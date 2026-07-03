@@ -58,6 +58,18 @@ int segment_number_from_name(const std::string& stem) {
   }
 }
 
+// Entry count of a .tidx image, validating the size first. A truncated or
+// empty file (seen on flaky network mounts) must fail loudly — the naive
+// (size - 1024) on an unsigned type underflows into billions of entries.
+std::size_t index_entry_count(std::span<const ui1> idx, const std::string& path) {
+  if (idx.size() < static_cast<std::size_t>(fmt::UNIVERSAL_HEADER_BYTES))
+    throw FormatError("index file smaller than its universal header (truncated?): " + path);
+  const std::size_t body = idx.size() - fmt::UNIVERSAL_HEADER_BYTES;
+  if (body % fmt::TIME_SERIES_INDEX_BYTES != 0)
+    throw FormatError("index file body is not a whole number of entries (truncated?): " + path);
+  return body / fmt::TIME_SERIES_INDEX_BYTES;
+}
+
 }  // namespace
 
 Session::Session(const std::string& mefd_path, std::string password)
@@ -175,8 +187,7 @@ std::vector<DataRun> Session::read_runs(const std::string& channel, std::optiona
     if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
 
     auto idx = segment_index(seg);
-    const std::size_t n_entries =
-        (idx.size() - fmt::UNIVERSAL_HEADER_BYTES) / fmt::TIME_SERIES_INDEX_BYTES;
+    const std::size_t n_entries = index_entry_count(idx, seg.tidx_path);
     auto tdat = read_file(seg.tdat_path);
 
     crypto::AccessKeys keys = crypto::validate_password(
@@ -264,8 +275,7 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
         md.universal_header.level_2_password_validation_field);
 
     auto idx = segment_index(seg);
-    const std::size_t n_entries =
-        (idx.size() - fmt::UNIVERSAL_HEADER_BYTES) / fmt::TIME_SERIES_INDEX_BYTES;
+    const std::size_t n_entries = index_entry_count(idx, seg.tidx_path);
 
     // Determine whether any block in this segment is in range before loading
     // the (potentially large) .tdat.
@@ -282,11 +292,21 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
     }
     if (hits.empty()) continue;
 
-    // Needed blocks are contiguous in the file (index written in order), so read
-    // one byte range covering just them rather than the whole (huge) .tdat.
-    const std::size_t range_begin = static_cast<std::size_t>(hits.front().file_offset);
-    const std::size_t range_end =
-        static_cast<std::size_t>(hits.back().file_offset) + hits.back().block_bytes;
+    // Needed blocks are normally contiguous in the file, so read one byte
+    // range covering them rather than the whole (huge) .tdat — but do NOT
+    // trust the index to be sorted: compute the true min/max span and check
+    // every block against it and against the actual file size. Damaged or
+    // foreign indices must fail with an exception, never with a wild read.
+    std::size_t range_begin = static_cast<std::size_t>(hits.front().file_offset);
+    std::size_t range_end = range_begin;
+    for (const auto& e : hits) {
+      const std::size_t off = static_cast<std::size_t>(e.file_offset);
+      range_begin = std::min(range_begin, off);
+      range_end = std::max(range_end, off + e.block_bytes);
+    }
+    const std::size_t tdat_size = static_cast<std::size_t>(fs::file_size(seg.tdat_path));
+    if (range_end > tdat_size)
+      throw FormatError("index points past end of .tdat: " + seg.tdat_path);
     std::size_t buf_index = out.buffers.size();
     out.buffers.push_back(read_file_range(seg.tdat_path, range_begin, range_end - range_begin));
     for (const auto& e : hits) {
@@ -338,8 +358,7 @@ std::vector<BlockIndexEntry> Session::read_index(const std::string& channel) {
     si8 rto = md.section3_available ? md.section3.recording_time_offset : 0;
     if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
     auto idx = segment_index(seg);
-    const std::size_t n =
-        (idx.size() - fmt::UNIVERSAL_HEADER_BYTES) / fmt::TIME_SERIES_INDEX_BYTES;
+    const std::size_t n = index_entry_count(idx, seg.tidx_path);
     for (std::size_t i = 0; i < n; ++i) {
       auto e = fmt::TimeSeriesIndex::parse(
           idx.subspan(fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES,

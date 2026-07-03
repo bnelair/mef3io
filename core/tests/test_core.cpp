@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "mef3io/crc.hpp"
+#include "mef3io/errors.hpp"
 #include "mef3io/crypto.hpp"
 #include "mef3io/headers.hpp"
 #include "mef3io/c_api.h"
@@ -225,4 +226,42 @@ TEST_CASE("C ABI round trip (write, read, records, segments)") {
 
   REQUIRE(std::string(mef3io_version()).find('.') != std::string::npos);
   fsys::remove_all(dir);
+}
+
+TEST_CASE("Corrupt inputs fail with exceptions, never crashes") {
+  namespace fsys = std::filesystem;
+
+  SECTION("RED header counter sanity") {
+    std::vector<ui1> block(fmt::RED_BLOCK_HEADER_BYTES, 0);
+    fmt::RedBlockHeader bh;
+    bh.block_bytes = fmt::RED_BLOCK_HEADER_BYTES;
+    bh.number_of_samples = 1000;
+    bh.difference_bytes = 0;  // impossible: samples need difference symbols
+    bh.serialize(block);
+    REQUIRE_THROWS_AS(red::decode_block(block, {}, false), FormatError);
+
+    bh.number_of_samples = 10;
+    bh.difference_bytes = 0xFFFFFFFFu;  // would drive a 4-billion-symbol loop
+    bh.serialize(block);
+    REQUIRE_THROWS_AS(red::decode_block(block, {}, false), FormatError);
+  }
+
+  SECTION("truncated .tidx (short network read)") {
+    const auto dir = fsys::temp_directory_path() / "mef3io_trunc_test.mefd";
+    fsys::remove_all(dir);
+    {
+      SessionWriter w(dir.string(), true);
+      std::vector<si4> a(1000);
+      for (int i = 0; i < 1000; ++i) a[i] = i;
+      w.write_int32("ch1", a, 1.0, 1577836800000000, 250.0);
+    }
+    const auto tidx = dir / "ch1.timd" / "ch1-000000.segd" / "ch1-000000.tidx";
+    fsys::resize_file(tidx, 500);  // smaller than the universal header
+
+    Session s(dir.string());  // open is lazy on indices and must still work
+    REQUIRE_THROWS_AS(s.read_runs("ch1"), FormatError);
+    REQUIRE_THROWS_AS(s.collect_blocks("ch1"), FormatError);
+    REQUIRE_THROWS_AS(s.read_index("ch1"), FormatError);
+    fsys::remove_all(dir);
+  }
 }
