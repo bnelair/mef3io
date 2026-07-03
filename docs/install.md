@@ -20,14 +20,17 @@ pip install "mef3io[bench]"        # + NWB-Zarr benchmark stack
 Two options (details in the [MATLAB guide](matlab.md)):
 
 **Prebuilt** — every [GitHub release](https://github.com/bnelair/mef3io/releases)
-has the compiled MEX attached for Linux x86_64 (`mef3io_mex.mexa64`), Windows
-AMD64 (`mef3io_mex.mexw64`), and macOS arm64 (`mef3io_mex.mexmaca64`), built
-and tested with the latest MATLAB release. Download the one for your platform
-into the repo's `matlab/` folder, then:
+has a single `mef3io-matlab-vX.Y.Z.zip` with the `+mef3io` classes and the
+compiled, CI-tested MEX for all supported platforms (Linux x86_64, Windows
+AMD64, macOS arm64 — MATLAB loads the right one automatically). Unzip and:
 
 ```matlab
-addpath('<repo>/matlab')
+addpath('<somewhere>/mef3io-matlab')
 ```
+
+Caveats: browser-downloaded zips are quarantined on macOS (unsigned MEX →
+`xattr -dr com.apple.quarantine ...` on first use); very old Linux glibc
+(RHEL 8 era) and Intel Macs need the source build below.
 
 **Build from source** (one-time, ~30 s) — needs a C++20 compiler configured
 for MEX (`mex -setup C++`): Xcode on macOS, GCC ≥ 11 on Linux, Visual Studio
