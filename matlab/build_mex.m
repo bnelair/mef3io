@@ -27,8 +27,9 @@ else
     % Linux: MATLAB ships its own (older) libstdc++, which the loader prefers
     % over the system one — link the C++ runtime statically so the MEX does
     % not depend on GLIBCXX versions newer than MATLAB's bundled copy.
+    % (The link-stage variable in MATLAB's XML toolchains is LINKFLAGS.)
     flags = {'CXXFLAGS=$CXXFLAGS -std=c++20', ...
-             'LDFLAGS=$LDFLAGS -static-libstdc++ -static-libgcc'};
+             'LINKFLAGS=$LINKFLAGS -static-libstdc++ -static-libgcc'};
 end
 
 fprintf('Building mef3io_mex (%s) from %d sources...\n', version, numel(files));
