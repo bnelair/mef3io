@@ -373,12 +373,20 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
       if (!mxIsEmpty(prhs[4])) {
         if (mxGetNumberOfElements(prhs[4]) != static_cast<size_t>(n))
           fail("valid mask must match data length");
-        if (mxIsLogical(prhs[4]))
+        if (mxIsLogical(prhs[4])) {
           valid = reinterpret_cast<const std::uint8_t*>(mxGetLogicals(prhs[4]));
-        else if (mxIsUint8(prhs[4]))
+        } else if (mxIsUint8(prhs[4])) {
           valid = mxGetUint8s(prhs[4]);
-        else
-          fail("valid mask must be logical or uint8");
+        } else if (mxIsDouble(prhs[4]) && !mxIsComplex(prhs[4])) {
+          // Double mask: nonzero = valid (the Writer class also coerces).
+          valid_copy.resize(static_cast<size_t>(n));
+          const double* src = mxGetDoubles(prhs[4]);
+          for (std::int64_t i = 0; i < n; ++i)
+            valid_copy[static_cast<size_t>(i)] = src[i] != 0.0;
+          valid = valid_copy.data();
+        } else {
+          fail("valid mask must be logical, uint8, or double");
+        }
       }
       double ufact = get_scalar(prhs[5], "ufact");
       std::int64_t start = get_int64(prhs[6], "start_uutc");

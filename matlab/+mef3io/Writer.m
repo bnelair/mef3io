@@ -75,6 +75,7 @@ classdef Writer < handle
                 opts.Valid = []
                 opts.NewSegment (1, 1) logical = false
             end
+            if ~isempty(opts.Valid), opts.Valid = logical(opts.Valid(:)); end
             s = mef3io_mex('writer_write_int32', obj.h, channel, data(:), ...
                            opts.Valid, ufact, startUutc, fs, double(opts.NewSegment));
         end

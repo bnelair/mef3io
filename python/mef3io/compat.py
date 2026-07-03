@@ -200,18 +200,24 @@ class MefWriter:
         discont_handler: bool = True,
         reload_metadata: bool = True,
     ):
-        data = np.asarray(data_write)
+        data = np.atleast_1d(np.asarray(data_write))
         if np.issubdtype(data.dtype, np.integer):
             # Treat as raw int32 with a precision-derived ufact if given.
+            from ._writer import _as_int32_counts
+
+            counts, valid = _as_int32_counts(data, None)
+            if valid is not None:
+                valid = np.ascontiguousarray(valid, dtype=np.uint8)
             ufact = 10.0 ** -(precision if precision is not None else 0)
             self._w.write_int32(
-                channel, np.ascontiguousarray(data, np.int32), ufact, int(start_uutc),
-                float(sampling_freq), None, new_segment,
+                channel, counts, ufact, int(start_uutc),
+                float(sampling_freq), valid, bool(new_segment),
             )
         else:
             self._w.write_float(
                 channel, np.ascontiguousarray(data, np.float64), int(start_uutc),
-                float(sampling_freq), precision if precision is not None else -1, new_segment,
+                float(sampling_freq), int(precision) if precision is not None else -1,
+                bool(new_segment),
             )
         return True
 

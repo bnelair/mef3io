@@ -103,3 +103,68 @@ def test_truncated_tdat_raises(tmp_path):
 
     with pytest.raises(RuntimeError, match="tdat"):
         mef3io.Reader(path).read("ch1")
+
+
+def test_write_accepts_any_numeric_input(tmp_path):
+    # Lists, integer arrays, float32, scalars — everything numeric is coerced.
+    path = str(tmp_path / "s.mefd")
+    with mef3io.Writer(path, overwrite=True) as w:
+        w.write("lst", [1.5, 2.5, float("nan"), 4.0], START, FS, precision=1)
+        w.write("ints", np.arange(100, dtype=np.int16), START, FS, precision=0)
+        w.write("f32", np.linspace(0, 1, 100, dtype=np.float32), START, FS, precision=3)
+        w.write("scalar", 7.25, START, FS, precision=2)
+        w.write("f16", np.linspace(0, 1, 50, dtype=np.float16), START, FS, precision=2)
+
+    with mef3io.Reader(path) as r:
+        y = r.read("lst")
+        assert np.isnan(y[2]) and y[0] == 1.5
+        assert np.allclose(r.read("ints"), np.arange(100))
+        assert len(r.read("scalar")) == 1 and r.read("scalar")[0] == 7.25
+
+
+def test_write_int32_coercion_and_safety(tmp_path):
+    path = str(tmp_path / "s.mefd")
+    with mef3io.Writer(path, overwrite=True) as w:
+        # float counts are rounded (not truncated), NaN becomes a gap
+        s = w.write_int32("ch1", [10.6, 11.4, float("nan"), 13.0], 0.5, START, FS)
+        assert s["samples_written"] == 3 and s["gaps_skipped"] == 1
+        # int64 within range is fine; outside int32 range must raise, not wrap
+        w.write_int32("ch2", np.array([2**31 - 1, -(2**31)], dtype=np.int64), 1.0,
+                      START, FS)
+        with pytest.raises(ValueError, match="int32 range"):
+            w.write_int32("ch3", np.array([2**31], dtype=np.int64), 1.0, START, FS)
+        # float valid mask works (nonzero = valid)
+        w.write_int32("ch4", np.arange(4, dtype=np.int32), 1.0,
+                      START + 10_000_000, FS, valid=[1.0, 0.0, 1.0, 1.0])
+
+    with mef3io.Reader(path) as r:
+        raw = r.read_raw("ch1")
+        assert list(raw["samples"][raw["valid"].astype(bool)]) == [11, 11, 13]
+        assert list(r.read_raw("ch2")["samples"]) == [2**31 - 1, -(2**31)]
+        assert not r.read_raw("ch4")["valid"][1]
+
+
+def test_empty_and_inverted_windows(tmp_path):
+    path = _make_session(tmp_path)
+    with mef3io.Reader(path) as r:
+        assert len(r.read("ch1", START, START)) == 0            # empty window
+        assert len(r.read("ch1", START + 1_000_000, START)) == 0  # inverted
+        raw = r.read_raw("ch1", START, START)
+        assert len(raw["samples"]) == 0 and len(raw["valid"]) == 0
+
+
+def test_annotation_time_types(tmp_path):
+    path = str(tmp_path / "s.mefd")
+    with mef3io.Writer(path, overwrite=True) as w:
+        w.write("ch1", np.zeros(100), START, FS, precision=0)
+        w.write_annotations([
+            {"time": np.float64(START + 1e6), "text": "np float time"},
+            {"time": float(START + 2e6), "type": "EDFA", "text": "d",
+             "duration": np.float64(5e5)},
+            {"time": START + 3_000_000, "text": None, "duration": None},
+        ], "ch1")
+    with mef3io.Reader(path) as r:
+        recs = r.records("ch1")
+    assert recs[0]["time"] == START + 1_000_000
+    assert recs[1]["duration"] == 500_000
+    assert recs[2]["time"] == START + 3_000_000

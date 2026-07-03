@@ -151,7 +151,9 @@ int mef3io_reader_read_size(mef3io_reader* r, const char* channel, int64_t t0, i
 
 int mef3io_reader_read(mef3io_reader* r, const char* channel, int64_t t0, int64_t t1,
                        double* buf, int64_t buf_len, int64_t* out_n) {
-  if (!r || !channel || !buf || !out_n) return fail_argument("NULL argument");
+  // A NULL buffer is fine for a zero-length window (empty reads are legal).
+  if (!r || !channel || (!buf && buf_len > 0) || !out_n)
+    return fail_argument("NULL argument");
   return guarded([&] {
     std::vector<mef3io::sf8> v = r->impl.read(channel, opt_time(t0), opt_time(t1));
     if (static_cast<int64_t>(v.size()) > buf_len)
@@ -164,7 +166,8 @@ int mef3io_reader_read(mef3io_reader* r, const char* channel, int64_t t0, int64_
 int mef3io_reader_read_raw(mef3io_reader* r, const char* channel, int64_t t0, int64_t t1,
                            int32_t* samples, uint8_t* valid, int64_t buf_len, int64_t* out_n,
                            int64_t* out_start_uutc) {
-  if (!r || !channel || !samples || !valid || !out_n) return fail_argument("NULL argument");
+  if (!r || !channel || ((!samples || !valid) && buf_len > 0) || !out_n)
+    return fail_argument("NULL argument");
   return guarded([&] {
     mef3io::RawData d = r->impl.read_raw(channel, opt_time(t0), opt_time(t1));
     if (static_cast<int64_t>(d.samples.size()) > buf_len)

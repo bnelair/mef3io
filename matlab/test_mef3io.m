@@ -89,5 +89,21 @@ gotError = false;
 try mef3io.Reader(encPath, 'wrong'); catch, gotError = true; end
 assert(gotError, 'wrong password must be rejected');
 
+% ---- input flexibility: types are coerced, edge windows are legal ----------
+flexPath = fullfile(sessionDir, 'matlab_flex.mefd');
+w = mef3io.Writer(flexPath, Overwrite=true);
+w.write('s', single(x(1:100)), start, fs, Precision=3);        % single -> double
+w.write('i', int16(1:100), start, fs, Precision=0);            % ints -> double
+w.writeInt32('c', int32(1:100), 0.5, single(start), fs, ...    % single timestamp
+             Valid=[ones(1, 50), zeros(1, 10), ones(1, 40)]);  % double mask
+delete(w);
+r = mef3io.Reader(flexPath);
+assert(max(abs(r.read('i') - (1:100)')) < 1e-12);
+raw = r.readRaw('c');
+assert(~any(raw.valid(51:60)) && sum(raw.valid) == 90);
+assert(isempty(r.read('s', start, start)));                    % empty window
+assert(isempty(r.read('s', start + 1e6, start)));              % inverted window
+delete(r);
+
 fprintf('test_mef3io: all assertions passed (%s)\n', sessionDir);
 end

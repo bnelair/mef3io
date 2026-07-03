@@ -104,7 +104,7 @@ class Reader:
         impl = self._ensure_impl()
         if n_threads is None:
             return impl.read(channel, t0, t1)
-        return impl.read(channel, t0, t1, n_threads)
+        return impl.read(channel, t0, t1, int(n_threads))
 
     def read_raw(
         self,
@@ -117,7 +117,7 @@ class Reader:
         impl = self._ensure_impl()
         if n_threads is None:
             return impl.read_raw(channel, t0, t1)
-        return impl.read_raw(channel, t0, t1, n_threads)
+        return impl.read_raw(channel, t0, t1, int(n_threads))
 
     def segments(self, channel: str) -> list[dict]:
         """Per-segment map of ``channel``: one dict per segment with its

@@ -12,6 +12,33 @@ from typing import Optional
 
 import numpy as np
 
+_INT32_MIN, _INT32_MAX = -(2**31), 2**31 - 1
+
+
+def _as_int32_counts(data, valid):
+    """Coerce arbitrary numeric input to int32 counts, safely.
+
+    Floats are rounded (not truncated); NaN samples become gaps (merged into
+    the validity mask); values outside the int32 range raise ValueError
+    instead of silently wrapping.
+    """
+    a = np.atleast_1d(np.asarray(data))
+    if np.issubdtype(a.dtype, np.floating):
+        nan = np.isnan(a)
+        if nan.any():
+            v = np.ones(a.shape, bool) if valid is None else \
+                np.atleast_1d(np.asarray(valid)).astype(bool).copy()
+            v &= ~nan
+            valid = v
+            a = np.where(nan, 0.0, a)
+        a = np.rint(a)
+    if a.size and (a.min() < _INT32_MIN or a.max() > _INT32_MAX):
+        raise ValueError(
+            f"write_int32: values outside the int32 range "
+            f"[{a.min()}, {a.max()}] would wrap; scale them or use write()"
+        )
+    return np.ascontiguousarray(a, dtype=np.int32), valid
+
 
 class Writer:
     def __init__(
@@ -61,8 +88,10 @@ class Writer:
         Returns a summary dict: ``samples_written``, ``blocks``,
         ``gaps_skipped``, ``segment``.
         """
-        data = np.ascontiguousarray(data, dtype=np.float64)
-        return self._impl.write_float(channel, data, int(start_uutc), float(fs), precision, new_segment)
+        data = np.atleast_1d(np.ascontiguousarray(data, dtype=np.float64))
+        return self._impl.write_float(
+            channel, data, start_uutc, float(fs), int(precision), bool(new_segment)
+        )
 
     def write_int32(
         self,
@@ -77,12 +106,15 @@ class Writer:
         """Write integer ``data`` with conversion factor ``ufact`` verbatim.
 
         ``valid`` (optional, same length, bool/uint8) marks discontinuity gaps.
+        Any numeric dtype is accepted: floats are rounded, float NaN samples
+        become gaps, and values outside the int32 range raise ValueError
+        rather than silently wrapping.
         """
-        data = np.ascontiguousarray(data, dtype=np.int32)
+        data, valid = _as_int32_counts(data, valid)
         if valid is not None:
             valid = np.ascontiguousarray(valid, dtype=np.uint8)
         return self._impl.write_int32(
-            channel, data, float(ufact), int(start_uutc), float(fs), valid, new_segment
+            channel, data, float(ufact), start_uutc, float(fs), valid, bool(new_segment)
         )
 
     def write_annotations(self, annotations, channel: Optional[str] = None) -> None:

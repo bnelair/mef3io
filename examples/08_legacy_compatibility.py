@@ -15,6 +15,7 @@ from mef_tools import MefWriter as MefWriterLegacy
 
 from mef3io import MefReader
 from mef3io import MefWriter
+from mef3io import Reader
 
 pth_leg = '/Users/mivalt.filip/Data/tmp/test_wrt_leg.mefd'
 pth_new = '/Users/mivalt.filip/Data/tmp/test_wrt_new.mefd'
