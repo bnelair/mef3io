@@ -8,7 +8,7 @@ of scope. The legacy `mef_tools`/`pymef` stack is the correctness oracle.
 
 Status: read + write complete, cross-validated **both directions** vs
 pymef/mef_tools (values, NaN gaps, times, encryption none/L1+L2, fractional fs,
-records). In-segment append + per-segment map implemented. ~102 Python tests +
+records). In-segment append + per-segment map implemented. ~112 Python tests +
 standalone C++ Catch2 tests. Wheel builds via `python -m build`. Parallel
 decode/encode, byte-deterministic across threads.
 

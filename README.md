@@ -13,7 +13,7 @@ against the legacy stack.
 ## Status
 
 Read and write are implemented and cross-validated against the legacy
-`pymef` / `mef_tools` stack in both directions (~103 Python tests + standalone
+`pymef` / `mef_tools` stack in both directions (~112 Python tests + standalone
 C++ tests). Scope notes:
 
 - **Video** (`.vidd/.vmet/.vidx`) is out of scope (traversal skips it).
@@ -140,6 +140,8 @@ matlab/      MEX gateway over the C ABI (core/include/mef3io/c_api.h),
              +mef3io Reader/Writer classes, build_mex.m, test_mef3io.m
 examples/    runnable scripts: write/read, int32, append, segment map,
              annotations, encryption, legacy drop-in, replicability checks
-tests/       golden fixture generator + P1–P8 pytest suites (pymef oracle)
-docs/        mef3_format.md, design.md, encryption_model.md, legacy_comparison.md
+tests/       golden fixture generator + P1–P9 pytest suites (pymef oracle)
+benchmarks/  bindings + legacy/NWB-Zarr comparison scripts
+docs/        MkDocs site source (guides, format reference, legacy comparison)
+scripts/     dev_build.sh (dev build + extension symlink)
 ```

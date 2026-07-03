@@ -4,7 +4,6 @@ import time
 
 import numpy as np
 import scipy.signal as signal
-import matplotlib.pyplot as plt
 
 from datetime import datetime
 from tqdm import tqdm
@@ -17,8 +16,11 @@ from mef3io import MefReader
 from mef3io import MefWriter
 from mef3io import Reader
 
-pth_leg = '/Users/mivalt.filip/Data/tmp/test_wrt_leg.mefd'
-pth_new = '/Users/mivalt.filip/Data/tmp/test_wrt_new.mefd'
+import os, tempfile
+out_dir = os.environ.get('MEF3IO_BENCH_DIR', tempfile.mkdtemp())
+pth_leg = str(Path(out_dir) / 'test_wrt_leg.mefd')
+pth_new = str(Path(out_dir) / 'test_wrt_new.mefd')
+print('writing sessions under:', out_dir)
 
 fs = 512
 len_s = 3600*5

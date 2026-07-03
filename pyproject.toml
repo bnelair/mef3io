@@ -5,15 +5,20 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "mef3io"
 dynamic = ["version"]
-description = "MEF 3.0 read/write — C++ core with Python bindings, pure-Python fallback"
+description = "MEF 3.0 read/write — one C++ core with Python bindings (MATLAB via MEX)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "Mayo Clinic — BNEL" }]
 dependencies = ["numpy>=1.23"]
 
+[project.urls]
+Homepage = "https://bnelair.github.io/mef3io/"
+Documentation = "https://bnelair.github.io/mef3io/"
+Repository = "https://github.com/bnelair/mef3io"
+Issues = "https://github.com/bnelair/mef3io/issues"
+
 [project.optional-dependencies]
-pure = ["numba"]
 compat = ["pandas"]
 # The legacy `mef-tools` (PyPI; import name `mef_tools`, pulls in pymef) is the
 # correctness oracle and benchmark baseline. Installing it makes the suite and
