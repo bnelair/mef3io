@@ -35,19 +35,35 @@ comparison: performance, L1 encryption, annotation protection, quantization),
 
 ## Install
 
+**Python** — prebuilt wheels (no compiler needed) for Linux (x86_64/aarch64),
+macOS (arm64/x86_64), and Windows (AMD64/ARM64), Python 3.10+:
+
 ```bash
 pip install mef3io                 # runtime (numpy only)
 pip install "mef3io[test]"         # + oracle tests (pymef, mef-tools, pandas, pytest)
 pip install "mef3io[bench]"        # + NWB-Zarr benchmark stack
 ```
 
-Development from the source tree (uses the active env's Python):
+**MATLAB** — compiled from source once on your machine (needs a C++20
+compiler configured via `mex -setup C++`; ~30 s). See
+[matlab/README.md](matlab/README.md):
+
+```matlab
+run('<repo>/matlab/build_mex.m'); addpath('<repo>/matlab')
+r = mef3io.Reader('session.mefd'); x = r.read('ch1');
+```
+
+**From source (Python development)** — needs CMake ≥ 3.26 and a C++20
+compiler; uses the active env's Python:
 
 ```bash
 scripts/dev_build.sh            # builds build/dev, symlinks the extension into python/mef3io
 python -m pytest tests          # conftest sets up paths; needs pymef/mef-tools as oracle
 python -m build --wheel         # build a wheel
 ```
+
+All bindings share one version: the repo-root `VERSION` file feeds the wheel
+metadata, `mef3io::version()` in C++, and the MEX build.
 
 The legacy `mef-tools` package (PyPI; import name `mef_tools`) is the
 correctness oracle and benchmark baseline: the test/benchmark scripts use a
@@ -116,6 +132,8 @@ core/        C++17/20 library (types, byteio, crc, crypto, headers, metadata,
              red, session, reader, records, writer, session_writer) + Catch2 tests
 bindings/    nanobind extension (_mef3io)
 python/mef3io/  Reader, Writer, compat (mef_tools.io shim), cache, pure (stub)
+matlab/      MEX gateway over the C ABI (core/include/mef3io/c_api.h),
+             +mef3io Reader/Writer classes, build_mex.m, test_mef3io.m
 examples/    runnable scripts: write/read, int32, append, segment map,
              annotations, encryption, legacy drop-in, replicability checks
 tests/       golden fixture generator + P1–P8 pytest suites (pymef oracle)

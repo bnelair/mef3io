@@ -298,7 +298,11 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
                              std::to_string(spec.units_conversion_factor) + " != segment's " +
                              std::to_string(md.section2.units_conversion_factor));
   const si8 old_end = to_user_time(md.universal_header.end_time, rto);
-  if (blocks.front().start_uutc < old_end)
+  // Per-block half-microsecond rounding can store an end time up to ~1 us past
+  // the grid-exact end, so allow half a sample period of slack: a start within
+  // it cannot land on (or before) any stored grid sample.
+  const si8 slack = static_cast<si8>(std::llround(0.5e6 / fs_hz));
+  if (blocks.front().start_uutc < old_end - slack)
     throw WriteConflictError("append starts at " + std::to_string(blocks.front().start_uutc) +
                              " uUTC, before segment end " + std::to_string(old_end));
 

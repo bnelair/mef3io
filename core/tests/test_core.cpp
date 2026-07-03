@@ -3,6 +3,7 @@
 #include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <random>
 #include <vector>
@@ -10,6 +11,7 @@
 #include "mef3io/crc.hpp"
 #include "mef3io/crypto.hpp"
 #include "mef3io/headers.hpp"
+#include "mef3io/c_api.h"
 #include "mef3io/red.hpp"
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
@@ -141,5 +143,86 @@ TEST_CASE("In-segment append extends the last segment") {
   REQUIRE(map[0].start_sample == 0);
   REQUIRE(map[0].number_of_samples == 2000);
   REQUIRE(map[0].number_of_blocks == 2);
+  fsys::remove_all(dir);
+}
+
+TEST_CASE("C ABI round trip (write, read, records, segments)") {
+  namespace fsys = std::filesystem;
+  const auto dir = fsys::temp_directory_path() / "mef3io_capi_test.mefd";
+  fsys::remove_all(dir);
+  const std::string path = dir.string();
+  const si8 start = 1577836800000000;
+  const sf8 fs = 250.0;
+
+  std::vector<double> data(1000);
+  for (int i = 0; i < 1000; ++i) data[i] = std::sin(i / 20.0);
+  data[100] = std::nan("");  // one-sample gap
+
+  // --- write ---
+  mef3io_writer* w = nullptr;
+  REQUIRE(mef3io_writer_open(path.c_str(), 1, "", "", &w) == MEF3IO_OK);
+  mef3io_write_summary sum{};
+  REQUIRE(mef3io_writer_write_float(w, "ch1", data.data(), 1000, start, fs, 3, 0, &sum) ==
+          MEF3IO_OK);
+  REQUIRE(sum.samples_written == 999);
+  REQUIRE(sum.segment == 0);
+  mef3io_records* recs = mef3io_records_create();
+  REQUIRE(mef3io_records_add(recs, "Note", start + 1000, "hello", -1) == MEF3IO_OK);
+  REQUIRE(mef3io_writer_write_records(w, "ch1", recs) == MEF3IO_OK);
+  mef3io_records_free(recs);
+  mef3io_writer_close(w);
+
+  // --- read back ---
+  mef3io_reader* r = nullptr;
+  REQUIRE(mef3io_reader_open(path.c_str(), "", 1, &r) == MEF3IO_OK);
+  int32_t nch = 0;
+  REQUIRE(mef3io_reader_n_channels(r, &nch) == MEF3IO_OK);
+  REQUIRE(nch == 1);
+  char name[64];
+  REQUIRE(mef3io_reader_channel_name(r, 0, name, sizeof name) == MEF3IO_OK);
+  REQUIRE(std::string(name) == "ch1");
+
+  mef3io_channel_info info{};
+  REQUIRE(mef3io_reader_info(r, "ch1", &info) == MEF3IO_OK);
+  REQUIRE(info.sampling_frequency == fs);
+  REQUIRE(info.number_of_samples == 999);
+  REQUIRE(info.start_time == start);
+  REQUIRE(info.section3_available == 1);
+
+  int64_t n = 0;
+  REQUIRE(mef3io_reader_read_size(r, "ch1", MEF3IO_TIME_UNSET, MEF3IO_TIME_UNSET, &n) ==
+          MEF3IO_OK);
+  REQUIRE(n == 1000);
+  std::vector<double> got(static_cast<size_t>(n));
+  int64_t n_read = 0;
+  REQUIRE(mef3io_reader_read(r, "ch1", MEF3IO_TIME_UNSET, MEF3IO_TIME_UNSET, got.data(), n,
+                             &n_read) == MEF3IO_OK);
+  REQUIRE(n_read == 1000);
+  REQUIRE(std::isnan(got[100]));
+  REQUIRE(got[0] == 0.0);
+  REQUIRE(std::abs(got[500] - std::round(std::sin(500 / 20.0) * 1000) / 1000) < 1e-9);
+
+  int32_t nseg = 0;
+  REQUIRE(mef3io_reader_n_segments(r, "ch1", &nseg) == MEF3IO_OK);
+  REQUIRE(nseg == 1);
+  mef3io_segment_info seg{};
+  REQUIRE(mef3io_reader_segment(r, "ch1", 0, &seg) == MEF3IO_OK);
+  REQUIRE(seg.number_of_samples == 999);
+
+  int32_t nrec = 0;
+  REQUIRE(mef3io_reader_n_records(r, "ch1", &nrec) == MEF3IO_OK);
+  REQUIRE(nrec == 1);
+  mef3io_record_info rec{};
+  REQUIRE(mef3io_reader_record(r, "ch1", 0, &rec) == MEF3IO_OK);
+  REQUIRE(std::string(rec.type) == "Note");
+  REQUIRE(std::string(rec.text) == "hello");
+  REQUIRE(rec.duration == -1);
+
+  // errors surface as codes + message
+  REQUIRE(mef3io_reader_info(r, "nope", &info) == MEF3IO_ERR_ARGUMENT);
+  REQUIRE(std::string(mef3io_last_error()).find("nope") != std::string::npos);
+  mef3io_reader_close(r);
+
+  REQUIRE(std::string(mef3io_version()).find('.') != std::string::npos);
   fsys::remove_all(dir);
 }

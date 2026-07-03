@@ -12,3 +12,4 @@ python/mef3io/_mef3io*.pyd
 ../reference_files/
 reference_files/
 .idea/
+matlab/*.mex*

@@ -95,7 +95,15 @@ map, annotations, encryption, legacy style). `docs/design.md` = full design;
   loads an install-time extension snapshot that shadows the dev_build symlink
   (meta-path beats sys.path). Keep mef3io uninstalled; use scripts/dev_build.sh.
 - Pure-Python backend is a stub. Records write covers Note/EDFA/SyLg/Seiz.
-  MATLAB MEX not started. Cache is Python-level (a C++ warm-start is future).
+  Cache is Python-level (a C++ warm-start is future).
+- **MATLAB binding implemented**: flat C ABI (`core/include/mef3io/c_api.h`,
+  Catch2-tested) → single command-dispatch MEX (`matlab/mef3io_mex.cpp`) →
+  `+mef3io` Reader/Writer classes. Build with `matlab/build_mex.m` (C++20
+  compiler; do NOT add -fvisibility=hidden — it hides the MEX version symbols
+  → "not supported in current release"). `matlab/test_mef3io.m` = round trip;
+  validated cross-language both directions vs Python/pymef with R2026a.
+  Append-overlap check has half-a-sample-period slack (per-block half-us time
+  rounding can store a segment end ~1 us past the grid-exact end).
 - Distribution: **version single source of truth = repo-root `VERSION` file**
   (pyproject regex provider → wheel metadata; CMake → `mef3io::version()` and
   the extension's `__version__`; `mef3io.__version__` prefers installed dist
