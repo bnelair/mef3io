@@ -285,7 +285,7 @@ NB_MODULE(_mef3io, m) {
             }
             w.write_records(ch, recs);
           },
-          nb::arg("channel"), nb::arg("records"));
+          nb::arg("channel").none(), nb::arg("records"));
 
   m.def("infer_precision", [](nb::ndarray<const mef3io::sf8, nb::ndim<1>, nb::c_contig> d) {
     return mef3io::infer_precision(std::span<const mef3io::sf8>(d.data(), d.size()));

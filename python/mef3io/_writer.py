@@ -84,3 +84,19 @@ class Writer:
         return self._impl.write_int32(
             channel, data, float(ufact), int(start_uutc), float(fs), valid, new_segment
         )
+
+    def write_annotations(self, annotations, channel: Optional[str] = None) -> None:
+        """Write records (annotations): session-level by default, or attached
+        to ``channel``. Accepts an iterable of dicts (``time`` required;
+        ``type`` defaults to ``"Note"``; optional ``text``, ``duration``) or a
+        pandas DataFrame with those columns. Replaces existing records at that
+        level. Encrypted sessions encrypt record bodies at level 2."""
+        if hasattr(annotations, "to_dict"):
+            annotations = annotations.to_dict("records")
+        norm = []
+        for r in annotations:
+            rec = {"type": r.get("type", "Note"), "time": int(r["time"]), "text": r.get("text", "")}
+            if r.get("duration") is not None:
+                rec["duration"] = int(r["duration"])
+            norm.append(rec)
+        self._impl.write_records(channel, norm)

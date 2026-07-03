@@ -24,4 +24,15 @@ def have_cpp_backend() -> bool:
 from ._reader import Reader  # noqa: E402
 from ._writer import Writer  # noqa: E402
 
-__all__ = ["Reader", "Writer", "have_cpp_backend", "__version__"]
+__all__ = ["Reader", "Writer", "MefReader", "MefWriter", "have_cpp_backend", "__version__"]
+
+
+def __getattr__(name):
+    # Legacy mef_tools-style entry points, importable straight off the package
+    # (``from mef3io import MefReader, MefWriter``). Resolved lazily so that
+    # importing mef3io works even where the compat layer's C++ backend doesn't.
+    if name in ("MefReader", "MefWriter"):
+        from . import compat
+
+        return getattr(compat, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

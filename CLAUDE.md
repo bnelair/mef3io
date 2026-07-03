@@ -40,9 +40,13 @@ TimeSeriesIndex, RedBlockHeader — parse/serialize by explicit offset),
 `writer` (segment writer), `session_writer` (precision inference, quantization,
 NaN splitting, segments), `parallel.hpp`.
 
-`python/mef3io/`: `Reader`, `Writer`, `compat` (mef_tools.io drop-in), `cache`
-(opt-in warm start), `pure` (stub). `bindings/python/mef3io_ext.cpp` = nanobind.
-`docs/design.md` = full design; `docs/encryption_model.md` = the crypto model.
+`python/mef3io/`: `Reader`, `Writer` (incl. `write_annotations`), `compat`
+(mef_tools.io drop-in; `MefReader`/`MefWriter` are also re-exported at the top
+level — `from mef3io import MefReader, MefWriter` — via lazy `__getattr__`),
+`cache` (opt-in warm start), `pure` (stub). `bindings/python/mef3io_ext.cpp` =
+nanobind. `examples/` = runnable scripts (write/read, int32, append, segment
+map, annotations, encryption, legacy style). `docs/design.md` = full design;
+`docs/encryption_model.md` = the crypto model.
 
 ## Format gotchas (do NOT relearn the hard way)
 

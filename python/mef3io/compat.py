@@ -3,11 +3,14 @@
 Existing code can switch from the legacy package with an import change::
 
     # from mef_tools.io import MefReader, MefWriter
-    from mef3io.compat import MefReader, MefWriter
+    from mef3io import MefReader, MefWriter        # or from mef3io.compat import ...
 
 These classes mirror the signatures, return shapes, and defaults of
-``mef_tools.io`` while delegating to the mef3io C++ backend. They are a
-transition aid; new code should prefer ``mef3io.Reader`` / ``mef3io.Writer``.
+``mef_tools.io`` while delegating to the mef3io C++ backend: float data is
+split on NaN runs into discontinuity gaps, precision (and with it the units
+conversion factor) is inferred when not given, integer data takes the int32
+primitive path, and appends extend the channel's last segment in place. New
+code should prefer ``mef3io.Reader`` / ``mef3io.Writer``.
 """
 from __future__ import annotations
 
@@ -134,6 +137,9 @@ class MefWriter:
         self._w = _mef3io.SessionWriter(self._path, overwrite, password1 or "", password2 or "")
         self.verbose = verbose
         self._data_units = "uV"
+        self._mef_block_len = None
+        self._max_nans_written = 0
+        self._record_offset = 0
 
     @property
     def data_units(self) -> str:
@@ -143,6 +149,44 @@ class MefWriter:
     def data_units(self, value: str):
         self._data_units = value
         self._w.set_units(value)
+
+    @property
+    def mef_block_len(self):
+        """RED block length in samples (None = derive from fs, like legacy)."""
+        return self._mef_block_len
+
+    @mef_block_len.setter
+    def mef_block_len(self, value):
+        self._mef_block_len = value
+        self._w.set_block_length(int(value) if value else 0)
+
+    def get_mefblock_len(self, fs: float) -> int:
+        """Block length that will be used for data at ``fs`` (legacy formula)."""
+        if self._mef_block_len is not None:
+            return int(self._mef_block_len)
+        return int(fs) if fs >= 5000 else int(fs * 10)
+
+    @property
+    def max_nans_written(self) -> int:
+        """Kept for legacy compatibility. mef3io always splits data on NaN runs
+        (never stores NaN as values), i.e. it behaves like the legacy writer's
+        recommended setting of 0; other values are accepted and ignored."""
+        return self._max_nans_written
+
+    @max_nans_written.setter
+    def max_nans_written(self, value):
+        self._max_nans_written = value
+
+    @property
+    def record_offset(self) -> int:
+        """Kept for legacy compatibility. mef3io writes records with a zero
+        recording-time offset (annotation times round-trip unchanged either
+        way); non-zero values are accepted and ignored."""
+        return self._record_offset
+
+    @record_offset.setter
+    def record_offset(self, value):
+        self._record_offset = value
 
     def write_data(
         self,
