@@ -54,6 +54,18 @@ def test_tidx_not_multiple_of_entry_raises(tmp_path):
         mef3io.Reader(path).read("ch1")
 
 
+def test_corrupt_tmet_body_raises(tmp_path):
+    # Section 2 holds fs/ufact: undetected corruption there would silently
+    # mis-scale every sample. The body CRC must catch it at open.
+    path = _make_session(tmp_path)
+    with open(_seg_file(path, "tmet"), "r+b") as f:
+        f.seek(1024 + 1536 + 6160)  # section-2 sampling_frequency field
+        f.write(b"\xde\xad\xbe\xef")
+
+    with pytest.raises(RuntimeError, match="body CRC"):
+        mef3io.Reader(path)
+
+
 def test_corrupt_red_counters_raise(tmp_path):
     path = _make_session(tmp_path)
     tdat = _seg_file(path, "tdat")
