@@ -123,8 +123,8 @@ class MefReader:
 class MefWriter:
     """``mef_tools.io.MefWriter``-compatible writer.
 
-    Note: unlike the legacy writer, appends create new segments rather than
-    extending an existing segment's data file. Reads are unaffected.
+    Like the legacy writer, appends extend the channel's last segment in place
+    (in-segment append); pass ``new_segment=True`` to start a fresh segment.
     """
 
     __version__ = "mef3io"

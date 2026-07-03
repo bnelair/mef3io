@@ -296,6 +296,30 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
   return out;
 }
 
+std::vector<SegmentInfo> Session::segment_map(const std::string& channel) {
+  auto it = channels_.find(channel);
+  if (it == channels_.end()) throw std::out_of_range("no such channel: " + channel);
+  Channel& ch = it->second;
+
+  std::vector<SegmentInfo> out;
+  out.reserve(ch.segments.size());
+  for (auto& seg : ch.segments) {
+    auto& md = segment_metadata(seg);
+    si8 rto = md.section3_available ? md.section3.recording_time_offset : 0;
+    if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
+    SegmentInfo si;
+    si.segment_number = seg.segment_number;
+    si.path = fs::path(seg.tmet_path).parent_path().string();
+    si.start_time = to_user_time(md.universal_header.start_time, rto);
+    si.end_time = to_user_time(md.universal_header.end_time, rto);
+    si.start_sample = md.section2.start_sample;
+    si.number_of_samples = md.section2.number_of_samples;
+    si.number_of_blocks = md.section2.number_of_blocks;
+    out.push_back(std::move(si));
+  }
+  return out;
+}
+
 std::vector<BlockIndexEntry> Session::read_index(const std::string& channel) {
   auto it = channels_.find(channel);
   if (it == channels_.end()) throw std::out_of_range("no such channel: " + channel);

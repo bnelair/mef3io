@@ -2,6 +2,8 @@
 // header round-trips, and RED encode/decode independent of the golden fixtures.
 #include <array>
 #include <catch2/catch_test_macros.hpp>
+#include <cmath>
+#include <filesystem>
 #include <random>
 #include <vector>
 
@@ -9,6 +11,8 @@
 #include "mef3io/crypto.hpp"
 #include "mef3io/headers.hpp"
 #include "mef3io/red.hpp"
+#include "mef3io/session.hpp"
+#include "mef3io/session_writer.hpp"
 
 using namespace mef3io;
 
@@ -95,4 +99,47 @@ TEST_CASE("RED handles int32 extremes") {
   auto dec = red::decode_block(block);
   REQUIRE(dec.samples == data);
   REQUIRE(dec.discontinuity);
+}
+
+TEST_CASE("In-segment append extends the last segment") {
+  namespace fsys = std::filesystem;
+  const auto dir = fsys::temp_directory_path() / "mef3io_append_test.mefd";
+  fsys::remove_all(dir);
+
+  const si8 start = 1577836800000000;
+  const sf8 fs = 250.0;
+  std::vector<si4> a(1000), b(1000);
+  for (int i = 0; i < 1000; ++i) {
+    a[i] = i;
+    b[i] = 2 * i;
+  }
+  {
+    SessionWriter w(dir.string(), true);
+    auto s1 = w.write_int32("ch1", a, 1.0, start, fs);
+    REQUIRE(s1.segment == 0);
+    const si8 t2 = start + static_cast<si8>(std::llround(1000 / fs * 1e6));
+    auto s2 = w.write_int32("ch1", b, 1.0, t2, fs);
+    REQUIRE(s2.segment == 0);  // appended, not a new segment
+  }
+  int n_seg_dirs = 0;
+  for (const auto& e : fsys::directory_iterator(dir / "ch1.timd"))
+    if (e.is_directory()) ++n_seg_dirs;
+  REQUIRE(n_seg_dirs == 1);
+
+  Session ses(dir.string());
+  REQUIRE(ses.channel_info("ch1").number_of_samples == 2000);
+  auto runs = ses.read_runs("ch1");
+  si8 total = 0;
+  for (const auto& r : runs) total += static_cast<si8>(r.samples.size());
+  REQUIRE(total == 2000);
+  REQUIRE(runs.front().samples.front() == 0);
+  REQUIRE(runs.back().samples.back() == 2 * 999);
+
+  auto map = ses.segment_map("ch1");
+  REQUIRE(map.size() == 1);
+  REQUIRE(map[0].segment_number == 0);
+  REQUIRE(map[0].start_sample == 0);
+  REQUIRE(map[0].number_of_samples == 2000);
+  REQUIRE(map[0].number_of_blocks == 2);
+  fsys::remove_all(dir);
 }

@@ -349,6 +349,23 @@ NB_MODULE(_mef3io, m) {
           },
           nb::arg("channel"), nb::arg("t0") = nb::none(), nb::arg("t1") = nb::none(),
           nb::arg("n_threads") = mef3io::Reader::kUseDefaultThreads)
+      .def("segments",
+           [](mef3io::Reader& r, const std::string& ch) {
+             auto segs = r.segments(ch);
+             nb::list out;
+             for (const auto& s : segs) {
+               nb::dict d;
+               d["segment"] = s.segment_number;
+               d["path"] = s.path;
+               d["start_time"] = s.start_time;
+               d["end_time"] = s.end_time;
+               d["start_sample"] = s.start_sample;
+               d["number_of_samples"] = s.number_of_samples;
+               d["number_of_blocks"] = s.number_of_blocks;
+               out.append(d);
+             }
+             return out;
+           })
       .def("toc",
            [](mef3io::Reader& r, const std::string& ch) {
              auto entries = r.toc(ch);

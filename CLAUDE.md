@@ -8,8 +8,9 @@ of scope. The legacy `mef_tools`/`pymef` stack is the correctness oracle.
 
 Status: read + write complete, cross-validated **both directions** vs
 pymef/mef_tools (values, NaN gaps, times, encryption none/L1+L2, fractional fs,
-records). ~93 Python tests + standalone C++ Catch2 tests. Wheel builds via
-`python -m build`. Parallel decode/encode, byte-deterministic across threads.
+records). In-segment append + per-segment map implemented. ~102 Python tests +
+standalone C++ Catch2 tests. Wheel builds via `python -m build`. Parallel
+decode/encode, byte-deterministic across threads.
 
 ## Build & test (use the active conda env for everything)
 
@@ -78,9 +79,17 @@ NaN splitting, segments), `parallel.hpp`.
 
 ## Known limitations / next steps
 
-- **In-segment append** not implemented — appends write a NEW segment (valid,
-  reads fine, not byte-same as mef_tools). This is the gate before mef_tools 3.0
-  could run on mef3io. Highest-value next item.
+- **In-segment append implemented** (`append_time_series_segment` +
+  `SessionWriter` hydration): non-first writes extend the channel's last
+  segment in place (.tdat streamed-CRC append, .tidx extend, .tmet s2 rewrite);
+  `new_segment=True` forces a fresh segment. Appends validate fs/ufact/start
+  time vs on-disk metadata (`WriteConflictError` → Python RuntimeError); float
+  appends reuse the segment's precision. `Reader.segments(ch)` maps what data
+  is where per segment. First appended block keeps discontinuity=true (readers
+  are time-gridded so contiguous appends stay seamless).
+- **Do NOT `pip install -e .` for C++ dev** — scikit-build-core's editable hook
+  loads an install-time extension snapshot that shadows the dev_build symlink
+  (meta-path beats sys.path). Keep mef3io uninstalled; use scripts/dev_build.sh.
 - Pure-Python backend is a stub. Records write covers Note/EDFA/SyLg/Seiz.
   MATLAB MEX not started. Cache is Python-level (a C++ warm-start is future).
 - Distribution: cibuildwheel config + CI exist but no wheels published; reserve

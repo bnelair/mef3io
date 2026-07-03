@@ -41,4 +41,15 @@ struct SegmentSpec {
 si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec& spec,
                               const std::vector<BlockSpec>& blocks, int n_threads = 0);
 
+// Append blocks to an EXISTING segment (in-segment append): extends the .tdat
+// and .tidx in place and rewrites the .tmet statistics plus the universal
+// headers' end times / entry counts / CRCs. The segment's fs and conversion
+// factor are authoritative: a mismatch with `spec`, or a first block starting
+// before the segment's stored end time, throws WriteConflictError. Encrypted
+// segments need a password granting at least level-1 access (to re-encrypt
+// section 2; section 3 bytes are preserved verbatim). File UUIDs and password
+// validation fields are preserved. Returns the number of samples appended.
+si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec& spec,
+                               const std::vector<BlockSpec>& blocks, int n_threads = 0);
+
 }  // namespace mef3io

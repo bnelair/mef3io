@@ -7,7 +7,10 @@
 #include <filesystem>
 #include <limits>
 
+#include <fstream>
+
 #include "mef3io/errors.hpp"
+#include "mef3io/metadata.hpp"
 #include "mef3io/writer.hpp"
 
 namespace fs = std::filesystem;
@@ -88,7 +91,8 @@ SessionWriter::SessionWriter(const std::string& mefd_path, bool overwrite, std::
   fs::create_directories(mefd_path_);
   session_name_ = fs::path(mefd_path_).stem().string();
 
-  // Adopt existing channels/segments so appends continue the numbering.
+  // Adopt existing channels/segments so appends continue where the session
+  // left off. Metadata is read back lazily (hydrate) on the first write.
   for (const auto& entry : fs::directory_iterator(mefd_path_)) {
     if (!entry.is_directory() || entry.path().extension() != ".timd") continue;
     std::string ch = entry.path().stem().string();
@@ -96,7 +100,33 @@ SessionWriter::SessionWriter(const std::string& mefd_path, bool overwrite, std::
     for (const auto& s : fs::directory_iterator(entry.path()))
       if (s.is_directory() && s.path().extension() == ".segd") ++nseg;
     channels_[ch].n_segments = nseg;
+    channels_[ch].hydrated = (nseg == 0);
   }
+}
+
+void SessionWriter::hydrate(const std::string& channel, ChannelState& st) {
+  if (st.hydrated) return;
+  st.hydrated = true;
+  const std::string base = segment_name(channel, st.n_segments - 1);
+  const std::string tmet_path =
+      (fs::path(mefd_path_) / (channel + ".timd") / (base + ".segd") / (base + ".tmet")).string();
+  std::ifstream f(tmet_path, std::ios::binary);
+  if (!f) throw IoError("cannot open segment metadata for append: " + tmet_path);
+  std::vector<ui1> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  auto md = load_time_series_metadata(bytes,
+                                      password_2_.empty() ? password_1_ : password_2_);
+  si8 rto = md.section3_available ? md.section3.recording_time_offset : 0;
+  if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
+  st.sampling_frequency = md.section2.sampling_frequency;
+  st.units_conversion_factor = md.section2.units_conversion_factor;
+  // start_sample is channel-wide, so the last segment's start + count is the
+  // channel total.
+  st.total_samples = md.section2.start_sample + md.section2.number_of_samples;
+  si8 end_stored = md.universal_header.end_time;
+  if (end_stored == fmt::UUTC_NO_ENTRY)
+    st.last_end_uutc = 0;
+  else
+    st.last_end_uutc = (end_stored >= 0) ? end_stored : -end_stored + rto;
 }
 
 void SessionWriter::write_records(std::optional<std::string> channel,
@@ -129,7 +159,18 @@ WriteSummary SessionWriter::write_int32(const std::string& channel, std::span<co
 
 WriteSummary SessionWriter::write_float(const std::string& channel, std::span<const sf8> data,
                                         si8 start_uutc, sf8 fs, int precision, bool new_segment) {
-  if (precision < 0) precision = infer_precision(data);
+  if (precision < 0) {
+    // In-segment appends must keep the segment's conversion factor, so reuse
+    // its precision instead of re-inferring (which could differ and conflict).
+    auto it = channels_.find(channel);
+    if (!new_segment && it != channels_.end() && it->second.n_segments > 0) {
+      hydrate(channel, it->second);
+      precision =
+          static_cast<int>(std::llround(-std::log10(it->second.units_conversion_factor)));
+    } else {
+      precision = infer_precision(data);
+    }
+  }
   sf8 ufact = std::pow(10.0, -precision);
   auto samples = quantize_to_int32(data, precision);
   std::vector<ui1> valid(data.size());
@@ -140,8 +181,9 @@ WriteSummary SessionWriter::write_float(const std::string& channel, std::span<co
 WriteSummary SessionWriter::write_blocks(const std::string& channel,
                                          const std::vector<si4>& samples,
                                          std::span<const ui1> valid, sf8 ufact, si8 start_uutc,
-                                         sf8 fs, bool /*new_segment*/) {
+                                         sf8 fs, bool new_segment) {
   ChannelState& st = channels_[channel];
+  hydrate(channel, st);
   const si8 n = static_cast<si8>(samples.size());
   const si8 block_len = block_length_for(fs);
 
@@ -165,7 +207,7 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   summary.gaps_skipped = static_cast<si8>(runs.size()) > 0 ? static_cast<si8>(runs.size()) - 1 : 0;
   if (runs.empty()) {
     // All-NaN / no valid data: no-op on disk, but report it explicitly.
-    summary.segment = st.n_segments;
+    summary.segment = (!new_segment && st.n_segments > 0) ? st.n_segments - 1 : st.n_segments;
     return summary;
   }
 
@@ -189,10 +231,10 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
     }
   }
 
-  const int seg = st.n_segments;
+  const bool append = !new_segment && st.n_segments > 0;
+  const int seg = append ? st.n_segments - 1 : st.n_segments;
   std::string seg_dir =
       (fs::path(mefd_path_) / (channel + ".timd") / (segment_name(channel, seg) + ".segd")).string();
-  fs::create_directories(seg_dir);
 
   SegmentSpec spec;
   spec.session_name = session_name_;
@@ -205,7 +247,14 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   spec.password_1 = password_1_;
   spec.password_2 = password_2_;
 
-  write_time_series_segment(seg_dir, spec, blocks, n_threads_);
+  if (append) {
+    // fs / conversion-factor / start-time conflicts are validated against the
+    // on-disk metadata inside append_time_series_segment.
+    append_time_series_segment(seg_dir, spec, blocks, n_threads_);
+  } else {
+    fs::create_directories(seg_dir);
+    write_time_series_segment(seg_dir, spec, blocks, n_threads_);
+  }
 
   st.sampling_frequency = fs;
   st.units_conversion_factor = ufact;

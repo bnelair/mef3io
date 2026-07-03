@@ -11,3 +11,4 @@ python/mef3io/_mef3io*.pyd
 # reference sources (meflib/pymef/mef3_dump), kept next to the repo but untracked
 ../reference_files/
 reference_files/
+.idea/
