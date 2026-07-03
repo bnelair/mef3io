@@ -1,0 +1,132 @@
+{
+  "base_uutc": 1577836800000000,
+  "cases": [
+    {
+      "name": "plain_single",
+      "password": null,
+      "password1": null,
+      "password2": null,
+      "channels": {
+        "ch1": {
+          "fs": 256.0,
+          "ufact": 0.001,
+          "start_time": 1577836800000000,
+          "end_time": 1577836807812500,
+          "nsamp": 2000
+        }
+      }
+    },
+    {
+      "name": "nan_gap_long",
+      "password": null,
+      "password1": null,
+      "password2": null,
+      "channels": {
+        "ch1": {
+          "fs": 256.0,
+          "ufact": 0.001,
+          "start_time": 1577836800000000,
+          "end_time": 1577836807812500,
+          "nsamp": 2000
+        }
+      }
+    },
+    {
+      "name": "nan_gap_short",
+      "password": null,
+      "password1": null,
+      "password2": null,
+      "channels": {
+        "ch1": {
+          "fs": 256.0,
+          "ufact": 0.001,
+          "start_time": 1577836800000000,
+          "end_time": 1577836807812500,
+          "nsamp": 2000
+        }
+      }
+    },
+    {
+      "name": "multi_segment",
+      "password": null,
+      "password1": null,
+      "password2": null,
+      "channels": {
+        "ch1": {
+          "fs": 256.0,
+          "ufact": 0.001,
+          "start_time": 1577836800000000,
+          "end_time": 1577836816625000,
+          "nsamp": 4256
+        }
+      }
+    },
+    {
+      "name": "multi_channel",
+      "password": null,
+      "password1": null,
+      "password2": null,
+      "channels": {
+        "ch1": {
+          "fs": 256.0,
+          "ufact": 0.001,
+          "start_time": 1577836800000000,
+          "end_time": 1577836807812500,
+          "nsamp": 2000
+        },
+        "ch2": {
+          "fs": 256.0,
+          "ufact": 0.01,
+          "start_time": 1577836800000000,
+          "end_time": 1577836807812500,
+          "nsamp": 2000
+        }
+      }
+    },
+    {
+      "name": "enc_both",
+      "password": "pass2",
+      "password1": "pass1",
+      "password2": "pass2",
+      "channels": {
+        "ch1": {
+          "fs": 256.0,
+          "ufact": 0.001,
+          "start_time": 1577836800000000,
+          "end_time": 1577836807812500,
+          "nsamp": 2000
+        }
+      }
+    },
+    {
+      "name": "with_annotations",
+      "password": null,
+      "password1": null,
+      "password2": null,
+      "channels": {
+        "ch1": {
+          "fs": 256.0,
+          "ufact": 0.001,
+          "start_time": 1577836800000000,
+          "end_time": 1577836807812500,
+          "nsamp": 2000
+        }
+      }
+    },
+    {
+      "name": "fractional_fs",
+      "password": null,
+      "password1": null,
+      "password2": null,
+      "channels": {
+        "ch1": {
+          "fs": 512.5,
+          "ufact": 0.001,
+          "start_time": 1577836800000000,
+          "end_time": 1577836803902439,
+          "nsamp": 2000
+        }
+      }
+    }
+  ]
+}
