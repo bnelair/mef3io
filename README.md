@@ -26,7 +26,7 @@ C++ tests). Scope notes:
 
 More docs: [docs/design.md](docs/design.md) (full design),
 [docs/legacy_comparison.md](docs/legacy_comparison.md) (measured old-vs-new
-comparison: L1 encryption, annotation protection, quantization),
+comparison: performance, L1 encryption, annotation protection, quantization),
 [docs/mef3io_handoff.md](docs/mef3io_handoff.md) (repo-extraction + context),
 [benchmarks/README.md](benchmarks/README.md), runnable
 [examples/](examples/README.md), and `CLAUDE.md`.

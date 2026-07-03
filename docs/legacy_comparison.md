@@ -3,8 +3,29 @@
 Both implementations read each other's files bit-identically at full access,
 and encrypting a session never changes the decoded samples. The differences
 below are measured, and each is reproducible by running
+[`examples/08_legacy_compatability.py`](../examples/08_legacy_compatability.py)
+(performance) and
 [`examples/09_encryption_replicability.py`](../examples/09_encryption_replicability.py)
-(needs `pip install "mef3io[test]"`).
+(encryption/access levels); both need `pip install "mef3io[test]"`.
+
+## Performance
+
+Measured with `examples/08`: 5 channels × 5 h at 512 Hz (9.2 M samples per
+channel, ~88 MB session, band-pass-filtered noise, precision 3), encrypted,
+Apple-silicon macOS, Python 3.13:
+
+| Operation | legacy | mef3io | speedup |
+|---|---|---|---|
+| Write (whole session) | 4.67 s | 0.66 s | **7.1×** |
+| Open / read headers (legacy-written) | 0.011 s | 0.004 s | 2.5× |
+| Read all data (legacy-written file) | 2.78 s | 0.36 s | **7.8×** |
+| Read all data (mef3io-written file) | 2.80 s | 0.35 s | **8.0×** |
+| File size | 87.79 MB | 87.79 MB | identical |
+
+Same run confirms cross-compatibility on unencrypted content at full access:
+both readers return equal arrays with matching NaN positions on both writers'
+files (`Data equality: True`, `NaN positions match: True`, all four
+writer×reader combinations).
 
 ## Level-1 password behavior — the main difference
 
