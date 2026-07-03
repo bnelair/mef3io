@@ -27,6 +27,28 @@ both readers return equal arrays with matching NaN positions on both writers'
 files (`Data equality: True`, `NaN positions match: True`, all four
 writer×reader combinations).
 
+### MATLAB vs Python binding (same C++ core)
+
+Both bindings sit on the same core, so the language layer is essentially
+free. Measured with `matlab/benchmark_mef3io.m` and
+`benchmarks/bindings_benchmark.py` on the identical workload (5 ch × 5 h @
+512 Hz = 46.1 M samples, smoothed noise + NaN gap, precision 3; same machine
+as above; MATLAB R2026a / Python 3.13):
+
+| | write | read | file size |
+|---|---|---|---|
+| Python, plain | 0.62 s (74 MS/s) | 0.34 s (134 MS/s) | 80.2 MB |
+| Python, encrypted | 0.62 s (75 MS/s) | 0.34 s (137 MS/s) | 80.2 MB |
+| MATLAB, plain | 0.74 s (63 MS/s) | 0.34 s (135 MS/s) | 80.1 MB |
+| MATLAB, encrypted | 0.61 s (75 MS/s) | 0.34 s (137 MS/s) | 80.1 MB |
+
+Takeaways: MATLAB and Python are within measurement noise of each other
+(reads identical at ~135 M samples/s; the one slower MATLAB write is
+first-run warmup), **encryption costs nothing** on either binding (it only
+wraps metadata — the signal codec path is unchanged), and both are the same
+~7–8× ahead of the legacy pymef stack shown in the table above. Sessions
+written by either binding read back bit-identically in the other.
+
 ## Level-1 password behavior — the main difference
 
 MEF 3.0 encrypts **section 2** (technical metadata: fs, sample counts,
