@@ -55,7 +55,8 @@ testpaths = ["tests", "python/mef3io"]
 # runs one job per os/arch: linux x86_64 + aarch64, windows AMD64 + ARM64),
 # except macOS where one arm64 runner builds both architectures.
 build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
-skip = "*-musllinux* *_i686 *-win32"
+# cp314t (free-threaded) excluded until the extension is audited for it.
+skip = "*-musllinux* *_i686 *-win32 cp314t-*"
 archs = ["auto64"]
 build-frontend = "build"
 test-requires = ["pytest", "numpy"]
@@ -65,3 +66,6 @@ test-command = "python -c \"import mef3io, numpy as np; print(mef3io.__version__
 
 [tool.cibuildwheel.macos]
 archs = ["arm64", "x86_64"]
+# nanobind needs >=10.13 and the core's std::filesystem >=10.15; the default
+# x86_64 target (10.9) fails the build.
+environment = { MACOSX_DEPLOYMENT_TARGET = "10.15" }
