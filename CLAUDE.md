@@ -96,10 +96,17 @@ map, annotations, encryption, legacy style). `docs/design.md` = full design;
   (meta-path beats sys.path). Keep mef3io uninstalled; use scripts/dev_build.sh.
 - Pure-Python backend is a stub. Records write covers Note/EDFA/SyLg/Seiz.
   MATLAB MEX not started. Cache is Python-level (a C++ warm-start is future).
-- Distribution: cibuildwheel config + CI exist but no wheels published; reserve
-  the PyPI name. Release plan: ship mef3io standalone, benchmark vs legacy, then
-  cut mef_tools 3.0 as a compat re-export. Keep mef3io brand-neutral;
-  brainmaze-mef3-server should depend on it (see docs/design.md).
+- Distribution: **version single source of truth = repo-root `VERSION` file**
+  (pyproject regex provider → wheel metadata; CMake → `mef3io::version()` and
+  the extension's `__version__`; `mef3io.__version__` prefers installed dist
+  metadata). Release flow: manually run the `bump-version` workflow
+  (patch/minor/major or explicit) → commits VERSION, tags vX.Y.Z, dispatches
+  `release.yml` → cibuildwheel on linux x86_64+aarch64, windows AMD64+ARM64
+  (cp311+ on ARM), macOS arm64+x86_64, + sdist → twine upload using the
+  `PYPI_Token_General` secret. `ci.yml` = tests on push/PR (main, dev). PyPI
+  name not yet reserved. Then: benchmark vs legacy, cut mef_tools 3.0 as a
+  compat re-export. Keep mef3io brand-neutral; brainmaze-mef3-server should
+  depend on it (see docs/design.md).
 
 Benchmarks: `benchmarks/mef_benchmark.py` (write/open/seq/parallel vs mef_tools
 & NWB-Zarr) and `benchmarks/compression_test.py` (file size / compression).

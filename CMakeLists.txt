@@ -1,6 +1,10 @@
 # Top-level build for the mef3io Python extension (driven by scikit-build-core).
 cmake_minimum_required(VERSION 3.26)
-project(mef3io LANGUAGES CXX)
+
+# Single source of truth for the version (shared with the wheel metadata via
+# pyproject.toml's regex provider, and with C++ via mef3io/version.hpp).
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" MEF3IO_VERSION LIMIT_COUNT 1)
+project(mef3io VERSION ${MEF3IO_VERSION} LANGUAGES CXX)
 
 add_subdirectory(core)
 

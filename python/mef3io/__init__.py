@@ -5,8 +5,6 @@ API (``Reader``, ``Writer``) is filled in over the implementation phases; P0
 exposes only backend availability so the build can be validated end to end.
 """
 
-__version__ = "0.1.0.dev0"
-
 try:
     from . import _mef3io  # noqa: F401
 
@@ -14,6 +12,16 @@ try:
 except ImportError:  # pragma: no cover - exercised only on exotic platforms
     _mef3io = None
     _HAVE_CPP = False
+
+# Version: single source of truth is the repo-root VERSION file. Installed
+# wheels carry it in the package metadata; dev trees fall back to the value
+# baked into the extension at build time (also from VERSION).
+try:
+    from importlib.metadata import version as _dist_version
+
+    __version__ = _dist_version("mef3io")
+except Exception:  # pragma: no cover - uninstalled source tree
+    __version__ = getattr(_mef3io, "__version__", "0.0.0") if _mef3io else "0.0.0"
 
 
 def have_cpp_backend() -> bool:

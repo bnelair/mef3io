@@ -17,6 +17,7 @@
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
 #include "mef3io/types.hpp"
+#include "mef3io/version.hpp"
 #include "mef3io/writer.hpp"
 
 #include <cmath>
@@ -45,6 +46,7 @@ nb::bytes to_bytes(std::span<const mef3io::ui1> s) {
 }  // namespace
 
 NB_MODULE(_mef3io, m) {
+  m.attr("__version__") = mef3io::version();
   m.doc() = "mef3io C++ backend (nanobind extension)";
   m.attr("__mef_version_major__") = mef3io::fmt::MEF_VERSION_MAJOR;
   m.attr("__mef_version_minor__") = mef3io::fmt::MEF_VERSION_MINOR;

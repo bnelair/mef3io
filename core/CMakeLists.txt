@@ -1,6 +1,10 @@
 # mef3io core C++ library.
 cmake_minimum_required(VERSION 3.26)
-project(mef3io_core LANGUAGES CXX)
+
+# Version comes from the repo-root VERSION file (works both under the
+# top-level build and when core is configured standalone).
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" MEF3IO_VERSION LIMIT_COUNT 1)
+project(mef3io_core VERSION ${MEF3IO_VERSION} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,6 +18,7 @@ file(GLOB MEF3IO_CORE_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src
 
 add_library(mef3io_core STATIC ${MEF3IO_CORE_SOURCES})
 target_include_directories(mef3io_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_compile_definitions(mef3io_core PUBLIC MEF3IO_VERSION_STRING="${MEF3IO_VERSION}")
 set_target_properties(mef3io_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 find_package(Threads REQUIRED)

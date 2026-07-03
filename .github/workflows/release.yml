@@ -1,0 +1,68 @@
+name: release
+
+# Builds wheels for every supported platform/arch and publishes to PyPI.
+# Triggered by a version tag (created by the bump-version workflow, which also
+# dispatches this workflow explicitly — tags pushed with GITHUB_TOKEN do not
+# fire tag-push events). A plain workflow_dispatch on a branch is a dry run:
+# wheels are built and uploaded as artifacts, but publishing is skipped.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  wheels:
+    name: wheels ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, label: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, label: linux-aarch64 }
+          - { os: windows-latest, label: windows-amd64 }
+          # CPython ships official Windows-on-ARM binaries from 3.11.
+          - { os: windows-11-arm, label: windows-arm64, cibw_build: "cp311-* cp312-* cp313-*" }
+          # One macOS runner builds both arm64 and x86_64 (see pyproject).
+          - { os: macos-latest, label: macos }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.23.3
+        env:
+          CIBW_BUILD: ${{ matrix.cibw_build || '' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.label }}
+          path: ./wheelhouse/*.whl
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        run: pipx run build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_Token_General }}
+        run: |
+          python -m pip install --upgrade pip twine
+          twine upload --skip-existing dist/*

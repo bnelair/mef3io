@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "mef3io"
-version = "0.1.0.dev0"
+dynamic = ["version"]
 description = "MEF 3.0 read/write — C++ core with Python bindings, pure-Python fallback"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -29,6 +29,14 @@ wheel.packages = ["python/mef3io"]
 minimum-version = "0.9"
 build-dir = "build/skbuild/{wheel_tag}"
 cmake.version = ">=3.26"
+# Single source of truth for the version: the repo-root VERSION file (also
+# read by CMake for the C++ core and baked into the extension).
+sdist.include = ["VERSION"]
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "VERSION"
+regex = "^(?P<value>.+?)\\s*$"
 
 [tool.scikit-build.cmake.define]
 MEF3IO_BUILD_TESTS = "OFF"
@@ -38,19 +46,17 @@ testpaths = ["tests", "python/mef3io"]
 
 [tool.cibuildwheel]
 # CPython 3.10+ on the three desktop platforms; skip musl/32-bit for now.
+# Architectures come from the runner (native builds — the release workflow
+# runs one job per os/arch: linux x86_64 + aarch64, windows AMD64 + ARM64),
+# except macOS where one arm64 runner builds both architectures.
 build = "cp310-* cp311-* cp312-* cp313-*"
 skip = "*-musllinux* *_i686 *-win32"
+archs = ["auto64"]
 build-frontend = "build"
 test-requires = ["pytest", "numpy"]
 # Golden-file tests need the legacy stack (pymef); run the codec/self tests that
 # don't require it in the wheel smoke test.
-test-command = "python -c \"import mef3io, numpy as np; print(mef3io.have_cpp_backend())\""
-
-[tool.cibuildwheel.linux]
-archs = ["x86_64", "aarch64"]
+test-command = "python -c \"import mef3io, numpy as np; print(mef3io.__version__, mef3io.have_cpp_backend())\""
 
 [tool.cibuildwheel.macos]
 archs = ["arm64", "x86_64"]
-
-[tool.cibuildwheel.windows]
-archs = ["AMD64"]
