@@ -33,7 +33,10 @@ else
 end
 
 fprintf('Building mef3io_mex (%s) from %d sources...\n', version, numel(files));
-mex('-R2018a', flags{:}, def, ['-I' fullfile(core, 'include')], ...
+mex('-v', '-R2018a', flags{:}, def, ['-I' fullfile(core, 'include')], ...
     '-output', fullfile(here, 'mef3io_mex'), files{:});
+if isunix && ~ismac  % TEMP DEBUG: show runtime deps of the built MEX
+    system(['ldd ' fullfile(here, ['mef3io_mex.' mexext]) ' | grep -i "stdc\|gcc" || true']);
+end
 fprintf('Done: %s\n', fullfile(here, ['mef3io_mex.' mexext]));
 end
