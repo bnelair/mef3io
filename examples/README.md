@@ -18,3 +18,5 @@ does. Times in MEF 3.0 are **uUTC** — microseconds since the Unix epoch.
 | `05_annotations.py` | Writing and reading records (annotations), session- and channel-level |
 | `06_encryption.py` | Two-level passwords, what each level can access |
 | `07_legacy_mef_tools_style.py` | `from mef3io import MefReader, MefWriter` as a mef_tools drop-in |
+| `08_legacy_compatability.py` | Legacy-vs-new write/read timing and value comparison on larger data (needs `mef3io[test]` + scipy/matplotlib/tqdm; writes under a hardcoded path) |
+| `09_encryption_replicability.py` | Encryption replicability matrix: both writers × plain/encrypted × both readers, plus what L1/L2/wrong passwords actually unlock (needs `mef3io[test]`) |
