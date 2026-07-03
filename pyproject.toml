@@ -69,3 +69,9 @@ archs = ["arm64", "x86_64"]
 # nanobind needs >=10.13 and the core's std::filesystem >=10.15; the default
 # x86_64 target (10.9) fails the build.
 environment = { MACOSX_DEPLOYMENT_TARGET = "10.15" }
+
+# arm64 macOS starts at 11.0 — state it explicitly rather than relying on the
+# toolchain to bump it (wheels tag as macosx_11_0_arm64 either way).
+[[tool.cibuildwheel.overrides]]
+select = "*-macosx_arm64"
+environment = { MACOSX_DEPLOYMENT_TARGET = "11.0" }
