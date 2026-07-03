@@ -21,14 +21,14 @@ jobs:
           - { os: ubuntu-24.04-arm, label: linux-aarch64 }
           - { os: windows-latest, label: windows-amd64 }
           # CPython ships official Windows-on-ARM binaries from 3.11.
-          - { os: windows-11-arm, label: windows-arm64, cibw_build: "cp311-* cp312-* cp313-*" }
+          - { os: windows-11-arm, label: windows-arm64, cibw_build: "cp311-* cp312-* cp313-* cp314-*" }
           # One macOS runner builds both arm64 and x86_64 (see pyproject).
           - { os: macos-latest, label: macos }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.23.3
+        uses: pypa/cibuildwheel@v3.4.1
         env:
           CIBW_BUILD: ${{ matrix.cibw_build || '' }}
       - uses: actions/upload-artifact@v4

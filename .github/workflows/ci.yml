@@ -58,3 +58,34 @@ jobs:
           python -m pip install --upgrade pip
           pip install .
           python -c "import mef3io; assert mef3io.have_cpp_backend(); print('cpp backend OK,', mef3io.__version__)"
+
+  # Newest CPython, oracle-free (the legacy pymef stack may lag new Pythons):
+  # compile, import, and a full write/read round trip.
+  python-latest-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install and round-trip
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+          python -c "
+          import tempfile
+          import numpy as np
+          import mef3io
+          p = tempfile.mkdtemp() + '/s.mefd'
+          w = mef3io.Writer(p, overwrite=True)
+          d = np.sin(np.arange(1000) / 9)
+          d[100:200] = np.nan
+          w.write('ch', d, 1577836800000000, 256.0, precision=3)
+          w.close()
+          r = mef3io.Reader(p)
+          x = r.read('ch')
+          assert len(x) == 1000 and np.isnan(x[100:200]).all()
+          ok = ~np.isnan(d)
+          assert np.allclose(x[ok], np.round(d[ok], 3))
+          print('py3.14 round trip OK,', mef3io.__version__)
+          "
