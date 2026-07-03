@@ -11,8 +11,15 @@ from pathlib import Path
 
 MEF3IO_ROOT = Path(__file__).resolve().parent.parent  # mef3io/
 
-# mef3io package (python/mef3io)
-sys.path.insert(0, str(MEF3IO_ROOT / "python"))
+# mef3io package: prefer the in-tree package only when its compiled extension
+# has been built (scripts/dev_build.sh symlinks it in). Otherwise fall through
+# to an installed mef3io (e.g. `pip install ".[test]"` on CI) — inserting the
+# source tree unconditionally would shadow the installed extension and leave
+# the package without a backend.
+_pkg = MEF3IO_ROOT / "python" / "mef3io"
+_ext = [p for pat in ("_mef3io*.so", "_mef3io*.pyd") for p in _pkg.glob(pat)]
+if any(p.exists() for p in _ext):  # .exists() also filters dangling symlinks
+    sys.path.insert(0, str(MEF3IO_ROOT / "python"))
 
 # legacy mef_tools oracle: prefer a local checkout when running in the original
 # repo (matches the golden fixtures), otherwise fall through to a pip-installed
