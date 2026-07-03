@@ -354,27 +354,18 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   }
   const si8 end_disk = to_disk_time(last_end, rto);
 
-  // --- .tdat: stream the old body CRC, append the new blocks, patch the UH ---
+  // --- .tdat: append the new blocks and patch the UH. The Koopman CRC has no
+  // final XOR, so the stored body CRC is a resumable running state: seed from
+  // it and update with only the appended bytes — appends stay O(new data)
+  // instead of re-reading the whole (potentially huge) existing body. ---
   {
-    ui4 body_crc = fmt::CRC_START_VALUE;
+    std::vector<ui1> old_uh(fmt::UNIVERSAL_HEADER_BYTES);
     std::ifstream in(tdat_path, std::ios::binary);
     if (!in) throw IoError("cannot open for read: " + tdat_path);
-    in.seekg(fmt::UNIVERSAL_HEADER_BYTES);
-    std::vector<ui1> chunk(1 << 20);
-    si8 remaining = old_tdat_size - fmt::UNIVERSAL_HEADER_BYTES;
-    while (remaining > 0) {
-      const std::size_t n = static_cast<std::size_t>(
-          std::min<si8>(remaining, static_cast<si8>(chunk.size())));
-      if (!in.read(reinterpret_cast<char*>(chunk.data()), static_cast<std::streamsize>(n)))
-        throw IoError("short read: " + tdat_path);
-      body_crc = crc::calculate(std::span<const ui1>(chunk.data(), n), body_crc);
-      remaining -= static_cast<si8>(n);
-    }
-    std::vector<ui1> old_uh(fmt::UNIVERSAL_HEADER_BYTES);
-    in.seekg(0);
     if (!in.read(reinterpret_cast<char*>(old_uh.data()), fmt::UNIVERSAL_HEADER_BYTES))
       throw IoError("short read: " + tdat_path);
     in.close();
+    ui4 body_crc = byteio::read<ui4>(old_uh, 4);
 
     {
       std::ofstream app(tdat_path, std::ios::binary | std::ios::app);

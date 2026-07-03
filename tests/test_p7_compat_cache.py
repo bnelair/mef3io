@@ -70,6 +70,9 @@ def test_top_level_legacy_imports(tmp_path):
     w.max_nans_written = 0   # legacy knobs accepted
     w.record_offset = 0
     assert w.get_mefblock_len(FS) == 512
+    w.mef_block_len = 0      # falsy -> derive from fs (legacy formula)
+    assert w.get_mefblock_len(FS) == int(FS * 10)
+    w.mef_block_len = 512
     w.write_data(data, "ch1", START, FS)  # precision inferred
     w.write_annotations([{"time": START + 1000, "text": "note", "type": "Note"}], "ch1")
     w.close()

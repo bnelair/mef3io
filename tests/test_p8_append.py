@@ -57,6 +57,15 @@ def test_append_extends_segment_in_place(tmp_path):
     legacy = np.asarray(MefReader(path).get_data("ch1"), float)
     assert np.allclose(legacy, got)
 
+    # the appended .tdat's stored body CRC (seeded from the previous value,
+    # not recomputed from scratch) must equal a full recompute
+    import struct
+
+    tdat = Path(path) / "ch1.timd" / "ch1-000000.segd" / "ch1-000000.tdat"
+    b = tdat.read_bytes()
+    stored = struct.unpack("<I", b[4:8])[0]
+    assert stored == m.crc32(b[1024:])
+
 
 def test_append_with_gap_keeps_single_segment(tmp_path):
     path = str(tmp_path / "s.mefd")
