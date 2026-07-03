@@ -2,6 +2,7 @@
 #include "mef3io/metadata.hpp"
 
 #include <vector>
+#include <algorithm>
 
 #include "mef3io/crypto.hpp"
 #include "mef3io/errors.hpp"

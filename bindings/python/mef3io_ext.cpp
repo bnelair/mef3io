@@ -21,6 +21,7 @@
 #include "mef3io/writer.hpp"
 
 #include <cmath>
+#include <algorithm>
 #include <filesystem>
 
 namespace nb = nanobind;

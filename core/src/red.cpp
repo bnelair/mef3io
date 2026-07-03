@@ -2,6 +2,8 @@
 #include "mef3io/red.hpp"
 
 #include <array>
+#include <cmath>
+#include <algorithm>
 #include <cstring>
 
 #include "mef3io/byteio.hpp"
