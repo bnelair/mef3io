@@ -2,6 +2,8 @@
 #include "mef3io/red.hpp"
 
 #include <array>
+#include <cmath>
+#include <algorithm>
 #include <cstring>
 
 #include "mef3io/byteio.hpp"
@@ -34,6 +36,15 @@ DecodedBlock decode_block(std::span<const ui1> block, const crypto::AccessKeys& 
   if (bh.block_bytes < static_cast<ui4>(RED_BLOCK_HEADER_BYTES) ||
       bh.block_bytes > block.size())
     throw FormatError("RED block_bytes inconsistent with buffer");
+
+  // The on-disk ui4 counters are untrusted: every sample consumes at least one
+  // difference symbol (keysamples five), so violating either bound means
+  // corruption — reject it before it drives the symbol loop or the sample
+  // allocation below into gigabytes.
+  if (static_cast<ui8>(bh.number_of_samples) > static_cast<ui8>(bh.difference_bytes) + 1)
+    throw FormatError("RED number_of_samples exceeds difference stream");
+  if (static_cast<ui8>(bh.difference_bytes) > 5ull * bh.number_of_samples + 5ull)
+    throw FormatError("RED difference_bytes inconsistent with sample count");
 
   if (validate_crc) {
     // CRC is over the block from byte 4 (after the stored crc) to block_bytes.

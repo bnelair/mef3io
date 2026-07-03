@@ -54,6 +54,12 @@ class Reader {
     return session_.read_index(channel);
   }
 
+  // Per-segment map: what data is where (time and sample ranges), from
+  // metadata only. Complements toc(), which is block-level.
+  std::vector<SegmentInfo> segments(const std::string& channel) {
+    return session_.segment_map(channel);
+  }
+
   std::vector<Record> records(std::optional<std::string> channel = std::nullopt) {
     return session_.read_records(std::move(channel));
   }

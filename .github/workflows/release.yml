@@ -1,0 +1,118 @@
+name: release
+
+# Builds wheels for every supported platform/arch and publishes to PyPI.
+# Triggered by a version tag (created by the bump-version workflow, which also
+# dispatches this workflow explicitly — tags pushed with GITHUB_TOKEN do not
+# fire tag-push events). A plain workflow_dispatch on a branch is a dry run:
+# wheels are built and uploaded as artifacts, but publishing is skipped.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  wheels:
+    name: wheels ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, label: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, label: linux-aarch64 }
+          - { os: windows-latest, label: windows-amd64 }
+          # CPython ships official Windows-on-ARM binaries from 3.11.
+          - { os: windows-11-arm, label: windows-arm64, cibw_build: "cp311-* cp312-* cp313-* cp314-*" }
+          # One macOS runner builds both arm64 and x86_64 (see pyproject).
+          - { os: macos-latest, label: macos }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v3.4.1
+        env:
+          CIBW_BUILD: ${{ matrix.cibw_build || '' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.label }}
+          path: ./wheelhouse/*.whl
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        run: pipx run build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  # MATLAB MEX binaries for the platforms MATLAB supports. Free MathWorks
+  # licensing on GitHub-hosted runners applies to public repos; on a private
+  # repo these jobs need a MathWorks batch token (they don't block PyPI).
+  mex:
+    name: mex ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, label: linux-x86_64 }   # mexa64
+          - { os: windows-latest, label: windows-amd64 } # mexw64
+          - { os: macos-latest, label: macos-arm64 }     # mexmaca64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: matlab-actions/setup-matlab@v2
+        with:
+          release: latest
+      - name: Build and test the MEX
+        uses: matlab-actions/run-command@v2
+        with:
+          command: cd('matlab'); build_mex; test_mef3io
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mex-${{ matrix.label }}
+          path: matlab/*.mex*
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_Token_General }}
+        run: |
+          python -m pip install --upgrade pip twine
+          twine upload --skip-existing dist/*.whl dist/*.tar.gz
+
+  # GitHub release with the MEX binaries attached (their extensions are
+  # platform-unique: mexa64 / mexw64 / mexmaca64, so they upload flat).
+  github-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [mex]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "mex-*"
+          path: mexbin
+          merge-multiple: true
+      - name: Create release and attach MEX binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --generate-notes || true
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --clobber mexbin/*.mex*

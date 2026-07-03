@@ -104,7 +104,7 @@ class Reader:
         impl = self._ensure_impl()
         if n_threads is None:
             return impl.read(channel, t0, t1)
-        return impl.read(channel, t0, t1, n_threads)
+        return impl.read(channel, t0, t1, int(n_threads))
 
     def read_raw(
         self,
@@ -117,7 +117,16 @@ class Reader:
         impl = self._ensure_impl()
         if n_threads is None:
             return impl.read_raw(channel, t0, t1)
-        return impl.read_raw(channel, t0, t1, n_threads)
+        return impl.read_raw(channel, t0, t1, int(n_threads))
+
+    def segments(self, channel: str) -> list[dict]:
+        """Per-segment map of ``channel``: one dict per segment with its
+        ``start_time``/``end_time`` (uUTC), ``start_sample``,
+        ``number_of_samples``, ``number_of_blocks``, and on-disk ``path``.
+        Metadata only (no data is decoded), so it is cheap even for huge
+        sessions — use it to locate data across large recording gaps, then
+        :meth:`toc` for the block-level view within segments."""
+        return self._ensure_impl().segments(channel)
 
     def toc(self, channel: str) -> list[dict]:
         """Block-level table of contents for seeking / viewers."""

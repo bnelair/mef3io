@@ -8,8 +8,9 @@ of scope. The legacy `mef_tools`/`pymef` stack is the correctness oracle.
 
 Status: read + write complete, cross-validated **both directions** vs
 pymef/mef_tools (values, NaN gaps, times, encryption none/L1+L2, fractional fs,
-records). ~93 Python tests + standalone C++ Catch2 tests. Wheel builds via
-`python -m build`. Parallel decode/encode, byte-deterministic across threads.
+records). In-segment append + per-segment map implemented. ~112 Python tests +
+standalone C++ Catch2 tests. Wheel builds via `python -m build`. Parallel
+decode/encode, byte-deterministic across threads.
 
 ## Build & test (use the active conda env for everything)
 
@@ -39,9 +40,17 @@ TimeSeriesIndex, RedBlockHeader — parse/serialize by explicit offset),
 `writer` (segment writer), `session_writer` (precision inference, quantization,
 NaN splitting, segments), `parallel.hpp`.
 
-`python/mef3io/`: `Reader`, `Writer`, `compat` (mef_tools.io drop-in), `cache`
-(opt-in warm start), `pure` (stub). `bindings/python/mef3io_ext.cpp` = nanobind.
-`docs/design.md` = full design; `docs/encryption_model.md` = the crypto model.
+`python/mef3io/`: `Reader`, `Writer` (incl. `write_annotations`), `compat`
+(mef_tools.io drop-in; `MefReader`/`MefWriter` are also re-exported at the top
+level — `from mef3io import MefReader, MefWriter` — via lazy `__getattr__`),
+`cache` (opt-in warm start), `pure` (stub). `bindings/python/mef3io_ext.cpp` =
+nanobind. `matlab/` = MEX + `+mef3io` classes. `examples/` = runnable scripts
+(write/read, int32, append, segment map, annotations, encryption, legacy
+style). Docs site: MkDocs Material from `docs/` (`mkdocs.yml`; nav pages
+index/install/python/matlab/cpp/examples/releasing + the reference docs),
+deployed to GitHub Pages by `.github/workflows/docs.yml` on push to main —
+keep `mkdocs build --strict` green; `for_agents/` (repo root) holds agent handoff docs, outside the site. `docs/design.md` = full design; `docs/encryption_model.md` = crypto
+model; `docs/mef3_format.md` = format reference.
 
 ## Format gotchas (do NOT relearn the hard way)
 
@@ -78,15 +87,38 @@ NaN splitting, segments), `parallel.hpp`.
 
 ## Known limitations / next steps
 
-- **In-segment append** not implemented — appends write a NEW segment (valid,
-  reads fine, not byte-same as mef_tools). This is the gate before mef_tools 3.0
-  could run on mef3io. Highest-value next item.
+- **In-segment append implemented** (`append_time_series_segment` +
+  `SessionWriter` hydration): non-first writes extend the channel's last
+  segment in place (.tdat streamed-CRC append, .tidx extend, .tmet s2 rewrite);
+  `new_segment=True` forces a fresh segment. Appends validate fs/ufact/start
+  time vs on-disk metadata (`WriteConflictError` → Python RuntimeError); float
+  appends reuse the segment's precision. `Reader.segments(ch)` maps what data
+  is where per segment. First appended block keeps discontinuity=true (readers
+  are time-gridded so contiguous appends stay seamless).
+- **Do NOT `pip install -e .` for C++ dev** — scikit-build-core's editable hook
+  loads an install-time extension snapshot that shadows the dev_build symlink
+  (meta-path beats sys.path). Keep mef3io uninstalled; use scripts/dev_build.sh.
 - Pure-Python backend is a stub. Records write covers Note/EDFA/SyLg/Seiz.
-  MATLAB MEX not started. Cache is Python-level (a C++ warm-start is future).
-- Distribution: cibuildwheel config + CI exist but no wheels published; reserve
-  the PyPI name. Release plan: ship mef3io standalone, benchmark vs legacy, then
-  cut mef_tools 3.0 as a compat re-export. Keep mef3io brand-neutral;
-  brainmaze-mef3-server should depend on it (see docs/design.md).
+  Cache is Python-level (a C++ warm-start is future).
+- **MATLAB binding implemented**: flat C ABI (`core/include/mef3io/c_api.h`,
+  Catch2-tested) → single command-dispatch MEX (`matlab/mef3io_mex.cpp`) →
+  `+mef3io` Reader/Writer classes. Build with `matlab/build_mex.m` (C++20
+  compiler; do NOT add -fvisibility=hidden — it hides the MEX version symbols
+  → "not supported in current release"). `matlab/test_mef3io.m` = round trip;
+  validated cross-language both directions vs Python/pymef with R2026a.
+  Append-overlap check has half-a-sample-period slack (per-block half-us time
+  rounding can store a segment end ~1 us past the grid-exact end).
+- Distribution: **version single source of truth = repo-root `VERSION` file**
+  (pyproject regex provider → wheel metadata; CMake → `mef3io::version()` and
+  the extension's `__version__`; `mef3io.__version__` prefers installed dist
+  metadata). Release flow: manually run the `bump-version` workflow
+  (patch/minor/major or explicit) → commits VERSION, tags vX.Y.Z, dispatches
+  `release.yml` → cibuildwheel on linux x86_64+aarch64, windows AMD64+ARM64
+  (cp311+ on ARM), macOS arm64+x86_64, + sdist → twine upload using the
+  `PYPI_Token_General` secret. `ci.yml` = tests on push/PR (main, dev). PyPI
+  name not yet reserved. Then: benchmark vs legacy, cut mef_tools 3.0 as a
+  compat re-export. Keep mef3io brand-neutral; brainmaze-mef3-server should
+  depend on it (see docs/design.md).
 
 Benchmarks: `benchmarks/mef_benchmark.py` (write/open/seq/parallel vs mef_tools
 & NWB-Zarr) and `benchmarks/compression_test.py` (file size / compression).

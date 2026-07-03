@@ -61,6 +61,19 @@ struct BlockIndexEntry {
   bool discontinuity = false;
 };
 
+// Per-segment map entry: where one segment's data lies in time and in
+// channel-wide sample indices. Metadata only — nothing is decoded — so it is
+// cheap even for huge sessions, and it locates data across arbitrary gaps.
+struct SegmentInfo {
+  int segment_number = 0;
+  std::string path;             // the .segd directory
+  si8 start_time = 0;           // absolute uUTC of the first sample
+  si8 end_time = 0;             // absolute uUTC just past the last sample
+  si8 start_sample = 0;         // channel-wide index of the first sample
+  si8 number_of_samples = 0;    // samples stored in this segment (gaps excluded)
+  si8 number_of_blocks = 0;
+};
+
 struct ChannelInfo {
   std::string name;
   sf8 sampling_frequency = 0.0;
@@ -71,6 +84,13 @@ struct ChannelInfo {
   si8 number_of_samples = 0;
   si8 recording_time_offset = 0;
   int n_segments = 0;
+  // Section-3 (level-2) metadata: populated only when the password grants L2
+  // access (or the session is unencrypted); section3_available says which.
+  bool section3_available = false;
+  std::string subject_name_1;
+  std::string subject_name_2;
+  std::string subject_id;
+  std::string recording_location;
 };
 
 class Session {
@@ -92,6 +112,12 @@ class Session {
   // All RED block index entries for a channel (across segments), with absolute
   // times resolved. Does not decode data. For viewers / seeking.
   std::vector<BlockIndexEntry> read_index(const std::string& channel);
+
+  // Per-segment map of a channel, sorted by segment number: time range, sample
+  // range and block count of each segment, from metadata only. Use this to see
+  // what data is where (e.g. across huge recording gaps); read_index gives the
+  // finer block-level view including in-segment discontinuities.
+  std::vector<SegmentInfo> segment_map(const std::string& channel);
 
   // Gather (without decoding) all blocks of `channel` overlapping [t0, t1],
   // loading the needed .tdat images into owned buffers. The high-level Reader

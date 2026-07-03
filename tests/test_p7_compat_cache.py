@@ -54,6 +54,52 @@ def test_compat_reader_api(tmp_path):
     assert np.asarray(r.get_data("ch1")).shape[0] == 3000
 
 
+def test_top_level_legacy_imports(tmp_path):
+    # Legacy code should run with just the import changed to `mef3io`:
+    # NaN gaps, inferred precision, annotations, legacy writer properties.
+    from mef3io import MefReader as TopReader
+    from mef3io import MefWriter as TopWriter
+
+    path = str(tmp_path / "c.mefd")
+    data = _sig()
+    data[500:700] = np.nan
+
+    w = TopWriter(path, overwrite=True)
+    w.data_units = "mV"
+    w.mef_block_len = 512
+    w.max_nans_written = 0   # legacy knobs accepted
+    w.record_offset = 0
+    assert w.get_mefblock_len(FS) == 512
+    w.mef_block_len = 0      # falsy -> derive from fs (legacy formula)
+    assert w.get_mefblock_len(FS) == int(FS * 10)
+    w.mef_block_len = 512
+    w.write_data(data, "ch1", START, FS)  # precision inferred
+    w.write_annotations([{"time": START + 1000, "text": "note", "type": "Note"}], "ch1")
+    w.close()
+
+    r = TopReader(path)
+    assert r.channels == ["ch1"]
+    got = np.asarray(r.get_data("ch1"), float)
+    assert np.array_equal(np.isnan(got), np.isnan(data))
+    ufact = r.get_property("ufact", "ch1")
+    assert np.allclose(got[~np.isnan(got)], data[~np.isnan(data)], atol=ufact / 2 + 1e-12)
+    assert r.get_property("unit", "ch1") == b"mV"
+    assert r.get_annotations("ch1")[0]["text"] == "note"
+
+    # oracle agreement, and the int32 primitive path through the legacy API
+    legacy = np.asarray(LegacyReader(path).get_data("ch1"), float)
+    assert np.array_equal(np.isnan(legacy), np.isnan(got))
+    assert np.allclose(legacy[~np.isnan(legacy)], got[~np.isnan(got)])
+
+    path2 = str(tmp_path / "i.mefd")
+    counts = (np.arange(1000) % 100).astype(np.int32)
+    w2 = TopWriter(path2, overwrite=True)
+    w2.write_data(counts, "ch1", START, FS, precision=2)  # ufact = 10^-2
+    w2.close()
+    r2 = TopReader(path2)
+    assert np.allclose(np.asarray(r2.get_data("ch1")), counts * 0.01)
+
+
 def test_records_write_read_roundtrip(tmp_path):
     path = str(tmp_path / "r.mefd")
     annotations = [

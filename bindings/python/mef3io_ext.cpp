@@ -17,9 +17,11 @@
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
 #include "mef3io/types.hpp"
+#include "mef3io/version.hpp"
 #include "mef3io/writer.hpp"
 
 #include <cmath>
+#include <algorithm>
 #include <filesystem>
 
 namespace nb = nanobind;
@@ -44,7 +46,26 @@ nb::bytes to_bytes(std::span<const mef3io::ui1> s) {
 }
 }  // namespace
 
+namespace {
+// Flexible int64 from Python: ints and numpy ints exactly, floats and numpy
+// floats via llround (uUTC values are exact in float64). Clear TypeError
+// otherwise. MUST be called while holding the GIL.
+mef3io::si8 to_si8(nb::object o, const char* what) {
+  mef3io::si8 v;
+  if (nb::try_cast<mef3io::si8>(o, v)) return v;
+  double d;
+  if (nb::try_cast<double>(o, d)) return static_cast<mef3io::si8>(std::llround(d));
+  throw nb::type_error((std::string(what) + " must be a number (int or float)").c_str());
+}
+
+std::optional<mef3io::si8> opt_si8(nb::object o, const char* what) {
+  if (o.is_none()) return std::nullopt;
+  return to_si8(o, what);
+}
+}  // namespace
+
 NB_MODULE(_mef3io, m) {
+  m.attr("__version__") = mef3io::version();
   m.doc() = "mef3io C++ backend (nanobind extension)";
   m.attr("__mef_version_major__") = mef3io::fmt::MEF_VERSION_MAJOR;
   m.attr("__mef_version_minor__") = mef3io::fmt::MEF_VERSION_MINOR;
@@ -199,15 +220,24 @@ NB_MODULE(_mef3io, m) {
              d["number_of_samples"] = ci.number_of_samples;
              d["recording_time_offset"] = ci.recording_time_offset;
              d["n_segments"] = ci.n_segments;
+             d["section3_available"] = ci.section3_available;
+             if (ci.section3_available) {
+               d["subject_name_1"] = ci.subject_name_1;
+               d["subject_name_2"] = ci.subject_name_2;
+               d["subject_id"] = ci.subject_id;
+               d["recording_location"] = ci.recording_location;
+             } else {
+               d["subject_name_1"] = nb::none();
+               d["subject_name_2"] = nb::none();
+               d["subject_id"] = nb::none();
+               d["recording_location"] = nb::none();
+             }
              return d;
            })
       .def(
           "read_runs",
           [](mef3io::Session& s, const std::string& channel, nb::object t0, nb::object t1) {
-            std::optional<mef3io::si8> a, b;
-            if (!t0.is_none()) a = nb::cast<mef3io::si8>(t0);
-            if (!t1.is_none()) b = nb::cast<mef3io::si8>(t1);
-            auto runs = s.read_runs(channel, a, b);
+            auto runs = s.read_runs(channel, opt_si8(t0, "t0"), opt_si8(t1, "t1"));
             nb::list out;
             for (auto& r : runs) {
               nb::dict d;
@@ -239,12 +269,13 @@ NB_MODULE(_mef3io, m) {
           "write_float",
           [summary_dict](mef3io::SessionWriter& w, const std::string& ch,
                          nb::ndarray<const mef3io::sf8, nb::ndim<1>, nb::c_contig> data,
-                         mef3io::si8 start, double fs, int precision, bool new_segment) {
+                         nb::object start, double fs, int precision, bool new_segment) {
             std::span<const mef3io::sf8> s(data.data(), data.size());
+            const mef3io::si8 start_us = to_si8(start, "start_uutc");
             mef3io::WriteSummary r;
             {
               nb::gil_scoped_release rel;
-              r = w.write_float(ch, s, start, fs, precision, new_segment);
+              r = w.write_float(ch, s, start_us, fs, precision, new_segment);
             }
             return summary_dict(r);
           },
@@ -254,7 +285,7 @@ NB_MODULE(_mef3io, m) {
           "write_int32",
           [summary_dict](mef3io::SessionWriter& w, const std::string& ch,
                          nb::ndarray<const mef3io::si4, nb::ndim<1>, nb::c_contig> data,
-                         double ufact, mef3io::si8 start, double fs, nb::object valid,
+                         double ufact, nb::object start, double fs, nb::object valid,
                          bool new_segment) {
             std::span<const mef3io::si4> s(data.data(), data.size());
             std::vector<mef3io::ui1> vbuf;
@@ -263,7 +294,8 @@ NB_MODULE(_mef3io, m) {
               auto v = nb::cast<nb::ndarray<const mef3io::ui1, nb::ndim<1>, nb::c_contig>>(valid);
               vspan = std::span<const mef3io::ui1>(v.data(), v.size());
             }
-            mef3io::WriteSummary r = w.write_int32(ch, s, ufact, start, fs, vspan, new_segment);
+            mef3io::WriteSummary r =
+                w.write_int32(ch, s, ufact, to_si8(start, "start_uutc"), fs, vspan, new_segment);
             return summary_dict(r);
           },
           nb::arg("channel"), nb::arg("data"), nb::arg("ufact"), nb::arg("start_uutc"),
@@ -278,24 +310,27 @@ NB_MODULE(_mef3io, m) {
               nb::dict d = nb::cast<nb::dict>(item);
               mef3io::Record r;
               r.type = nb::cast<std::string>(d["type"]);
-              r.time = nb::cast<mef3io::si8>(d["time"]);
-              if (d.contains("text")) r.text = nb::cast<std::string>(d["text"]);
-              if (d.contains("duration")) r.duration = nb::cast<mef3io::si8>(d["duration"]);
+              r.time = to_si8(d["time"], "record time");
+              if (d.contains("text")) {
+                nb::object t = d["text"];
+                if (!t.is_none()) r.text = nb::cast<std::string>(t);
+              }
+              if (d.contains("duration")) {
+                nb::object dur = d["duration"];
+                if (!dur.is_none()) r.duration = to_si8(dur, "record duration");
+              }
               recs.push_back(std::move(r));
             }
             w.write_records(ch, recs);
           },
-          nb::arg("channel"), nb::arg("records"));
+          nb::arg("channel").none(), nb::arg("records"));
 
   m.def("infer_precision", [](nb::ndarray<const mef3io::sf8, nb::ndim<1>, nb::c_contig> d) {
     return mef3io::infer_precision(std::span<const mef3io::sf8>(d.data(), d.size()));
   });
 
   // --- Reader (P3 high-level API) ---
-  auto opt_time = [](nb::object o) -> std::optional<mef3io::si8> {
-    if (o.is_none()) return std::nullopt;
-    return nb::cast<mef3io::si8>(o);
-  };
+  auto opt_time = [](nb::object o) { return opt_si8(o, "t0/t1"); };
 
   nb::class_<mef3io::Reader>(m, "Reader")
       .def(nb::init<const std::string&, std::string, int>(), nb::arg("path"),
@@ -315,16 +350,32 @@ NB_MODULE(_mef3io, m) {
              d["number_of_samples"] = ci.number_of_samples;
              d["recording_time_offset"] = ci.recording_time_offset;
              d["n_segments"] = ci.n_segments;
+             d["section3_available"] = ci.section3_available;
+             if (ci.section3_available) {
+               d["subject_name_1"] = ci.subject_name_1;
+               d["subject_name_2"] = ci.subject_name_2;
+               d["subject_id"] = ci.subject_id;
+               d["recording_location"] = ci.recording_location;
+             } else {
+               d["subject_name_1"] = nb::none();
+               d["subject_name_2"] = nb::none();
+               d["subject_id"] = nb::none();
+               d["recording_location"] = nb::none();
+             }
              return d;
            })
       .def(
           "read",
           [opt_time](mef3io::Reader& r, const std::string& ch, nb::object t0, nb::object t1,
                      int n_threads) {
+            // Resolve the Python arguments BEFORE releasing the GIL —
+            // nb::cast is Python C API and crashes without a thread state
+            // (bit us with float timestamps, e.g. t0 + 10*1e6).
+            auto a = opt_time(t0), b = opt_time(t1);
             std::vector<mef3io::sf8> v;
             {
               nb::gil_scoped_release rel;
-              v = r.read(ch, opt_time(t0), opt_time(t1), n_threads);
+              v = r.read(ch, a, b, n_threads);
             }
             return vec_to_numpy(std::move(v));
           },
@@ -334,10 +385,11 @@ NB_MODULE(_mef3io, m) {
           "read_raw",
           [opt_time](mef3io::Reader& r, const std::string& ch, nb::object t0, nb::object t1,
                      int n_threads) {
+            auto a = opt_time(t0), b = opt_time(t1);  // see read: cast needs the GIL
             mef3io::RawData d;
             {
               nb::gil_scoped_release rel;
-              d = r.read_raw(ch, opt_time(t0), opt_time(t1), n_threads);
+              d = r.read_raw(ch, a, b, n_threads);
             }
             nb::dict out;
             out["start_uutc"] = d.start_uutc;
@@ -349,6 +401,23 @@ NB_MODULE(_mef3io, m) {
           },
           nb::arg("channel"), nb::arg("t0") = nb::none(), nb::arg("t1") = nb::none(),
           nb::arg("n_threads") = mef3io::Reader::kUseDefaultThreads)
+      .def("segments",
+           [](mef3io::Reader& r, const std::string& ch) {
+             auto segs = r.segments(ch);
+             nb::list out;
+             for (const auto& s : segs) {
+               nb::dict d;
+               d["segment"] = s.segment_number;
+               d["path"] = s.path;
+               d["start_time"] = s.start_time;
+               d["end_time"] = s.end_time;
+               d["start_sample"] = s.start_sample;
+               d["number_of_samples"] = s.number_of_samples;
+               d["number_of_blocks"] = s.number_of_blocks;
+               out.append(d);
+             }
+             return out;
+           })
       .def("toc",
            [](mef3io::Reader& r, const std::string& ch) {
              auto entries = r.toc(ch);

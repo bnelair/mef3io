@@ -33,14 +33,20 @@ class SessionWriter {
 
   // Primitive path: int32 counts + a conversion factor (e.g. amplifier V/bit).
   // Samples are stored verbatim. Optional `valid` mask (same length) marks
-  // discontinuity gaps (0 = gap).
+  // discontinuity gaps (0 = gap). The first write to a channel creates segment
+  // 0; later writes append IN-SEGMENT to the channel's last segment unless
+  // new_segment=true forces a fresh segment. In-segment appends must match the
+  // segment's fs and conversion factor and start at/after its end time
+  // (WriteConflictError otherwise).
   WriteSummary write_int32(const std::string& channel, std::span<const si4> samples,
                            sf8 units_conversion_factor, si8 start_uutc, sf8 sampling_frequency,
                            std::span<const ui1> valid = {}, bool new_segment = false);
 
   // Convenience path: float64 data. NaN = discontinuity. `precision` sets the
-  // conversion factor as 10^-precision; if < 0 it is inferred. Data is
-  // quantized to int32 as round(data * 10^precision).
+  // conversion factor as 10^-precision; if < 0 it is inferred — except when
+  // appending in-segment, where the segment's existing conversion factor is
+  // reused so the append cannot conflict. Data is quantized to int32 as
+  // round(data * 10^precision). Same segment semantics as write_int32.
   WriteSummary write_float(const std::string& channel, std::span<const sf8> data, si8 start_uutc,
                            sf8 sampling_frequency, int precision = -1, bool new_segment = false);
 
@@ -62,9 +68,14 @@ class SessionWriter {
     int n_segments = 0;
     si8 total_samples = 0;   // channel-wide sample count so far
     si8 last_end_uutc = 0;   // for append-time validation
+    bool hydrated = true;    // false for channels adopted from disk until their
+                             // last segment's metadata has been read back
   };
 
   si8 block_length_for(sf8 fs) const;
+  // Load fs/ufact/total_samples/last_end_uutc from the channel's last segment
+  // on disk (for sessions reopened with overwrite=false). No-op once hydrated.
+  void hydrate(const std::string& channel, ChannelState& st);
   WriteSummary write_blocks(const std::string& channel, const std::vector<si4>& samples,
                             std::span<const ui1> valid, sf8 ufact, si8 start_uutc, sf8 fs,
                             bool new_segment);

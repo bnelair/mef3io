@@ -1,0 +1,57 @@
+name: bump-version
+
+# Manual release trigger: bumps the repo-root VERSION file (the single source
+# of truth for Python, C++, and later MATLAB), commits, tags vX.Y.Z, and
+# dispatches the release workflow on that tag.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "patch | minor | major, or an explicit version like 1.2.3"
+        required: true
+        default: "patch"
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute new version
+        id: ver
+        run: |
+          cur=$(tr -d ' \n' < VERSION)
+          IFS=. read -r major minor patch <<< "$cur"
+          case "${{ inputs.bump }}" in
+            patch) new="$major.$minor.$((patch + 1))" ;;
+            minor) new="$major.$((minor + 1)).0" ;;
+            major) new="$((major + 1)).0.0" ;;
+            *)
+              new="${{ inputs.bump }}"
+              [[ "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+([a-z0-9.]*)?$ ]] || { echo "bad version: $new"; exit 1; }
+              ;;
+          esac
+          echo "current $cur -> new $new"
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+
+      - name: Commit VERSION and tag
+        run: |
+          new="${{ steps.ver.outputs.new }}"
+          echo "$new" > VERSION
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add VERSION
+          git commit -m "Release v$new"
+          git tag "v$new"
+          git push origin "HEAD:${{ github.ref_name }}" "refs/tags/v$new"
+
+      # Tags pushed with GITHUB_TOKEN do not trigger push events (recursion
+      # guard), so start the release run on the new tag explicitly.
+      - name: Dispatch release workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release.yml --ref "v${{ steps.ver.outputs.new }}"

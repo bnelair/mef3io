@@ -3,11 +3,14 @@
 Existing code can switch from the legacy package with an import change::
 
     # from mef_tools.io import MefReader, MefWriter
-    from mef3io.compat import MefReader, MefWriter
+    from mef3io import MefReader, MefWriter        # or from mef3io.compat import ...
 
 These classes mirror the signatures, return shapes, and defaults of
-``mef_tools.io`` while delegating to the mef3io C++ backend. They are a
-transition aid; new code should prefer ``mef3io.Reader`` / ``mef3io.Writer``.
+``mef_tools.io`` while delegating to the mef3io C++ backend: float data is
+split on NaN runs into discontinuity gaps, precision (and with it the units
+conversion factor) is inferred when not given, integer data takes the int32
+primitive path, and appends extend the channel's last segment in place. New
+code should prefer ``mef3io.Reader`` / ``mef3io.Writer``.
 """
 from __future__ import annotations
 
@@ -123,8 +126,8 @@ class MefReader:
 class MefWriter:
     """``mef_tools.io.MefWriter``-compatible writer.
 
-    Note: unlike the legacy writer, appends create new segments rather than
-    extending an existing segment's data file. Reads are unaffected.
+    Like the legacy writer, appends extend the channel's last segment in place
+    (in-segment append); pass ``new_segment=True`` to start a fresh segment.
     """
 
     __version__ = "mef3io"
@@ -134,6 +137,9 @@ class MefWriter:
         self._w = _mef3io.SessionWriter(self._path, overwrite, password1 or "", password2 or "")
         self.verbose = verbose
         self._data_units = "uV"
+        self._mef_block_len = None
+        self._max_nans_written = 0
+        self._record_offset = 0
 
     @property
     def data_units(self) -> str:
@@ -143,6 +149,46 @@ class MefWriter:
     def data_units(self, value: str):
         self._data_units = value
         self._w.set_units(value)
+
+    @property
+    def mef_block_len(self):
+        """RED block length in samples (None = derive from fs, like legacy)."""
+        return self._mef_block_len
+
+    @mef_block_len.setter
+    def mef_block_len(self, value):
+        # Falsy (None/0) means "derive from fs": normalize so get_mefblock_len
+        # applies the legacy formula instead of returning a literal 0.
+        self._mef_block_len = int(value) if value else None
+        self._w.set_block_length(int(value) if value else 0)
+
+    def get_mefblock_len(self, fs: float) -> int:
+        """Block length that will be used for data at ``fs`` (legacy formula)."""
+        if self._mef_block_len is not None:
+            return int(self._mef_block_len)
+        return int(fs) if fs >= 5000 else int(fs * 10)
+
+    @property
+    def max_nans_written(self) -> int:
+        """Kept for legacy compatibility. mef3io always splits data on NaN runs
+        (never stores NaN as values), i.e. it behaves like the legacy writer's
+        recommended setting of 0; other values are accepted and ignored."""
+        return self._max_nans_written
+
+    @max_nans_written.setter
+    def max_nans_written(self, value):
+        self._max_nans_written = value
+
+    @property
+    def record_offset(self) -> int:
+        """Kept for legacy compatibility. mef3io writes records with a zero
+        recording-time offset (annotation times round-trip unchanged either
+        way); non-zero values are accepted and ignored."""
+        return self._record_offset
+
+    @record_offset.setter
+    def record_offset(self, value):
+        self._record_offset = value
 
     def write_data(
         self,
@@ -156,18 +202,22 @@ class MefWriter:
         discont_handler: bool = True,
         reload_metadata: bool = True,
     ):
-        data = np.asarray(data_write)
+        data = np.atleast_1d(np.asarray(data_write))
         if np.issubdtype(data.dtype, np.integer):
             # Treat as raw int32 with a precision-derived ufact if given.
+            from ._writer import _as_int32_counts
+
+            counts = _as_int32_counts(data)
             ufact = 10.0 ** -(precision if precision is not None else 0)
             self._w.write_int32(
-                channel, np.ascontiguousarray(data, np.int32), ufact, int(start_uutc),
-                float(sampling_freq), None, new_segment,
+                channel, counts, ufact, int(start_uutc),
+                float(sampling_freq), None, bool(new_segment),
             )
         else:
             self._w.write_float(
                 channel, np.ascontiguousarray(data, np.float64), int(start_uutc),
-                float(sampling_freq), precision if precision is not None else -1, new_segment,
+                float(sampling_freq), int(precision) if precision is not None else -1,
+                bool(new_segment),
             )
         return True
 

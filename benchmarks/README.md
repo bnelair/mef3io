@@ -1,5 +1,11 @@
 # MEF read/write benchmark
 
+`bindings_benchmark.py` measures the Python binding on the examples/08
+workload (5 ch × 5 h @ 512 Hz, plain + encrypted); its twin
+`matlab/benchmark_mef3io.m` runs the identical workload through the MATLAB
+MEX — run both on one machine to compare the bindings (results in
+[docs/legacy_comparison.md](../docs/legacy_comparison.md)).
+
 `mef_benchmark.py` compares three MEF-3 / ephys storage backends on the same
 synthetic recording:
 

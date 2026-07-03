@@ -1,5 +1,10 @@
 # mef3io — Handoff / Repo Extraction Guide
 
+> **Historical document.** Written while mef3io still lived inside the
+> mef_tools repo; the extraction it describes was completed in July 2026
+> (paths like `requirements/` and `scripts/export_mef3io.sh` no longer
+> exist). Kept for context; current assistant context lives in `CLAUDE.md`.
+
 This document is the single orientation point for moving `mef3io` into its own
 repository and for re-seeding an assistant's (or a new contributor's) context
 there. It intentionally duplicates knowledge that otherwise lives only in a
