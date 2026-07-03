@@ -308,7 +308,13 @@ NB_MODULE(_mef3io, m) {
   // --- Reader (P3 high-level API) ---
   auto opt_time = [](nb::object o) -> std::optional<mef3io::si8> {
     if (o.is_none()) return std::nullopt;
-    return nb::cast<mef3io::si8>(o);
+    // Accept ints and floats: legacy code computes windows like t + 10*1e6,
+    // which is a Python float. uUTC values are exact in float64 (< 2^53).
+    mef3io::si8 v;
+    if (nb::try_cast<mef3io::si8>(o, v)) return v;
+    double d;
+    if (nb::try_cast<double>(o, d)) return static_cast<mef3io::si8>(std::llround(d));
+    throw nb::type_error("t0/t1 must be a uUTC time in microseconds (int or float)");
   };
 
   nb::class_<mef3io::Reader>(m, "Reader")
@@ -347,10 +353,14 @@ NB_MODULE(_mef3io, m) {
           "read",
           [opt_time](mef3io::Reader& r, const std::string& ch, nb::object t0, nb::object t1,
                      int n_threads) {
+            // Resolve the Python arguments BEFORE releasing the GIL —
+            // nb::cast is Python C API and crashes without a thread state
+            // (bit us with float timestamps, e.g. t0 + 10*1e6).
+            auto a = opt_time(t0), b = opt_time(t1);
             std::vector<mef3io::sf8> v;
             {
               nb::gil_scoped_release rel;
-              v = r.read(ch, opt_time(t0), opt_time(t1), n_threads);
+              v = r.read(ch, a, b, n_threads);
             }
             return vec_to_numpy(std::move(v));
           },
@@ -360,10 +370,11 @@ NB_MODULE(_mef3io, m) {
           "read_raw",
           [opt_time](mef3io::Reader& r, const std::string& ch, nb::object t0, nb::object t1,
                      int n_threads) {
+            auto a = opt_time(t0), b = opt_time(t1);  // see read: cast needs the GIL
             mef3io::RawData d;
             {
               nb::gil_scoped_release rel;
-              d = r.read_raw(ch, opt_time(t0), opt_time(t1), n_threads);
+              d = r.read_raw(ch, a, b, n_threads);
             }
             nb::dict out;
             out["start_uutc"] = d.start_uutc;
