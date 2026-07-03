@@ -21,12 +21,27 @@ def = ['-DMEF3IO_VERSION_STRING=\"' version '\"'];
 
 if ispc
     flags = {'COMPFLAGS=$COMPFLAGS /std:c++20 /EHsc'};
-else
+elseif ismac
     flags = {'CXXFLAGS=$CXXFLAGS -std=c++20'};
+else
+    % Linux: MATLAB ships its own (older) libstdc++, which the loader prefers
+    % over the system one, so the MEX must not require newer GLIBCXX symbols.
+    % -static-libstdc++ does NOT work here: MATLAB's link line passes
+    % -lstdc++ explicitly, which overrides the driver flag. Instead, feed the
+    % static archive as a regular link input — every C++ runtime symbol then
+    % resolves at link time and the MEX carries no GLIBCXX version needs.
+    flags = {'CXXFLAGS=$CXXFLAGS -std=c++20', ...
+             'LDFLAGS=$LDFLAGS -static-libgcc'};
+    [rc, a] = system('g++ -print-file-name=libstdc++.a');
+    assert(rc == 0 && ~isempty(strtrim(a)), 'could not locate libstdc++.a');
+    files{end+1} = strtrim(a);
 end
 
 fprintf('Building mef3io_mex (%s) from %d sources...\n', version, numel(files));
 mex('-R2018a', flags{:}, def, ['-I' fullfile(core, 'include')], ...
     '-output', fullfile(here, 'mef3io_mex'), files{:});
+if isunix && ~ismac  % show C++ runtime deps (should list no versioned needs)
+    system(['ldd ' fullfile(here, ['mef3io_mex.' mexext]) ' | grep -i "stdc\|gcc" || true']);
+end
 fprintf('Done: %s\n', fullfile(here, ['mef3io_mex.' mexext]));
 end
