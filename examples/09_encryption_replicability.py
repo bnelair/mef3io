@@ -132,18 +132,55 @@ print(f"  NaN gaps identical: {nan_ok}; max value deviation: {max_dev:.6f}"
 print("\nmatrix:", "ALL PASS" if all_ok else "FAILURES PRESENT")
 
 # --- part 2: what does each credential unlock on the encrypted sessions? ---
+def describe_data(got, baseline):
+    """Not a verdict — a measured comparison against the writer's own plain
+    session (the ground truth for what a full-access read must return)."""
+    if got.shape != baseline.shape:
+        return (f"data WRONG (returned {got.size} of {baseline.size} samples,"
+                f" shape {got.shape} vs {baseline.shape})")
+    if np.array_equal(got, baseline, equal_nan=True):
+        n_nan = int(np.isnan(baseline).sum())
+        return f"data OK (bit-identical: {baseline.size} samples, {n_nan} NaN, 0 differ)"
+    nan_same = np.array_equal(np.isnan(got), np.isnan(baseline))
+    both = ~(np.isnan(got) | np.isnan(baseline))
+    n_diff = int((got[both] != baseline[both]).sum())
+    max_dev = float(np.abs(got[both] - baseline[both]).max()) if both.any() else float("nan")
+    return (f"data WRONG ({n_diff}/{int(both.sum())} values differ,"
+            f" max dev {max_dev:.6g}, NaN pattern {'same' if nan_same else 'DIFFERS'})")
+
+
+def describe_tech_metadata(r):
+    """Section-2 technical metadata via the legacy-style API, checked against
+    the known ground truth (fs, sample count, start/end times)."""
+    try:
+        got = {
+            "fsamp": r.get_property("fsamp", "ch1"),
+            "nsamp": r.get_property("nsamp", "ch1"),
+            "start_time": r.get_property("start_time", "ch1"),
+            "end_time": r.get_property("end_time", "ch1"),
+        }
+    except Exception as e:
+        return f"technical-md rejected ({type(e).__name__})"
+    # stored nsamp counts STORED samples (NaN gaps are not stored), while the
+    # end time spans the gaps — both are MEF semantics, not reader quirks.
+    expected = {"fsamp": FS, "nsamp": int((~np.isnan(x[0])).sum()), "start_time": START,
+                "end_time": START + int(x.shape[1] / FS * 1e6)}
+    bad = {k: (got[k], expected[k]) for k in expected
+           if not np.isclose(float(got[k]), float(expected[k]))}
+    return "technical-md OK" if not bad else f"technical-md WRONG {bad}"
+
+
 def probe(reader_cls, path, password, baseline):
-    """Try data + annotations with one credential; report, never raise."""
+    """Try data + technical metadata + annotations with one credential."""
     try:
         r = reader_cls(str(path), password2=password)
     except Exception as e:
         return f"REJECTED at open ({type(e).__name__})"
     try:
-        got = np.array(r.get_data(CHANNELS), dtype=float)
-        data_msg = ("data OK" if got.shape == baseline.shape
-                    and np.array_equal(got, baseline, equal_nan=True) else "data WRONG")
+        data_msg = describe_data(np.array(r.get_data(CHANNELS), dtype=float), baseline)
     except Exception as e:
         data_msg = f"data rejected ({type(e).__name__})"
+    tech_msg = describe_tech_metadata(r)
     try:
         anns = r.get_annotations("ch1")
         ann_msg = ("annotations OK" if anns and any(a.get("text") == "probe" for a in anns)
@@ -151,7 +188,7 @@ def probe(reader_cls, path, password, baseline):
     except Exception as e:
         ann_msg = f"annotations rejected ({type(e).__name__})"
     r.close()
-    return f"{data_msg}; {ann_msg}"
+    return f"{data_msg}; {tech_msg}; {ann_msg}"
 
 
 print("\n" + "X" * 20)
@@ -163,6 +200,31 @@ for wname in WRITERS:
     for rname, rcls in READERS.items():
         for cred, pwd in [("L2 password", PWD2), ("L1 password", PWD1),
                           ("wrong password", "nope"), ("no password", None)]:
-            print(f"    {rname:6s} reader, {cred:14s}: {probe(rcls, path, pwd, baseline)}")
+            print(f"    {rname:6s} reader, {cred:14s}:\n"
+                  f"        {probe(rcls, path, pwd, baseline)}")
 
-print("\ndone;", "replicability holds" if all_ok else "REPLICABILITY BROKEN")
+# --- part 3: L1 vs L2 must differ on level-2 (section 3, subject) metadata --
+# The mef3io Reader exposes section-3 availability directly; the legacy
+# reader has no API for subject metadata, so this check uses the new reader.
+import mef3io  # noqa: E402
+
+print("\n" + "X" * 20)
+print("Section-3 (subject) metadata visibility — new reader, both sessions")
+s3_ok = True
+for wname in WRITERS:
+    path = sessions[(wname, True)]
+    print(f"\n  session written by the {wname} writer:")
+    for cred, pwd in [("L2 password", PWD2), ("L1 password", PWD1)]:
+        with mef3io.Reader(str(path), pwd) as r:
+            info = r.info("ch1")
+        if info["section3_available"]:
+            msg = (f"section 3 READABLE (subject_id={info['subject_id']!r},"
+                   f" location={info['recording_location']!r},"
+                   f" rto={info['recording_time_offset']})")
+        else:
+            msg = "section 3 LOCKED (subject metadata not accessible)"
+        print(f"    {cred:12s}: {msg}")
+        s3_ok &= info["section3_available"] == (pwd == PWD2)
+print("\nL1/L2 differ on level-2 metadata:", "CONFIRMED" if s3_ok else "VIOLATED")
+
+print("\ndone;", "replicability holds" if all_ok and s3_ok else "REPLICABILITY BROKEN")

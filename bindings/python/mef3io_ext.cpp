@@ -199,6 +199,18 @@ NB_MODULE(_mef3io, m) {
              d["number_of_samples"] = ci.number_of_samples;
              d["recording_time_offset"] = ci.recording_time_offset;
              d["n_segments"] = ci.n_segments;
+             d["section3_available"] = ci.section3_available;
+             if (ci.section3_available) {
+               d["subject_name_1"] = ci.subject_name_1;
+               d["subject_name_2"] = ci.subject_name_2;
+               d["subject_id"] = ci.subject_id;
+               d["recording_location"] = ci.recording_location;
+             } else {
+               d["subject_name_1"] = nb::none();
+               d["subject_name_2"] = nb::none();
+               d["subject_id"] = nb::none();
+               d["recording_location"] = nb::none();
+             }
              return d;
            })
       .def(
@@ -315,6 +327,18 @@ NB_MODULE(_mef3io, m) {
              d["number_of_samples"] = ci.number_of_samples;
              d["recording_time_offset"] = ci.recording_time_offset;
              d["n_segments"] = ci.n_segments;
+             d["section3_available"] = ci.section3_available;
+             if (ci.section3_available) {
+               d["subject_name_1"] = ci.subject_name_1;
+               d["subject_name_2"] = ci.subject_name_2;
+               d["subject_id"] = ci.subject_id;
+               d["recording_location"] = ci.recording_location;
+             } else {
+               d["subject_name_1"] = nb::none();
+               d["subject_name_2"] = nb::none();
+               d["subject_id"] = nb::none();
+               d["recording_location"] = nb::none();
+             }
              return d;
            })
       .def(

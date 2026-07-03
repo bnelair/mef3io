@@ -84,6 +84,13 @@ struct ChannelInfo {
   si8 number_of_samples = 0;
   si8 recording_time_offset = 0;
   int n_segments = 0;
+  // Section-3 (level-2) metadata: populated only when the password grants L2
+  // access (or the session is unencrypted); section3_available says which.
+  bool section3_available = false;
+  std::string subject_name_1;
+  std::string subject_name_2;
+  std::string subject_id;
+  std::string recording_location;
 };
 
 class Session {

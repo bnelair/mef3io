@@ -133,6 +133,13 @@ void Session::load_channel_basic_info(Channel& ch) {
       info.recording_time_offset = rto;
       info.start_time = seg_start;
       info.end_time = seg_end;
+      info.section3_available = md.section3_available;
+      if (md.section3_available) {
+        info.subject_name_1 = md.section3.subject_name_1;
+        info.subject_name_2 = md.section3.subject_name_2;
+        info.subject_id = md.section3.subject_id;
+        info.recording_location = md.section3.recording_location;
+      }
       first = false;
     } else {
       info.start_time = std::min(info.start_time, seg_start);

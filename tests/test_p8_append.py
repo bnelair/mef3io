@@ -152,7 +152,15 @@ def test_append_encrypted_session(tmp_path):
     del w
     assert len(_segd_dirs(path)) == 1
     with mef3io.Reader(path, p2) as r:
-        assert r.info("ch1")["number_of_samples"] == 6000
+        info = r.info("ch1")
+        assert info["number_of_samples"] == 6000
+        # L2 access exposes section-3 (subject) metadata ...
+        assert info["section3_available"] and info["subject_id"] is not None
+    with mef3io.Reader(path, p1) as r:
+        info = r.info("ch1")
+        # ... L1 access does not, but still reads the signal
+        assert not info["section3_available"] and info["subject_id"] is None
+        assert len(r.read("ch1")) > 0
 
 
 def test_append_conflicts_raise(tmp_path):
