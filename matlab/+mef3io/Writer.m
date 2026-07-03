@@ -64,19 +64,31 @@ classdef Writer < handle
 
         function s = writeInt32(obj, channel, data, ufact, startUutc, fs, opts)
             %WRITEINT32 Verbatim int32 counts + conversion factor (bit-exact).
-            %   Valid: logical/uint8 mask, false marks gap samples.
+            %   Data must be integer-typed: counts are stored verbatim, so
+            %   floating-point input errors (use write() for float data) and
+            %   values outside the int32 range error instead of saturating.
+            %   Valid: any numeric/logical mask, nonzero = valid sample.
             arguments
                 obj
                 channel (1, :) char
-                data int32
+                data
                 ufact (1, 1) double
                 startUutc (1, 1) {mustBeNumeric}
                 fs (1, 1) double
                 opts.Valid = []
                 opts.NewSegment (1, 1) logical = false
             end
+            if ~isinteger(data)
+                error('mef3io:type', ['writeInt32 stores counts verbatim and ' ...
+                      'requires integer data (e.g. int32); got %s. Convert ' ...
+                      'explicitly, or use write() for floating-point data.'], class(data));
+            end
+            if any(data(:) > intmax('int32')) || any(data(:) < intmin('int32'))
+                error('mef3io:range', ['writeInt32: values exceed the int32 ' ...
+                      'range and would be altered; rescale them or use write().']);
+            end
             if ~isempty(opts.Valid), opts.Valid = logical(opts.Valid(:)); end
-            s = mef3io_mex('writer_write_int32', obj.h, channel, data(:), ...
+            s = mef3io_mex('writer_write_int32', obj.h, channel, int32(data(:)), ...
                            opts.Valid, ufact, startUutc, fs, double(opts.NewSegment));
         end
 

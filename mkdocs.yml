@@ -29,9 +29,6 @@ markdown_extensions:
   - pymdownx.highlight
   - pymdownx.superfences
 
-exclude_docs: |
-  for_agents/
-
 nav:
   - Home: index.md
   - Getting started:

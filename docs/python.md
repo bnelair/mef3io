@@ -54,7 +54,11 @@ Returns a summary dict: `samples_written`, `blocks`, `gaps_skipped`,
 
 The primitive path: int32 counts stored **verbatim** (bit-exact round trip)
 with `ufact` (e.g. an amplifier's volts-per-bit) in metadata. Optional
-`valid` mask (bool/uint8, same length): `False` marks gap samples.
+`valid` mask (same length, anything numeric — nonzero = valid): marks gap
+samples. Because counts are never altered, `data` must be integer-typed
+(any width): floating-point input raises `TypeError` (use `write()` for
+float data), and values outside the int32 range raise `ValueError` instead
+of silently wrapping.
 
 ### `write_annotations(annotations, channel=None)`
 

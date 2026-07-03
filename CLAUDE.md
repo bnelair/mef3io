@@ -49,8 +49,7 @@ nanobind. `matlab/` = MEX + `+mef3io` classes. `examples/` = runnable scripts
 style). Docs site: MkDocs Material from `docs/` (`mkdocs.yml`; nav pages
 index/install/python/matlab/cpp/examples/releasing + the reference docs),
 deployed to GitHub Pages by `.github/workflows/docs.yml` on push to main —
-keep `mkdocs build --strict` green; `docs/for_agents/` is excluded from the
-site. `docs/design.md` = full design; `docs/encryption_model.md` = crypto
+keep `mkdocs build --strict` green; `for_agents/` (repo root) holds agent handoff docs, outside the site. `docs/design.md` = full design; `docs/encryption_model.md` = crypto
 model; `docs/mef3_format.md` = format reference.
 
 ## Format gotchas (do NOT relearn the hard way)

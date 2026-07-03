@@ -205,13 +205,11 @@ class MefWriter:
             # Treat as raw int32 with a precision-derived ufact if given.
             from ._writer import _as_int32_counts
 
-            counts, valid = _as_int32_counts(data, None)
-            if valid is not None:
-                valid = np.ascontiguousarray(valid, dtype=np.uint8)
+            counts = _as_int32_counts(data)
             ufact = 10.0 ** -(precision if precision is not None else 0)
             self._w.write_int32(
                 channel, counts, ufact, int(start_uutc),
-                float(sampling_freq), valid, bool(new_segment),
+                float(sampling_freq), None, bool(new_segment),
             )
         else:
             self._w.write_float(

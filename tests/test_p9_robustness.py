@@ -122,26 +122,28 @@ def test_write_accepts_any_numeric_input(tmp_path):
         assert len(r.read("scalar")) == 1 and r.read("scalar")[0] == 7.25
 
 
-def test_write_int32_coercion_and_safety(tmp_path):
+def test_write_int32_strictness_and_safety(tmp_path):
     path = str(tmp_path / "s.mefd")
     with mef3io.Writer(path, overwrite=True) as w:
-        # float counts are rounded (not truncated), NaN becomes a gap
-        s = w.write_int32("ch1", [10.6, 11.4, float("nan"), 13.0], 0.5, START, FS)
-        assert s["samples_written"] == 3 and s["gaps_skipped"] == 1
-        # int64 within range is fine; outside int32 range must raise, not wrap
+        # the primitive path never alters data: floats must be rejected ...
+        with pytest.raises(TypeError, match="integer data"):
+            w.write_int32("ch1", [10.6, 11.4, 13.0], 0.5, START, FS)
+        with pytest.raises(TypeError, match="integer data"):
+            w.write_int32("ch1", np.zeros(4, dtype=np.float32), 0.5, START, FS)
+        # ... as must out-of-range integers (no silent wrap)
+        with pytest.raises(ValueError, match="int32 range"):
+            w.write_int32("ch1", np.array([2**31], dtype=np.int64), 1.0, START, FS)
+        # any integer dtype in range is fine (lists give int64)
+        w.write_int32("ch1", [10, 11, 13], 0.5, START, FS)
         w.write_int32("ch2", np.array([2**31 - 1, -(2**31)], dtype=np.int64), 1.0,
                       START, FS)
-        with pytest.raises(ValueError, match="int32 range"):
-            w.write_int32("ch3", np.array([2**31], dtype=np.int64), 1.0, START, FS)
-        # float valid mask works (nonzero = valid)
-        w.write_int32("ch4", np.arange(4, dtype=np.int32), 1.0,
-                      START + 10_000_000, FS, valid=[1.0, 0.0, 1.0, 1.0])
+        w.write_int32("ch3", np.arange(4, dtype=np.int16), 1.0, START, FS,
+                      valid=[1.0, 0.0, 1.0, 1.0])  # numeric mask: nonzero = valid
 
     with mef3io.Reader(path) as r:
-        raw = r.read_raw("ch1")
-        assert list(raw["samples"][raw["valid"].astype(bool)]) == [11, 11, 13]
+        assert list(r.read_raw("ch1")["samples"]) == [10, 11, 13]
         assert list(r.read_raw("ch2")["samples"]) == [2**31 - 1, -(2**31)]
-        assert not r.read_raw("ch4")["valid"][1]
+        assert not r.read_raw("ch3")["valid"][1]
 
 
 def test_empty_and_inverted_windows(tmp_path):

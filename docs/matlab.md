@@ -47,8 +47,10 @@ an existing session is reopened for appending), `Password1`/`Password2`
   Returns a summary struct (`samples_written`, `blocks`, `gaps_skipped`,
   `segment`).
 - **`writeInt32(channel, data, ufact, startUutc, fs, Valid=[], NewSegment=false)`**
-  — verbatim int32 counts + conversion factor (bit-exact round trip);
-  `Valid` is a logical/uint8 mask, `false` marks gap samples.
+  — verbatim int32 counts + conversion factor (bit-exact round trip).
+  `data` must be integer-typed: floating-point input errors (use `write`
+  for float data) and values beyond the int32 range error instead of
+  saturating. `Valid` is any numeric/logical mask, nonzero = valid.
 - **`writeAnnotations(records, channel)`** — struct array (or table) with
   fields `time` (required), `type` (default `'Note'`), `text`, `duration`.
   Omit `channel` for session-level records. Replaces records at that level.

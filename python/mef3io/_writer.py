@@ -15,29 +15,27 @@ import numpy as np
 _INT32_MIN, _INT32_MAX = -(2**31), 2**31 - 1
 
 
-def _as_int32_counts(data, valid):
-    """Coerce arbitrary numeric input to int32 counts, safely.
+def _as_int32_counts(data):
+    """Validate user input as int32 counts — never alter the values.
 
-    Floats are rounded (not truncated); NaN samples become gaps (merged into
-    the validity mask); values outside the int32 range raise ValueError
-    instead of silently wrapping.
+    The primitive path stores counts verbatim, so no silent conversion is
+    allowed: floating-point data raises TypeError (quantization belongs to
+    ``write()`` or to the caller, explicitly), and integer values outside
+    the int32 range raise ValueError rather than wrapping.
     """
     a = np.atleast_1d(np.asarray(data))
-    if np.issubdtype(a.dtype, np.floating):
-        nan = np.isnan(a)
-        if nan.any():
-            v = np.ones(a.shape, bool) if valid is None else \
-                np.atleast_1d(np.asarray(valid)).astype(bool).copy()
-            v &= ~nan
-            valid = v
-            a = np.where(nan, 0.0, a)
-        a = np.rint(a)
-    if a.size and (a.min() < _INT32_MIN or a.max() > _INT32_MAX):
-        raise ValueError(
-            f"write_int32: values outside the int32 range "
-            f"[{a.min()}, {a.max()}] would wrap; scale them or use write()"
+    if not np.issubdtype(a.dtype, np.integer):
+        raise TypeError(
+            f"write_int32 stores counts verbatim and requires integer data "
+            f"(e.g. int32); got dtype {a.dtype}. Convert explicitly, or use "
+            f"write() for floating-point data."
         )
-    return np.ascontiguousarray(a, dtype=np.int32), valid
+    if a.size and (int(a.min()) < _INT32_MIN or int(a.max()) > _INT32_MAX):
+        raise ValueError(
+            f"write_int32: values in [{a.min()}, {a.max()}] exceed the int32 "
+            f"range and would wrap; rescale them or use write()"
+        )
+    return np.ascontiguousarray(a, dtype=np.int32)
 
 
 class Writer:
@@ -105,14 +103,17 @@ class Writer:
     ) -> dict:
         """Write integer ``data`` with conversion factor ``ufact`` verbatim.
 
-        ``valid`` (optional, same length, bool/uint8) marks discontinuity gaps.
-        Any numeric dtype is accepted: floats are rounded, float NaN samples
-        become gaps, and values outside the int32 range raise ValueError
-        rather than silently wrapping.
+        ``valid`` (optional, same length; anything numeric — nonzero = valid)
+        marks discontinuity gaps. Data must be integer-typed: counts are
+        stored bit-exact, so floating-point input raises TypeError (use
+        ``write()`` for float data) and values outside the int32 range raise
+        ValueError instead of silently wrapping.
         """
-        data, valid = _as_int32_counts(data, valid)
+        data = _as_int32_counts(data)
         if valid is not None:
-            valid = np.ascontiguousarray(valid, dtype=np.uint8)
+            valid = np.ascontiguousarray(
+                np.atleast_1d(np.asarray(valid)) != 0, dtype=np.uint8
+            )
         return self._impl.write_int32(
             channel, data, float(ufact), start_uutc, float(fs), valid, bool(new_segment)
         )

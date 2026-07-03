@@ -96,6 +96,13 @@ w.write('s', single(x(1:100)), start, fs, Precision=3);        % single -> doubl
 w.write('i', int16(1:100), start, fs, Precision=0);            % ints -> double
 w.writeInt32('c', int32(1:100), 0.5, single(start), fs, ...    % single timestamp
              Valid=[ones(1, 50), zeros(1, 10), ones(1, 40)]);  % double mask
+w.writeInt32('c16', int16(1:100), 0.5, start + 1e6, fs);       % narrower ints OK
+gotError = false;                                              % floats must error
+try w.writeInt32('cf', 1:100, 0.5, start, fs); catch, gotError = true; end
+assert(gotError, 'writeInt32 must reject floating-point data');
+gotError = false;                                              % out-of-range must error
+try w.writeInt32('cr', int64(2^31), 1, start, fs); catch, gotError = true; end
+assert(gotError, 'writeInt32 must reject values beyond int32');
 delete(w);
 r = mef3io.Reader(flexPath);
 assert(max(abs(r.read('i') - (1:100)')) < 1e-12);
