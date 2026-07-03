@@ -1,10 +1,14 @@
 # mef3io
 
-A single C++ core for MEF 3.0 read/write, wrapped for Python (nanobind). The
-high-level semantics of the legacy `mef_tools` — float scaling, NaN
-discontinuities, precision inference, the int32-counts + conversion-factor
-primitive write path — live in C++, so every language binding behaves
-identically.
+A single C++ core for MEF 3.0 read/write, wrapped for **Python** (nanobind)
+and **MATLAB** (MEX). The high-level semantics of the legacy `mef_tools` —
+float scaling, NaN discontinuities, precision inference, the int32-counts +
+conversion-factor primitive write path — live in C++, so every language
+binding behaves identically.
+
+**Documentation: <https://bnelair.github.io/mef3io/>** — install, Python /
+MATLAB / C++ guides, the MEF 3.0 format reference, and measured comparisons
+against the legacy stack.
 
 ## Status
 
@@ -24,14 +28,13 @@ C++ tests). Scope notes:
 - **Append** extends the channel's last segment in place (legacy semantics);
   `new_segment=True` forces a fresh segment.
 
-More docs: [docs/mef3_format.md](docs/mef3_format.md) (the MEF 3.0 on-disk
-structure and headers, field by field),
-[docs/design.md](docs/design.md) (full design),
-[docs/legacy_comparison.md](docs/legacy_comparison.md) (measured old-vs-new
-comparison: performance, L1 encryption, annotation protection, quantization),
-[docs/mef3io_handoff.md](docs/for_agents/mef3io_handoff.md) (repo-extraction + context),
-[benchmarks/README.md](benchmarks/README.md), runnable
-[examples/](examples/README.md), and `CLAUDE.md`.
+Full docs live at **<https://bnelair.github.io/mef3io/>** (built from
+`docs/` with MkDocs Material, deployed by `.github/workflows/docs.yml`).
+In-repo: [docs/mef3_format.md](docs/mef3_format.md) (format reference),
+[docs/design.md](docs/design.md) (design),
+[docs/legacy_comparison.md](docs/legacy_comparison.md) (measured performance
++ encryption comparison), [benchmarks/README.md](benchmarks/README.md),
+runnable [examples/](examples/README.md), and `CLAUDE.md`.
 
 ## Install
 

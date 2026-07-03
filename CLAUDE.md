@@ -44,9 +44,14 @@ NaN splitting, segments), `parallel.hpp`.
 (mef_tools.io drop-in; `MefReader`/`MefWriter` are also re-exported at the top
 level — `from mef3io import MefReader, MefWriter` — via lazy `__getattr__`),
 `cache` (opt-in warm start), `pure` (stub). `bindings/python/mef3io_ext.cpp` =
-nanobind. `examples/` = runnable scripts (write/read, int32, append, segment
-map, annotations, encryption, legacy style). `docs/design.md` = full design;
-`docs/encryption_model.md` = the crypto model.
+nanobind. `matlab/` = MEX + `+mef3io` classes. `examples/` = runnable scripts
+(write/read, int32, append, segment map, annotations, encryption, legacy
+style). Docs site: MkDocs Material from `docs/` (`mkdocs.yml`; nav pages
+index/install/python/matlab/cpp/examples/releasing + the reference docs),
+deployed to GitHub Pages by `.github/workflows/docs.yml` on push to main —
+keep `mkdocs build --strict` green; `docs/for_agents/` is excluded from the
+site. `docs/design.md` = full design; `docs/encryption_model.md` = crypto
+model; `docs/mef3_format.md` = format reference.
 
 ## Format gotchas (do NOT relearn the hard way)
 

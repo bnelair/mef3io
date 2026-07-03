@@ -3,9 +3,9 @@
 Both implementations read each other's files bit-identically at full access,
 and encrypting a session never changes the decoded samples. The differences
 below are measured, and each is reproducible by running
-[`examples/08_legacy_compatability.py`](../examples/08_legacy_compatability.py)
+[`examples/08_legacy_compatibility.py`](https://github.com/bnelair/mef3io/blob/main/examples/08_legacy_compatibility.py)
 (performance) and
-[`examples/09_encryption_replicability.py`](../examples/09_encryption_replicability.py)
+[`examples/09_encryption_replicability.py`](https://github.com/bnelair/mef3io/blob/main/examples/09_encryption_replicability.py)
 (encryption/access levels); both need `pip install "mef3io[test]"`.
 
 ## Performance

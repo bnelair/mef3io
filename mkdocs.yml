@@ -1,0 +1,50 @@
+site_name: mef3io
+site_description: MEF 3.0 read/write — one C++ core with Python and MATLAB bindings
+site_url: https://bnelair.github.io/mef3io/
+repo_url: https://github.com/bnelair/mef3io
+repo_name: bnelair/mef3io
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      toggle: { icon: material/brightness-7, name: Dark mode }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      toggle: { icon: material/brightness-4, name: Light mode }
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+exclude_docs: |
+  for_agents/
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Install: install.md
+      - Examples: examples.md
+  - Guides:
+      - Python: python.md
+      - MATLAB: matlab.md
+      - C++ and C ABI: cpp.md
+  - Reference:
+      - MEF 3.0 on-disk format: mef3_format.md
+      - Encryption model: encryption_model.md
+      - Performance & legacy comparison: legacy_comparison.md
+  - Development:
+      - Design & internals: design.md
+      - Versioning & releases: releasing.md
