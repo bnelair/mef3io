@@ -4,16 +4,26 @@ MATLAB binding over the same C++ core as the Python package — identical
 semantics (NaN gaps, precision inference, in-segment appends, encryption) and
 the same version number.
 
-## Build (one-time, ~30 s)
+## Install
 
-The MEX is compiled from source; you need a **C++20 compiler** configured for
-MEX (`mex -setup C++`): Xcode on macOS, GCC ≥ 11 on Linux, Visual Studio 2022
-on Windows. Then:
+**Prebuilt (no compiler):** each GitHub release has the compiled MEX attached
+for Linux x86_64 (`mef3io_mex.mexa64`), Windows AMD64 (`mef3io_mex.mexw64`),
+and macOS arm64 (`mef3io_mex.mexmaca64`) — built and tested with the latest
+MATLAB release on CI. Download the one for your platform into this `matlab/`
+folder, then `addpath('<repo>/matlab')`.
+
+**Build from source (one-time, ~30 s):** needs a **C++20 compiler** configured
+for MEX (`mex -setup C++`): Xcode on macOS, GCC ≥ 11 on Linux, Visual Studio
+2022 on Windows. Then:
 
 ```matlab
 run('<repo>/matlab/build_mex.m')     % produces matlab/mef3io_mex.<mexext>
 addpath('<repo>/matlab')             % put +mef3io and the MEX on the path
 ```
+
+After updating the repo (git pull), **rebuild and restart MATLAB** (or
+`clear all; clear mex`) — the core is statically embedded in the MEX, and a
+loaded MEX is cached by MATLAB, so an old binary silently keeps running.
 
 ## Usage
 

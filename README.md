@@ -44,8 +44,9 @@ pip install "mef3io[test]"         # + oracle tests (pymef, mef-tools, pandas, p
 pip install "mef3io[bench]"        # + NWB-Zarr benchmark stack
 ```
 
-**MATLAB** — compiled from source once on your machine (needs a C++20
-compiler configured via `mex -setup C++`; ~30 s). See
+**MATLAB** — download the prebuilt `mef3io_mex.<mexext>` for your platform
+from the GitHub release into `matlab/`, or compile once on your machine
+(needs a C++20 compiler configured via `mex -setup C++`; ~30 s). See
 [matlab/README.md](matlab/README.md):
 
 ```matlab
