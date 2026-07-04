@@ -20,6 +20,29 @@ struct BlockSpec {
   bool discontinuity = false;
 };
 
+// User-settable session/subject/acquisition metadata (MEF section 2 & 3
+// descriptive fields). All optional with sane defaults; the writer fills the
+// computed fields (counts, extrema, durations) itself. Empty string / NO_ENTRY
+// sentinels mean "unset". Subject fields live in the level-2-encrypted
+// section 3; the descriptive/acquisition fields in the level-1 section 2.
+struct SessionMetadata {
+  // --- section 2: descriptive / acquisition ---
+  std::string session_description;      // free text; defaults to session name
+  std::string channel_description;      // free text; defaults to channel name
+  std::string reference_description;    // e.g. montage/reference note
+  si8 acquisition_channel_number = 1;   // amplifier channel index
+  sf8 low_frequency_filter = -1.0;      // Hz; -1 = not recorded
+  sf8 high_frequency_filter = -1.0;     // Hz
+  sf8 notch_filter = -1.0;              // Hz
+  sf8 line_frequency = -1.0;            // Hz (mains, e.g. 50/60)
+  // --- section 3: subject / time zone ---
+  std::string subject_name_1;
+  std::string subject_name_2;
+  std::string subject_id;
+  std::string recording_location;
+  si4 gmt_offset = 0;                   // seconds
+};
+
 struct SegmentSpec {
   std::string session_name;
   std::string channel_name;
@@ -31,6 +54,7 @@ struct SegmentSpec {
   si4 gmt_offset = 0;
   std::string password_1;  // empty -> unencrypted
   std::string password_2;  // empty -> section 3 not L2-encrypted
+  SessionMetadata metadata;  // descriptive/subject fields (see above)
 };
 
 // Write the three files for one segment into `segment_dir` (which must exist).

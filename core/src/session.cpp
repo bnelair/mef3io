@@ -145,8 +145,17 @@ void Session::load_channel_basic_info(Channel& ch) {
       info.recording_time_offset = rto;
       info.start_time = seg_start;
       info.end_time = seg_end;
+      info.session_description = md.section2.session_description;
+      info.channel_description = md.section2.channel_description;
+      info.reference_description = md.section2.reference_description;
+      info.acquisition_channel_number = md.section2.acquisition_channel_number;
+      info.low_frequency_filter = md.section2.low_frequency_filter_setting;
+      info.high_frequency_filter = md.section2.high_frequency_filter_setting;
+      info.notch_filter = md.section2.notch_filter_frequency_setting;
+      info.line_frequency = md.section2.ac_line_frequency;
       info.section3_available = md.section3_available;
       if (md.section3_available) {
+        info.gmt_offset = md.section3.gmt_offset;
         info.subject_name_1 = md.section3.subject_name_1;
         info.subject_name_2 = md.section3.subject_name_2;
         info.subject_id = md.section3.subject_id;

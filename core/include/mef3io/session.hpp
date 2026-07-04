@@ -84,8 +84,18 @@ struct ChannelInfo {
   si8 number_of_samples = 0;
   si8 recording_time_offset = 0;
   int n_segments = 0;
-  // Section-3 (level-2) metadata: populated only when the password grants L2
-  // access (or the session is unencrypted); section3_available says which.
+  si4 gmt_offset = 0;
+  // Section-2 (level-1) descriptive / acquisition metadata.
+  std::string session_description;
+  std::string channel_description;
+  std::string reference_description;
+  si8 acquisition_channel_number = 0;
+  sf8 low_frequency_filter = -1.0;
+  sf8 high_frequency_filter = -1.0;
+  sf8 notch_filter = -1.0;
+  sf8 line_frequency = -1.0;
+  // Section-3 (level-2) subject metadata: populated only when the password
+  // grants L2 access (or the session is unencrypted); section3_available says.
   bool section3_available = false;
   std::string subject_name_1;
   std::string subject_name_2;

@@ -220,13 +220,23 @@ NB_MODULE(_mef3io, m) {
              d["number_of_samples"] = ci.number_of_samples;
              d["recording_time_offset"] = ci.recording_time_offset;
              d["n_segments"] = ci.n_segments;
+             d["session_description"] = ci.session_description;
+             d["channel_description"] = ci.channel_description;
+             d["reference_description"] = ci.reference_description;
+             d["acquisition_channel_number"] = ci.acquisition_channel_number;
+             d["low_frequency_filter"] = ci.low_frequency_filter;
+             d["high_frequency_filter"] = ci.high_frequency_filter;
+             d["notch_filter"] = ci.notch_filter;
+             d["line_frequency"] = ci.line_frequency;
              d["section3_available"] = ci.section3_available;
              if (ci.section3_available) {
+               d["gmt_offset"] = ci.gmt_offset;
                d["subject_name_1"] = ci.subject_name_1;
                d["subject_name_2"] = ci.subject_name_2;
                d["subject_id"] = ci.subject_id;
                d["recording_location"] = ci.recording_location;
              } else {
+               d["gmt_offset"] = nb::none();
                d["subject_name_1"] = nb::none();
                d["subject_name_2"] = nb::none();
                d["subject_id"] = nb::none();
@@ -265,6 +275,36 @@ NB_MODULE(_mef3io, m) {
       .def("set_block_length", &mef3io::SessionWriter::set_block_length)
       .def("set_units", &mef3io::SessionWriter::set_units)
       .def("set_threads", &mef3io::SessionWriter::set_threads)
+      .def(
+          "set_metadata",
+          [](mef3io::SessionWriter& w, nb::dict d) {
+            mef3io::SessionMetadata m;
+            auto get_s = [&](const char* k, std::string& dst) {
+              if (d.contains(k) && !d[k].is_none()) dst = nb::cast<std::string>(d[k]);
+            };
+            auto get_f = [&](const char* k, mef3io::sf8& dst) {
+              if (d.contains(k) && !d[k].is_none()) dst = nb::cast<mef3io::sf8>(d[k]);
+            };
+            get_s("session_description", m.session_description);
+            get_s("channel_description", m.channel_description);
+            get_s("reference_description", m.reference_description);
+            if (d.contains("acquisition_channel_number") &&
+                !d["acquisition_channel_number"].is_none())
+              m.acquisition_channel_number = to_si8(d["acquisition_channel_number"],
+                                                    "acquisition_channel_number");
+            get_f("low_frequency_filter", m.low_frequency_filter);
+            get_f("high_frequency_filter", m.high_frequency_filter);
+            get_f("notch_filter", m.notch_filter);
+            get_f("line_frequency", m.line_frequency);
+            get_s("subject_name_1", m.subject_name_1);
+            get_s("subject_name_2", m.subject_name_2);
+            get_s("subject_id", m.subject_id);
+            get_s("recording_location", m.recording_location);
+            if (d.contains("gmt_offset") && !d["gmt_offset"].is_none())
+              m.gmt_offset = static_cast<mef3io::si4>(to_si8(d["gmt_offset"], "gmt_offset"));
+            w.set_metadata(m);
+          },
+          nb::arg("metadata"))
       .def(
           "write_float",
           [summary_dict](mef3io::SessionWriter& w, const std::string& ch,
@@ -350,13 +390,23 @@ NB_MODULE(_mef3io, m) {
              d["number_of_samples"] = ci.number_of_samples;
              d["recording_time_offset"] = ci.recording_time_offset;
              d["n_segments"] = ci.n_segments;
+             d["session_description"] = ci.session_description;
+             d["channel_description"] = ci.channel_description;
+             d["reference_description"] = ci.reference_description;
+             d["acquisition_channel_number"] = ci.acquisition_channel_number;
+             d["low_frequency_filter"] = ci.low_frequency_filter;
+             d["high_frequency_filter"] = ci.high_frequency_filter;
+             d["notch_filter"] = ci.notch_filter;
+             d["line_frequency"] = ci.line_frequency;
              d["section3_available"] = ci.section3_available;
              if (ci.section3_available) {
+               d["gmt_offset"] = ci.gmt_offset;
                d["subject_name_1"] = ci.subject_name_1;
                d["subject_name_2"] = ci.subject_name_2;
                d["subject_id"] = ci.subject_id;
                d["recording_location"] = ci.recording_location;
              } else {
+               d["gmt_offset"] = nb::none();
                d["subject_name_1"] = nb::none();
                d["subject_name_2"] = nb::none();
                d["subject_id"] = nb::none();

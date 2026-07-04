@@ -243,9 +243,10 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   spec.sampling_frequency = fs;
   spec.units_conversion_factor = ufact;
   spec.units_description = units_;
-  spec.gmt_offset = -21600;
+  spec.gmt_offset = metadata_.gmt_offset != 0 ? metadata_.gmt_offset : -21600;
   spec.password_1 = password_1_;
   spec.password_2 = password_2_;
+  spec.metadata = metadata_;
 
   if (append) {
     // fs / conversion-factor / start-time conflicts are validated against the
