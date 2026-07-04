@@ -30,6 +30,9 @@ markdown_extensions:
       permalink: true
   - pymdownx.highlight
   - pymdownx.superfences
+  - pymdownx.snippets:   # lets docs pages include repo-root markdown (METADATA.md)
+      base_path: ["."]
+      check_paths: true
 
 plugins:
   - search
@@ -57,6 +60,7 @@ nav:
       - Python: python.md
       - MATLAB: matlab.md
       - C++ and C ABI: cpp.md
+      - Session metadata: metadata.md
   - API reference:
       - Python: api/python.md
       - MATLAB: api/matlab.md
