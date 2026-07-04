@@ -1,0 +1,58 @@
+name: Bug report
+description: Something is wrong or crashes
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please do **not** attach clinical or
+        subject-identifying data — a small synthetic or anonymized session is
+        ideal for reproduction.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, what happened instead?
+      placeholder: Reading channel X over [t0, t1) returned ... but I expected ...
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest snippet that shows the problem.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: traceback
+    attributes:
+      label: Full error / traceback
+      description: The complete message (for a segfault, run with `python -X faulthandler`).
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: mef3io version
+      description: "`python -c \"import mef3io; print(mef3io.__version__)\"` or `mef3io_mex('version')`"
+    validations:
+      required: true
+  - type: dropdown
+    id: binding
+    attributes:
+      label: Which binding
+      options: [Python, MATLAB, C++ core]
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: OS and Python/MATLAB version
+      placeholder: macOS 15 (arm64), Python 3.12 / MATLAB R2024b
+    validations:
+      required: true
+  - type: input
+    id: writer
+    attributes:
+      label: If a specific session triggers it, which tool wrote it?
+      placeholder: mef3io, mef_tools, meflib/Natus export, unknown ...

@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+title: "mef3io: MEF 3.0 read/write with a single C++ core and Python/MATLAB bindings"
+message: "If you use mef3io in research, please cite it."
+type: software
+authors:
+  - name: "Mayo Clinic — Bioelectronics Neurophysiology and Engineering Lab (BNEL)"
+repository-code: "https://github.com/bnelair/mef3io"
+url: "https://bnelair.github.io/mef3io/"
+license: Apache-2.0
+keywords:
+  - MEF
+  - electrophysiology
+  - iEEG
+  - time series
+  - file format
