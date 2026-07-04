@@ -25,34 +25,45 @@ struct WriteSummary {
   int segment = -1;
 };
 
+/// High-level MEF 3.0 writer: float64 quantization with precision inference,
+/// the int32+conversion-factor primitive path, NaN = discontinuity splitting,
+/// block layout, in-segment append, and records. Times are uUTC.
 class SessionWriter {
  public:
-  // overwrite=true removes any existing session at the path first.
+  /// Open a session for writing.
+  /// @param mefd_path   `.mefd` directory to create or extend.
+  /// @param overwrite   true removes any existing session first; false reopens
+  ///                    it for appending (state recovered from disk).
+  /// @param password_1  level-1 password (empty = no encryption).
+  /// @param password_2  level-2 password (required with password_1 to encrypt).
   SessionWriter(const std::string& mefd_path, bool overwrite = false, std::string password_1 = "",
                 std::string password_2 = "");
 
-  // Primitive path: int32 counts + a conversion factor (e.g. amplifier V/bit).
-  // Samples are stored verbatim. Optional `valid` mask (same length) marks
-  // discontinuity gaps (0 = gap). The first write to a channel creates segment
-  // 0; later writes append IN-SEGMENT to the channel's last segment unless
-  // new_segment=true forces a fresh segment. In-segment appends must match the
-  // segment's fs and conversion factor and start at/after its end time
-  // (WriteConflictError otherwise).
+  /// Primitive path: int32 counts stored verbatim with a conversion factor
+  /// (e.g. amplifier V/bit).
+  /// @param channel                 channel name (created on first write).
+  /// @param samples                 int32 counts, stored bit-exact.
+  /// @param units_conversion_factor counts -> physical units.
+  /// @param start_uutc              timestamp of the first sample.
+  /// @param sampling_frequency      Hz.
+  /// @param valid                   optional mask (same length); 0 marks a gap.
+  /// @param new_segment             force a new segment instead of appending.
+  /// @throws WriteConflictError on an in-segment append whose fs/factor differ
+  ///         or that starts before the segment's end.
   WriteSummary write_int32(const std::string& channel, std::span<const si4> samples,
                            sf8 units_conversion_factor, si8 start_uutc, sf8 sampling_frequency,
                            std::span<const ui1> valid = {}, bool new_segment = false);
 
-  // Convenience path: float64 data. NaN = discontinuity. `precision` sets the
-  // conversion factor as 10^-precision; if < 0 it is inferred — except when
-  // appending in-segment, where the segment's existing conversion factor is
-  // reused so the append cannot conflict. Data is quantized to int32 as
-  // round(data * 10^precision). Same segment semantics as write_int32.
+  /// Convenience path: float64 data. NaN marks discontinuities. @p precision
+  /// sets the conversion factor to `10^-precision`; if < 0 it is inferred —
+  /// except on in-segment append, where the segment's factor is reused so the
+  /// append cannot conflict. Data is quantized as `round(data * 10^precision)`.
+  /// Segment semantics match write_int32().
   WriteSummary write_float(const std::string& channel, std::span<const sf8> data, si8 start_uutc,
                            sf8 sampling_frequency, int precision = -1, bool new_segment = false);
 
-  // Write records (annotations). channel == nullopt -> session-level records
-  // (in the .mefd root); otherwise the given channel's records. Replaces any
-  // existing records file at that level.
+  /// Write records (annotations). @p channel nullopt -> session-level (in the
+  /// `.mefd` root), otherwise channel-level. Replaces the records at that level.
   void write_records(std::optional<std::string> channel, const std::vector<Record>& records);
 
   // Optional override for the RED block length (samples per block). <= 0 uses

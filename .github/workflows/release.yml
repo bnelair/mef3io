@@ -68,7 +68,7 @@ jobs:
       - name: Build and test the MEX
         uses: matlab-actions/run-command@v2
         with:
-          command: cd('matlab'); build_mex; test_mef3io
+          command: cd('matlab'); build_mex; test_mef3io; test_api_parity
       - uses: actions/upload-artifact@v4
         with:
           name: mex-${{ matrix.label }}

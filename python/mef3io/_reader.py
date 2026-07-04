@@ -11,15 +11,34 @@ import numpy as np
 class Reader:
     """Read-only interface to a MEF 3.0 session.
 
+    Times throughout are **uUTC** (microseconds since the Unix epoch). Windowed
+    reads fetch only the bytes they need, so they stay cheap on huge sessions.
+
     Parameters
     ----------
     path : str
         Path to the ``.mefd`` session directory.
     password : str, optional
-        Password (level 1 or level 2) for encrypted sessions.
+        Password for encrypted sessions. A **level-2** password unlocks
+        everything; a **level-1** password reads the signal and technical
+        metadata but leaves subject metadata locked. Empty for unencrypted
+        sessions.
     backend : {"cpp", "pure"}, optional
-        Which implementation to use. Defaults to the C++ backend, falling back
-        to pure Python if the extension is unavailable.
+        Which implementation to use. Defaults to the C++ backend; the pure
+        backend is not yet implemented.
+    n_threads : int, optional
+        Worker threads for RED block decoding. ``0`` (default) uses all cores,
+        ``1`` is serial. Output is byte-identical regardless of thread count.
+    cache : str or None, optional
+        Opt-in warm-start cache for channel metadata. ``None`` (default)
+        disables it; ``"auto"`` uses the per-user OS cache directory; a path
+        makes it persistent. Warm opens serve :attr:`channels` / :meth:`info`
+        without touching the session tree.
+
+    Examples
+    --------
+    >>> with mef3io.Reader("session.mefd") as r:
+    ...     x = r.read(r.channels[0], t0, t1)   # float64, NaN in gaps
     """
 
     def __init__(
@@ -75,17 +94,43 @@ class Reader:
         self.close()
 
     def close(self) -> None:
-        # RAII in C++; nothing to release explicitly. Present for API parity.
+        """Release the backend. Optional (cleanup is automatic); present for
+        API parity and context-manager use."""
         self._impl = None
 
     @property
     def channels(self) -> list[str]:
+        """Channel names in the session, sorted.
+
+        Returns
+        -------
+        list of str
+        """
         # Served from the cache snapshot when warm; no backend needed.
         if self._infos is not None:
             return list(self._infos.keys())
         return list(self._ensure_impl().channels)
 
     def info(self, channel: str) -> dict:
+        """Channel metadata.
+
+        Parameters
+        ----------
+        channel : str
+            Channel name.
+
+        Returns
+        -------
+        dict
+            Keys: ``sampling_frequency`` (Hz), ``units_conversion_factor``,
+            ``units_description``, ``start_time`` / ``end_time`` (uUTC),
+            ``number_of_samples`` (stored samples — NaN gaps are not counted,
+            so a gridded :meth:`read` usually returns more),
+            ``recording_time_offset``, ``n_segments``, ``section3_available``,
+            and the section-3 subject fields (``subject_name_1`` /
+            ``subject_name_2`` / ``subject_id`` / ``recording_location``;
+            ``None`` without level-2 access).
+        """
         if self._infos is not None and channel in self._infos:
             return self._infos[channel]
         return self._ensure_impl().info(channel)
@@ -97,10 +142,31 @@ class Reader:
         t1: Optional[int] = None,
         n_threads: Optional[int] = None,
     ) -> np.ndarray:
-        """Float64 samples for ``channel`` over ``[t0, t1)`` uUTC (whole channel
-        by default). Discontinuity gaps are NaN; values are scaled by the
-        channel's units-conversion factor. ``n_threads`` overrides the reader
-        default for this call."""
+        """Read float64 samples on the uniform sampling grid.
+
+        Parameters
+        ----------
+        channel : str
+            Channel name.
+        t0, t1 : int or float, optional
+            Half-open time window ``[t0, t1)`` in uUTC. Defaults span the whole
+            channel. The number of samples returned is
+            ``round((t1 - t0) * fs / 1e6)``.
+        n_threads : int, optional
+            Per-call override of the reader's thread count (``0`` = all cores,
+            ``1`` = serial). ``None`` (default) uses the reader default.
+
+        Returns
+        -------
+        numpy.ndarray
+            1-D float64 array on the sampling grid. Discontinuity gaps are
+            filled with ``NaN``; values are scaled by the channel's
+            units-conversion factor.
+
+        See Also
+        --------
+        read_raw : the unscaled int32 form with an explicit validity mask.
+        """
         impl = self._ensure_impl()
         if n_threads is None:
             return impl.read(channel, t0, t1)
@@ -113,25 +179,85 @@ class Reader:
         t1: Optional[int] = None,
         n_threads: Optional[int] = None,
     ) -> dict:
-        """Int32 samples plus a validity mask (0 in gaps) and metadata."""
+        """Read the stored int32 counts with an explicit validity mask.
+
+        Parameters
+        ----------
+        channel : str
+            Channel name.
+        t0, t1 : int or float, optional
+            Half-open ``[t0, t1)`` window in uUTC; defaults span the channel.
+        n_threads : int, optional
+            Per-call thread-count override (see :meth:`read`).
+
+        Returns
+        -------
+        dict
+            Keys: ``samples`` (int32 ``ndarray``, on the grid),
+            ``valid`` (uint8 ``ndarray``; ``0`` marks gap samples with no
+            data), ``start_uutc``, ``sampling_frequency``,
+            ``units_conversion_factor``. Physical units are
+            ``samples * units_conversion_factor`` where ``valid``.
+        """
         impl = self._ensure_impl()
         if n_threads is None:
             return impl.read_raw(channel, t0, t1)
         return impl.read_raw(channel, t0, t1, int(n_threads))
 
     def segments(self, channel: str) -> list[dict]:
-        """Per-segment map of ``channel``: one dict per segment with its
-        ``start_time``/``end_time`` (uUTC), ``start_sample``,
-        ``number_of_samples``, ``number_of_blocks``, and on-disk ``path``.
-        Metadata only (no data is decoded), so it is cheap even for huge
-        sessions — use it to locate data across large recording gaps, then
-        :meth:`toc` for the block-level view within segments."""
+        """Per-segment map of a channel — what data is where.
+
+        Read from metadata only (nothing is decoded), so it is cheap even for
+        huge, gap-riddled sessions. Use it to locate data across large
+        recording gaps, then :meth:`toc` for the block-level view within a
+        segment.
+
+        Parameters
+        ----------
+        channel : str
+            Channel name.
+
+        Returns
+        -------
+        list of dict
+            One dict per segment (sorted by segment number) with keys
+            ``segment``, ``start_time`` / ``end_time`` (uUTC), ``start_sample``
+            (channel-wide index of the first sample), ``number_of_samples``,
+            ``number_of_blocks``, and the on-disk ``path``.
+        """
         return self._ensure_impl().segments(channel)
 
     def toc(self, channel: str) -> list[dict]:
-        """Block-level table of contents for seeking / viewers."""
+        """Block-level table of contents, for seeking and viewers.
+
+        Parameters
+        ----------
+        channel : str
+            Channel name.
+
+        Returns
+        -------
+        list of dict
+            One dict per RED block with ``start_uutc``, ``start_sample``,
+            ``number_of_samples``, ``maximum_sample_value``,
+            ``minimum_sample_value``, and ``discontinuity`` (``True`` when the
+            block does not continue seamlessly from the previous one).
+        """
         return self._ensure_impl().toc(channel)
 
     def records(self, channel: Optional[str] = None) -> list[dict]:
-        """Records (annotations) at session level (default) or for a channel."""
+        """Read records (annotations).
+
+        Parameters
+        ----------
+        channel : str or None, optional
+            Channel name for channel-level records, or ``None`` (default) for
+            session-level records.
+
+        Returns
+        -------
+        list of dict
+            One dict per record with ``type`` (e.g. ``"Note"``, ``"EDFA"``),
+            ``time`` (uUTC), optional ``text`` and ``duration``.
+        """
         return self._ensure_impl().records(channel)
