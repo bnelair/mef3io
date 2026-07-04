@@ -12,7 +12,11 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  # Let deploys queue rather than cancel: cancelling an in-flight Pages deploy
+  # (e.g. two PRs merged seconds apart) leaves the deployment in a state that
+  # makes the next one fail with "try again later". Matches GitHub's
+  # recommended Pages workflow.
+  cancel-in-progress: false
 
 jobs:
   build:

@@ -23,6 +23,8 @@ theme:
 
 markdown_extensions:
   - admonition
+  - attr_list        # enables the { .md-button } link attributes
+  - md_in_html
   - tables
   - toc:
       permalink: true

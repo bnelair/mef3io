@@ -3,9 +3,7 @@
 The full C++ core reference is generated with Doxygen from the public headers
 (`core/include/mef3io`), including the flat C ABI (`c_api.h`).
 
-<div class="doxygen-link" markdown>
-[Browse the C++ / C ABI reference &nbsp;→](cpp/html/index.html){ .md-button .md-button--primary }
-</div>
+[Browse the full C++ / C ABI reference →](cpp/html/index.html){ .md-button .md-button--primary }
 
 For a task-oriented walkthrough — consuming the library with CMake, reading,
 writing, the error hierarchy, and the C ABI — see the [C++ guide](../cpp.md).
