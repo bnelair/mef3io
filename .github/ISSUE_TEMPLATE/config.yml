@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question / discussion
+    url: https://github.com/bnelair/mef3io/discussions
+    about: Usage questions and open-ended discussion belong here, not in issues.
+  - name: Documentation
+    url: https://bnelair.github.io/mef3io/
+    about: Install guides, the Python/MATLAB/C++ API, and the MEF 3.0 format reference.

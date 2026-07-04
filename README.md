@@ -145,3 +145,17 @@ benchmarks/  bindings + legacy/NWB-Zarr comparison scripts
 docs/        MkDocs site source (guides, format reference, legacy comparison)
 scripts/     dev_build.sh (dev build + extension symlink)
 ```
+
+## Contributing & support
+
+Bug reports and feature requests via
+[issues](https://github.com/bnelair/mef3io/issues), questions via
+[discussions](https://github.com/bnelair/mef3io/discussions). See
+[CONTRIBUTING.md](CONTRIBUTING.md) to build and test locally, and
+[SECURITY.md](SECURITY.md) to report vulnerabilities privately. Please cite
+via [CITATION.cff](CITATION.cff).
+
+## License
+
+[Apache 2.0](LICENSE). Developed at the Mayo Clinic Bioelectronics
+Neurophysiology and Engineering Lab (BNEL).
