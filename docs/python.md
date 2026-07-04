@@ -127,6 +127,40 @@ Snapshots channel metadata so warm opens serve `channels`/`info` without
 touching the session tree, deferring the backend until a data read.
 Invalidated automatically on any size/mtime change and on write.
 
+## Session metadata (subject, acquisition)
+
+Set subject and acquisition metadata with the `Metadata` object — grouped
+into a `Subject` block (MEF section 3) and an `Acquisition` block (section 2).
+Every field is defaulted, so fill in only what you have:
+
+```python
+from mef3io import Metadata, Subject, Acquisition
+
+md = Metadata(
+    subject=Subject(id="MRN-123", name_1="Jane", recording_location="EMU-4"),
+    acquisition=Acquisition(session_description="pre-surgical", line_frequency=60.0),
+)
+with mef3io.Writer("session.mefd", overwrite=True, metadata=md) as w:
+    w.write("ch1", data, start_uutc, fs=256.0)
+# or later, before writing:  w.set_metadata(md)   (also accepts a flat dict)
+```
+
+Read it back via `Reader.metadata`:
+
+```python
+r = mef3io.Reader("session.mefd", password="l2pw")
+r.metadata.subject.id                     # "MRN-123"
+r.metadata.acquisition.session_description
+r.metadata.to_dict()                      # nested plain dict
+```
+
+Subject fields (names, id, location) live in the **level-2** encrypted
+section, so they read back empty with only a level-1 password; the
+acquisition descriptions and filter settings are level-1. Metadata is
+session-wide (written to every channel); `channel_description` defaults to the
+channel name. See the [API reference](api/python.md#metadata-objects) for
+every field.
+
 ## Legacy drop-in (`mef_tools` compatibility)
 
 ```python
