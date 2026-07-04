@@ -89,7 +89,7 @@ struct ChannelInfo {
   std::string session_description;
   std::string channel_description;
   std::string reference_description;
-  si8 acquisition_channel_number = 0;
+  si8 acquisition_channel_number = 1;
   sf8 low_frequency_filter = -1.0;
   sf8 high_frequency_filter = -1.0;
   sf8 notch_filter = -1.0;
