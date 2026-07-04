@@ -12,6 +12,7 @@
 
 #include "mef3io/records.hpp"
 #include "mef3io/types.hpp"
+#include "mef3io/writer.hpp"  // SessionMetadata, SegmentSpec
 
 namespace mef3io {
 
@@ -72,6 +73,12 @@ class SessionWriter {
   void set_units(const std::string& u) { units_ = u; }
   void set_threads(int n) { n_threads_ = n; }
 
+  // Session-wide subject/descriptive metadata written into every channel's
+  // section 2 (descriptive/acquisition) and section 3 (subject) on write.
+  // Set before writing; ignored for channels already on disk.
+  void set_metadata(const SessionMetadata& m) { metadata_ = m; }
+  const SessionMetadata& metadata() const { return metadata_; }
+
  private:
   struct ChannelState {
     sf8 sampling_frequency = 0.0;
@@ -96,6 +103,7 @@ class SessionWriter {
   std::string password_2_;
   std::string session_name_;
   std::string units_ = "uV";
+  SessionMetadata metadata_;
   si8 block_length_override_ = 0;
   int n_threads_ = 0;
   std::map<std::string, ChannelState> channels_;

@@ -43,6 +43,19 @@ classdef Reader < handle
             s = mef3io_mex('reader_info', obj.h, channel);
         end
 
+        function m = metadata(obj)
+            %METADATA Session subject/acquisition metadata as a
+            %   mef3io.Metadata object (.subject / .acquisition), from the
+            %   first channel (metadata is session-wide). Subject fields are
+            %   empty unless the reader was opened with a level-2 password.
+            chans = obj.channels();
+            if isempty(chans)
+                m = mef3io.Metadata;
+                return;
+            end
+            m = mef3io.Metadata.fromInfo(obj.info(chans{1}));
+        end
+
         function x = read(obj, channel, t0, t1)
             %READ Float64 samples over [t0, t1) uUTC; gaps are NaN.
             if nargin < 3, t0 = []; end

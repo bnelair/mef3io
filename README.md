@@ -30,7 +30,8 @@ C++ tests). Scope notes:
 
 Full docs live at **<https://bnelair.github.io/mef3io/>** (built from
 `docs/` with MkDocs Material, deployed by `.github/workflows/docs.yml`).
-In-repo: [docs/mef3_format.md](docs/mef3_format.md) (format reference),
+In-repo: [METADATA.md](METADATA.md) (session/subject/acquisition metadata),
+[docs/mef3_format.md](docs/mef3_format.md) (format reference),
 [docs/design.md](docs/design.md) (design),
 [docs/legacy_comparison.md](docs/legacy_comparison.md) (measured performance
 + encryption comparison), [benchmarks/README.md](benchmarks/README.md),

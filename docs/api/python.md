@@ -9,6 +9,14 @@ The native API:
 
 ::: mef3io.Writer
 
+## Metadata objects
+
+::: mef3io.Metadata
+
+::: mef3io.Subject
+
+::: mef3io.Acquisition
+
 ## Legacy `mef_tools` compatibility
 
 Drop-in replacements for `mef_tools.io` — `from mef3io import MefReader,

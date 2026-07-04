@@ -112,5 +112,33 @@ assert(isempty(r.read('s', start, start)));                    % empty window
 assert(isempty(r.read('s', start + 1e6, start)));              % inverted window
 delete(r);
 
+% ---- metadata round trip (object API, mirrors Python) ----------------------
+mdPath = fullfile(sessionDir, 'matlab_md.mefd');
+md = mef3io.Metadata( ...
+    subject=mef3io.Subject(id="MRN-9", name_1="Alice", recording_location="ICU-2"), ...
+    acquisition=mef3io.Acquisition(session_description="nightly", line_frequency=60));
+w = mef3io.Writer(mdPath, Overwrite=true, Metadata=md);
+w.write('ch1', x, start, fs, Precision=3);
+delete(w);
+r = mef3io.Reader(mdPath);
+got = r.metadata;
+assert(isa(got, 'mef3io.Metadata'));
+assert(strcmp(got.subject.id, 'MRN-9'));
+assert(strcmp(got.subject.name_1, 'Alice'));
+assert(strcmp(got.subject.recording_location, 'ICU-2'));
+assert(strcmp(got.acquisition.session_description, 'nightly'));
+assert(got.acquisition.line_frequency == 60);
+delete(r);
+
+% plain struct still accepted by setMetadata
+mdPath2 = fullfile(sessionDir, 'matlab_md2.mefd');
+w = mef3io.Writer(mdPath2, Overwrite=true, ...
+                  Metadata=struct('subject_id', 'S2', 'session_description', 'via struct'));
+w.write('ch1', x, start, fs, Precision=3);
+delete(w);
+r = mef3io.Reader(mdPath2);
+assert(strcmp(r.metadata.subject.id, 'S2'));
+delete(r);
+
 fprintf('test_mef3io: all assertions passed (%s)\n', sessionDir);
 end

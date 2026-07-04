@@ -174,9 +174,12 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     const char* fields[] = {"sampling_frequency", "units_conversion_factor", "start_time",
                             "end_time", "number_of_samples", "recording_time_offset",
                             "n_segments", "section3_available", "units_description",
-                            "subject_name_1", "subject_name_2", "subject_id",
-                            "recording_location"};
-    plhs[0] = mxCreateStructMatrix(1, 1, 13, fields);
+                            "acquisition_channel_number", "low_frequency_filter",
+                            "high_frequency_filter", "notch_filter", "line_frequency",
+                            "gmt_offset", "session_description", "channel_description",
+                            "reference_description", "subject_name_1", "subject_name_2",
+                            "subject_id", "recording_location"};
+    plhs[0] = mxCreateStructMatrix(1, 1, 22, fields);
     mxSetField(plhs[0], 0, "sampling_frequency", mxCreateDoubleScalar(ci.sampling_frequency));
     mxSetField(plhs[0], 0, "units_conversion_factor",
                mxCreateDoubleScalar(ci.units_conversion_factor));
@@ -187,6 +190,16 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     mxSetField(plhs[0], 0, "n_segments", mxCreateDoubleScalar(ci.n_segments));
     mxSetField(plhs[0], 0, "section3_available", mxCreateLogicalScalar(ci.section3_available != 0));
     mxSetField(plhs[0], 0, "units_description", mxCreateString(ci.units_description));
+    mxSetField(plhs[0], 0, "acquisition_channel_number",
+               make_int64(ci.acquisition_channel_number));
+    mxSetField(plhs[0], 0, "low_frequency_filter", mxCreateDoubleScalar(ci.low_frequency_filter));
+    mxSetField(plhs[0], 0, "high_frequency_filter", mxCreateDoubleScalar(ci.high_frequency_filter));
+    mxSetField(plhs[0], 0, "notch_filter", mxCreateDoubleScalar(ci.notch_filter));
+    mxSetField(plhs[0], 0, "line_frequency", mxCreateDoubleScalar(ci.line_frequency));
+    mxSetField(plhs[0], 0, "gmt_offset", mxCreateDoubleScalar(ci.gmt_offset));
+    mxSetField(plhs[0], 0, "session_description", mxCreateString(ci.session_description));
+    mxSetField(plhs[0], 0, "channel_description", mxCreateString(ci.channel_description));
+    mxSetField(plhs[0], 0, "reference_description", mxCreateString(ci.reference_description));
     mxSetField(plhs[0], 0, "subject_name_1", mxCreateString(ci.subject_name_1));
     mxSetField(plhs[0], 0, "subject_name_2", mxCreateString(ci.subject_name_2));
     mxSetField(plhs[0], 0, "subject_id", mxCreateString(ci.subject_id));
@@ -334,6 +347,48 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     need_args(nrhs, 3, "writer_set_units");
     check(mef3io_writer_set_units(get_writer(prhs[1]),
                                   get_string(prhs[2], "units").c_str()));
+    return;
+  }
+  if (cmd == "writer_set_metadata") {
+    // h, struct with any of the metadata fields
+    need_args(nrhs, 3, "writer_set_metadata");
+    mef3io_writer* w = get_writer(prhs[1]);
+    const mxArray* s = prhs[2];
+    if (!mxIsStruct(s)) fail("metadata must be a struct");
+    mef3io_metadata md{};
+    md.acquisition_channel_number = 1;
+    md.low_frequency_filter = -1.0;
+    md.high_frequency_filter = -1.0;
+    md.notch_filter = -1.0;
+    md.line_frequency = -1.0;
+    auto set_str = [&](const char* key, char* dst, size_t cap) {
+      const mxArray* f = mxGetField(s, 0, key);
+      if (f && !mxIsEmpty(f)) {
+        std::string v = get_string(f, key);
+        std::strncpy(dst, v.c_str(), cap - 1);
+        dst[cap - 1] = '\0';
+      }
+    };
+    auto set_num = [&](const char* key, double& dst) {
+      const mxArray* f = mxGetField(s, 0, key);
+      if (f && !mxIsEmpty(f)) dst = get_scalar(f, key);
+    };
+    set_str("session_description", md.session_description, sizeof md.session_description);
+    set_str("channel_description", md.channel_description, sizeof md.channel_description);
+    set_str("reference_description", md.reference_description, sizeof md.reference_description);
+    set_str("subject_name_1", md.subject_name_1, sizeof md.subject_name_1);
+    set_str("subject_name_2", md.subject_name_2, sizeof md.subject_name_2);
+    set_str("subject_id", md.subject_id, sizeof md.subject_id);
+    set_str("recording_location", md.recording_location, sizeof md.recording_location);
+    set_num("low_frequency_filter", md.low_frequency_filter);
+    set_num("high_frequency_filter", md.high_frequency_filter);
+    set_num("notch_filter", md.notch_filter);
+    set_num("line_frequency", md.line_frequency);
+    const mxArray* fa = mxGetField(s, 0, "acquisition_channel_number");
+    if (fa && !mxIsEmpty(fa)) md.acquisition_channel_number = get_int64(fa, "acq num");
+    const mxArray* fg = mxGetField(s, 0, "gmt_offset");
+    if (fg && !mxIsEmpty(fg)) md.gmt_offset = static_cast<std::int32_t>(get_int64(fg, "gmt"));
+    check(mef3io_writer_set_metadata(w, &md));
     return;
   }
   if (cmd == "writer_set_block_length") {

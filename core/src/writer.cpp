@@ -205,9 +205,19 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     s1.section_2_encryption = encrypt ? fmt::LEVEL_1_ENCRYPTION : -fmt::LEVEL_1_ENCRYPTION;
     s1.section_3_encryption = encrypt ? fmt::LEVEL_2_ENCRYPTION : -fmt::LEVEL_2_ENCRYPTION;
 
+    const SessionMetadata& meta = spec.metadata;
     fmt::TimeSeriesMetadataSection2 s2;
-    s2.session_description = spec.session_name;
-    s2.channel_description = spec.channel_name;
+    // Descriptive fields: use the user value, else fall back to the name.
+    s2.session_description =
+        meta.session_description.empty() ? spec.session_name : meta.session_description;
+    s2.channel_description =
+        meta.channel_description.empty() ? spec.channel_name : meta.channel_description;
+    s2.reference_description = meta.reference_description;
+    s2.acquisition_channel_number = meta.acquisition_channel_number;
+    s2.low_frequency_filter_setting = meta.low_frequency_filter;
+    s2.high_frequency_filter_setting = meta.high_frequency_filter;
+    s2.notch_filter_frequency_setting = meta.notch_filter;
+    s2.ac_line_frequency = meta.line_frequency;
     s2.sampling_frequency = fs_hz;
     s2.units_conversion_factor = spec.units_conversion_factor;
     s2.units_description = spec.units_description;
@@ -228,11 +238,14 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     s2.maximum_contiguous_samples = total_samples;
     s2.maximum_native_sample_value = static_cast<sf8>(global_max);
     s2.minimum_native_sample_value = static_cast<sf8>(global_min);
-    s2.acquisition_channel_number = 1;
 
     fmt::MetadataSection3 s3;
     s3.recording_time_offset = rto;
     s3.gmt_offset = spec.gmt_offset;
+    s3.subject_name_1 = meta.subject_name_1;
+    s3.subject_name_2 = meta.subject_name_2;
+    s3.subject_id = meta.subject_id;
+    s3.recording_location = meta.recording_location;
 
     // Serialize sections into temporary buffers, encrypt if needed.
     std::vector<ui1> s2buf(fmt::TIME_SERIES_METADATA_SECTION_2_BYTES);

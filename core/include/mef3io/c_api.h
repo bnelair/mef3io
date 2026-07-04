@@ -60,6 +60,17 @@ typedef struct {
   int32_t n_segments;
   int32_t section3_available;  /* 0 with only level-1 access */
   char units_description[128];
+  /* section-2 descriptive / acquisition */
+  int64_t acquisition_channel_number;
+  double low_frequency_filter;   /* Hz; -1 = not recorded */
+  double high_frequency_filter;
+  double notch_filter;
+  double line_frequency;
+  int32_t gmt_offset;            /* seconds (valid only with section3_available) */
+  char session_description[512];
+  char channel_description[512];
+  char reference_description[512];
+  /* section-3 subject (valid only with section3_available) */
   char subject_name_1[128];
   char subject_name_2[128];
   char subject_id[128];
@@ -67,6 +78,25 @@ typedef struct {
 } mef3io_channel_info;
 
 int mef3io_reader_info(mef3io_reader* r, const char* channel, mef3io_channel_info* out);
+
+/* Session-wide metadata (subject/acquisition) written to every channel. Set
+ * before writing. String fields "" and numeric fields per struct defaults mean
+ * "unset". Subject fields are stored in the level-2 section. */
+typedef struct {
+  int64_t acquisition_channel_number;  /* default 1 */
+  double low_frequency_filter;         /* Hz; -1 = unset */
+  double high_frequency_filter;
+  double notch_filter;
+  double line_frequency;
+  int32_t gmt_offset;                  /* seconds */
+  char session_description[512];
+  char channel_description[512];
+  char reference_description[512];
+  char subject_name_1[128];
+  char subject_name_2[128];
+  char subject_id[128];
+  char recording_location[512];
+} mef3io_metadata;
 
 /* Number of grid samples a read over [t0, t1) returns (no decoding). */
 int mef3io_reader_read_size(mef3io_reader* r, const char* channel, int64_t t0, int64_t t1,
@@ -126,6 +156,7 @@ int mef3io_writer_open(const char* mefd_path, int overwrite, const char* passwor
 void mef3io_writer_close(mef3io_writer* w);
 
 int mef3io_writer_set_units(mef3io_writer* w, const char* units);
+int mef3io_writer_set_metadata(mef3io_writer* w, const mef3io_metadata* md);
 int mef3io_writer_set_block_length(mef3io_writer* w, int64_t samples_per_block);
 int mef3io_writer_set_threads(mef3io_writer* w, int n_threads);
 

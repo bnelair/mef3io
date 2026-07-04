@@ -64,6 +64,9 @@ class Writer:
     n_threads : int, optional
         Worker threads for RED encoding (``0`` = all cores, ``1`` = serial).
         Output is byte-identical regardless of thread count.
+    metadata : mef3io.Metadata or dict, optional
+        Session-wide subject/acquisition metadata written to every channel.
+        Also settable later via :meth:`set_metadata` (before writing).
 
     Examples
     --------
@@ -80,6 +83,7 @@ class Writer:
         units: Optional[str] = None,
         block_length: Optional[int] = None,
         n_threads: int = 0,
+        metadata=None,
     ):
         from . import _mef3io
 
@@ -94,6 +98,15 @@ class Writer:
         if block_length is not None:
             self._impl.set_block_length(int(block_length))
         self._impl.set_threads(int(n_threads))
+        if metadata is not None:
+            self.set_metadata(metadata)
+
+    def set_metadata(self, metadata) -> None:
+        """Set session-wide subject/acquisition metadata (a
+        :class:`mef3io.Metadata`, or a flat dict of fields). Call before
+        writing; applies to every channel."""
+        flat = metadata._flat() if hasattr(metadata, "_flat") else dict(metadata)
+        self._impl.set_metadata(flat)
 
     def __enter__(self) -> "Writer":
         return self

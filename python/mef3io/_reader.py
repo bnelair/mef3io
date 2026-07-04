@@ -135,6 +135,24 @@ class Reader:
             return self._infos[channel]
         return self._ensure_impl().info(channel)
 
+    @property
+    def metadata(self):
+        """Session subject/acquisition metadata as a :class:`mef3io.Metadata`.
+
+        Built from the first channel (metadata is session-wide). Subject fields
+        are empty unless the reader was opened with a level-2 password.
+
+        Returns
+        -------
+        mef3io.Metadata
+        """
+        from .metadata import Metadata
+
+        chans = self.channels
+        if not chans:
+            return Metadata()
+        return Metadata.from_info(self.info(chans[0]))
+
     def read(
         self,
         channel: str,

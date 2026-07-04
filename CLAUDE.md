@@ -40,6 +40,14 @@ TimeSeriesIndex, RedBlockHeader — parse/serialize by explicit offset),
 `writer` (segment writer), `session_writer` (precision inference, quantization,
 NaN splitting, segments), `parallel.hpp`.
 
+Session metadata (subject/acquisition): `mef3io.Metadata`/`Subject`/
+`Acquisition` dataclasses (`python/mef3io/metadata.py`), settable via
+`Writer(metadata=)` / `set_metadata`, read via `Reader.metadata`. Threaded
+through C++ `SessionMetadata` (writer.hpp) → SegmentSpec → writer.cpp s2/s3
+population; `ChannelInfo` carries the fields on read. C ABI
+`mef3io_writer_set_metadata` + MEX `writer_set_metadata`; MATLAB
+`Writer(Metadata=struct)` / `Reader.metadata`. Subject fields are L2-gated.
+
 `python/mef3io/`: `Reader`, `Writer` (incl. `write_annotations`), `compat`
 (mef_tools.io drop-in; `MefReader`/`MefWriter` are also re-exported at the top
 level — `from mef3io import MefReader, MefWriter` — via lazy `__getattr__`),

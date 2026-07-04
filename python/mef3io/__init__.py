@@ -31,8 +31,12 @@ def have_cpp_backend() -> bool:
 
 from ._reader import Reader  # noqa: E402
 from ._writer import Writer  # noqa: E402
+from .metadata import Acquisition, Metadata, Subject  # noqa: E402
 
-__all__ = ["Reader", "Writer", "MefReader", "MefWriter", "have_cpp_backend", "__version__"]
+__all__ = [
+    "Reader", "Writer", "Metadata", "Subject", "Acquisition",
+    "MefReader", "MefWriter", "have_cpp_backend", "__version__",
+]
 
 
 def __getattr__(name):
