@@ -128,11 +128,17 @@ class MefWriter:
 
     Like the legacy writer, appends extend the channel's last segment in place
     (in-segment append); pass ``new_segment=True`` to start a fresh segment.
+
+    Metadata works two ways: mutate the legacy ``section3_dict`` /
+    ``section2_ts_dict`` (e.g. ``w.section3_dict['subject_ID'] = 'Smith'``) as
+    with mef_tools, or use the modern object via ``set_metadata`` / the
+    ``metadata=`` argument (``mef3io.Metadata``).
     """
 
     __version__ = "mef3io"
 
-    def __init__(self, session_path, overwrite=False, password1=None, password2=None, verbose=False):
+    def __init__(self, session_path, overwrite=False, password1=None, password2=None,
+                 verbose=False, metadata=None):
         self._path = str(session_path)
         self._w = _mef3io.SessionWriter(self._path, overwrite, password1 or "", password2 or "")
         self.verbose = verbose
@@ -140,6 +146,48 @@ class MefWriter:
         self._mef_block_len = None
         self._max_nans_written = 0
         self._record_offset = 0
+        # Legacy mef_tools-style mutable metadata dicts: set keys on these
+        # before writing and they are applied (e.g. section3_dict['subject_ID']
+        # = 'Smith'). The modern mef3io.Metadata is also accepted via
+        # set_metadata() or the metadata= argument.
+        self.section2_ts_dict = {}
+        self.section3_dict = {}
+        self._metadata_flat = {}
+        if metadata is not None:
+            self.set_metadata(metadata)
+
+    # Map legacy mef_tools section-dict keys onto mef3io metadata fields.
+    _LEGACY_KEYS = {
+        "subject_name_1": "subject_name_1", "subject_name_2": "subject_name_2",
+        "subject_ID": "subject_id", "subject_id": "subject_id",
+        "recording_location": "recording_location", "GMT_offset": "gmt_offset",
+        "gmt_offset": "gmt_offset", "session_description": "session_description",
+        "channel_description": "channel_description",
+        "reference_description": "reference_description",
+        "acquisition_channel_number": "acquisition_channel_number",
+        "low_frequency_filter_setting": "low_frequency_filter",
+        "high_frequency_filter_setting": "high_frequency_filter",
+        "notch_filter_frequency_setting": "notch_filter",
+        "AC_line_frequency": "line_frequency",
+    }
+
+    def set_metadata(self, metadata) -> None:
+        """Set session-wide subject/acquisition metadata (a
+        :class:`mef3io.Metadata` or a flat dict). Applied on the next write."""
+        self._metadata_flat = metadata._flat() if hasattr(metadata, "_flat") else dict(metadata)
+
+    def _apply_metadata(self) -> None:
+        """Merge the modern metadata with the legacy section dicts (decoding
+        any bytes) and push it to the backend before a write."""
+        flat = dict(self._metadata_flat)
+        for src in (self.section2_ts_dict, self.section3_dict):
+            for k, v in src.items():
+                key = self._LEGACY_KEYS.get(k)
+                if key is None:
+                    continue
+                flat[key] = v.decode() if isinstance(v, (bytes, bytearray)) else v
+        if flat:
+            self._w.set_metadata(flat)
 
     @property
     def data_units(self) -> str:
@@ -202,6 +250,7 @@ class MefWriter:
         discont_handler: bool = True,
         reload_metadata: bool = True,
     ):
+        self._apply_metadata()
         data = np.atleast_1d(np.asarray(data_write))
         if np.issubdtype(data.dtype, np.integer):
             # Treat as raw int32 with a precision-derived ufact if given.

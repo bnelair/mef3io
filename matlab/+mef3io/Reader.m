@@ -44,25 +44,16 @@ classdef Reader < handle
         end
 
         function m = metadata(obj)
-            %METADATA Session subject/acquisition metadata, grouped into
-            %   .subject and .acquisition structs (from the first channel;
-            %   metadata is session-wide). Subject fields are empty unless the
-            %   reader was opened with a level-2 password.
+            %METADATA Session subject/acquisition metadata as a
+            %   mef3io.Metadata object (.subject / .acquisition), from the
+            %   first channel (metadata is session-wide). Subject fields are
+            %   empty unless the reader was opened with a level-2 password.
             chans = obj.channels();
-            m = struct('subject', struct(), 'acquisition', struct());
-            if isempty(chans), return; end
-            i = obj.info(chans{1});
-            m.subject = struct('name_1', i.subject_name_1, 'name_2', i.subject_name_2, ...
-                               'id', i.subject_id, 'recording_location', i.recording_location, ...
-                               'gmt_offset', i.gmt_offset);
-            m.acquisition = struct( ...
-                'session_description', i.session_description, ...
-                'channel_description', i.channel_description, ...
-                'reference_description', i.reference_description, ...
-                'acquisition_channel_number', i.acquisition_channel_number, ...
-                'low_frequency_filter', i.low_frequency_filter, ...
-                'high_frequency_filter', i.high_frequency_filter, ...
-                'notch_filter', i.notch_filter, 'line_frequency', i.line_frequency);
+            if isempty(chans)
+                m = mef3io.Metadata;
+                return;
+            end
+            m = mef3io.Metadata.fromInfo(obj.info(chans{1}));
         end
 
         function x = read(obj, channel, t0, t1)

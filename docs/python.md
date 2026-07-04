@@ -177,6 +177,11 @@ int32 primitive path, in-segment appends), `write_annotations`,
 the legacy stack are measured and documented in the
 [comparison](legacy_comparison.md).
 
+Metadata works both the legacy and the modern way on `MefWriter`: mutate the
+`section3_dict` / `section2_ts_dict` (e.g.
+`w.section3_dict['subject_ID'] = 'Smith'`) as in mef_tools, or pass a
+`mef3io.Metadata` via `metadata=` / `set_metadata`.
+
 ## Parallelism
 
 RED block decode/encode run on an internal thread pool (`n_threads`: 0 = all

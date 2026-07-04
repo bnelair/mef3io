@@ -109,6 +109,38 @@ def test_to_dict_and_from_info(tmp_path):
     assert Metadata.from_info(r.info("ch1")).subject.id == "MRN-123"
 
 
+def test_compat_writer_metadata_object(tmp_path):
+    from mef3io import MefReader, MefWriter
+
+    path = str(tmp_path / "s.mefd")
+    w = MefWriter(path, overwrite=True, metadata=Metadata(subject=Subject(id="C1")))
+    w.write_data(np.zeros(500), "ch1", START, FS, precision=0)
+    w.close()
+    assert mef3io.Reader(path).metadata.subject.id == "C1"
+    # readable through the legacy reader's basic info too
+    assert MefReader(path).channels == ["ch1"]
+
+
+def test_compat_writer_legacy_dicts(tmp_path):
+    # mef_tools-style: mutate section dicts (bytes values), incl. subject_ID.
+    from mef3io import MefWriter
+
+    path = str(tmp_path / "s.mefd")
+    w = MefWriter(path, overwrite=True)
+    w.section3_dict["subject_ID"] = b"MRN-legacy"
+    w.section3_dict["subject_name_1"] = "Bob"  # str also fine
+    w.section2_ts_dict["session_description"] = b"legacy sess"
+    w.section2_ts_dict["AC_line_frequency"] = 50.0
+    w.write_data(np.zeros(500), "ch1", START, FS, precision=0)
+    w.close()
+
+    md = mef3io.Reader(path).metadata
+    assert md.subject.id == "MRN-legacy"
+    assert md.subject.name_1 == "Bob"
+    assert md.acquisition.session_description == "legacy sess"
+    assert md.acquisition.line_frequency == 50.0
+
+
 def test_pymef_reads_metadata(tmp_path):
     pytest.importorskip("pymef")
     from pymef.mef_session import MefSession

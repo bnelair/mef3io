@@ -56,20 +56,19 @@ an existing session is reopened for appending), `Password1`/`Password2`
   fields `time` (required), `type` (default `'Note'`), `text`, `duration`.
   Omit `channel` for session-level records. Replaces records at that level.
 - **`setMetadata(md)`** / the `Metadata=` constructor option — session-wide
-  subject/acquisition metadata as a struct with any subset of: `subject_id`,
-  `subject_name_1`/`_2`, `recording_location`, `gmt_offset`,
-  `session_description`, `channel_description`, `reference_description`,
-  `acquisition_channel_number`, `low_frequency_filter`,
-  `high_frequency_filter`, `notch_filter`, `line_frequency`. Set before
-  writing; applied to every channel.
+  subject/acquisition metadata. Use the object API (mirrors Python):
 
 ```matlab
-w = mef3io.Writer('s.mefd', Overwrite=true, Metadata=struct( ...
-    'subject_id', 'MRN-123', 'subject_name_1', 'Jane', 'line_frequency', 60));
+md = mef3io.Metadata( ...
+    subject=mef3io.Subject(id="MRN-123", name_1="Jane", recording_location="EMU-4"), ...
+    acquisition=mef3io.Acquisition(session_description="pre-surgical", line_frequency=60));
+w = mef3io.Writer('s.mefd', Overwrite=true, Metadata=md);
 ```
 
-Read it back with `r.metadata` — a struct with `.subject` and `.acquisition`
-sub-structs (subject fields empty without a level-2 password).
+Every field defaults, so set only what you have. `setMetadata` also accepts a
+plain struct with the flat field names (`subject_id`, `session_description`,
+…). Read it back with `r.metadata`, a `mef3io.Metadata` object with `.subject`
+and `.acquisition` (subject fields empty without a level-2 password).
 
 ## Reading
 
