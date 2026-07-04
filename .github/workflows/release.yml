@@ -94,25 +94,51 @@ jobs:
           python -m pip install --upgrade pip twine
           twine upload --skip-existing dist/*.whl dist/*.tar.gz
 
-  # GitHub release with the MEX binaries attached (their extensions are
-  # platform-unique: mexa64 / mexw64 / mexmaca64, so they upload flat).
+  # One download for MATLAB users: the +mef3io classes plus all three MEX
+  # binaries in a ready-to-addpath tree. The binaries coexist in one folder —
+  # MATLAB resolves mef3io_mex to the extension matching the running platform.
+  package-matlab:
+    needs: [mex]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "mex-*"
+          path: mexbin
+          merge-multiple: true
+      - name: Assemble MATLAB bundle
+        run: |
+          v=$(tr -d ' \n' < VERSION)
+          mkdir -p bundle/mef3io-matlab
+          cp -r matlab/+mef3io bundle/mef3io-matlab/
+          cp matlab/test_mef3io.m matlab/benchmark_mef3io.m matlab/README.md \
+             bundle/mef3io-matlab/
+          cp mexbin/*.mex* bundle/mef3io-matlab/
+          cd bundle && zip -r "mef3io-matlab-v$v.zip" mef3io-matlab
+          unzip -l "mef3io-matlab-v$v.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: matlab-bundle
+          path: bundle/*.zip
+
+  # GitHub release with the MATLAB bundle attached.
   github-release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [mex]
+    needs: [package-matlab]
     permissions:
       contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: "mex-*"
-          path: mexbin
-          merge-multiple: true
-      - name: Create release and attach MEX binaries
+          name: matlab-bundle
+          path: bundle
+      - name: Create release and attach the MATLAB bundle
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" --generate-notes || true
           gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            --clobber mexbin/*.mex*
+            --clobber bundle/*.zip

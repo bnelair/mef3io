@@ -27,8 +27,9 @@ and dispatches the **release** workflow, which:
 2. compiles and **tests** the MATLAB MEX with the latest MATLAB release on
    Linux, Windows, and macOS runners;
 3. publishes wheels + sdist to PyPI (`twine`, `PYPI_Token_General` secret);
-4. creates the GitHub release with generated notes and the three MEX
-   binaries attached.
+4. assembles the MATLAB bundle (`mef3io-matlab-vX.Y.Z.zip`: the `+mef3io`
+   classes plus the tested MEX binaries for all three platforms) and creates
+   the GitHub release with it attached.
 
 Dispatching the release workflow manually on a branch is a **dry run**:
 wheels and MEX build as artifacts, publishing is skipped.

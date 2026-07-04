@@ -4,6 +4,7 @@
 #include <vector>
 #include <algorithm>
 
+#include "mef3io/crc.hpp"
 #include "mef3io/crypto.hpp"
 #include "mef3io/errors.hpp"
 
@@ -20,6 +21,15 @@ TimeSeriesMetadata load_time_series_metadata(std::span<const ui1> tmet_bytes,
   md.universal_header = UniversalHeader::parse(tmet_bytes);
   if (!md.universal_header.header_crc_valid(tmet_bytes))
     throw CrcError("tmet universal header CRC mismatch");
+  // The body CRC covers sections 1-3 (encryption flags, fs/ufact/counts,
+  // subject metadata) — 15/16 of the file. Without this check, body
+  // corruption silently yields garbage scaling. CRC_START_VALUE doubles as
+  // meflib's "no entry": skip validation for writers that never filled it.
+  if (md.universal_header.body_crc != CRC_START_VALUE) {
+    ui4 body = crc::calculate(tmet_bytes.subspan(UNIVERSAL_HEADER_BYTES));
+    if (body != md.universal_header.body_crc)
+      throw CrcError("tmet body CRC mismatch (metadata sections corrupted)");
+  }
 
   // Section 1 is never encrypted.
   auto s1_bytes = tmet_bytes.subspan(METADATA_SECTION_1_OFFSET, METADATA_SECTION_1_BYTES);

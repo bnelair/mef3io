@@ -8,10 +8,11 @@ over a single compiled MEX.
 
 ## Setup
 
-Get `mef3io_mex.<mexext>` — either download the prebuilt binary for your
-platform from a [GitHub release](https://github.com/bnelair/mef3io/releases)
-into `matlab/`, or compile once (~30 s, needs a C++20 compiler via
-`mex -setup C++`):
+Either download the `mef3io-matlab-vX.Y.Z.zip` bundle from a
+[GitHub release](https://github.com/bnelair/mef3io/releases) — classes and
+the CI-tested MEX for all platforms in one ready-to-addpath folder (see
+[Install](install.md#matlab) for the caveats) — or compile once from the repo
+(~30 s, needs a C++20 compiler via `mex -setup C++`):
 
 ```matlab
 run('<repo>/matlab/build_mex.m')

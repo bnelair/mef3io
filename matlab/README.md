@@ -6,11 +6,27 @@ the same version number.
 
 ## Install
 
-**Prebuilt (no compiler):** each GitHub release has the compiled MEX attached
-for Linux x86_64 (`mef3io_mex.mexa64`), Windows AMD64 (`mef3io_mex.mexw64`),
-and macOS arm64 (`mef3io_mex.mexmaca64`) — built and tested with the latest
-MATLAB release on CI. Download the one for your platform into this `matlab/`
-folder, then `addpath('<repo>/matlab')`.
+**Prebuilt (no compiler):** each GitHub release has a single
+`mef3io-matlab-vX.Y.Z.zip` attached containing the `+mef3io` classes and the
+compiled MEX for all supported platforms — Linux x86_64 (`.mexa64`), Windows
+AMD64 (`.mexw64`), and macOS arm64 (`.mexmaca64`) — built and tested with the
+latest MATLAB release on CI. The binaries coexist in one folder; MATLAB
+automatically loads the one matching your platform:
+
+```matlab
+unzip mef3io-matlab-vX.Y.Z.zip somewhere, then:
+addpath('<somewhere>/mef3io-matlab')
+```
+
+Prebuilt-binary caveats:
+
+- **macOS Gatekeeper**: a zip downloaded through a browser is quarantined and
+  the unsigned MEX may be blocked on first use ("developer cannot be
+  verified"). Fix: `xattr -dr com.apple.quarantine <somewhere>/mef3io-matlab`
+  (downloads via `curl`/`gh` are not quarantined).
+- **Old Linux distros**: the `.mexa64` is built on Ubuntu 24.04; very old
+  glibc (RHEL 8 era) may refuse it — build from source there.
+- **Intel Macs**: no `.mexmaci64` is shipped; build from source.
 
 **Build from source (one-time, ~30 s):** needs a **C++20 compiler** configured
 for MEX (`mex -setup C++`): Xcode on macOS, GCC ≥ 11 on Linux, Visual Studio
