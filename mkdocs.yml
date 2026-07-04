@@ -31,13 +31,6 @@ markdown_extensions:
   - pymdownx.highlight
   - pymdownx.superfences
 
-# The C++ reference button links into the Doxygen HTML, which is generated
-# after the mkdocs build, so its target isn't a tracked doc file. Nav and
-# anchor validation stay on; only the file-existence check is relaxed.
-validation:
-  links:
-    not_found: ignore
-
 plugins:
   - search
   - mkdocstrings:
