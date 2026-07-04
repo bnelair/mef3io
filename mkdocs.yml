@@ -29,6 +29,23 @@ markdown_extensions:
   - pymdownx.highlight
   - pymdownx.superfences
 
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [python]
+          options:
+            docstring_style: numpy
+            show_source: false
+            show_root_heading: true
+            heading_level: 2
+            members_order: source
+            separate_signature: true
+            show_signature_annotations: true
+            merge_init_into_class: true
+            filters: ["!^_"]
+
 nav:
   - Home: index.md
   - Getting started:
@@ -38,6 +55,10 @@ nav:
       - Python: python.md
       - MATLAB: matlab.md
       - C++ and C ABI: cpp.md
+  - API reference:
+      - Python: api/python.md
+      - MATLAB: api/matlab.md
+      - C++ (Doxygen): api/cpp.md
   - Reference:
       - MEF 3.0 on-disk format: mef3_format.md
       - Encryption model: encryption_model.md

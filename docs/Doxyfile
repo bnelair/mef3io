@@ -1,0 +1,40 @@
+# Doxygen config for the mef3io C++ core.
+# Run from the repo root: `doxygen docs/Doxyfile`
+# Output: site/api/cpp/html/ (published as part of the docs site).
+
+PROJECT_NAME           = "mef3io C++ core"
+PROJECT_BRIEF          = "MEF 3.0 read/write — C++ core and flat C ABI"
+PROJECT_NUMBER         = $(MEF3IO_VERSION)
+
+INPUT                  = core/include/mef3io
+FILE_PATTERNS          = *.hpp *.h
+RECURSIVE              = YES
+STRIP_FROM_PATH        = core/include
+
+OUTPUT_DIRECTORY       = site/api/cpp
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+HTML_OUTPUT            = html
+
+# Document the whole public surface, even entities without a doc comment, so
+# the API browses completely; described entities get their prose.
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = YES
+HIDE_UNDOC_MEMBERS     = NO
+JAVADOC_AUTOBRIEF      = YES
+QT_AUTOBRIEF           = YES
+MARKDOWN_SUPPORT       = YES
+SORT_MEMBER_DOCS       = NO
+GENERATE_TREEVIEW      = YES
+DISABLE_INDEX          = NO
+FULL_SIDEBAR           = NO
+
+# The public headers are self-contained; skip the parser-heavy bits.
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = YES
+PREDEFINED             = __cplusplus=202002L
+
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_AS_ERROR          = NO

@@ -22,8 +22,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install "mkdocs-material>=9,<10" "mkdocs>=1.6,<2"
-      - run: mkdocs build --strict
+      - name: Install docs tooling
+        run: |
+          pip install "mkdocs-material>=9,<10" "mkdocs>=1.6,<2" "mkdocstrings[python]>=0.24"
+          sudo apt-get update && sudo apt-get install -y doxygen
+      - name: Build site (mkdocs + mkdocstrings)
+        run: PYTHONPATH=python mkdocs build --strict
+      - name: Generate C++ reference (Doxygen) into the site
+        run: MEF3IO_VERSION="$(tr -d ' \n' < VERSION)" doxygen docs/Doxyfile
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
