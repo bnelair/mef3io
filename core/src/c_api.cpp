@@ -128,6 +128,15 @@ int mef3io_reader_info(mef3io_reader* r, const char* channel, mef3io_channel_inf
     out->n_segments = ci.n_segments;
     out->section3_available = ci.section3_available ? 1 : 0;
     copy_str(out->units_description, sizeof out->units_description, ci.units_description);
+    out->acquisition_channel_number = ci.acquisition_channel_number;
+    out->low_frequency_filter = ci.low_frequency_filter;
+    out->high_frequency_filter = ci.high_frequency_filter;
+    out->notch_filter = ci.notch_filter;
+    out->line_frequency = ci.line_frequency;
+    out->gmt_offset = ci.gmt_offset;
+    copy_str(out->session_description, sizeof out->session_description, ci.session_description);
+    copy_str(out->channel_description, sizeof out->channel_description, ci.channel_description);
+    copy_str(out->reference_description, sizeof out->reference_description, ci.reference_description);
     copy_str(out->subject_name_1, sizeof out->subject_name_1, ci.subject_name_1);
     copy_str(out->subject_name_2, sizeof out->subject_name_2, ci.subject_name_2);
     copy_str(out->subject_id, sizeof out->subject_id, ci.subject_id);
@@ -268,6 +277,27 @@ void mef3io_writer_close(mef3io_writer* w) { delete w; }
 int mef3io_writer_set_units(mef3io_writer* w, const char* units) {
   if (!w || !units) return fail_argument("NULL argument");
   return guarded([&] { w->impl.set_units(units); });
+}
+
+int mef3io_writer_set_metadata(mef3io_writer* w, const mef3io_metadata* md) {
+  if (!w || !md) return fail_argument("NULL argument");
+  return guarded([&] {
+    mef3io::SessionMetadata m;
+    m.session_description = md->session_description;
+    m.channel_description = md->channel_description;
+    m.reference_description = md->reference_description;
+    m.acquisition_channel_number = md->acquisition_channel_number;
+    m.low_frequency_filter = md->low_frequency_filter;
+    m.high_frequency_filter = md->high_frequency_filter;
+    m.notch_filter = md->notch_filter;
+    m.line_frequency = md->line_frequency;
+    m.subject_name_1 = md->subject_name_1;
+    m.subject_name_2 = md->subject_name_2;
+    m.subject_id = md->subject_id;
+    m.recording_location = md->recording_location;
+    m.gmt_offset = md->gmt_offset;
+    w->impl.set_metadata(m);
+  });
 }
 
 int mef3io_writer_set_block_length(mef3io_writer* w, int64_t samples_per_block) {

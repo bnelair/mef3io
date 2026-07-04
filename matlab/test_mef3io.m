@@ -112,5 +112,22 @@ assert(isempty(r.read('s', start, start)));                    % empty window
 assert(isempty(r.read('s', start + 1e6, start)));              % inverted window
 delete(r);
 
+% ---- metadata round trip ---------------------------------------------------
+mdPath = fullfile(sessionDir, 'matlab_md.mefd');
+w = mef3io.Writer(mdPath, Overwrite=true, Metadata=struct( ...
+    'subject_id', 'MRN-9', 'subject_name_1', 'Alice', ...
+    'recording_location', 'ICU-2', 'session_description', 'nightly', ...
+    'line_frequency', 60));
+w.write('ch1', x, start, fs, Precision=3);
+delete(w);
+r = mef3io.Reader(mdPath);
+md = r.metadata;
+assert(strcmp(md.subject.id, 'MRN-9'));
+assert(strcmp(md.subject.name_1, 'Alice'));
+assert(strcmp(md.subject.recording_location, 'ICU-2'));
+assert(strcmp(md.acquisition.session_description, 'nightly'));
+assert(md.acquisition.line_frequency == 60);
+delete(r);
+
 fprintf('test_mef3io: all assertions passed (%s)\n', sessionDir);
 end

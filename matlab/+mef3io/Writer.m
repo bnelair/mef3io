@@ -26,6 +26,7 @@ classdef Writer < handle
                 opts.Units (1, :) char = ''
                 opts.BlockLength (1, 1) double = 0
                 opts.Threads (1, 1) double = 0
+                opts.Metadata struct = struct([])
             end
             obj.h = mef3io_mex('writer_open', path, double(opts.Overwrite), ...
                                opts.Password1, opts.Password2);
@@ -36,6 +37,19 @@ classdef Writer < handle
                 mef3io_mex('writer_set_block_length', obj.h, opts.BlockLength);
             end
             mef3io_mex('writer_set_threads', obj.h, opts.Threads);
+            if ~isempty(fieldnames(opts.Metadata))
+                obj.setMetadata(opts.Metadata);
+            end
+        end
+
+        function setMetadata(obj, md)
+            %SETMETADATA Session-wide subject/acquisition metadata (a struct
+            %   with any of: subject_name_1/2, subject_id, recording_location,
+            %   gmt_offset, session_description, channel_description,
+            %   reference_description, acquisition_channel_number,
+            %   low_frequency_filter, high_frequency_filter, notch_filter,
+            %   line_frequency). Set before writing; applies to every channel.
+            mef3io_mex('writer_set_metadata', obj.h, md);
         end
 
         function delete(obj)
