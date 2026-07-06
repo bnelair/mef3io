@@ -60,8 +60,16 @@ def resolve_cache_path(session_path: str, cache) -> Optional[Path]:
 
 
 def _fingerprints(session_path: str) -> dict:
-    """(relpath -> [size, mtime_ns]) for every metadata/index file in the tree."""
+    """(relpath -> [size, mtime_ns]) for every metadata/index file in the tree.
+
+    Tar sessions (a single archive file) are fingerprinted as that one file —
+    globbing inside them is impossible, and an empty dict would make a stale
+    cache validate forever.
+    """
     root = Path(session_path)
+    if root.is_file():
+        st = root.stat()
+        return {root.name: [st.st_size, st.st_mtime_ns]}
     fp = {}
     for pattern in ("*.timd/*.segd/*.tmet", "*.timd/*.segd/*.tidx"):
         for f in root.glob(pattern):

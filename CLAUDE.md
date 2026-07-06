@@ -8,9 +8,10 @@ of scope. The legacy `mef_tools`/`pymef` stack is the correctness oracle.
 
 Status: read + write complete, cross-validated **both directions** vs
 pymef/mef_tools (values, NaN gaps, times, encryption none/L1+L2, fractional fs,
-records). In-segment append + per-segment map implemented. ~112 Python tests +
-standalone C++ Catch2 tests. Wheel builds via `python -m build`. Parallel
-decode/encode, byte-deterministic across threads.
+records). In-segment append + per-segment map implemented. Tar session
+archives (single-file `.mefd.tar`, read in place) implemented. ~143 Python
+tests + standalone C++ Catch2 tests. Wheel builds via `python -m build`.
+Parallel decode/encode, byte-deterministic across threads.
 
 ## Build & test (use the active conda env for everything)
 
@@ -35,10 +36,36 @@ packed-struct casts), `crc` (Koopman-32), `crypto` (SHA-256, AES-128-ECB,
 two-level password), `headers` (UniversalHeader, MetadataSection1/2/3,
 TimeSeriesIndex, RedBlockHeader — parse/serialize by explicit offset),
 `metadata` (.tmet loader: CRC→password→decrypt), `red` (decode + encode),
-`session` (lazy .mefd/.timd/.segd tree, indexed reads, `collect_blocks`),
-`reader` (gridding, NaN fill, scaling, parallel decode), `records` (read+write),
-`writer` (segment writer), `session_writer` (precision inference, quantization,
-NaN splitting, segments), `parallel.hpp`.
+`session` (lazy .mefd/.timd/.segd tree, indexed reads, `collect_blocks`; ALL
+read-path file access funnels through `source`), `source` (SessionSource
+abstraction: DirectorySource/TarSource), `tar` (uncompressed .mefd.tar session
+archives: TarIndex/TarSource/`archive_session`), `reader` (gridding, NaN fill,
+scaling, parallel decode), `records` (read+write), `writer` (segment writer),
+`session_writer` (precision inference, quantization, NaN splitting, segments),
+`parallel.hpp`.
+
+Tar session archives: `archive_session(dir)` packs a session into ONE
+deterministic uncompressed ustar (`name.mefd.tar`); readers in all languages
+accept the tar path transparently in the existing `path` argument (random
+access into member byte ranges, no extraction; foreign GNU/PAX/bsdtar/tarfile
+archives tolerated, `./` prefixes + missing dir entries OK, compressed input
+rejected with a clear error). `extract_session(tar)` is the exact inverse
+(archive→extract→archive byte-identical; strips the in-archive session root;
+rejects `..` member traversal; cleans up on failure) and yields a writable
+session again. Writers REJECT `.tar` paths — the guard sits BEFORE the
+overwrite/remove_all in SessionWriter's ctor so an archive can never be
+deleted. Python `mef3io.archive_session`/`extract_session`; MATLAB
+`mef3io.archiveSession`/`extractSession`; C ABI `mef3io_archive_session`/
+`mef3io_extract_session`. Session NAMING IS ENFORCED in core (all bindings):
+dirs must end `.mefd`, archives `.mefd.tar` — reader (`open_session_source`),
+writer ctor, archive and extract all throw IoError otherwise
+(case-insensitive, trailing separators OK; `path_has_suffix` in source.hpp).
+`SegmentInfo.path` for tar reads is `"<archive>::<member>"`. cache.py fingerprints a tar session as the single
+file (an empty fingerprint dict would validate stale caches forever).
+Benchmarked on a ~2 GB session: full-read throughput identical to the dir,
+windowed reads ~8% slower, open faster; archive ~0.56 GB/s. Tests:
+core/tests/test_tar.cpp, tests/test_p11_tar.py, tar block in
+matlab/test_mef3io.m.
 
 Session metadata (subject/acquisition): `mef3io.Metadata`/`Subject`/
 `Acquisition` dataclasses (`python/mef3io/metadata.py`), settable via

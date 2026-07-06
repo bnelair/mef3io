@@ -127,6 +127,46 @@ Snapshots channel metadata so warm opens serve `channels`/`info` without
 touching the session tree, deferring the backend until a data read.
 Invalidated automatically on any size/mtime change and on write.
 
+## Tar archives (single-file sessions)
+
+A session directory can be packed into a single **uncompressed tar** file —
+one file to share or archive, immune to piecemeal corruption of the tree:
+
+```python
+tar = mef3io.archive_session("session.mefd")   # -> "session.mefd.tar"
+r = mef3io.Reader(tar)                          # read in place, no extraction
+```
+
+`Reader` (and the compat `MefReader`) accept the archive path anywhere a
+`.mefd` directory is accepted; because the archive is uncompressed, windowed
+reads still fetch only the byte ranges they need. Everything else carries
+over — encryption, records, the warm-start cache. The source directory is
+left untouched, output is deterministic (same session ⇒ identical bytes), and
+any tar tool restores the directory (`tar -xf session.mefd.tar`). Foreign
+archives work too (GNU/bsdtar/`tarfile`, with or without directory entries);
+compressed input (`.tar.gz` etc.) is rejected with a clear error.
+
+Tar sessions are **read-only**: `Writer` refuses `.tar` paths. To modify one,
+unpack it first — `extract_session` is the exact inverse (archive → extract →
+archive reproduces identical bytes), and the restored directory is a normal
+writable session again:
+
+```python
+session = mef3io.extract_session(tar)          # -> "session.mefd" back
+with mef3io.Writer(session) as w:              # appends work again
+    w.write("ch1", more, t, fs=256.0)
+```
+
+Pass `tar_path=` / `dest_dir=` to choose targets and `overwrite=True` to
+replace an existing one.
+
+Session naming is **enforced at every entry point** (reading, writing,
+archiving, extracting, in all language bindings): directories must end
+`.mefd`, archives `.mefd.tar` — anything else is refused with a clear error.
+This is a safety contract: a stray directory or file can never be misread as
+a session, and a session can never be created or overwritten under an
+unmarked name.
+
 ## Session metadata (subject, acquisition)
 
 Set subject and acquisition metadata with the `Metadata` object — grouped

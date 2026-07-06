@@ -3,6 +3,11 @@ classdef Reader < handle
     %
     %   r = mef3io.Reader(path)                 % unencrypted
     %   r = mef3io.Reader(path, password)       % level-1 or level-2 password
+    %
+    % `path` is a .mefd session directory or an uncompressed tar archive of
+    % one (name.mefd.tar, from mef3io.archiveSession) — read in place,
+    % without extraction. The suffix is enforced: anything else is refused,
+    % so a stray directory or file can never be misread as a session.
     %   r.channels                              % cellstr
     %   info = r.info('ch1')                    % fs, ufact, times, subject metadata
     %   x = r.read('ch1')                       % whole channel, double, NaN gaps

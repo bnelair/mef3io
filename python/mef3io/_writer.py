@@ -48,7 +48,10 @@ class Writer:
     Parameters
     ----------
     path : str
-        Path to the ``.mefd`` session directory to create or extend.
+        Path to the ``.mefd`` session directory to create or extend (the
+        suffix is enforced). Tar archives are read-only sessions: a ``.tar``
+        path raises — write a directory and pack it with
+        :func:`mef3io.archive_session`.
     overwrite : bool, optional
         ``True`` deletes any existing session first. ``False`` (default)
         reopens an existing session for appending — state is recovered from

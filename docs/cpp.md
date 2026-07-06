@@ -44,6 +44,31 @@ level: lazy `.mefd/.timd/.segd` traversal, `read_runs` (decoded contiguous
 runs), `collect_blocks` (undecoded block gathering for custom parallel
 pipelines).
 
+The session path may also be an **uncompressed tar archive** of a session
+(`name.mefd.tar`, from `mef3io::archive_session` in `tar.hpp`) — read in
+place, without extraction; windowed reads fetch member byte ranges directly.
+All file access goes through the `SessionSource` interface (`source.hpp`:
+`DirectorySource` / `TarSource`), so both layouts behave identically:
+
+```cpp
+#include "mef3io/tar.hpp"
+
+std::string tar = mef3io::archive_session("session.mefd");  // session.mefd.tar
+mef3io::Reader rt(tar);                                     // same API
+std::string dir = mef3io::extract_session(tar);             // session.mefd back
+```
+
+Tar sessions are read-only — `SessionWriter` throws `IoError` on `.tar`
+paths; `extract_session` restores a writable directory (exact inverse:
+archive → extract → archive is byte-identical). Archive creation is
+deterministic (sorted members, zeroed mtimes) and plain ustar, so `tar -xf`
+restores the directory exactly as well.
+
+Session naming is enforced by the core at every entry point (so all bindings
+behave identically): directories must end `.mefd`, archives `.mefd.tar`;
+`Session`/`Reader`, `SessionWriter`, `archive_session` and `extract_session`
+all throw `IoError` on anything else.
+
 ## Writing
 
 ```cpp
@@ -86,6 +111,8 @@ Everything throws from the `mef3io::MefError` hierarchy (`errors.hpp`):
 | `metadata.hpp` | `.tmet` loader: CRC → password → decrypt |
 | `red.hpp` | RED block decode + encode (lossless) |
 | `session.hpp` | session tree, indexed reads, block gathering |
+| `source.hpp` | `SessionSource` abstraction: directory vs tar-backed sessions |
+| `tar.hpp` | uncompressed tar session archives: `archive_session`, `TarSource` |
 | `reader.hpp` | gridded reads, NaN fill, scaling, parallel decode |
 | `writer.hpp` | low-level segment write + in-segment append |
 | `session_writer.hpp` | precision inference, quantization, NaN splitting, segments, records |
@@ -105,6 +132,10 @@ MATLAB MEX is built on it). Conventions:
   `mef3io_last_error()` (thread-local);
 - handles are opaque (`mef3io_reader*`, `mef3io_writer*`); close functions
   accept NULL;
+- `mef3io_reader_open` also accepts a tar session archive;
+  `mef3io_archive_session(dir, tar_path_or_NULL, overwrite, out, n)` creates
+  one, `mef3io_extract_session` unpacks it back, and `mef3io_writer_open`
+  rejects `.tar` paths (`MEF3IO_ERR_IO`);
 - reads use a deterministic size query + caller-allocated buffer:
 
 ```c

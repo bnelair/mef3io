@@ -16,6 +16,7 @@
 #include "mef3io/red.hpp"
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
+#include "mef3io/tar.hpp"
 #include "mef3io/types.hpp"
 #include "mef3io/version.hpp"
 #include "mef3io/writer.hpp"
@@ -69,6 +70,14 @@ NB_MODULE(_mef3io, m) {
   m.doc() = "mef3io C++ backend (nanobind extension)";
   m.attr("__mef_version_major__") = mef3io::fmt::MEF_VERSION_MAJOR;
   m.attr("__mef_version_minor__") = mef3io::fmt::MEF_VERSION_MINOR;
+
+  m.def("archive_session", &mef3io::archive_session, nb::arg("session_dir"),
+        nb::arg("tar_path") = "", nb::arg("overwrite") = false,
+        "Pack a session directory into a single uncompressed tar archive and "
+        "return the archive path.");
+  m.def("extract_session", &mef3io::extract_session, nb::arg("tar_path"),
+        nb::arg("dest_dir") = "", nb::arg("overwrite") = false,
+        "Unpack a session archive back into a directory and return its path.");
 
   // Exposed for parity tests against the Python oracles.
   m.def(

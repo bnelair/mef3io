@@ -12,6 +12,7 @@
 #include "mef3io/headers.hpp"
 #include "mef3io/metadata.hpp"
 #include "mef3io/records.hpp"
+#include "mef3io/source.hpp"
 #include "mef3io/types.hpp"
 
 namespace mef3io {
@@ -25,6 +26,8 @@ struct DataRun {
 };
 
 struct SegmentReader {
+  // Source-relative '/'-separated paths (resolved through the SessionSource,
+  // which may be a directory tree or a tar archive).
   std::string tmet_path;
   std::string tidx_path;
   std::string tdat_path;
@@ -66,7 +69,7 @@ struct BlockIndexEntry {
 // cheap even for huge sessions, and it locates data across arbitrary gaps.
 struct SegmentInfo {
   int segment_number = 0;
-  std::string path;             // the .segd directory
+  std::string path;             // the .segd directory ("<archive>::<member>" for tar sessions)
   si8 start_time = 0;           // absolute uUTC of the first sample
   si8 end_time = 0;             // absolute uUTC just past the last sample
   si8 start_sample = 0;         // channel-wide index of the first sample
@@ -106,6 +109,8 @@ struct ChannelInfo {
 class Session {
  public:
   // Discover the session tree and load per-channel basic info (lazy on data).
+  // `mefd_path` is either a .mefd directory or an uncompressed tar archive of
+  // one (e.g. name.mefd.tar) — tar sessions are read without extraction.
   Session(const std::string& mefd_path, std::string password = "");
 
   const std::vector<std::string>& channels() const { return channel_names_; }
@@ -151,6 +156,7 @@ class Session {
   std::span<const ui1> segment_index(SegmentReader& seg);
 
   std::string mefd_path_;
+  std::shared_ptr<const SessionSource> source_;
   std::string password_;
   std::vector<std::string> channel_names_;
   std::map<std::string, Channel> channels_;

@@ -29,13 +29,15 @@ def have_cpp_backend() -> bool:
     return _HAVE_CPP
 
 
+from ._archive import archive_session, extract_session  # noqa: E402
 from ._reader import Reader  # noqa: E402
 from ._writer import Writer  # noqa: E402
 from .metadata import Acquisition, Metadata, Subject  # noqa: E402
 
 __all__ = [
     "Reader", "Writer", "Metadata", "Subject", "Acquisition",
-    "MefReader", "MefWriter", "have_cpp_backend", "__version__",
+    "MefReader", "MefWriter", "archive_session", "extract_session",
+    "have_cpp_backend", "__version__",
 ]
 
 

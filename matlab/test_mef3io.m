@@ -130,6 +130,42 @@ assert(strcmp(got.acquisition.session_description, 'nightly'));
 assert(got.acquisition.line_frequency == 60);
 delete(r);
 
+% ---- tar archive: single-file session, read in place, writer refuses -------
+tarPath = mef3io.archiveSession(path);
+assert(strcmp(tarPath, [path '.tar']));
+rDir = mef3io.Reader(path);
+rTar = mef3io.Reader(tarPath);
+assert(isequal(rDir.channels, rTar.channels));
+assert(isequaln(rDir.read('ch1'), rTar.read('ch1')));
+assert(isequal(rDir.readRaw('ch2'), rTar.readRaw('ch2')));
+assert(isequal(rDir.records('ch1'), rTar.records('ch1')));
+segsTar = rTar.segments('ch1');
+assert(contains(segsTar(1).path, '::'));               % tar member notation
+delete(rDir); delete(rTar);
+gotError = false;                                      % existing target refused
+try mef3io.archiveSession(path); catch, gotError = true; end
+assert(gotError, 'existing archive target must be refused without Overwrite');
+mef3io.archiveSession(path, '', Overwrite=true);       % deterministic rewrite OK
+gotError = false;                                      % tar sessions are read-only
+try mef3io.Writer(tarPath, Overwrite=true); catch, gotError = true; end
+assert(gotError, 'Writer must refuse tar archives');
+assert(exist(tarPath, 'file') == 2);                   % and never delete them
+gotError = false;                                      % naming: .mefd / .mefd.tar only
+try mef3io.Writer(fullfile(sessionDir, 'bad_name'), Overwrite=true); catch, gotError = true; end
+assert(gotError, 'Writer must refuse non-.mefd session names');
+gotError = false;
+try mef3io.extractSession(tarPath, fullfile(sessionDir, 'bad_name')); catch, gotError = true; end
+assert(gotError, 'extractSession must refuse non-.mefd targets');
+restored = mef3io.extractSession(tarPath, fullfile(sessionDir, 'restored.mefd'));
+rRest = mef3io.Reader(restored);
+rTar = mef3io.Reader(tarPath);
+assert(isequaln(rRest.read('ch1'), rTar.read('ch1')));  % untar restores the session
+delete(rRest); delete(rTar);
+w = mef3io.Writer(restored);                            % ... and it is writable again
+w.write('ch1', x, start + 3 * chunkUs, fs);
+delete(w);
+delete(tarPath);
+
 % plain struct still accepted by setMetadata
 mdPath2 = fullfile(sessionDir, 'matlab_md2.mefd');
 w = mef3io.Writer(mdPath2, Overwrite=true, ...

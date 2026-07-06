@@ -91,6 +91,34 @@ delete(r);
 `section3_available` and the subject metadata fields (empty under a level-1
 password — the signal still reads correctly, unlike the legacy stack).
 
+## Tar archives (single-file sessions)
+
+Pack a session into one uncompressed tar file and read it in place — handy
+for sharing and safe archiving:
+
+```matlab
+tarPath = mef3io.archiveSession('session.mefd');   % -> 'session.mefd.tar'
+r = mef3io.Reader(tarPath);                        % no extraction needed
+```
+
+Windowed reads stay cheap (the archive is uncompressed, so only the needed
+byte ranges are fetched), and any tar tool restores the directory
+(`tar -xf session.mefd.tar`). Tar sessions are read-only — `mef3io.Writer`
+refuses `.tar` paths; unpack first to modify:
+
+```matlab
+sessionDir = mef3io.extractSession(tarPath);       % -> 'session.mefd' back
+w = mef3io.Writer(sessionDir);                     % writable again
+```
+
+`archiveSession(dir, tarPath, Overwrite=true)` / `extractSession(tarPath,
+destDir, Overwrite=true)` pick targets and replace existing ones; they mirror
+Python's `mef3io.archive_session` / `extract_session`.
+
+Session naming is enforced at every entry point: directories must end
+`.mefd`, archives `.mefd.tar` — anything else is refused, so a stray
+directory or file can never be misread (or overwritten) as a session.
+
 ## How it is put together
 
 `matlab/mef3io_mex.cpp` is a single command-dispatch MEX over the flat C ABI

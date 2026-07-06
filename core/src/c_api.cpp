@@ -12,6 +12,7 @@
 #include "mef3io/reader.hpp"
 #include "mef3io/records.hpp"
 #include "mef3io/session_writer.hpp"
+#include "mef3io/tar.hpp"
 #include "mef3io/version.hpp"
 
 namespace {
@@ -256,6 +257,28 @@ int mef3io_reader_record(mef3io_reader* r, const char* channel, int32_t index,
     out->time = rec.time;
     out->duration = rec.duration.value_or(-1);
     copy_str(out->text, sizeof out->text, rec.text.value_or(""));
+  });
+}
+
+/* ----- archive ----------------------------------------------------------- */
+
+int mef3io_archive_session(const char* session_dir, const char* tar_path, int overwrite,
+                           char* out_path, size_t out_path_bytes) {
+  if (!session_dir) return fail_argument("session_dir must not be NULL");
+  return guarded([&] {
+    const std::string result =
+        mef3io::archive_session(session_dir, tar_path ? tar_path : "", overwrite != 0);
+    if (out_path && out_path_bytes) copy_str(out_path, out_path_bytes, result);
+  });
+}
+
+int mef3io_extract_session(const char* tar_path, const char* dest_dir, int overwrite,
+                           char* out_path, size_t out_path_bytes) {
+  if (!tar_path) return fail_argument("tar_path must not be NULL");
+  return guarded([&] {
+    const std::string result =
+        mef3io::extract_session(tar_path, dest_dir ? dest_dir : "", overwrite != 0);
+    if (out_path && out_path_bytes) copy_str(out_path, out_path_bytes, result);
   });
 }
 
