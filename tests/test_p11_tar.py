@@ -71,7 +71,10 @@ def test_outbound_interop_stdlib_tarfile_extracts_identical_tree(tmp_path):
     src = GOLDEN / "with_annotations.mefd"
     tar = mef3io.archive_session(src, tmp_path / "a.mefd.tar")
     with tarfile.open(tar) as tf:
-        tf.extractall(tmp_path / "out", filter="data")
+        if hasattr(tarfile, "data_filter"):
+            tf.extractall(tmp_path / "out", filter="data")
+        else:  # 3.10.x before the filter backport (3.10.12)
+            tf.extractall(tmp_path / "out")
     extracted = tmp_path / "out" / "with_annotations.mefd"
     src_files = sorted(p.relative_to(src) for p in src.rglob("*") if p.is_file())
     ext_files = sorted(p.relative_to(extracted) for p in extracted.rglob("*") if p.is_file())

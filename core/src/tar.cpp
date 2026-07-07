@@ -128,15 +128,15 @@ std::string detect_session_root(const TarIndex& idx) {
 }
 
 // Extraction writes member paths to the real filesystem; refuse traversal.
+// fs::path does the component split so platform separators ('\\' on Windows)
+// and root-names ("C:...", UNC shares) are judged the way the extraction
+// itself would treat them.
 void check_member_safe(const std::string& rel, const std::string& archive) {
-  std::size_t pos = 0;
-  while (pos <= rel.size()) {
-    const auto next = rel.find('/', pos);
-    const std::string part = rel.substr(pos, next == std::string::npos ? next : next - pos);
+  const fs::path p(rel);
+  if (p.is_absolute() || p.has_root_name() || p.has_root_directory())
+    throw FormatError("unsafe member path in archive " + archive + ": " + rel);
+  for (const auto& part : p)
     if (part == "..") throw FormatError("unsafe member path in archive " + archive + ": " + rel);
-    if (next == std::string::npos) break;
-    pos = next + 1;
-  }
 }
 
 }  // namespace
