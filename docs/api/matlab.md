@@ -31,3 +31,5 @@ call the same C++ core.
 | `Writer.write` | `Writer.write` |
 | `Writer.write_int32` | `Writer.writeInt32` |
 | `Writer.write_annotations` | `Writer.writeAnnotations` |
+| `mef3io.archive_session` | `mef3io.archiveSession` |
+| `mef3io.extract_session` | `mef3io.extractSession` |

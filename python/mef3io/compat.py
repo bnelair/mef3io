@@ -22,7 +22,11 @@ from . import _mef3io
 
 
 class MefReader:
-    """``mef_tools.io.MefReader``-compatible reader."""
+    """``mef_tools.io.MefReader``-compatible reader.
+
+    ``session_path`` may also be an uncompressed tar archive of a session
+    (``name.mefd.tar``, see :func:`mef3io.archive_session`).
+    """
 
     __version__ = "mef3io"
 

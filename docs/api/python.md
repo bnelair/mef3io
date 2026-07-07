@@ -9,6 +9,10 @@ The native API:
 
 ::: mef3io.Writer
 
+::: mef3io.archive_session
+
+::: mef3io.extract_session
+
 ## Metadata objects
 
 ::: mef3io.Metadata

@@ -17,7 +17,11 @@ class Reader:
     Parameters
     ----------
     path : str
-        Path to the ``.mefd`` session directory.
+        Path to the ``.mefd`` session directory, or to an uncompressed tar
+        archive of one (``name.mefd.tar``, from :func:`mef3io.archive_session`)
+        — tar sessions are read in place, without extraction. The suffix is
+        enforced: anything else is refused, so a stray directory or file can
+        never be misread as a session.
     password : str, optional
         Password for encrypted sessions. A **level-2** password unlocks
         everything; a **level-1** password reads the signal and technical

@@ -18,6 +18,15 @@ function test_api_parity()
 
     checkClass('mef3io.Reader', readerMap);
     checkClass('mef3io.Writer', writerMap);
+
+    % Package functions: Python module-level mef3io.archive_session /
+    % extract_session <-> MATLAB archiveSession / extractSession, documented.
+    for fn = {'archiveSession', 'extractSession'}
+        name = ['mef3io.' fn{1}];
+        assert(~isempty(which(name)), '%s (Python parity) not found', name);
+        assert(~isempty(strtrim(help(name))), '%s is undocumented (no help text)', name);
+    end
+
     fprintf('test_api_parity: MATLAB API mirrors Python and every method is documented.\n');
 end
 

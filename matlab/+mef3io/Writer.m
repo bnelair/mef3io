@@ -11,6 +11,8 @@ classdef Writer < handle
     %
     % Encrypted sessions: pass Password1 and Password2 (both required).
     % Times are uUTC: microseconds since the Unix epoch (int64 or double).
+    % `path` must end .mefd (enforced); tar archives are read-only and
+    % refused — pack a directory with mef3io.archiveSession instead.
 
     properties (Access = private)
         h uint64 = 0

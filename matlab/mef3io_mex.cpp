@@ -132,6 +132,28 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     plhs[0] = mxCreateString(mef3io_version());
     return;
   }
+  if (cmd == "archive_session") {
+    need_args(nrhs, 4, "archive_session");
+    std::string session_dir = get_string(prhs[1], "session_dir");
+    std::string tar_path = get_string(prhs[2], "tar_path");
+    int overwrite = static_cast<int>(get_scalar(prhs[3], "overwrite"));
+    char out_path[2048] = {0};
+    check(mef3io_archive_session(session_dir.c_str(), tar_path.c_str(), overwrite, out_path,
+                                 sizeof out_path));
+    plhs[0] = mxCreateString(out_path);
+    return;
+  }
+  if (cmd == "extract_session") {
+    need_args(nrhs, 4, "extract_session");
+    std::string tar_path = get_string(prhs[1], "tar_path");
+    std::string dest_dir = get_string(prhs[2], "dest_dir");
+    int overwrite = static_cast<int>(get_scalar(prhs[3], "overwrite"));
+    char out_path[2048] = {0};
+    check(mef3io_extract_session(tar_path.c_str(), dest_dir.c_str(), overwrite, out_path,
+                                 sizeof out_path));
+    plhs[0] = mxCreateString(out_path);
+    return;
+  }
 
   // ---- reader ----------------------------------------------------------
   if (cmd == "reader_open") {

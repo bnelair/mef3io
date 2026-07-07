@@ -1,41 +1,16 @@
-// mef3io — session tree discovery and low-level indexed reads.
+// mef3io — session tree discovery and low-level indexed reads. All file access
+// goes through the SessionSource, so a session reads identically from a .mefd
+// directory and from an uncompressed .mefd.tar archive.
 #include "mef3io/session.hpp"
 
 #include <algorithm>
 #include <cmath>
-#include <filesystem>
-#include <fstream>
 
 #include "mef3io/errors.hpp"
 #include "mef3io/red.hpp"
 
-namespace fs = std::filesystem;
-
 namespace mef3io {
 namespace {
-
-std::vector<ui1> read_file(const std::string& path) {
-  std::ifstream f(path, std::ios::binary | std::ios::ate);
-  if (!f) throw IoError("cannot open file: " + path);
-  auto size = f.tellg();
-  f.seekg(0);
-  std::vector<ui1> buf(static_cast<std::size_t>(size));
-  if (!f.read(reinterpret_cast<char*>(buf.data()), size))
-    throw IoError("short read: " + path);
-  return buf;
-}
-
-// Read exactly [offset, offset+length) from a file. Used to fetch only the RED
-// blocks a windowed read needs, rather than the whole (potentially huge) .tdat.
-std::vector<ui1> read_file_range(const std::string& path, std::size_t offset, std::size_t length) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) throw IoError("cannot open file: " + path);
-  f.seekg(static_cast<std::streamoff>(offset));
-  std::vector<ui1> buf(length);
-  if (length && !f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(length)))
-    throw IoError("short read: " + path);
-  return buf;
-}
 
 // Convert an on-disk MEF time to a user-facing absolute uUTC. meflib marks
 // "recording-time-offset applied" times by negating them; the true time is
@@ -73,32 +48,31 @@ std::size_t index_entry_count(std::span<const ui1> idx, const std::string& path)
 }  // namespace
 
 Session::Session(const std::string& mefd_path, std::string password)
-    : mefd_path_(mefd_path), password_(std::move(password)) {
-  if (!fs::is_directory(mefd_path_)) throw IoError("session path is not a directory: " + mefd_path_);
+    : mefd_path_(mefd_path), source_(open_session_source(mefd_path)),
+      password_(std::move(password)) {
   discover();
 }
 
 void Session::discover() {
-  for (const auto& entry : fs::directory_iterator(mefd_path_)) {
-    if (!entry.is_directory()) continue;
-    const auto path = entry.path();
-    const std::string ext = path.extension().string();
-    if (ext == ".vidd") continue;  // video channels are out of scope; skip silently
-    if (ext != ".timd") continue;
+  for (const auto& entry : source_->list_dir("")) {
+    if (!entry.is_dir) continue;
+    if (entry.name.ends_with(".vidd")) continue;  // video channels are out of scope; skip silently
+    if (!entry.name.ends_with(".timd")) continue;
 
     Channel ch;
-    ch.info.name = path.stem().string();
+    ch.info.name = entry.name.substr(0, entry.name.size() - 5);
 
-    for (const auto& seg_entry : fs::directory_iterator(path)) {
-      if (!seg_entry.is_directory() || seg_entry.path().extension() != ".segd") continue;
-      const auto seg_path = seg_entry.path();
-      const std::string seg_stem = seg_path.stem().string();
+    for (const auto& seg_entry : source_->list_dir(entry.name)) {
+      if (!seg_entry.is_dir || !seg_entry.name.ends_with(".segd")) continue;
+      const std::string seg_stem = seg_entry.name.substr(0, seg_entry.name.size() - 5);
+      const std::string seg_dir = entry.name + "/" + seg_entry.name;
       SegmentReader seg;
       seg.segment_number = segment_number_from_name(seg_stem);
-      seg.tmet_path = (seg_path / (seg_stem + ".tmet")).string();
-      seg.tidx_path = (seg_path / (seg_stem + ".tidx")).string();
-      seg.tdat_path = (seg_path / (seg_stem + ".tdat")).string();
-      if (fs::exists(seg.tmet_path) && fs::exists(seg.tidx_path) && fs::exists(seg.tdat_path))
+      seg.tmet_path = seg_dir + "/" + seg_stem + ".tmet";
+      seg.tidx_path = seg_dir + "/" + seg_stem + ".tidx";
+      seg.tdat_path = seg_dir + "/" + seg_stem + ".tdat";
+      if (source_->exists(seg.tmet_path) && source_->exists(seg.tidx_path) &&
+          source_->exists(seg.tdat_path))
         ch.segments.push_back(std::move(seg));
     }
     if (ch.segments.empty()) continue;
@@ -117,14 +91,14 @@ void Session::discover() {
 
 TimeSeriesMetadata& Session::segment_metadata(SegmentReader& seg) {
   if (!seg.metadata) {
-    auto bytes = read_file(seg.tmet_path);
+    auto bytes = source_->read_all(seg.tmet_path);
     seg.metadata = load_time_series_metadata(bytes, password_);
   }
   return *seg.metadata;
 }
 
 std::span<const ui1> Session::segment_index(SegmentReader& seg) {
-  if (seg.tidx_bytes.empty()) seg.tidx_bytes = read_file(seg.tidx_path);
+  if (seg.tidx_bytes.empty()) seg.tidx_bytes = source_->read_all(seg.tidx_path);
   return seg.tidx_bytes;
 }
 
@@ -196,8 +170,8 @@ std::vector<DataRun> Session::read_runs(const std::string& channel, std::optiona
     if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
 
     auto idx = segment_index(seg);
-    const std::size_t n_entries = index_entry_count(idx, seg.tidx_path);
-    auto tdat = read_file(seg.tdat_path);
+    const std::size_t n_entries = index_entry_count(idx, source_->describe(seg.tidx_path));
+    auto tdat = source_->read_all(seg.tdat_path);
 
     crypto::AccessKeys keys = crypto::validate_password(
         password_, md.universal_header.level_1_password_validation_field,
@@ -243,19 +217,18 @@ std::vector<Record> Session::read_records(std::optional<std::string> channel) {
     auto it = channels_.find(*channel);
     if (it == channels_.end()) throw std::out_of_range("no such channel: " + *channel);
     rto = it->second.info.recording_time_offset;
-    std::string dir = (fs::path(mefd_path_) / (*channel + ".timd")).string();
-    std::string cand = (fs::path(dir) / (*channel + ".rdat")).string();
-    if (fs::exists(cand)) rdat_path = cand;
+    std::string cand = *channel + ".timd/" + *channel + ".rdat";
+    if (source_->exists(cand)) rdat_path = cand;
   } else {
-    for (const auto& e : fs::directory_iterator(mefd_path_))
-      if (e.is_regular_file() && e.path().extension() == ".rdat") {
-        rdat_path = e.path().string();
+    for (const auto& e : source_->list_dir(""))
+      if (!e.is_dir && e.name.ends_with(".rdat")) {
+        rdat_path = e.name;
         break;
       }
   }
   if (rdat_path.empty()) return {};
 
-  auto bytes = read_file(rdat_path);
+  auto bytes = source_->read_all(rdat_path);
   auto uh = fmt::UniversalHeader::parse(bytes);
   crypto::AccessKeys keys = crypto::validate_password(
       password_, uh.level_1_password_validation_field, uh.level_2_password_validation_field);
@@ -284,7 +257,7 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
         md.universal_header.level_2_password_validation_field);
 
     auto idx = segment_index(seg);
-    const std::size_t n_entries = index_entry_count(idx, seg.tidx_path);
+    const std::size_t n_entries = index_entry_count(idx, source_->describe(seg.tidx_path));
 
     // Determine whether any block in this segment is in range before loading
     // the (potentially large) .tdat.
@@ -313,11 +286,12 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
       range_begin = std::min(range_begin, off);
       range_end = std::max(range_end, off + e.block_bytes);
     }
-    const std::size_t tdat_size = static_cast<std::size_t>(fs::file_size(seg.tdat_path));
+    const std::size_t tdat_size = static_cast<std::size_t>(source_->file_size(seg.tdat_path));
     if (range_end > tdat_size)
-      throw FormatError("index points past end of .tdat: " + seg.tdat_path);
+      throw FormatError("index points past end of .tdat: " + source_->describe(seg.tdat_path));
     std::size_t buf_index = out.buffers.size();
-    out.buffers.push_back(read_file_range(seg.tdat_path, range_begin, range_end - range_begin));
+    out.buffers.push_back(
+        source_->read_range(seg.tdat_path, range_begin, range_end - range_begin));
     for (const auto& e : hits) {
       BlockJob job;
       job.buffer_index = buf_index;
@@ -345,7 +319,7 @@ std::vector<SegmentInfo> Session::segment_map(const std::string& channel) {
     if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
     SegmentInfo si;
     si.segment_number = seg.segment_number;
-    si.path = fs::path(seg.tmet_path).parent_path().string();
+    si.path = source_->describe(seg.tmet_path.substr(0, seg.tmet_path.rfind('/')));
     si.start_time = to_user_time(md.universal_header.start_time, rto);
     si.end_time = to_user_time(md.universal_header.end_time, rto);
     si.start_sample = md.section2.start_sample;
@@ -367,7 +341,7 @@ std::vector<BlockIndexEntry> Session::read_index(const std::string& channel) {
     si8 rto = md.section3_available ? md.section3.recording_time_offset : 0;
     if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
     auto idx = segment_index(seg);
-    const std::size_t n = index_entry_count(idx, seg.tidx_path);
+    const std::size_t n = index_entry_count(idx, source_->describe(seg.tidx_path));
     for (std::size_t i = 0; i < n; ++i) {
       auto e = fmt::TimeSeriesIndex::parse(
           idx.subspan(fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES,

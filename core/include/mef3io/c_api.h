@@ -43,6 +43,9 @@ const char* mef3io_last_error(void);
 
 /* ----- reader ------------------------------------------------------------ */
 
+/* `mefd_path` is a .mefd session directory or an uncompressed tar archive of
+ * one (e.g. name.mefd.tar, from mef3io_archive_session) — tar sessions are
+ * read in place, without extraction. */
 int mef3io_reader_open(const char* mefd_path, const char* password, int n_threads,
                        mef3io_reader** out);
 void mef3io_reader_close(mef3io_reader* r);
@@ -117,7 +120,7 @@ typedef struct {
   int64_t start_sample;
   int64_t number_of_samples;
   int64_t number_of_blocks;
-  char path[1024];
+  char path[1024];  /* .segd dir; "<archive>::<member>" for tar sessions */
 } mef3io_segment_info;
 
 int mef3io_reader_n_segments(mef3io_reader* r, const char* channel, int32_t* out);
@@ -149,8 +152,24 @@ int mef3io_reader_n_records(mef3io_reader* r, const char* channel, int32_t* out)
 int mef3io_reader_record(mef3io_reader* r, const char* channel, int32_t index,
                          mef3io_record_info* out);
 
+/* ----- archive ----------------------------------------------------------- */
+
+/* Pack a session directory into a single uncompressed tar archive (readable
+ * directly by mef3io_reader_open; the directory is left untouched).
+ * tar_path NULL or "" derives "<session_dir>.tar". The resulting archive path
+ * is copied into out_path (may be NULL when not wanted). */
+int mef3io_archive_session(const char* session_dir, const char* tar_path, int overwrite,
+                           char* out_path, size_t out_path_bytes);
+
+/* Inverse: unpack a session archive back into a directory. dest_dir NULL or
+ * "" strips the ".tar" suffix ("name.mefd.tar" -> "name.mefd"). Refuses an
+ * existing target unless overwrite. The directory path lands in out_path. */
+int mef3io_extract_session(const char* tar_path, const char* dest_dir, int overwrite,
+                           char* out_path, size_t out_path_bytes);
+
 /* ----- writer ------------------------------------------------------------ */
 
+/* Rejects tar archives: tar sessions are read-only. */
 int mef3io_writer_open(const char* mefd_path, int overwrite, const char* password_1,
                        const char* password_2, mef3io_writer** out);
 void mef3io_writer_close(mef3io_writer* w);

@@ -11,6 +11,7 @@
 
 #include "mef3io/errors.hpp"
 #include "mef3io/metadata.hpp"
+#include "mef3io/source.hpp"
 #include "mef3io/writer.hpp"
 
 namespace fs = std::filesystem;
@@ -87,6 +88,17 @@ SessionWriter::SessionWriter(const std::string& mefd_path, bool overwrite, std::
     : mefd_path_(mefd_path),
       password_1_(std::move(password_1)),
       password_2_(std::move(password_2)) {
+  // Tar archives are read-only sessions. Refuse them before the destructive
+  // overwrite/remove_all below can ever touch one.
+  if (path_has_suffix(mefd_path_, ".tar"))
+    throw IoError("cannot write into a tar archive (tar sessions are read-only): " + mefd_path_ +
+                  "; write a .mefd directory and pack it with archive_session()");
+  // Same naming contract as the reader: only clearly-marked session
+  // directories are ever created or overwritten.
+  if (!path_has_suffix(mefd_path_, ".mefd"))
+    throw IoError("session directory must end with .mefd: " + mefd_path_);
+  if (fs::exists(mefd_path_) && !fs::is_directory(mefd_path_))
+    throw IoError("session path exists and is not a directory: " + mefd_path_);
   if (overwrite && fs::exists(mefd_path_)) fs::remove_all(mefd_path_);
   fs::create_directories(mefd_path_);
   session_name_ = fs::path(mefd_path_).stem().string();
