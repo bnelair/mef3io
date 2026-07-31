@@ -167,11 +167,28 @@ void write_records(const std::string& dir, const std::string& base,
   // never leaves a half-written .rdat/.ridx pair behind. Any 4-character code
   // is allowed through: types we build no body for still round-trip as an
   // empty-bodied record, which is how unknown MEF record types pass through.
-  for (const auto& r : records)
+  for (const auto& r : records) {
     if (r.type.size() != RECORD_TYPE_BYTES)
       throw FormatError("record type must be exactly " + std::to_string(RECORD_TYPE_BYTES) +
                         " characters (e.g. \"Note\", \"EDFA\", \"SyLg\", \"Seiz\"); got \"" +
                         r.type + "\"");
+    // A 4-character code is well-formed but still says nothing about which
+    // payload the body layout can hold, and record_body drops whatever it has
+    // no slot for. That is the same silent loss as a mis-width type, just
+    // reached by a misspelling ("note") or a type whose body we do not build
+    // (Seiz), so refuse the write rather than store a record missing its
+    // payload. Empty text is not a payload -- the Python helper defaults it.
+    const bool stores_text = r.type == "Note" || r.type == "SyLg" || r.type == "EDFA";
+    const bool stores_duration = r.type == "EDFA";
+    if (!stores_text && r.text && !r.text->empty())
+      throw FormatError("record type \"" + r.type +
+                        "\" stores no text (only \"Note\", \"SyLg\" and \"EDFA\" do), but text "
+                        "was given; it would be silently dropped");
+    if (!stores_duration && r.duration)
+      throw FormatError("record type \"" + r.type +
+                        "\" stores no duration (only \"EDFA\" does), but duration was given; "
+                        "it would be silently dropped");
+  }
   const bool encrypt = !password_1.empty();
   crypto::ValidationFields vf =
       encrypt ? crypto::make_validation_fields(password_1, password_2) : crypto::ValidationFields{};

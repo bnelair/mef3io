@@ -229,3 +229,48 @@ def test_rejected_records_leave_no_partial_files(tmp_path):
     assert not list(Path(path).glob("*.rdat"))
     assert not list(Path(path).glob("*.ridx"))
     assert mef3io.Reader(path).records() == []
+
+
+@pytest.mark.parametrize(
+    "rec,match",
+    [
+        ({"type": "note", "text": "hi"}, "stores no text"),      # wrong case
+        ({"type": "NOTE", "text": "hi"}, "stores no text"),
+        ({"type": "Curs", "text": "hi"}, "stores no text"),      # no body builder
+        ({"type": "Seiz", "text": "hi"}, "stores no text"),      # read-only type
+        ({"type": "Seiz", "duration": 5}, "stores no duration"),
+        ({"type": "Note", "duration": 5}, "stores no duration"),  # Note has no duration slot
+    ],
+)
+def test_record_payload_the_type_cannot_store_is_rejected(tmp_path, rec, match):
+    """A 4-character type is well-formed but says nothing about which payload
+    the body can hold. record_body drops what it has no slot for, so writing
+    e.g. lowercase "note" with text stored a record and silently lost the
+    text -- the same failure as a mis-width type, reached by a misspelling."""
+    path = str(tmp_path / "r.mefd")
+    with mef3io.Writer(path, overwrite=True) as w:
+        w.write("ch1", np.zeros(500), START, FS, precision=3)
+        with pytest.raises(RuntimeError, match=match):
+            w.write_annotations([{"time": START, **rec}])
+
+
+@pytest.mark.parametrize("rec_type", ["Curs", "Seiz", "Epoc"])
+def test_payloadless_records_of_any_type_still_pass_through(tmp_path, rec_type):
+    """Unknown/bodyless 4-char types must still round-trip as empty-bodied
+    records -- that is how MEF types we do not model pass through. The Python
+    helper defaults text to "", which must not count as a payload."""
+    path = str(tmp_path / "r.mefd")
+    with mef3io.Writer(path, overwrite=True) as w:
+        w.write("ch1", np.zeros(500), START, FS, precision=3)
+        w.write_annotations([{"type": rec_type, "time": START}])
+    recs = mef3io.Reader(path).records()
+    assert [r["type"] for r in recs] == [rec_type]
+
+
+def test_edfa_stores_both_text_and_duration(tmp_path):
+    path = str(tmp_path / "r.mefd")
+    with mef3io.Writer(path, overwrite=True) as w:
+        w.write("ch1", np.zeros(500), START, FS, precision=3)
+        w.write_annotations([{"type": "EDFA", "time": START, "text": "hi", "duration": 5000}])
+    rec = mef3io.Reader(path).records()[0]
+    assert rec["text"] == "hi" and rec["duration"] == 5000

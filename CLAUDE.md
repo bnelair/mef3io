@@ -152,7 +152,12 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
 - **Do NOT `pip install -e .` for C++ dev** — scikit-build-core's editable hook
   loads an install-time extension snapshot that shadows the dev_build symlink
   (meta-path beats sys.path). Keep mef3io uninstalled; use scripts/dev_build.sh.
-- Pure-Python backend is a stub. Records write covers Note/EDFA/SyLg/Seiz.
+- Pure-Python backend is a stub. Records write builds bodies for Note/SyLg
+  (text) and EDFA (duration+text) only; Seiz is read-only (`parse_records`
+  decodes onset/offset/duration, `record_body` has no Seiz branch, and the
+  bindings expose no onset/offset fields). Any other 4-char type writes a
+  header with an empty body. `write_records` rejects a record carrying a
+  payload its type cannot store, so the gap fails loudly instead of silently.
   Cache is Python-level (a C++ warm-start is future).
 - **MATLAB binding implemented**: flat C ABI (`core/include/mef3io/c_api.h`,
   Catch2-tested) → single command-dispatch MEX (`matlab/mef3io_mex.cpp`) →
