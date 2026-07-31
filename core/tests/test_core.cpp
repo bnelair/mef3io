@@ -8,6 +8,7 @@
 #include <random>
 #include <vector>
 
+#include "mef3io/byteio.hpp"
 #include "mef3io/crc.hpp"
 #include "mef3io/errors.hpp"
 #include "mef3io/crypto.hpp"
@@ -58,6 +59,43 @@ TEST_CASE("Two-level password derivation") {
   REQUIRE_FALSE(l1.level2_key.has_value());
   auto bad = crypto::validate_password("nope", vf.level1, vf.level2);
   REQUIRE(bad.access_level == fmt::LEVEL_0_ACCESS);
+}
+
+TEST_CASE("write_string keeps fixed-width fields null-terminated and valid UTF-8") {
+  std::vector<ui1> buf(16, 0xAA);
+
+  SECTION("an over-long value is truncated to field_len - 1") {
+    byteio::write_string(buf, 0, 8, std::string(20, 'x'));
+    REQUIRE(byteio::read_string(buf, 0, 8) == "xxxxxxx");
+    REQUIRE(buf[7] == 0);  // terminator, so meflib's C string reads stop here
+    REQUIRE(buf[8] == 0xAA);  // the next field is untouched
+  }
+
+  SECTION("an exact-fit value still reserves the terminator") {
+    byteio::write_string(buf, 0, 8, "abcdefgh");
+    REQUIRE(byteio::read_string(buf, 0, 8) == "abcdefg");
+    REQUIRE(buf[7] == 0);
+  }
+
+  SECTION("truncation cuts on a UTF-8 boundary, never mid-character") {
+    // 6 ASCII + "µ" (2 bytes): the field holds 7 bytes of content, so the
+    // multi-byte character must be dropped whole rather than half-written.
+    byteio::write_string(buf, 0, 8, "abcdef\xc2\xb5");
+    REQUIRE(byteio::read_string(buf, 0, 8) == "abcdef");
+    byteio::write_string(buf, 0, 8, "\xc2\xb5\xc2\xb5\xc2\xb5\xc2\xb5");
+    REQUIRE(byteio::read_string(buf, 0, 8) == "\xc2\xb5\xc2\xb5\xc2\xb5");
+  }
+
+  SECTION("a value that fits is stored verbatim") {
+    byteio::write_string(buf, 0, 8, "\xc2\xb5V");
+    REQUIRE(byteio::read_string(buf, 0, 8) == "\xc2\xb5V");
+  }
+
+  SECTION("write_fixed_code fills the field without a terminator") {
+    // Record type codes ("EDFA", "Note") are exactly field-width by design.
+    byteio::write_fixed_code(buf, 0, 4, "EDFA");
+    REQUIRE(std::memcmp(buf.data(), "EDFA", 4) == 0);
+  }
 }
 
 TEST_CASE("Universal header serialize/parse round trip") {

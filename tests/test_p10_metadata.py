@@ -153,3 +153,41 @@ def test_pymef_reads_metadata(tmp_path):
     assert seg["section_3"]["subject_name_1"][0] == b"Jane"
     assert seg["section_2"]["session_description"][0] == b"pre-surgical eval"
     assert seg["section_2"]["AC_line_frequency"][0] == 60.0
+
+
+def test_units_propagate_to_reader(tmp_path):
+    """Units set on the writer reach the reader on every write path."""
+    path = str(tmp_path / "u.mefd")
+    with mef3io.Writer(path, overwrite=True, units="mV") as w:
+        w.write("ch1", np.zeros(500), START, FS, precision=3)
+        w.write_int32("ch2", np.arange(500, dtype=np.int32), 0.25, START, FS)
+    r = mef3io.Reader(path)
+    assert r.info("ch1")["units_description"] == "mV"
+    assert r.info("ch2")["units_description"] == "mV"
+    assert r.info("ch2")["units_conversion_factor"] == 0.25
+
+    # Nothing specified falls back to the legacy default.
+    path = str(tmp_path / "d.mefd")
+    with mef3io.Writer(path, overwrite=True) as w:
+        w.write("ch1", np.zeros(500), START, FS, precision=3)
+    assert mef3io.Reader(path).info("ch1")["units_description"] == "uV"
+
+
+@pytest.mark.parametrize("units", ["uV", "µV", "u" * 200, "x" * 128, "µ" * 100])
+def test_units_fit_the_128_byte_field(tmp_path, units):
+    """The units field is 128 bytes. An over-long value must be truncated to a
+    null-terminated, UTF-8-clean prefix — a cut mid-character used to make the
+    whole session undecodable on read."""
+    path = str(tmp_path / "s.mefd")
+    with mef3io.Writer(path, overwrite=True, units=units) as w:
+        w.write("ch1", np.zeros(500), START, FS, precision=3)
+
+    got = mef3io.Reader(path).info("ch1")["units_description"]
+    assert len(got.encode()) <= 127  # room for the terminator
+    assert units.startswith(got)  # a prefix, never mangled
+
+    pymef = pytest.importorskip("pymef")
+    from pymef.mef_session import MefSession
+
+    stored = MefSession(path, None, True).read_ts_channel_basic_info()[0]["unit"][0]
+    assert stored == got.encode()

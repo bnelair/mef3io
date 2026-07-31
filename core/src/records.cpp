@@ -18,6 +18,7 @@ namespace {
 using byteio::read;
 using byteio::read_string;
 using byteio::write;
+using byteio::write_fixed_code;
 using byteio::write_string;
 
 // Same negated-on-disk convention as time-series times.
@@ -201,7 +202,7 @@ void write_records(const std::string& dir, const std::string& base,
 
     // Record header (24 B).
     std::vector<ui1> hdr(fmt::RECORD_HEADER_BYTES, 0);
-    write_string(hdr, 4, 4, r.type);
+    write_fixed_code(hdr, 4, 4, r.type);
     write<ui1>(hdr, 9, static_cast<ui1>(r.version_major));
     write<ui1>(hdr, 10, static_cast<ui1>(r.version_minor));
     write<si1>(hdr, 11, enc);
@@ -220,7 +221,7 @@ void write_records(const std::string& dir, const std::string& base,
 
     // Record index entry (24 B): type[4], vmaj@5, vmin@6, enc@7, offset@8, time@16.
     std::vector<ui1> ie(fmt::RECORD_INDEX_BYTES, 0);
-    write_string(ie, 0, 4, r.type);
+    write_fixed_code(ie, 0, 4, r.type);
     write<ui1>(ie, 5, static_cast<ui1>(r.version_major));
     write<ui1>(ie, 6, static_cast<ui1>(r.version_minor));
     write<si1>(ie, 7, enc);
