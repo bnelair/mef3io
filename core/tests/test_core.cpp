@@ -96,6 +96,14 @@ TEST_CASE("write_string keeps fixed-width fields null-terminated and valid UTF-8
     byteio::write_fixed_code(buf, 0, 4, "EDFA");
     REQUIRE(std::memcmp(buf.data(), "EDFA", 4) == 0);
   }
+
+  SECTION("write_fixed_code rejects any width but the exact one") {
+    // Padding or trimming here would emit a valid-looking header carrying a
+    // code the caller never wrote, so both directions must throw.
+    REQUIRE_THROWS_AS(byteio::write_fixed_code(buf, 0, 4, "Notes"), FormatError);
+    REQUIRE_THROWS_AS(byteio::write_fixed_code(buf, 0, 4, "Not"), FormatError);
+    REQUIRE_THROWS_AS(byteio::write_fixed_code(buf, 0, 4, ""), FormatError);
+  }
 }
 
 TEST_CASE("Universal header serialize/parse round trip") {

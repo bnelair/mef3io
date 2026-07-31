@@ -94,13 +94,20 @@ inline void write_string(std::span<ui1> buf, std::size_t offset, std::size_t fie
 // Write a fixed-width tag that is NOT null-terminated: MEF stores some fields
 // as exact-width codes that fill the field (e.g. the 4-byte record type
 // "EDFA"/"Note"). Use write_string for human-readable text fields instead.
+//
+// The value must be exactly field_len bytes. Silently padding or truncating
+// here would emit a well-formed header carrying a code the caller never asked
+// for -- e.g. "Notes" trimmed to "Note", which readers then parse with the
+// wrong body layout -- so a mismatch is a caller bug and throws.
 inline void write_fixed_code(std::span<ui1> buf, std::size_t offset, std::size_t field_len,
                              const std::string& s) {
   if (offset + field_len > buf.size())
     throw FormatError("byteio::write_fixed_code out of range at offset " + std::to_string(offset));
-  ui1* p = buf.data() + offset;
-  std::memset(p, 0, field_len);
-  std::memcpy(p, s.data(), std::min(s.size(), field_len));
+  if (s.size() != field_len)
+    throw FormatError("byteio::write_fixed_code needs exactly " + std::to_string(field_len) +
+                      " bytes at offset " + std::to_string(offset) + ", got " +
+                      std::to_string(s.size()) + " (\"" + s + "\")");
+  std::memcpy(buf.data() + offset, s.data(), field_len);
 }
 
 }  // namespace mef3io::byteio

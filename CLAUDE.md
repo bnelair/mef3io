@@ -127,7 +127,12 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   backs the cut off to a UTF-8 character boundary — a half-written multi-byte
   char makes the whole session throw `UnicodeDecodeError` on open in Python.
   The 4-byte record type code ("EDFA"/"Note") is the exception: it fills the
-  field with no terminator, so it uses `byteio::write_fixed_code` instead.
+  field with no terminator, so it uses `byteio::write_fixed_code` instead —
+  which REQUIRES an exact-width value. Padding/trimming a type code writes a
+  header claiming a type the body was not built for (writing "Notes" stored a
+  "Note" header with an empty body, silently dropping the text), so
+  `write_records` rejects any type that is not 4 characters up front, before
+  opening a file. Unknown 4-char types still pass through with an empty body.
 - **Oracle**: use `pymef` `read_ts_channels_sample([ch],[0,nsamp])` for decoded
   int32 (no gap NaN) and `read_ts_channels_uutc` for gap-filled. `mef3_dump` is
   NOT usable (reads the encryption sentinel byte unsigned). Manifest `nsamp` !=

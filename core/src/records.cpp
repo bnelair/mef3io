@@ -163,6 +163,15 @@ void write_records(const std::string& dir, const std::string& base,
                    int segment_number, const std::vector<Record>& records, si8 rto,
                    const std::string& password_1, const std::string& password_2) {
   if (records.empty()) return;
+  // Reject bad type codes before touching the filesystem, so a rejected batch
+  // never leaves a half-written .rdat/.ridx pair behind. Any 4-character code
+  // is allowed through: types we build no body for still round-trip as an
+  // empty-bodied record, which is how unknown MEF record types pass through.
+  for (const auto& r : records)
+    if (r.type.size() != RECORD_TYPE_BYTES)
+      throw FormatError("record type must be exactly " + std::to_string(RECORD_TYPE_BYTES) +
+                        " characters (e.g. \"Note\", \"EDFA\", \"SyLg\", \"Seiz\"); got \"" +
+                        r.type + "\"");
   const bool encrypt = !password_1.empty();
   crypto::ValidationFields vf =
       encrypt ? crypto::make_validation_fields(password_1, password_2) : crypto::ValidationFields{};

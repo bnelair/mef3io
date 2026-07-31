@@ -191,3 +191,41 @@ def test_units_fit_the_128_byte_field(tmp_path, units):
 
     stored = MefSession(path, None, True).read_ts_channel_basic_info()[0]["unit"][0]
     assert stored == got.encode()
+
+
+@pytest.mark.parametrize("bad_type", ["Notes", "Not", "", "Annotation"])
+def test_record_type_must_be_four_characters(tmp_path, bad_type):
+    """A record type code is an exact 4-byte field. Padding or trimming it
+    silently produced a header claiming a different type than the body was
+    built for -- writing type "Notes" stored a "Note" header with an empty
+    body, dropping the annotation text -- so a bad width must be rejected."""
+    path = str(tmp_path / "r.mefd")
+    with mef3io.Writer(path, overwrite=True) as w:
+        w.write("ch1", np.zeros(500), START, FS, precision=3)
+        with pytest.raises(RuntimeError, match="exactly 4 characters"):
+            w.write_annotations([{"type": bad_type, "time": START, "text": "hello"}])
+
+
+@pytest.mark.parametrize("rec_type", ["Note", "SyLg", "EDFA"])
+def test_valid_record_types_round_trip(tmp_path, rec_type):
+    path = str(tmp_path / "r.mefd")
+    with mef3io.Writer(path, overwrite=True) as w:
+        w.write("ch1", np.zeros(500), START, FS, precision=3)
+        w.write_annotations([{"type": rec_type, "time": START, "text": "hello world"}])
+    recs = mef3io.Reader(path).records()
+    assert [r["type"] for r in recs] == [rec_type]
+    assert recs[0]["text"] == "hello world"
+
+
+def test_rejected_records_leave_no_partial_files(tmp_path):
+    """Validation runs before any file is opened, so a rejected batch does not
+    leave a half-written .rdat/.ridx pair behind."""
+    path = str(tmp_path / "r.mefd")
+    with mef3io.Writer(path, overwrite=True) as w:
+        w.write("ch1", np.zeros(500), START, FS, precision=3)
+        with pytest.raises(RuntimeError):
+            w.write_annotations([{"type": "Note", "time": START, "text": "ok"},
+                                 {"type": "Bad", "time": START, "text": "no"}])
+    assert not list(Path(path).glob("*.rdat"))
+    assert not list(Path(path).glob("*.ridx"))
+    assert mef3io.Reader(path).records() == []
