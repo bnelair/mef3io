@@ -32,6 +32,9 @@ inline constexpr int RECORD_HEADER_BYTES = 24;
 inline constexpr int RECORD_INDEX_BYTES = 24;
 }  // namespace fmt
 
+/// Width of a record type code ("Note", "EDFA", ...): exact, not null-terminated.
+inline constexpr std::size_t RECORD_TYPE_BYTES = 4;
+
 // Parse a .rdat image (universal header + concatenated records). `rto` is the
 // recording-time-offset for resolving absolute record times; `keys` decrypts
 // encrypted record bodies when present.

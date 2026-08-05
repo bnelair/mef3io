@@ -153,3 +153,126 @@ def test_pymef_reads_metadata(tmp_path):
     assert seg["section_3"]["subject_name_1"][0] == b"Jane"
     assert seg["section_2"]["session_description"][0] == b"pre-surgical eval"
     assert seg["section_2"]["AC_line_frequency"][0] == 60.0
+
+
+def test_units_propagate_to_reader(tmp_path):
+    """Units set on the writer reach the reader on every write path."""
+    path = str(tmp_path / "u.mefd")
+    with mef3io.Writer(path, overwrite=True, units="mV") as w:
+        w.write("ch1", np.zeros(500), START, FS, precision=3)
+        w.write_int32("ch2", np.arange(500, dtype=np.int32), 0.25, START, FS)
+    r = mef3io.Reader(path)
+    assert r.info("ch1")["units_description"] == "mV"
+    assert r.info("ch2")["units_description"] == "mV"
+    assert r.info("ch2")["units_conversion_factor"] == 0.25
+
+    # Nothing specified falls back to the legacy default.
+    path = str(tmp_path / "d.mefd")
+    with mef3io.Writer(path, overwrite=True) as w:
+        w.write("ch1", np.zeros(500), START, FS, precision=3)
+    assert mef3io.Reader(path).info("ch1")["units_description"] == "uV"
+
+
+@pytest.mark.parametrize("units", ["uV", "µV", "u" * 200, "x" * 128, "µ" * 100])
+def test_units_fit_the_128_byte_field(tmp_path, units):
+    """The units field is 128 bytes. An over-long value must be truncated to a
+    null-terminated, UTF-8-clean prefix — a cut mid-character used to make the
+    whole session undecodable on read."""
+    path = str(tmp_path / "s.mefd")
+    with mef3io.Writer(path, overwrite=True, units=units) as w:
+        w.write("ch1", np.zeros(500), START, FS, precision=3)
+
+    got = mef3io.Reader(path).info("ch1")["units_description"]
+    assert len(got.encode()) <= 127  # room for the terminator
+    assert units.startswith(got)  # a prefix, never mangled
+
+    pymef = pytest.importorskip("pymef")
+    from pymef.mef_session import MefSession
+
+    stored = MefSession(path, None, True).read_ts_channel_basic_info()[0]["unit"][0]
+    assert stored == got.encode()
+
+
+@pytest.mark.parametrize("bad_type", ["Notes", "Not", "", "Annotation", "Nöte", "Nöt"])
+def test_record_type_must_be_four_ascii_bytes(tmp_path, bad_type):
+    """A record type code is an exact 4-byte ASCII field. Padding or trimming it
+    silently produced a header claiming a different type than the body was
+    built for -- writing type "Notes" stored a "Note" header with an empty
+    body, dropping the annotation text -- so a bad width must be rejected. The
+    width is bytes, not characters: "Nöte" is 4 characters but 5 bytes, and
+    "Nöt" is 4 bytes but not a type tag, so both are rejected too."""
+    path = str(tmp_path / "r.mefd")
+    with mef3io.Writer(path, overwrite=True) as w:
+        w.write("ch1", np.zeros(500), START, FS, precision=3)
+        with pytest.raises(RuntimeError, match="exactly 4 ASCII bytes"):
+            w.write_annotations([{"type": bad_type, "time": START, "text": "hello"}])
+
+
+@pytest.mark.parametrize("rec_type", ["Note", "SyLg", "EDFA"])
+def test_valid_record_types_round_trip(tmp_path, rec_type):
+    path = str(tmp_path / "r.mefd")
+    with mef3io.Writer(path, overwrite=True) as w:
+        w.write("ch1", np.zeros(500), START, FS, precision=3)
+        w.write_annotations([{"type": rec_type, "time": START, "text": "hello world"}])
+    recs = mef3io.Reader(path).records()
+    assert [r["type"] for r in recs] == [rec_type]
+    assert recs[0]["text"] == "hello world"
+
+
+def test_rejected_records_leave_no_partial_files(tmp_path):
+    """Validation runs before any file is opened, so a rejected batch does not
+    leave a half-written .rdat/.ridx pair behind."""
+    path = str(tmp_path / "r.mefd")
+    with mef3io.Writer(path, overwrite=True) as w:
+        w.write("ch1", np.zeros(500), START, FS, precision=3)
+        with pytest.raises(RuntimeError):
+            w.write_annotations([{"type": "Note", "time": START, "text": "ok"},
+                                 {"type": "Bad", "time": START, "text": "no"}])
+    assert not list(Path(path).glob("*.rdat"))
+    assert not list(Path(path).glob("*.ridx"))
+    assert mef3io.Reader(path).records() == []
+
+
+@pytest.mark.parametrize(
+    "rec,match",
+    [
+        ({"type": "note", "text": "hi"}, "stores no text"),      # wrong case
+        ({"type": "NOTE", "text": "hi"}, "stores no text"),
+        ({"type": "Curs", "text": "hi"}, "stores no text"),      # no body builder
+        ({"type": "Seiz", "text": "hi"}, "stores no text"),      # read-only type
+        ({"type": "Seiz", "duration": 5}, "stores no duration"),
+        ({"type": "Note", "duration": 5}, "stores no duration"),  # Note has no duration slot
+    ],
+)
+def test_record_payload_the_type_cannot_store_is_rejected(tmp_path, rec, match):
+    """A 4-character type is well-formed but says nothing about which payload
+    the body can hold. record_body drops what it has no slot for, so writing
+    e.g. lowercase "note" with text stored a record and silently lost the
+    text -- the same failure as a mis-width type, reached by a misspelling."""
+    path = str(tmp_path / "r.mefd")
+    with mef3io.Writer(path, overwrite=True) as w:
+        w.write("ch1", np.zeros(500), START, FS, precision=3)
+        with pytest.raises(RuntimeError, match=match):
+            w.write_annotations([{"time": START, **rec}])
+
+
+@pytest.mark.parametrize("rec_type", ["Curs", "Seiz", "Epoc"])
+def test_payloadless_records_of_any_type_still_pass_through(tmp_path, rec_type):
+    """Unknown/bodyless 4-char types must still round-trip as empty-bodied
+    records -- that is how MEF types we do not model pass through. The Python
+    helper defaults text to "", which must not count as a payload."""
+    path = str(tmp_path / "r.mefd")
+    with mef3io.Writer(path, overwrite=True) as w:
+        w.write("ch1", np.zeros(500), START, FS, precision=3)
+        w.write_annotations([{"type": rec_type, "time": START}])
+    recs = mef3io.Reader(path).records()
+    assert [r["type"] for r in recs] == [rec_type]
+
+
+def test_edfa_stores_both_text_and_duration(tmp_path):
+    path = str(tmp_path / "r.mefd")
+    with mef3io.Writer(path, overwrite=True) as w:
+        w.write("ch1", np.zeros(500), START, FS, precision=3)
+        w.write_annotations([{"type": "EDFA", "time": START, "text": "hi", "duration": 5000}])
+    rec = mef3io.Reader(path).records()[0]
+    assert rec["text"] == "hi" and rec["duration"] == 5000

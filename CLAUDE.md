@@ -121,6 +121,18 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   time@16). Body padded to 16-byte multiple with 0x7e. L2-encrypted when the
   session is encrypted. `.ridx` entry 24 B (type@0,vmaj@5,vmin@6,enc@7,
   offset@8,time@16). file_offset FILE-relative.
+- **Fixed-width strings**: text fields (units_description 128 B,
+  channel/session_description 2048 B, subject_* 128 B, …) are NUL-terminated,
+  so max content is field_len - 1. `byteio::write_string` enforces that AND
+  backs the cut off to a UTF-8 character boundary — a half-written multi-byte
+  char makes the whole session throw `UnicodeDecodeError` on open in Python.
+  The 4-byte record type code ("EDFA"/"Note") is the exception: it fills the
+  field with no terminator, so it uses `byteio::write_fixed_code` instead —
+  which REQUIRES an exact-width value. Padding/trimming a type code writes a
+  header claiming a type the body was not built for (writing "Notes" stored a
+  "Note" header with an empty body, silently dropping the text), so
+  `write_records` rejects any type that is not 4 ASCII bytes up front, before
+  opening a file. Unknown 4-char types still pass through with an empty body.
 - **Oracle**: use `pymef` `read_ts_channels_sample([ch],[0,nsamp])` for decoded
   int32 (no gap NaN) and `read_ts_channels_uutc` for gap-filled. `mef3_dump` is
   NOT usable (reads the encryption sentinel byte unsigned). Manifest `nsamp` !=
@@ -140,7 +152,12 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
 - **Do NOT `pip install -e .` for C++ dev** — scikit-build-core's editable hook
   loads an install-time extension snapshot that shadows the dev_build symlink
   (meta-path beats sys.path). Keep mef3io uninstalled; use scripts/dev_build.sh.
-- Pure-Python backend is a stub. Records write covers Note/EDFA/SyLg/Seiz.
+- Pure-Python backend is a stub. Records write builds bodies for Note/SyLg
+  (text) and EDFA (duration+text) only; Seiz is read-only (`parse_records`
+  decodes onset/offset/duration, `record_body` has no Seiz branch, and the
+  bindings expose no onset/offset fields). Any other 4-char type writes a
+  header with an empty body. `write_records` rejects a record carrying a
+  payload its type cannot store, so the gap fails loudly instead of silently.
   Cache is Python-level (a C++ warm-start is future).
 - **MATLAB binding implemented**: flat C ABI (`core/include/mef3io/c_api.h`,
   Catch2-tested) → single command-dispatch MEX (`matlab/mef3io_mex.cpp`) →

@@ -69,18 +69,45 @@ inline std::string read_string(std::span<const ui1> buf, std::size_t offset, std
   return std::string(reinterpret_cast<const char*>(p), n);
 }
 
-// Write a string into a fixed-width field: null-padded, truncated to field_len.
-// A field_len-length string is stored without a null terminator (matches MEF,
-// where the max content length is field_len - 1 by convention but the last
-// byte is still usable for exact-fit strings written by some tools).
+// Write a string into a fixed-width field: null-padded, truncated to
+// field_len - 1 bytes so the field is always null-terminated (MEF convention;
+// meflib reads these with C string semantics and would run past an exact-fit
+// field into the next one). Truncation backs off to a UTF-8 character
+// boundary, so a cut never leaves a half-written multi-byte character that
+// would make the field undecodable.
 inline void write_string(std::span<ui1> buf, std::size_t offset, std::size_t field_len,
                          const std::string& s) {
   if (offset + field_len > buf.size())
     throw FormatError("byteio::write_string out of range at offset " + std::to_string(offset));
   ui1* p = buf.data() + offset;
   std::memset(p, 0, field_len);
-  std::size_t n = std::min(s.size(), field_len);
+  if (field_len == 0) return;
+  std::size_t n = std::min(s.size(), field_len - 1);
+  // If we cut mid-string, walk the cut point back over any UTF-8 continuation
+  // bytes (0b10xxxxxx) so it lands on a character boundary and the kept prefix
+  // holds only whole characters.
+  if (n < s.size())
+    while (n > 0 && (static_cast<ui1>(s[n]) & 0xC0) == 0x80) --n;
   std::memcpy(p, s.data(), n);
+}
+
+// Write a fixed-width tag that is NOT null-terminated: MEF stores some fields
+// as exact-width codes that fill the field (e.g. the 4-byte record type
+// "EDFA"/"Note"). Use write_string for human-readable text fields instead.
+//
+// The value must be exactly field_len bytes. Silently padding or truncating
+// here would emit a well-formed header carrying a code the caller never asked
+// for -- e.g. "Notes" trimmed to "Note", which readers then parse with the
+// wrong body layout -- so a mismatch is a caller bug and throws.
+inline void write_fixed_code(std::span<ui1> buf, std::size_t offset, std::size_t field_len,
+                             const std::string& s) {
+  if (offset + field_len > buf.size())
+    throw FormatError("byteio::write_fixed_code out of range at offset " + std::to_string(offset));
+  if (s.size() != field_len)
+    throw FormatError("byteio::write_fixed_code needs exactly " + std::to_string(field_len) +
+                      " bytes at offset " + std::to_string(offset) + ", got " +
+                      std::to_string(s.size()) + " (\"" + s + "\")");
+  std::memcpy(buf.data() + offset, s.data(), field_len);
 }
 
 }  // namespace mef3io::byteio

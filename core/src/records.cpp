@@ -18,6 +18,7 @@ namespace {
 using byteio::read;
 using byteio::read_string;
 using byteio::write;
+using byteio::write_fixed_code;
 using byteio::write_string;
 
 // Same negated-on-disk convention as time-series times.
@@ -162,6 +163,39 @@ void write_records(const std::string& dir, const std::string& base,
                    int segment_number, const std::vector<Record>& records, si8 rto,
                    const std::string& password_1, const std::string& password_2) {
   if (records.empty()) return;
+  // Reject bad type codes before touching the filesystem, so a rejected batch
+  // never leaves a half-written .rdat/.ridx pair behind. Any 4-character code
+  // is allowed through: types we build no body for still round-trip as an
+  // empty-bodied record, which is how unknown MEF record types pass through.
+  for (const auto& r : records) {
+    // The field is 4 raw bytes, so the width is measured in bytes, not in
+    // characters: a 4-character non-ASCII code ("Nöte") is 5 bytes and would
+    // not fit, and a code that happens to be 4 bytes of UTF-8 ("Nöt") is not a
+    // MEF type tag either. Say bytes and require ASCII so the message and the
+    // check agree.
+    const bool ascii = std::all_of(r.type.begin(), r.type.end(),
+                                   [](unsigned char c) { return c >= 0x20 && c <= 0x7E; });
+    if (r.type.size() != RECORD_TYPE_BYTES || !ascii)
+      throw FormatError("record type must be exactly " + std::to_string(RECORD_TYPE_BYTES) +
+                        " ASCII bytes (e.g. \"Note\", \"EDFA\", \"SyLg\", \"Seiz\"); got \"" +
+                        r.type + "\" (" + std::to_string(r.type.size()) + " bytes)");
+    // A 4-character code is well-formed but still says nothing about which
+    // payload the body layout can hold, and record_body drops whatever it has
+    // no slot for. That is the same silent loss as a mis-width type, just
+    // reached by a misspelling ("note") or a type whose body we do not build
+    // (Seiz), so refuse the write rather than store a record missing its
+    // payload. Empty text is not a payload -- the Python helper defaults it.
+    const bool stores_text = r.type == "Note" || r.type == "SyLg" || r.type == "EDFA";
+    const bool stores_duration = r.type == "EDFA";
+    if (!stores_text && r.text && !r.text->empty())
+      throw FormatError("record type \"" + r.type +
+                        "\" stores no text (only \"Note\", \"SyLg\" and \"EDFA\" do), but text "
+                        "was given; it would be silently dropped");
+    if (!stores_duration && r.duration)
+      throw FormatError("record type \"" + r.type +
+                        "\" stores no duration (only \"EDFA\" does), but duration was given; "
+                        "it would be silently dropped");
+  }
   const bool encrypt = !password_1.empty();
   crypto::ValidationFields vf =
       encrypt ? crypto::make_validation_fields(password_1, password_2) : crypto::ValidationFields{};
@@ -201,7 +235,7 @@ void write_records(const std::string& dir, const std::string& base,
 
     // Record header (24 B).
     std::vector<ui1> hdr(fmt::RECORD_HEADER_BYTES, 0);
-    write_string(hdr, 4, 4, r.type);
+    write_fixed_code(hdr, 4, 4, r.type);
     write<ui1>(hdr, 9, static_cast<ui1>(r.version_major));
     write<ui1>(hdr, 10, static_cast<ui1>(r.version_minor));
     write<si1>(hdr, 11, enc);
@@ -220,7 +254,7 @@ void write_records(const std::string& dir, const std::string& base,
 
     // Record index entry (24 B): type[4], vmaj@5, vmin@6, enc@7, offset@8, time@16.
     std::vector<ui1> ie(fmt::RECORD_INDEX_BYTES, 0);
-    write_string(ie, 0, 4, r.type);
+    write_fixed_code(ie, 0, 4, r.type);
     write<ui1>(ie, 5, static_cast<ui1>(r.version_major));
     write<ui1>(ie, 6, static_cast<ui1>(r.version_minor));
     write<si1>(ie, 7, enc);
