@@ -1,0 +1,25 @@
+# Normalize line endings across platforms.
+# Everything Git detects as text is stored LF in the repo and checked out LF
+# everywhere, regardless of the cloner's core.autocrlf. Without this, a clone on
+# Windows rewrites the tree to CRLF, which shows up as every file "modified" on
+# Linux/macOS and breaks scripts/dev_build.sh (`bad interpreter: /bin/bash^M`).
+* text=auto eol=lf
+
+# MEF 3.0 fixtures and other binaries: never touch these bytes. Golden files are
+# compared byte-for-byte against pymef/mef_tools, and .tdat/.tmet CRCs would not
+# survive EOL translation.
+*.tdat binary
+*.tidx binary
+*.tmet binary
+*.rdat binary
+*.ridx binary
+*.tar  binary
+*.npz  binary
+*.png  binary
+*.jpg  binary
+*.gif  binary
+*.pdf  binary
+*.so   binary
+*.dylib binary
+*.dll  binary
+*.mex* binary
