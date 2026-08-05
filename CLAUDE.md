@@ -127,6 +127,8 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   (`claim_range`, descending job order = last block wins = what a serial
   scatter gives). Never let workers scatter by block offset directly: that is a
   silent data race on the overlapped samples, not just a tie-break question.
+  Partitioning up front also means a block a later one covers outright owns
+  nothing, so it is not decoded at all (halves decode time on such geometry).
 - **RED encode**: first emitted byte is junk (meflib overwrites stats[255] then
   restores) → drop emitted[0], payload = emitted[1:] at offset 304; stored
   difference_bytes = generated+1. Lossless no-detrend/no-scale, pymef-readable.
