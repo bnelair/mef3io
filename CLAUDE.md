@@ -131,7 +131,7 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   which REQUIRES an exact-width value. Padding/trimming a type code writes a
   header claiming a type the body was not built for (writing "Notes" stored a
   "Note" header with an empty body, silently dropping the text), so
-  `write_records` rejects any type that is not 4 characters up front, before
+  `write_records` rejects any type that is not 4 ASCII bytes up front, before
   opening a file. Unknown 4-char types still pass through with an empty body.
 - **Oracle**: use `pymef` `read_ts_channels_sample([ch],[0,nsamp])` for decoded
   int32 (no gap NaN) and `read_ts_channels_uutc` for gap-filled. `mef3_dump` is

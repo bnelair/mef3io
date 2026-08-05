@@ -168,10 +168,17 @@ void write_records(const std::string& dir, const std::string& base,
   // is allowed through: types we build no body for still round-trip as an
   // empty-bodied record, which is how unknown MEF record types pass through.
   for (const auto& r : records) {
-    if (r.type.size() != RECORD_TYPE_BYTES)
+    // The field is 4 raw bytes, so the width is measured in bytes, not in
+    // characters: a 4-character non-ASCII code ("Nöte") is 5 bytes and would
+    // not fit, and a code that happens to be 4 bytes of UTF-8 ("Nöt") is not a
+    // MEF type tag either. Say bytes and require ASCII so the message and the
+    // check agree.
+    const bool ascii = std::all_of(r.type.begin(), r.type.end(),
+                                   [](unsigned char c) { return c >= 0x20 && c <= 0x7E; });
+    if (r.type.size() != RECORD_TYPE_BYTES || !ascii)
       throw FormatError("record type must be exactly " + std::to_string(RECORD_TYPE_BYTES) +
-                        " characters (e.g. \"Note\", \"EDFA\", \"SyLg\", \"Seiz\"); got \"" +
-                        r.type + "\"");
+                        " ASCII bytes (e.g. \"Note\", \"EDFA\", \"SyLg\", \"Seiz\"); got \"" +
+                        r.type + "\" (" + std::to_string(r.type.size()) + " bytes)");
     // A 4-character code is well-formed but still says nothing about which
     // payload the body layout can hold, and record_body drops whatever it has
     // no slot for. That is the same silent loss as a mis-width type, just

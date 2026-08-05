@@ -193,16 +193,18 @@ def test_units_fit_the_128_byte_field(tmp_path, units):
     assert stored == got.encode()
 
 
-@pytest.mark.parametrize("bad_type", ["Notes", "Not", "", "Annotation"])
-def test_record_type_must_be_four_characters(tmp_path, bad_type):
-    """A record type code is an exact 4-byte field. Padding or trimming it
+@pytest.mark.parametrize("bad_type", ["Notes", "Not", "", "Annotation", "Nöte", "Nöt"])
+def test_record_type_must_be_four_ascii_bytes(tmp_path, bad_type):
+    """A record type code is an exact 4-byte ASCII field. Padding or trimming it
     silently produced a header claiming a different type than the body was
     built for -- writing type "Notes" stored a "Note" header with an empty
-    body, dropping the annotation text -- so a bad width must be rejected."""
+    body, dropping the annotation text -- so a bad width must be rejected. The
+    width is bytes, not characters: "Nöte" is 4 characters but 5 bytes, and
+    "Nöt" is 4 bytes but not a type tag, so both are rejected too."""
     path = str(tmp_path / "r.mefd")
     with mef3io.Writer(path, overwrite=True) as w:
         w.write("ch1", np.zeros(500), START, FS, precision=3)
-        with pytest.raises(RuntimeError, match="exactly 4 characters"):
+        with pytest.raises(RuntimeError, match="exactly 4 ASCII bytes"):
             w.write_annotations([{"type": bad_type, "time": START, "text": "hello"}])
 
 
