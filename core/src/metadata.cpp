@@ -25,8 +25,15 @@ TimeSeriesMetadata load_time_series_metadata(std::span<const ui1> tmet_bytes,
   // subject metadata) — 15/16 of the file. Without this check, body
   // corruption silently yields garbage scaling. CRC_START_VALUE doubles as
   // meflib's "no entry": skip validation for writers that never filled it.
+  //
+  // Bound the CRC by the record's declared size, NOT by EOF: .tmet is a
+  // fixed-length record (1024 B universal header + 15360 B of sections) and
+  // some writers leave trailing bytes past its end. Those bytes are not part
+  // of the record the stored CRC was computed over, so hashing to EOF rejects
+  // intact metadata as corrupt — and every read of such a session fails.
   if (md.universal_header.body_crc != CRC_START_VALUE) {
-    ui4 body = crc::calculate(tmet_bytes.subspan(UNIVERSAL_HEADER_BYTES));
+    ui4 body = crc::calculate(
+        tmet_bytes.subspan(UNIVERSAL_HEADER_BYTES, METADATA_FILE_BYTES - UNIVERSAL_HEADER_BYTES));
     if (body != md.universal_header.body_crc)
       throw CrcError("tmet body CRC mismatch (metadata sections corrupted)");
   }

@@ -112,6 +112,21 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
 - **Index file_offset is FILE-relative** (includes the 1024 B UH); first block
   offset = 1024. Windowed reads must read only the needed byte range
   (`collect_blocks` uses `read_file_range`), not the whole `.tdat`.
+- **`.tmet` is a FIXED-length record** (1024 B UH + 15360 B sections =
+  `METADATA_FILE_BYTES`); the size check is `>=`, and foreign writers do append
+  trailing bytes past its end. The body CRC must be bounded by
+  `METADATA_FILE_BYTES`, NOT taken to EOF — hashing the padding rejects intact
+  metadata as "corrupted" and, since it throws in the ctor, kills the whole
+  session (reported in 1.1.1: 1094 padded files, 0 actually corrupt).
+- **Block ranges can OVERLAP on the sample grid.** Only writers that put every
+  block start exactly on the grid (mef3io's own) tile the output cleanly;
+  foreign recorders carry acquisition jitter + per-block us rounding, so a
+  block can start a few samples before the previous one ends — occasionally a
+  short block lands entirely inside its predecessor. `read_raw` therefore
+  partitions the output into disjoint per-block pieces BEFORE decoding
+  (`claim_range`, descending job order = last block wins = what a serial
+  scatter gives). Never let workers scatter by block offset directly: that is a
+  silent data race on the overlapped samples, not just a tie-break question.
 - **RED encode**: first emitted byte is junk (meflib overwrites stats[255] then
   restores) → drop emitted[0], payload = emitted[1:] at offset 304; stored
   difference_bytes = generated+1. Lossless no-detrend/no-scale, pymef-readable.
@@ -137,7 +152,10 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   int32 (no gap NaN) and `read_ts_channels_uutc` for gap-filled. `mef3_dump` is
   NOT usable (reads the encryption sentinel byte unsigned). Manifest `nsamp` !=
   stored nsamp (it's get_raw_data length incl. gaps) — compare vs pymef
-  basic_info.
+  basic_info. Oracle agreement is exact for grid-aligned block times; when
+  block timestamps drift off the grid the two layouts differ *by design* —
+  meflib packs blocks contiguously by sample count within a run, mef3io places
+  each block at its own timestamp. Not reconciled (see next section).
 
 ## Known limitations / next steps
 
@@ -149,6 +167,15 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   appends reuse the segment's precision. `Reader.segments(ch)` maps what data
   is where per segment. First appended block keeps discontinuity=true (readers
   are time-gridded so contiguous appends stay seamless).
+- **Off-grid block times: placement rule not reconciled with meflib.** With
+  jittered block timestamps, meflib/pymef `read_ts_channels_uutc` lays blocks
+  out contiguously by sample count within a continuous run (ignoring the
+  per-block timestamp until a discontinuity), while mef3io grids every block by
+  its own timestamp. Both are self-consistent and thread-invariant; they place
+  data differently on such files. Reproduce with `tests/test_p6_threads.py`'s
+  `_shift_block_times` + pymef. Decide deliberately before changing — real
+  production sessions are affected, and one segment-level error currently
+  fails the whole session (a per-segment/lenient mode is also open).
 - **Do NOT `pip install -e .` for C++ dev** — scikit-build-core's editable hook
   loads an install-time extension snapshot that shadows the dev_build symlink
   (meta-path beats sys.path). Keep mef3io uninstalled; use scripts/dev_build.sh.

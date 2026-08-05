@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <random>
 #include <vector>
 
@@ -14,6 +15,7 @@
 #include "mef3io/crypto.hpp"
 #include "mef3io/headers.hpp"
 #include "mef3io/c_api.h"
+#include "mef3io/reader.hpp"
 #include "mef3io/red.hpp"
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
@@ -310,4 +312,101 @@ TEST_CASE("Corrupt inputs fail with exceptions, never crashes") {
     REQUIRE_THROWS_AS(s.read_index("ch1"), FormatError);
     fsys::remove_all(dir);
   }
+}
+
+TEST_CASE("tmet tolerates trailing padding but not corruption inside the record") {
+  namespace fsys = std::filesystem;
+  const auto dir = fsys::temp_directory_path() / "mef3io_tmet_pad_test.mefd";
+  fsys::remove_all(dir);
+  {
+    SessionWriter w(dir.string(), true);
+    std::vector<si4> a(1000);
+    for (int i = 0; i < 1000; ++i) a[i] = i;
+    w.write_int32("ch1", a, 1.0, 1577836800000000, 250.0);
+  }
+  const auto tmet = dir / "ch1.timd" / "ch1-000000.segd" / "ch1-000000.tmet";
+  REQUIRE(fsys::file_size(tmet) == static_cast<std::uintmax_t>(fmt::METADATA_FILE_BYTES));
+
+  SECTION("trailing bytes past the fixed-length record are not part of the body CRC") {
+    {
+      std::ofstream f(tmet, std::ios::binary | std::ios::app);
+      std::vector<char> pad(4096, 0);
+      f.write(pad.data(), static_cast<std::streamsize>(pad.size()));
+    }
+    Session s(dir.string());
+    REQUIRE(s.channel_info("ch1").number_of_samples == 1000);
+    REQUIRE(s.channel_info("ch1").sampling_frequency == 250.0);
+  }
+
+  SECTION("corruption within the record still fails, padding or not") {
+    {
+      std::fstream f(tmet, std::ios::binary | std::ios::in | std::ios::out);
+      f.seekp(fmt::METADATA_SECTION_2_OFFSET + 8);
+      const char junk[4] = {'\xde', '\xad', '\xbe', '\xef'};
+      f.write(junk, 4);
+    }
+    {
+      std::ofstream f(tmet, std::ios::binary | std::ios::app);
+      std::vector<char> pad(512, 0);
+      f.write(pad.data(), static_cast<std::streamsize>(pad.size()));
+    }
+    REQUIRE_THROWS_AS(Session(dir.string()), CrcError);
+  }
+  fsys::remove_all(dir);
+}
+
+TEST_CASE("Decoding is thread-count invariant when blocks overlap the sample grid") {
+  namespace fsys = std::filesystem;
+  const auto dir = fsys::temp_directory_path() / "mef3io_overlap_test.mefd";
+  fsys::remove_all(dir);
+
+  const si8 start = 1577836800000000;
+  const sf8 fs = 250.0;
+  std::mt19937 rng(7);
+  std::vector<si4> a(60000);
+  for (std::size_t i = 0; i < a.size(); ++i) a[i] = static_cast<si4>(rng() % 20000) - 10000;
+  {
+    SessionWriter w(dir.string(), true);
+    w.write_int32("ch1", a, 1.0, start, fs);
+  }
+
+  // Foreign writers store per-block timestamps carrying acquisition jitter, so
+  // blocks can claim overlapping output samples. Emulate that by moving each
+  // stored block start off the grid (times are stored NEGATED on disk).
+  const auto tidx = dir / "ch1.timd" / "ch1-000000.segd" / "ch1-000000.tidx";
+  std::vector<ui1> idx;
+  {
+    std::ifstream f(tidx, std::ios::binary);
+    idx.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+  }
+  const std::size_t n_entries =
+      (idx.size() - fmt::UNIVERSAL_HEADER_BYTES) / fmt::TIME_SERIES_INDEX_BYTES;
+  REQUIRE(n_entries > 4);
+  const int shifts[] = {-9, 4, -13, 7, -2, 11};  // samples
+  for (std::size_t i = 1; i < n_entries; ++i) {
+    const std::size_t off =
+        fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES + 8;
+    std::span<ui1> field(idx.data() + off, 8);
+    const si8 stored = byteio::read<si8>(std::span<const ui1>(idx).subspan(off, 8), 0);
+    const si8 shift_us =
+        static_cast<si8>(std::llround(shifts[i % 6] * 1e6 / fs));
+    byteio::write<si8>(field, 0, stored - shift_us);
+  }
+  {
+    std::ofstream f(tidx, std::ios::binary | std::ios::trunc);
+    f.write(reinterpret_cast<const char*>(idx.data()), static_cast<std::streamsize>(idx.size()));
+  }
+
+  // Overlapping blocks are resolved by "last block wins", the result a serial
+  // scatter produces; every thread count must reproduce it byte for byte.
+  Reader r(dir.string(), "", 1);
+  const RawData base = r.read_raw("ch1");
+  for (int threads : {2, 3, 4, 8, 16, 0}) {
+    for (int rep = 0; rep < 3; ++rep) {
+      const RawData got = r.read_raw("ch1", std::nullopt, std::nullopt, threads);
+      REQUIRE(got.samples == base.samples);
+      REQUIRE(got.valid == base.valid);
+    }
+  }
+  fsys::remove_all(dir);
 }

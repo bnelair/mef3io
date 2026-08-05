@@ -182,3 +182,34 @@ def test_annotation_time_types(tmp_path):
     assert recs[0]["time"] == START + 1_000_000
     assert recs[1]["duration"] == 500_000
     assert recs[2]["time"] == START + 3_000_000
+
+
+def test_tmet_with_trailing_padding_opens(tmp_path):
+    # .tmet is a fixed-length record (1024 B universal header + 15360 B of
+    # sections). Some writers leave trailing bytes past its end; those bytes are
+    # not part of what the stored body CRC covers, so hashing to EOF rejected
+    # intact metadata and made the whole session unreadable.
+    path = _make_session(tmp_path)
+    ref = mef3io.Reader(path).read("ch1")
+    assert os.path.getsize(_seg_file(path, "tmet")) == 16384
+
+    with open(_seg_file(path, "tmet"), "ab") as f:
+        f.write(b"\x00" * 4096)
+
+    r = mef3io.Reader(path)
+    assert r.channels == ["ch1"]
+    assert np.array_equal(r.read("ch1"), ref, equal_nan=True)
+
+
+def test_tmet_corruption_inside_the_record_still_raises(tmp_path):
+    # Bounding the CRC by the record size must not blunt it: corruption within
+    # the 16384-byte record has to stay fatal even when padding follows.
+    path = _make_session(tmp_path)
+    with open(_seg_file(path, "tmet"), "r+b") as f:
+        f.seek(1024 + 1536 + 6160)  # section-2 sampling_frequency field
+        f.write(b"\xde\xad\xbe\xef")
+        f.seek(0, os.SEEK_END)
+        f.write(b"\x00" * 512)
+
+    with pytest.raises(RuntimeError, match="body CRC"):
+        mef3io.Reader(path)
