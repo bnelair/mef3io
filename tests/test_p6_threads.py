@@ -80,7 +80,6 @@ def _block_lengths(path):
 
 def _shift_block_times(path, shifts_samples):
     """Move block i's stored start time by shifts_samples[i] on the time axis.
-
     Blocks written by mef3io start exactly on the sampling grid, so they tile
     the output without overlap. Foreign writers carry acquisition jitter and
     per-block microsecond rounding, so a block can begin a few samples before
@@ -144,4 +143,28 @@ def test_decode_deterministic_when_a_block_is_shadowed(tmp_path):
     # Pull every short block back so it starts 800 samples before the preceding
     # long block ends and finishes 100 samples before it: fully shadowed.
     _shift_block_times(path, [0 if i % 2 == 0 else -(gap + 800) for i in range(len(lens))])
+    _assert_thread_invariant(path)
+
+
+def test_decode_when_a_later_block_swallows_an_earlier_one(tmp_path):
+    # The mirror of the case above: a LATER block pulled back far enough to
+    # cover an earlier one outright. The earlier block then owns no output at
+    # all and read_raw skips decoding it, so the samples in its range must come
+    # from the later block — what a serial front-to-back scatter leaves there.
+    data = _signal(120000)
+    path = str(tmp_path / "s.mefd")
+    _write(path, 1, data)
+    lens = _block_lengths(path)
+    assert len(lens) > 4 and len(set(lens)) == 1, lens
+    span = lens[0]
+    assert len(lens) * span == len(data), (len(lens), span)
+    # Pull every odd block back one whole block: it then spans exactly its
+    # predecessor's range, leaving the predecessor with nothing to write.
+    _shift_block_times(path, [0 if i % 2 == 0 else -span for i in range(len(lens))])
+
+    quant = np.round(data * 100).astype(np.int64)
+    got = np.asarray(m.Reader(path, "").read_raw("ch1", n_threads=1)["samples"]).astype(np.int64)
+    for i in range(1, len(lens), 2):  # each swallowed block's range
+        lo = (i - 1) * span
+        assert np.array_equal(got[lo:lo + span], quant[i * span:(i + 1) * span]), i
     _assert_thread_invariant(path)

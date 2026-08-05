@@ -110,6 +110,9 @@ RawData Reader::read_raw(const std::string& channel, std::optional<si8> t0_opt,
   }
 
   parallel_for(n_jobs, threads, [&](std::size_t j) {
+    // A block that owns no output — fully shadowed by a later one, or trimmed
+    // away by the window — cannot affect the result, so don't decode it.
+    if (count[j] == 0) return;
     const BlockJob& job = jobs.jobs[j];
     std::span<const ui1> block(jobs.buffers[job.buffer_index].data() + job.offset, job.block_bytes);
     auto decoded = red::decode_block(block, job.keys);
