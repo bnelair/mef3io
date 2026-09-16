@@ -13,7 +13,7 @@ against the legacy stack.
 ## Status
 
 Read and write are implemented and cross-validated against the legacy
-`pymef` / `mef_tools` stack in both directions (~112 Python tests + standalone
+`pymef` / `mef_tools` stack in both directions (~229 Python tests + standalone
 C++ tests). Scope notes:
 
 - **Video** (`.vidd/.vmet/.vidx`) is out of scope (traversal skips it).
@@ -27,6 +27,20 @@ C++ tests). Scope notes:
 - **Pure-Python backend**: not yet implemented (`backend="pure"` raises).
 - **Append** extends the channel's last segment in place (legacy semantics);
   `new_segment=True` forces a fresh segment.
+- **Third-party reader compatibility**: metadata section 2 declares the buffer
+  sizes a meflib-based reader (CyberPSG and similar) allocates from. Versions
+  **≤ 1.1.2** left `maximum_difference_bytes` and
+  `maximum_contiguous_block_bytes` at `0`, which such a reader cannot tell from
+  an unset field — sessions they wrote read fine in mef3io and pymef but can
+  crash one of those readers. Since **1.1.3** all of them are measured from the
+  blocks written; appending to an older segment repairs it in place, and
+  rewriting the session fixes it outright. See
+  [docs/mef3_format.md](docs/mef3_format.md#the-buffer-sizing-declarations).
+- **Validation**: `mef3io.Validator` checks a session's declarations against
+  its data and repairs only the checks you name — see
+  [Validating and repairing](docs/validation.md). Opening a session that leaves
+  those declarations unset warns once, saying plainly that reading is
+  unaffected.
 
 Full docs live at **<https://bnelair.github.io/mef3io/>** (built from
 `docs/` with MkDocs Material, deployed by `.github/workflows/docs.yml`).
@@ -134,14 +148,15 @@ external dataloader parallelism is safe too.
 
 ```
 core/        C++17/20 library (types, byteio, crc, crypto, headers, metadata,
-             red, session, reader, records, writer, session_writer) + Catch2 tests
+             red, session, reader, records, writer, session_writer, validate)
+             + Catch2 tests
 bindings/    nanobind extension (_mef3io)
-python/mef3io/  Reader, Writer, compat (mef_tools.io shim), cache, pure (stub)
+python/mef3io/  Reader, Writer, Validator, compat (mef_tools.io shim), cache, pure
 matlab/      MEX gateway over the C ABI (core/include/mef3io/c_api.h),
              +mef3io Reader/Writer classes, build_mex.m, test_mef3io.m
 examples/    runnable scripts: write/read, int32, append, segment map,
              annotations, encryption, legacy drop-in, replicability checks
-tests/       golden fixture generator + P1–P9 pytest suites (pymef oracle)
+tests/       golden fixture generator + P1–P13 pytest suites (pymef oracle)
 benchmarks/  bindings + legacy/NWB-Zarr comparison scripts
 docs/        MkDocs site source (guides, format reference, legacy comparison)
 scripts/     dev_build.sh (dev build + extension symlink)

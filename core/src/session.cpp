@@ -8,6 +8,7 @@
 
 #include "mef3io/errors.hpp"
 #include "mef3io/red.hpp"
+#include "mef3io/validate.hpp"
 
 namespace mef3io {
 namespace {
@@ -301,6 +302,19 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
       job.number_of_samples = e.number_of_samples;
       job.keys = keys;
       out.jobs.push_back(job);
+    }
+  }
+  return out;
+}
+
+std::vector<DeclarationIssue> Session::declaration_issues() const {
+  std::vector<DeclarationIssue> out;
+  for (const auto& name : channel_names_) {
+    const Channel& ch = channels_.at(name);
+    for (const auto& seg : ch.segments) {
+      if (!seg.metadata) continue;  // not loaded (should not happen after open)
+      for (const auto& field : unset_declarations(seg.metadata->section2))
+        out.push_back({name, seg.segment_number, field});
     }
   }
   return out;

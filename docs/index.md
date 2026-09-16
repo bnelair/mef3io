@@ -63,5 +63,15 @@ Read + write are complete and released; in-segment append matches legacy
 semantics. Out of scope: MEF video files. Records cover Note, EDFA, SyLg,
 Seiz. The pure-Python fallback backend is not yet implemented.
 
+Sessions written by mef3io **≤ 1.1.2** under-declare the section-2 buffer sizes
+that meflib-based readers (CyberPSG and similar) allocate from; they read
+correctly in mef3io and pymef but can crash such a reader. Since 1.1.3 those
+fields are measured from the blocks written — appending to an older segment
+repairs it in place, and rewriting the session fixes it outright. Opening such
+a session warns once, saying plainly that reading is unaffected; see
+[Validating and repairing](validation.md) to inspect or fix a file, and
+[the format reference](mef3_format.md#the-buffer-sizing-declarations) for what
+the declarations mean.
+
 mef3io is developed at the Mayo Clinic BNEL (Bioelectronics Neurophysiology
 and Engineering Lab).

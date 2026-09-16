@@ -3,9 +3,46 @@ backend). Thin: adds context-manager support and pandas-friendly helpers while
 delegating all real work to the backend."""
 from __future__ import annotations
 
+import warnings
 from typing import Optional
 
 import numpy as np
+
+
+class SessionDeclarationWarning(UserWarning):
+    """A session leaves size declarations unset that other readers rely on.
+
+    Raised on open, once per session. It never affects mef3io's own reads —
+    mef3io sizes every buffer from the block headers themselves — but
+    meflib-based readers (CyberPSG and most established MEF tooling) allocate
+    from metadata section 2 before decoding, and cannot tell an unset field
+    from a real measurement.
+
+    Silence it like any warning::
+
+        warnings.filterwarnings("ignore", category=mef3io.SessionDeclarationWarning)
+
+    or per call with ``Reader(path, warn_declarations=False)``. To see the
+    detail, or to fix it, use :class:`mef3io.Validator`.
+    """
+
+
+def _declaration_warning_text(issues: list, path: str) -> str:
+    fields: dict[str, int] = {}
+    channels = set()
+    for issue in issues:
+        fields[issue["field"]] = fields.get(issue["field"], 0) + 1
+        channels.add(issue["channel"])
+    listed = ", ".join(f"{name} ({n} segment(s))" for name, n in sorted(fields.items()))
+    return (
+        f"{path}: metadata section 2 leaves size declarations unset across "
+        f"{len(channels)} channel(s): {listed}. "
+        "This does NOT affect reading with mef3io — every buffer is sized from the "
+        "block headers themselves, and the data is intact. It does affect "
+        "meflib-based readers (e.g. CyberPSG), which allocate from these fields. "
+        "Run mef3io.Validator(path).validate() for detail, or "
+        "python -m mef3io validate <path> --repair <check-id> to fix the file."
+    )
 
 
 class Reader:
@@ -38,6 +75,12 @@ class Reader:
         disables it; ``"auto"`` uses the per-user OS cache directory; a path
         makes it persistent. Warm opens serve :attr:`channels` / :meth:`info`
         without touching the session tree.
+    warn_declarations : bool, default True
+        Emit a :class:`SessionDeclarationWarning` when the session leaves
+        section-2 size declarations unset. The check is free — the metadata is
+        already parsed at open — and never affects the data read here; it
+        flags a file that can mislead *other* MEF readers. Set ``False``, or
+        filter the warning category, to silence it.
 
     Examples
     --------
@@ -52,6 +95,7 @@ class Reader:
         backend: str = "cpp",
         n_threads: int = 0,
         cache=None,
+        warn_declarations: bool = True,
     ):
         self._path = str(path)
         self._password = password or ""
@@ -66,16 +110,36 @@ class Reader:
 
         self._cache_path = _cache.resolve_cache_path(self._path, cache)
         self._infos = None
+        self._declaration_issues = []
         if self._cache_path is not None:
             snap = _cache.load_valid(self._cache_path, self._path)
             if snap is not None:
                 self._infos = snap["channel_infos"]
+                self._declaration_issues = snap.get("declaration_issues", [])
 
         if self._infos is None:
             self._ensure_impl()
             self._infos = {ch: self._impl.info(ch) for ch in self._impl.channels}
+            # Free at this point: every segment's metadata is already parsed.
+            self._declaration_issues = self._collect_declaration_issues()
             if self._cache_path is not None:
-                _cache.save(self._cache_path, _cache.build_snapshot(self._path, self._infos))
+                _cache.save(
+                    self._cache_path,
+                    _cache.build_snapshot(self._path, self._infos, self._declaration_issues),
+                )
+
+        if warn_declarations and self._declaration_issues:
+            warnings.warn(
+                _declaration_warning_text(self._declaration_issues, self._path),
+                SessionDeclarationWarning,
+                stacklevel=2,
+            )
+
+    def _collect_declaration_issues(self) -> list:
+        try:
+            return list(self._impl.declaration_issues())
+        except AttributeError:  # pragma: no cover - backends without the hook
+            return []
 
     def _ensure_impl(self):
         if self._impl is None:

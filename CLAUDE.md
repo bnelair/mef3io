@@ -9,7 +9,8 @@ of scope. The legacy `mef_tools`/`pymef` stack is the correctness oracle.
 Status: read + write complete, cross-validated **both directions** vs
 pymef/mef_tools (values, NaN gaps, times, encryption none/L1+L2, fractional fs,
 records). In-segment append + per-segment map implemented. Tar session
-archives (single-file `.mefd.tar`, read in place) implemented. ~143 Python
+archives (single-file `.mefd.tar`, read in place) implemented. Session
+validator + targeted repair implemented (+ an open-time warning). ~229 Python
 tests + standalone C++ Catch2 tests. Wheel builds via `python -m build`.
 Parallel decode/encode, byte-deterministic across threads.
 
@@ -36,6 +37,7 @@ packed-struct casts), `crc` (Koopman-32), `crypto` (SHA-256, AES-128-ECB,
 two-level password), `headers` (UniversalHeader, MetadataSection1/2/3,
 TimeSeriesIndex, RedBlockHeader — parse/serialize by explicit offset),
 `metadata` (.tmet loader: CRC→password→decrypt), `red` (decode + encode),
+`validate` (check registry + targeted repair; see below),
 `session` (lazy .mefd/.timd/.segd tree, indexed reads, `collect_blocks`; ALL
 read-path file access funnels through `source`), `source` (SessionSource
 abstraction: DirectorySource/TarSource), `tar` (uncompressed .mefd.tar session
@@ -66,6 +68,34 @@ Benchmarked on a ~2 GB session: full-read throughput identical to the dir,
 windowed reads ~8% slower, open faster; archive ~0.56 GB/s. Tests:
 core/tests/test_tar.cpp, tests/test_p11_tar.py, tar block in
 matlab/test_mef3io.m.
+
+Validator/repair (`core/{include,src}/…/validate.{hpp,cpp}`, `python/mef3io/
+validate.py`, `python/mef3io/__main__.py`): a REGISTRY of 15 checks comparing a
+session's declarations against its data, run in a fixed order (integrity →
+structure → sizing → times → headers). Adding a check = ONE entry with
+`detect` + optional `repair` lambdas; ordering/filtering/reporting/bindings/CLI
+pick it up free. Two invariants, both test-pinned: `validate()` never writes a
+byte, and `repair()` requires an explicit non-empty check-id list (no
+"fix everything"; empty/unknown/non-repairable → `std::invalid_argument` →
+ValueError). Repairs rewrite ONLY declarations (s2 + the three universal
+headers) — never samples or the index — back up to `<session>.repair-backup/`,
+skip any segment whose CRC fails, and reject tar archives. `Report.ok` ignores
+findings repaired in the same pass. Python: `mef3io.Validator(path)` with
+`.validate()/.check(id)/.repair([ids])/.fix(id)`, `Report.summary()`, plus
+`python -m mef3io validate <path> [--repair ID] [--list-checks] [--fast]`
+(`__main__.py` exists so `-m` doesn't double-import the package). On READ,
+`Session::declaration_issues()` scans the already-parsed s2 for unset sizes
+(free — no extra I/O, sees only missing, not wrong) and `Reader` emits one
+`SessionDeclarationWarning` per open saying reads are unaffected; it rides in
+the cache snapshot so warm opens still warn; `warn_declarations=False` or a
+category filter silences it (pyproject filters it by MESSAGE for the suite —
+naming the class there imports the wrong mef3io at pytest config time). Checks
+validated against the meflib C source: `recording_duration` is a SPAN
+(meflib.c:5479), `.tdat maximum_entry_size` is BYTES (pymef writes samples —
+its bug), and times must be compared as ABSOLUTE uUTC because pymef negates
+block times but not universal-header times. Docs: `docs/validation.md`. Tests:
+`tests/test_p13_validate.py` (asserts every repairable check has a corruption
+case, so a new one cannot ship untested) + a Catch2 case.
 
 Session metadata (subject/acquisition): `mef3io.Metadata`/`Subject`/
 `Acquisition` dataclasses (`python/mef3io/metadata.py`), settable via
@@ -129,6 +159,32 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   silent data race on the overlapped samples, not just a tie-break question.
   Partitioning up front also means a block a later one covers outright owns
   nothing, so it is not decoded at all (halves decode time on such geometry).
+- **Section-2 `maximum_*` fields are an ALLOCATION CONTRACT, not statistics.**
+  meflib-based readers (CyberPSG et al.) malloc from them before decoding, and
+  `0` is NOT the NO_ENTRY sentinel for any of them (`maximum_difference_bytes`
+  / `maximum_block_samples` → `0xFFFFFFFF`; the si8 ones → `-1`), so a reader
+  cannot tell unset from measured. `RED_allocate_processing_struct` *skips* the
+  allocation on size 0 → NULL `difference_buffer` → `RED_decode` writes through
+  it, and meflib's `BehaviorOnFail = Exit` makes even the guarded path a
+  process exit. Fixed in 1.1.3 (reported against 1.1.2, which left
+  `maximum_difference_bytes` and `maximum_contiguous_block_bytes` at 0 and set
+  `maximum_contiguous_blocks`/`_samples` to the channel totals). The writer now
+  measures all six: `maximum_difference_bytes` from each encoded block's RED
+  header (`RedBlockHeader::DIFFERENCE_BYTES_OFFSET`, read back rather than
+  threaded out of the encoder), the contiguous trio from runs delimited by the
+  `.tidx` discontinuity flag — the same flag a reader uses — via the
+  `ContiguousRun` accumulator in writer.cpp. Each maximum is tracked
+  independently: over-declaring only wastes a reader's allocation,
+  under-declaring truncates its buffer. On APPEND the contiguous trio is
+  recomputed exactly from the full `.tidx` (so appending repairs a segment
+  written by an older mef3io), but `maximum_difference_bytes` lives in `.tdat`
+  headers — folding old blocks in exactly would cost a seek per block and break
+  the O(new data) append, so an unusable stored value (0 or NO_ENTRY) falls
+  back to meflib's `RED_MAX_DIFFERENCE_BYTES` = `5 × maximum_block_samples`.
+  READ PATH NEVER CONSULTS THESE — mef3io sizes from each block's own header,
+  so zeros/sentinels/nonsense still read fine; `test_p12_sizing.py` pins both
+  halves. Cross-checked against the third-party `fix_mef3_sizing.py` patcher
+  (`--diff-bytes exact` → "already consistent").
 - **RED encode**: first emitted byte is junk (meflib overwrites stats[255] then
   restores) → drop emitted[0], payload = emitted[1:] at offset 304; stored
   difference_bytes = generated+1. Lossless no-detrend/no-scale, pymef-readable.

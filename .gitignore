@@ -14,3 +14,5 @@ reference_files/
 .idea/
 matlab/*.mex*
 site/
+# local scratch (e.g. third-party repos dropped in for investigation)
+tmp/

@@ -30,13 +30,24 @@ def have_cpp_backend() -> bool:
 
 
 from ._archive import archive_session, extract_session  # noqa: E402
-from ._reader import Reader  # noqa: E402
+from ._reader import Reader, SessionDeclarationWarning  # noqa: E402
 from ._writer import Writer  # noqa: E402
 from .metadata import Acquisition, Metadata, Subject  # noqa: E402
+from .validate import (  # noqa: E402
+    Check,
+    Finding,
+    Report,
+    Validator,
+    available_checks,
+    repair_session,
+    validate_session,
+)
 
 __all__ = [
     "Reader", "Writer", "Metadata", "Subject", "Acquisition",
     "MefReader", "MefWriter", "archive_session", "extract_session",
+    "Validator", "Check", "Finding", "Report", "available_checks",
+    "validate_session", "repair_session", "SessionDeclarationWarning",
     "have_cpp_backend", "__version__",
 ]
 

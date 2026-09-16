@@ -78,12 +78,16 @@ def _fingerprints(session_path: str) -> dict:
     return fp
 
 
-def build_snapshot(session_path: str, channel_infos: dict) -> dict:
+def build_snapshot(session_path: str, channel_infos: dict, declaration_issues=None) -> dict:
     return {
         "format": CACHE_FORMAT_VERSION,
         "session_path": os.path.abspath(session_path),
         "fingerprints": _fingerprints(session_path),
         "channel_infos": channel_infos,
+        # Carried so a warm open can still warn about unset size declarations
+        # without touching the session tree. Snapshots written before this key
+        # existed simply have no issues to report.
+        "declaration_issues": list(declaration_issues or []),
     }
 
 
