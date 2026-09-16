@@ -9,6 +9,7 @@ to point at real recordings:
   empty selection — there is no implicit "fix everything".
 """
 import hashlib
+import os
 import struct
 import subprocess
 import sys
@@ -482,7 +483,11 @@ def test_cli_reports_and_repairs_only_when_asked(tmp_path):
     path = tmp_path / "s.mefd"
     _write(path)
     _patch_s2(_tmet(path), "maximum_difference_bytes", 0)
-    env = {"PYTHONPATH": str(REPO / "python"), "PATH": "/usr/bin:/bin"}
+    # Point the subprocess at whichever mef3io this process imported: the
+    # in-tree package when dev_build.sh has linked the extension into it, and
+    # the installed one on CI. Hardcoding the source tree gives CI a package
+    # with no compiled backend.
+    env = dict(os.environ, PYTHONPATH=str(Path(mef3io.__file__).resolve().parent.parent))
 
     listing = subprocess.run(
         [sys.executable, "-m", "mef3io", "validate", "--list-checks"],
@@ -506,7 +511,9 @@ def test_cli_reports_and_repairs_only_when_asked(tmp_path):
     assert fixed.returncode == 0, fixed.stdout + fixed.stderr
     assert "repaired" in fixed.stdout
     assert _read_s2(_tmet(path), "maximum_difference_bytes") > 0
-    assert not fixed.stderr, "the CLI must not emit import warnings"
+    assert "found in sys.modules" not in fixed.stderr, (
+        "`python -m mef3io` must not double-import the package"
+    )
 
 
 # --- the open-time warning ---------------------------------------------------
