@@ -354,6 +354,23 @@ def test_bad_crc_is_reported_and_left_alone(tmp_path):
     assert _tree_digest(path) == before, "a segment with a bad CRC must not be rewritten"
 
 
+@pytest.mark.parametrize("suffix", [".tmet", ".tidx", ".tdat"])
+def test_incomplete_segment_is_reported_not_dropped(tmp_path, suffix):
+    """A traversal skips a segment missing one of its files; surfacing exactly
+    that is the point of a validator, so it must never be quietly omitted."""
+    path = tmp_path / "s.mefd"
+    _write(path, channels=("ch1", "ch2"))
+    _tmet(path, "ch1").with_suffix(suffix).unlink()
+
+    report = mef3io.Validator(str(path)).validate()
+    assert not report.ok
+    assert len(report.skipped) == 1
+    skipped = report.skipped[0]
+    assert skipped.channel == "ch1"
+    assert suffix in skipped.reason
+    assert report.segments_checked == 1, "the intact channel is still checked"
+
+
 def test_truncated_data_file_is_an_error(tmp_path):
     path = tmp_path / "s.mefd"
     _write(path)
@@ -394,7 +411,30 @@ def test_repaired_session_still_reads_identically(tmp_path):
     np.testing.assert_array_equal(got["valid"], expected["valid"])
 
 
-def test_repaired_encrypted_session_stays_readable(tmp_path):
+def _patch_encrypted_s2(tmet, field, value, password1):
+    """Set one section-2 field in an encrypted .tmet.
+
+    Section 2 is ciphertext on disk, so the field cannot be poked directly:
+    decrypt with the level-1 key (which is the padded password bytes — see
+    ``validate_password`` in core/src/password.cpp), edit the plaintext,
+    re-encrypt, then repair both universal-header CRCs.
+    """
+    raw = bytearray(Path(tmet).read_bytes())
+    key = m.extract_password_bytes(password1)
+    end = S2 + 10752
+    plain = bytearray(m.aes128_ecb_decrypt(bytes(raw[S2:end]), key))
+    off, fmt = S2_FIELDS[field]
+    struct.pack_into(fmt, plain, off, value)
+    raw[S2:end] = m.aes128_ecb_encrypt(bytes(plain), key)
+    struct.pack_into("<I", raw, 4, m.crc32(bytes(raw[UH_BYTES:METADATA_FILE_BYTES])))
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
+    Path(tmet).write_bytes(bytes(raw))
+
+
+def test_encrypted_session_is_repaired_and_stays_readable(tmp_path):
+    """Section 2 is ciphertext on disk, so repairing it means decrypt, edit and
+    re-encrypt with the same key. The session must come back both fixed and
+    still protected."""
     path = tmp_path / "enc.mefd"
     rng = np.random.default_rng(3)
     x = rng.normal(0, 3000, 4000).astype(np.int32)
@@ -404,12 +444,30 @@ def test_repaired_encrypted_session_stays_readable(tmp_path):
 
     validator = mef3io.Validator(str(path), password="lvl2")
     assert validator.validate().ok
-    # Section 2 is ciphertext on disk, so a repair has to decrypt, edit and
-    # re-encrypt it; a session that still opens proves the round trip.
+
+    tmet = _tmet(path)
+    _patch_encrypted_s2(tmet, "maximum_difference_bytes", 0, "lvl1")
+    ciphertext_before = Path(tmet).read_bytes()[S2 : S2 + 10752]
+    assert "sizing.difference-bytes" in _ids(validator.validate())
+
     report = validator.repair(["sizing.difference-bytes"])
-    assert report.segments_repaired == 0
+    assert report.segments_repaired == 1
+    assert [f.repaired for f in report.findings if f.check_id == "sizing.difference-bytes"] == [True]
+    assert validator.validate().ok
+
+    # Section 2 must still be ciphertext, and still the *same* key: a level-2
+    # read has to return both the repaired value and the original samples.
+    after = Path(tmet).read_bytes()[S2 : S2 + 10752]
+    assert after != ciphertext_before, "section 2 was not rewritten"
+    plain = m.aes128_ecb_decrypt(bytes(after), m.extract_password_bytes("lvl1"))
+    off, fmt = S2_FIELDS["maximum_difference_bytes"]
+    assert struct.unpack_from(fmt, plain, off)[0] > 0
+    assert b"\x00" * 64 != after[:64], "section 2 must not have been left in plaintext"
+
     with mef3io.Reader(str(path), password="lvl2") as r:
         np.testing.assert_array_equal(r.read_raw("ch1")["samples"], x)
+    # And the protection is intact: no password still means no section 2.
+    assert mef3io.Validator(str(path)).validate().skipped
 
 
 def test_encrypted_session_without_password_is_skipped(tmp_path):

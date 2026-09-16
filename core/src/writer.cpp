@@ -464,6 +464,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   // in. ---
   ContiguousRun contiguous;
   ui4 index_max_block_samples = 0;
+  si8 index_max_block_bytes = 0;
   {
     std::vector<ui1> file = read_whole_file(tidx_path);
     auto uh = fmt::UniversalHeader::parse(file);
@@ -491,6 +492,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
       const ui4 bytes = e.block_bytes == fmt::UI4_NO_ENTRY ? 0 : e.block_bytes;
       contiguous.add(discontinuity, samples, bytes);
       index_max_block_samples = std::max(index_max_block_samples, samples);
+      index_max_block_bytes = std::max<si8>(index_max_block_bytes, bytes);
     }
   }
 
@@ -502,8 +504,12 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     s2.number_of_samples += appended_samples;
     s2.number_of_blocks += static_cast<si8>(nb);
     s2.recording_duration = last_end - seg_start;
-    s2.maximum_block_bytes = std::max<si8>(s2.maximum_block_bytes, max_block_bytes);
-    s2.maximum_block_samples = std::max(s2.maximum_block_samples, max_block_samples);
+    // Derived from the index rather than max()'d onto the stored value: a
+    // foreign segment may carry NO_ENTRY (0xFFFFFFFF / -1) here, and a max()
+    // would preserve the sentinel forever — and then block_interval below
+    // would be computed from it.
+    s2.maximum_block_bytes = std::max<si8>(index_max_block_bytes, max_block_bytes);
+    s2.maximum_block_samples = std::max(index_max_block_samples, max_block_samples);
     s2.block_interval = static_cast<si8>(std::llround(s2.maximum_block_samples * 1e6 / fs_hz));
     s2.number_of_discontinuities += n_discont;
     s2.maximum_contiguous_blocks = contiguous.blocks();

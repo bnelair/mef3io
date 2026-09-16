@@ -61,8 +61,12 @@ python -m mef3io validate SESSION.mefd --repair sizing.difference-bytes
 python -m mef3io validate --list-checks
 ```
 
-The exit status is `0` when nothing is left outstanding and `1` otherwise, so
-the report form drops straight into a pipeline.
+The exit status follows `Report.ok`: `0` when no **error**-severity finding is
+left outstanding and no segment was skipped, `1` otherwise. Warnings alone do
+not fail the command — they describe files that are wasteful or misleading but
+that every reader still handles — and a finding repaired in the same invocation
+no longer counts against it. A skipped segment always does: one that could not
+be checked is not one that passed.
 
 ## What gets written
 

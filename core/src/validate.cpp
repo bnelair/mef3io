@@ -84,7 +84,8 @@ struct SegmentFiles {
   std::string channel;
   int segment_number = 0;
   std::string tmet_rel, tidx_rel, tdat_rel;
-  std::string description;  // human-readable segment location
+  std::string description;        // human-readable segment location
+  std::vector<std::string> missing;  // of .tmet/.tidx/.tdat, those absent
 };
 
 // What the files declare, plus the raw bytes needed to check and rewrite them.
@@ -565,8 +566,14 @@ std::vector<SegmentFiles> discover_segments(const SessionSource& src,
       f.tidx_rel = dir + "/" + stem + ".tidx";
       f.tdat_rel = dir + "/" + stem + ".tdat";
       f.description = src.describe(dir);
-      if (src.exists(f.tmet_rel) && src.exists(f.tidx_rel) && src.exists(f.tdat_rel))
-        out.push_back(std::move(f));
+      // An incomplete segment is still a segment: a reader traversal skips it
+      // silently, which is exactly the kind of thing a validator exists to
+      // surface. Record what is missing and report it downstream rather than
+      // dropping the segment here and calling the session clean.
+      if (!src.exists(f.tmet_rel)) f.missing.push_back(".tmet");
+      if (!src.exists(f.tidx_rel)) f.missing.push_back(".tidx");
+      if (!src.exists(f.tdat_rel)) f.missing.push_back(".tdat");
+      out.push_back(std::move(f));
     }
   }
   std::sort(out.begin(), out.end(), [](const SegmentFiles& a, const SegmentFiles& b) {
@@ -813,6 +820,13 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     auto skip = [&](const std::string& reason) {
       report.skipped.push_back({files.channel, files.segment_number, files.description, reason});
     };
+
+    if (!files.missing.empty()) {
+      std::string list;
+      for (const auto& name : files.missing) list += (list.empty() ? "" : ", ") + name;
+      skip("segment is incomplete: missing " + list);
+      continue;
+    }
 
     SegmentState state;
     state.files = files;

@@ -28,7 +28,10 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-CACHE_FORMAT_VERSION = 1
+# 2: added "declaration_issues". A v1 snapshot has no such key, so a warm open
+# from one would silently skip the open-time warning until the session changed
+# on disk; bumping invalidates them instead, and the next open rebuilds.
+CACHE_FORMAT_VERSION = 2
 
 
 def _os_cache_dir() -> Path:

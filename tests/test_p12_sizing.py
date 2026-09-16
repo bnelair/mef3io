@@ -47,6 +47,7 @@ FIELDS = {
     "maximum_block_bytes": (6376, "<q"),
     "maximum_block_samples": (6384, "<I"),
     "maximum_difference_bytes": (6388, "<I"),
+    "block_interval": (6392, "<q"),
     "number_of_discontinuities": (6400, "<q"),
     "maximum_contiguous_blocks": (6408, "<q"),
     "maximum_contiguous_block_bytes": (6416, "<q"),
@@ -241,6 +242,30 @@ def test_append_repairs_fields_left_unset_by_older_mef3io(tmp_path):
     assert stored["maximum_contiguous_block_bytes"] == real["maximum_contiguous_block_bytes"]
     assert stored["maximum_contiguous_blocks"] == real["maximum_contiguous_blocks"]
     assert stored["maximum_contiguous_samples"] == real["maximum_contiguous_samples"]
+
+
+def test_append_does_not_preserve_a_no_entry_block_maximum(tmp_path):
+    """A foreign segment may carry NO_ENTRY in maximum_block_samples. Folding
+    the new blocks in with max() would keep 0xFFFFFFFF forever — and
+    block_interval, derived from it, would be nonsense."""
+    path = str(tmp_path / "s.mefd")
+    x = _write(path, gap_us=0)
+    tmet = _segments(path)[0]
+    _patch_section2(
+        tmet, maximum_block_samples=UI4_NO_ENTRY, maximum_block_bytes=SI8_NO_ENTRY
+    )
+
+    w = mef3io.Writer(path)
+    w.write_int32("ch1", x, 0.5, START + int(3 * 4000 / FS * 1e6), FS)
+    w.close()
+
+    stored = _read_section2(tmet)
+    real = _real_stats(tmet)
+    assert stored["maximum_block_samples"] == real["maximum_block_samples"]
+    assert stored["maximum_block_bytes"] == real["maximum_block_bytes"]
+    # Derived from the real block geometry, not from 0xFFFFFFFF samples (which
+    # would put block_interval around 1.7e13 us instead of ~1e7).
+    assert stored["block_interval"] == round(real["maximum_block_samples"] * 1e6 / FS)
 
 
 def test_append_bounds_no_entry_difference_bytes(tmp_path):
