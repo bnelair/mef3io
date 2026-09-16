@@ -74,6 +74,49 @@ void finalize_crcs(std::vector<ui1>& file) {
   byteio::write<ui4>(file, 0, header_crc);
 }
 
+// `difference_bytes` of an encoded RED block, straight out of its header.
+ui4 block_difference_bytes(std::span<const ui1> encoded) {
+  if (encoded.size() < fmt::RED_BLOCK_HEADER_BYTES) return 0;  // empty/degenerate block
+  return byteio::read<ui4>(encoded, fmt::RedBlockHeader::DIFFERENCE_BYTES_OFFSET);
+}
+
+// meflib's worst case for the RED codec, RED_MAX_DIFFERENCE_BYTES(x): a full
+// si4 plus one keysample flag byte per sample. Used only to bound blocks whose
+// real difference_bytes we would otherwise have to re-read from .tdat.
+ui4 red_max_difference_bytes(ui4 samples) {
+  constexpr ui4 kMaxSamples = fmt::UI4_NO_ENTRY / 5u;
+  return samples >= kMaxSamples ? fmt::UI4_NO_ENTRY : samples * 5u;
+}
+
+// Longest run of blocks uninterrupted by a discontinuity flag, which is how a
+// reader delimits a contiguous run too. Each maximum is tracked independently:
+// over-declaring only costs a reader some allocation, while under-declaring
+// truncates its buffer.
+class ContiguousRun {
+ public:
+  void add(bool discontinuity, si8 samples, si8 block_bytes) {
+    if (discontinuity) run_ = {};
+    run_.blocks += 1;
+    run_.samples += samples;
+    run_.block_bytes += block_bytes;
+    max_.blocks = std::max(max_.blocks, run_.blocks);
+    max_.samples = std::max(max_.samples, run_.samples);
+    max_.block_bytes = std::max(max_.block_bytes, run_.block_bytes);
+  }
+
+  si8 blocks() const { return max_.blocks; }
+  si8 samples() const { return max_.samples; }
+  si8 block_bytes() const { return max_.block_bytes; }
+
+ private:
+  struct Totals {
+    si8 blocks = 0;
+    si8 samples = 0;
+    si8 block_bytes = 0;
+  };
+  Totals run_, max_;
+};
+
 fmt::UniversalHeader base_uh(const SegmentSpec& spec, const std::string& ftype, si8 start_disk,
                              si8 end_disk, si8 n_entries, si8 max_entry_size,
                              const std::array<ui1, 16>& level_uuid,
@@ -132,6 +175,8 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
   si8 total_samples = 0;
   si8 first_start = fmt::UUTC_NO_ENTRY, last_end = fmt::UUTC_NO_ENTRY;
   ui4 max_block_bytes = 0;
+  ui4 max_difference_bytes = 0;
+  ContiguousRun contiguous;
   si4 global_max = std::numeric_limits<si4>::min(), global_min = std::numeric_limits<si4>::max();
   si8 n_discont = 0;
 
@@ -152,6 +197,8 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
 
     tdat_body.insert(tdat_body.end(), encoded[i].begin(), encoded[i].end());
     max_block_bytes = std::max(max_block_bytes, e.block_bytes);
+    max_difference_bytes = std::max(max_difference_bytes, block_difference_bytes(encoded[i]));
+    contiguous.add(blk.discontinuity, static_cast<si8>(blk.samples.size()), e.block_bytes);
     if (!blk.samples.empty()) {
       global_max = std::max(global_max, bmax[i]);
       global_min = std::min(global_min, bmin[i]);
@@ -231,11 +278,12 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     for (const auto& b : blocks)
       s2.maximum_block_samples =
           std::max(s2.maximum_block_samples, static_cast<ui4>(b.samples.size()));
+    s2.maximum_difference_bytes = max_difference_bytes;
     s2.block_interval = static_cast<si8>(std::llround(s2.maximum_block_samples * 1e6 / fs_hz));
     s2.number_of_discontinuities = std::max<si8>(n_discont, 1);
-    s2.maximum_contiguous_blocks = n_blocks;
-    s2.maximum_contiguous_block_bytes = 0;
-    s2.maximum_contiguous_samples = total_samples;
+    s2.maximum_contiguous_blocks = contiguous.blocks();
+    s2.maximum_contiguous_block_bytes = contiguous.block_bytes();
+    s2.maximum_contiguous_samples = contiguous.samples();
     s2.maximum_native_sample_value = static_cast<sf8>(global_max);
     s2.minimum_native_sample_value = static_cast<sf8>(global_min);
 
@@ -340,6 +388,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   si8 last_end = old_end, n_discont = 0;
   ui4 max_block_bytes = 0;
   ui4 max_block_samples = 0;
+  ui4 max_difference_bytes = 0;
   si4 new_max = std::numeric_limits<si4>::min(), new_min = std::numeric_limits<si4>::max();
   for (std::size_t i = 0; i < nb; ++i) {
     const auto& blk = blocks[i];
@@ -357,6 +406,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     running_offset += static_cast<si8>(encoded[i].size());
     max_block_bytes = std::max(max_block_bytes, e.block_bytes);
     max_block_samples = std::max(max_block_samples, e.number_of_samples);
+    max_difference_bytes = std::max(max_difference_bytes, block_difference_bytes(encoded[i]));
     if (!blk.samples.empty()) {
       new_max = std::max(new_max, bmax[i]);
       new_min = std::min(new_min, bmin[i]);
@@ -406,7 +456,14 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     if (!hdr) throw IoError("header update failed: " + tdat_path);
   }
 
-  // --- .tidx: small; extend in memory and rewrite ---
+  // --- .tidx: small; extend in memory and rewrite. The full entry list is the
+  // only place the pre-existing blocks are described cheaply, so the section-2
+  // sizing statistics that span the whole segment are recomputed from it here
+  // rather than folded into whatever the old .tmet happened to declare. That
+  // also repairs those fields on segments written before mef3io filled them
+  // in. ---
+  ContiguousRun contiguous;
+  ui4 index_max_block_samples = 0;
   {
     std::vector<ui1> file = read_whole_file(tidx_path);
     auto uh = fmt::UniversalHeader::parse(file);
@@ -420,6 +477,21 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     uh.serialize(file);
     finalize_crcs(file);
     write_file(tidx_path, file);
+
+    std::span<const ui1> entries =
+        std::span<const ui1>(file).subspan(fmt::UNIVERSAL_HEADER_BYTES);
+    const std::size_t n_entries = entries.size() / fmt::TIME_SERIES_INDEX_BYTES;
+    for (std::size_t i = 0; i < n_entries; ++i) {
+      auto e = fmt::TimeSeriesIndex::parse(
+          entries.subspan(i * fmt::TIME_SERIES_INDEX_BYTES, fmt::TIME_SERIES_INDEX_BYTES));
+      const bool discontinuity = (e.red_block_flags & fmt::RedBlockHeader::DISCONTINUITY_MASK) != 0;
+      // A foreign index may leave an entry's counts at NO_ENTRY; treat those as
+      // nothing rather than letting 0xFFFFFFFF inflate the totals.
+      const ui4 samples = e.number_of_samples == fmt::UI4_NO_ENTRY ? 0 : e.number_of_samples;
+      const ui4 bytes = e.block_bytes == fmt::UI4_NO_ENTRY ? 0 : e.block_bytes;
+      contiguous.add(discontinuity, samples, bytes);
+      index_max_block_samples = std::max(index_max_block_samples, samples);
+    }
   }
 
   // --- .tmet: update section-2 statistics, re-encrypt, rewrite. Section 1 and
@@ -434,8 +506,22 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     s2.maximum_block_samples = std::max(s2.maximum_block_samples, max_block_samples);
     s2.block_interval = static_cast<si8>(std::llround(s2.maximum_block_samples * 1e6 / fs_hz));
     s2.number_of_discontinuities += n_discont;
-    s2.maximum_contiguous_blocks = s2.number_of_blocks;
-    s2.maximum_contiguous_samples = s2.number_of_samples;
+    s2.maximum_contiguous_blocks = contiguous.blocks();
+    s2.maximum_contiguous_block_bytes = contiguous.block_bytes();
+    s2.maximum_contiguous_samples = contiguous.samples();
+    // The pre-existing blocks' difference_bytes live in .tdat block headers, so
+    // folding them in exactly would cost one seek per old block and break the
+    // O(new data) cost of an append. Trust the stored maximum when the segment
+    // carries one; otherwise (mef3io <= 1.1.2 wrote 0, a foreign writer may
+    // write NO_ENTRY) fall back to meflib's own worst case over the blocks the
+    // index describes, which bounds them without reading .tdat.
+    const ui4 stored_difference_bytes = s2.maximum_difference_bytes;
+    const bool stored_is_usable =
+        stored_difference_bytes != 0 && stored_difference_bytes != fmt::UI4_NO_ENTRY;
+    s2.maximum_difference_bytes =
+        std::max(max_difference_bytes, stored_is_usable
+                                           ? stored_difference_bytes
+                                           : red_max_difference_bytes(index_max_block_samples));
     s2.maximum_native_sample_value =
         std::max(s2.maximum_native_sample_value, static_cast<sf8>(new_max));
     s2.minimum_native_sample_value =

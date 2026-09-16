@@ -147,6 +147,11 @@ struct RedBlockHeader {
   static RedBlockHeader parse(std::span<const ui1> buf);  // >= 304 bytes
   void serialize(std::span<ui1> buf) const;
 
+  // Offset of `difference_bytes` within the header. Exposed so a writer can
+  // read it back from an encoded block without parsing (and copying) the
+  // 256-byte statistics table for every block.
+  static constexpr int DIFFERENCE_BYTES_OFFSET = 28;
+
   // RED block header flag bits (from meflib.h).
   static constexpr ui1 DISCONTINUITY_MASK = 0x01;
   static constexpr ui1 LEVEL_1_ENCRYPTION_MASK = 0x02;

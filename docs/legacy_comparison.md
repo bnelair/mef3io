@@ -96,3 +96,36 @@ directly. Boundary samples can therefore differ by up to ~2 quantization
 counts between the two writers. Both are valid MEF, each round-trips its own
 quantization exactly, and both readers return bit-identical arrays for any
 given file.
+
+## Section-2 buffer sizing — mef3io is stricter than pymef
+
+The `maximum_*` fields in metadata section 2 tell a meflib-based reader
+(CyberPSG and most established MEF tooling) how large a buffer to allocate
+before it decodes anything; see
+[the format reference](mef3_format.md#the-buffer-sizing-declarations).
+Writers disagree about them:
+
+| Field | legacy pymef | mef3io |
+|---|---|---|
+| `maximum_difference_bytes` | largest `difference_bytes` seen | same |
+| `maximum_contiguous_block_bytes` | the whole `.tdat` body | bytes in the longest run between discontinuities |
+| `maximum_contiguous_blocks` | every block in the segment | blocks in the longest run |
+| `maximum_contiguous_samples` | left at `0` | samples in the longest run |
+| `number_of_discontinuities` | left at `0` | the real count |
+
+pymef treats the segment as one contiguous run regardless of the discontinuity
+flags it wrote, so its contiguous figures over-declare on any segment with a
+gap (and `maximum_contiguous_samples` is simply never filled in). mef3io
+measures each run against the same `.tidx` discontinuity flag a reader uses.
+
+Neither reader depends on the fields — pymef sizes from
+`RED_MAX_DIFFERENCE_BYTES(samps_per_mef_block)` and mef3io from each block's own
+header — so this divergence changes no decoded value in either direction. It
+matters only to third-party readers that trust the declarations.
+
+mef3io **≤ 1.1.2** left `maximum_difference_bytes` and
+`maximum_contiguous_block_bytes` at `0`, which those readers cannot distinguish
+from an unset field. Sessions written by that version decode correctly in
+mef3io and pymef but can crash a meflib-based reader; appending to such a
+segment with a current version repairs the declarations in place, and rewriting
+the session fixes them outright.

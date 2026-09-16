@@ -117,6 +117,46 @@ start/end times and `recording_duration` span the gaps. A gridded read
 (`Reader.read`) therefore usually returns *more* samples than
 `number_of_samples`, with NaN filling the gaps.
 
+### The buffer-sizing declarations
+
+The `maximum_*` block of fields at 6376–6424 is not descriptive trivia — it is the
+allocation contract. A meflib-based reader (CyberPSG and most established MEF
+tooling) sizes its buffers straight from these numbers before it decodes
+anything, so a writer that under-declares hands that reader a buffer too small
+for the data it is about to write into it. `RED_allocate_processing_struct`
+skips the allocation entirely for a size of `0`, leaving `difference_buffer`
+NULL, and meflib's default `BehaviorOnFail = Exit` turns the resulting
+complaint into a process exit rather than a catchable error.
+
+**`0` is not the NO_ENTRY sentinel for any of them**, so a reader cannot tell
+an unset field from a genuine measurement:
+
+| Field | NO_ENTRY | mef3io writes |
+|---|---|---|
+| `maximum_block_bytes` | `-1` | largest encoded block in the segment |
+| `maximum_block_samples` | `0xFFFFFFFF` | largest block sample count |
+| `maximum_difference_bytes` | `0xFFFFFFFF` | largest `difference_bytes` over the RED block headers |
+| `maximum_contiguous_blocks` | `-1` | longest run of blocks between discontinuities |
+| `maximum_contiguous_block_bytes` | `-1` | encoded bytes in the longest such run |
+| `maximum_contiguous_samples` | `-1` | samples in the longest such run |
+
+A *contiguous run* is delimited by the `.tidx` discontinuity flag — the same
+flag a reader uses — so the declarations and the data agree by construction.
+Each maximum is tracked independently: over-declaring only costs a reader some
+allocation, whereas under-declaring truncates its buffer.
+
+Two asymmetries worth knowing. `maximum_difference_bytes` is the one field not
+derivable from the index, since it lives in the RED block headers inside
+`.tdat`; meflib's own worst case is `maximum_block_samples × 5`
+(`RED_MAX_DIFFERENCE_BYTES`), which is a tight bound in practice. And the
+legacy pymef writer sets `maximum_contiguous_block_bytes` to the whole `.tdat`
+body and leaves `maximum_contiguous_samples` at `0`, both of which ignore
+discontinuities; mef3io's values are per-run and exact.
+
+mef3io's own reader never consults any of these fields — it sizes from each
+block's own header — so sessions that declare zeros, sentinels, or nonsense
+still read correctly.
+
 **Section 3** (the sensitive, level-2 part):
 
 | Offset | Type | Field |

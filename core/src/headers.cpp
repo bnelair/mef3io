@@ -247,7 +247,7 @@ RedBlockHeader RedBlockHeader::parse(std::span<const ui1> b) {
   h.detrend_slope = read<sf4>(b, 16);
   h.detrend_intercept = read<sf4>(b, 20);
   h.scale_factor = read<sf4>(b, 24);
-  h.difference_bytes = read<ui4>(b, 28);
+  h.difference_bytes = read<ui4>(b, RedBlockHeader::DIFFERENCE_BYTES_OFFSET);
   h.number_of_samples = read<ui4>(b, 32);
   h.block_bytes = read<ui4>(b, 36);
   h.start_time = read<si8>(b, 40);
@@ -263,7 +263,7 @@ void RedBlockHeader::serialize(std::span<ui1> b) const {
   write<sf4>(b, 16, detrend_slope);
   write<sf4>(b, 20, detrend_intercept);
   write<sf4>(b, 24, scale_factor);
-  write<ui4>(b, 28, difference_bytes);
+  write<ui4>(b, DIFFERENCE_BYTES_OFFSET, difference_bytes);
   write<ui4>(b, 32, number_of_samples);
   write<ui4>(b, 36, block_bytes);
   write<si8>(b, 40, start_time);
