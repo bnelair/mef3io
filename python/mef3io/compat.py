@@ -14,7 +14,10 @@ code should prefer ``mef3io.Reader`` / ``mef3io.Writer``.
 """
 from __future__ import annotations
 
+import warnings
 from typing import Optional, Union
+
+from ._reader import SessionDeclarationWarning, _declaration_warning_text
 
 import numpy as np
 
@@ -32,6 +35,17 @@ class MefReader:
 
     def __init__(self, session_path: str, password2: Optional[str] = None):
         self._r = _mef3io.Reader(str(session_path), password2 or "")
+        # The legacy drop-in is exactly the entry point people with legacy-
+        # written sessions use, so it must carry the same open-time warning as
+        # mef3io.Reader — otherwise the population most affected is the one
+        # population never told.
+        issues = list(self._r.declaration_issues())
+        if issues:
+            warnings.warn(
+                _declaration_warning_text(issues, str(session_path)),
+                SessionDeclarationWarning,
+                stacklevel=2,
+            )
         self.bi = [self._basic_info(ch) for ch in self._r.channels]
 
     def _basic_info(self, channel: str) -> dict:

@@ -182,6 +182,26 @@ void TimeSeriesMetadataSection2::serialize(std::span<ui1> b) const {
   write<si8>(b, 6424, maximum_contiguous_samples);
 }
 
+void TimeSeriesMetadataSection2::serialize_derived_fields(std::span<ui1> b) const {
+  if (b.size() < TIME_SERIES_METADATA_SECTION_2_BYTES)
+    throw FormatError("TS section 2: buffer too small");
+  // No fill: every byte not listed here keeps its existing value.
+  write<si8>(b, 4096, recording_duration);
+  write<sf8>(b, 6336, maximum_native_sample_value);
+  write<sf8>(b, 6344, minimum_native_sample_value);
+  write<si8>(b, 6352, start_sample);
+  write<si8>(b, 6360, number_of_samples);
+  write<si8>(b, 6368, number_of_blocks);
+  write<si8>(b, 6376, maximum_block_bytes);
+  write<ui4>(b, 6384, maximum_block_samples);
+  write<ui4>(b, 6388, maximum_difference_bytes);
+  write<si8>(b, 6392, block_interval);
+  write<si8>(b, 6400, number_of_discontinuities);
+  write<si8>(b, 6408, maximum_contiguous_blocks);
+  write<si8>(b, 6416, maximum_contiguous_block_bytes);
+  write<si8>(b, 6424, maximum_contiguous_samples);
+}
+
 // --- MetadataSection3 --------------------------------------------------------
 MetadataSection3 MetadataSection3::parse(std::span<const ui1> b) {
   if (b.size() < METADATA_SECTION_3_BYTES) throw FormatError("section 3: buffer too small");

@@ -3,10 +3,12 @@
 A MEF 3.0 session declares, in metadata section 2 and the universal headers, a
 number of quantities that are really re-derivable from the data: how many
 blocks there are, how many samples, how large a buffer a reader must allocate.
-Readers trust those declarations — meflib-based ones (CyberPSG and most
-established MEF tooling) allocate from them *before* decoding anything — so a
-wrong declaration is a defect in the file even when every sample on disk is
-intact.
+Readers trust those declarations. meflib itself does not allocate from them,
+but it exposes helpers that take one as a buffer size and validate none of
+them, and applications built on it (CyberPSG among them) pass them in before
+decoding anything — so a wrong declaration is a defect in the file even when
+every sample on disk is intact. The mechanics are spelled out
+[below](#notes-on-individual-checks).
 
 `mef3io.Validator` checks those declarations against the data, and repairs the
 ones the data can prove.
@@ -31,7 +33,7 @@ sizing.difference-bytes  [error]  254 segment(s)
     ch3 seg0: maximum_difference_bytes = 0  ->  38366
     ... and 251 more
 
-Repairable — nothing was changed. To fix, pass the ids explicitly:
+Still repairable. To fix, pass the ids explicitly:
     Validator(path).repair(['sizing.difference-bytes', ...])
 ```
 
@@ -76,9 +78,11 @@ Section 2 of an encrypted session is decrypted, edited and re-encrypted with
 the same key, so the session stays exactly as protected as it was.
 
 Each rewritten file is first copied to `<session>.repair-backup/`, outside the
-session tree so no reader mistakes a backup for data. A pristine backup is
-never overwritten by a later repair. Pass `backup=False` (or `--no-backup`) to
-skip it.
+session tree so no reader mistakes a backup for data. For a `.tdat` only the
+1024-byte universal header is copied — that is all a repair can touch. Copies
+are staged as `.part` and renamed, so an interrupted copy is never mistaken for
+a pristine backup, and a completed backup is never overwritten. Pass
+`backup=False` (or `--no-backup`) to skip it.
 
 A segment whose CRCs do not verify is **reported and left alone** — if the
 bytes cannot be trusted, neither can anything derived from them. Tar archives
@@ -114,9 +118,10 @@ mef3io.Reader(path, warn_declarations=False)                       # this open
 warnings.filterwarnings("ignore", category=mef3io.SessionDeclarationWarning)
 ```
 
-Sessions written by the legacy pymef stack trip it (they leave
-`maximum_contiguous_samples` at `0`), as do sessions written by mef3io ≤ 1.1.2.
-Sessions written by mef3io ≥ 1.1.3 do not.
+Sessions written by the legacy stack trip it (`maximum_contiguous_samples` is
+never assigned), as do sessions written by mef3io ≤ 1.1.2. Sessions written by
+mef3io ≥ 1.1.3 do not. `Reader.declaration_issues` returns the same list
+structured, without the warning.
 
 ## The checks
 
@@ -130,27 +135,45 @@ declarations a reader allocates from, then the time fields. Ids are stable API.
 | `index.block-offsets` | error | no | Every block lies inside `.tdat`, in increasing order |
 | `index.block-count` | error | yes | `number_of_blocks` vs the `.tidx` entry count |
 | `index.sample-count` | error | yes | `number_of_samples` vs the sum over the index |
-| `index.start-sample` | warning | yes | `start_sample` vs the first index entry |
+| `index.start-sample` | warning | no | `start_sample` vs the first index entry (writers disagree; report only) |
 | `sizing.block-maxima` | error | yes | `maximum_block_bytes` / `maximum_block_samples` |
 | `sizing.difference-bytes` | error | yes | `maximum_difference_bytes` vs the RED block headers |
-| `sizing.contiguous` | warning | yes | The `maximum_contiguous_*` trio vs the longest run |
+| `sizing.contiguous` | warning | yes | The `maximum_contiguous_*` trio vs the longest run (raised only, never lowered) |
 | `times.segment-bounds` | warning | yes | Universal-header start/end vs the blocks |
 | `times.recording-duration` | warning | yes | `recording_duration` vs the segment's span |
 | `times.block-interval` | warning | yes | `block_interval` vs the block geometry |
-| `times.discontinuities` | warning | yes | `number_of_discontinuities` vs the index flags |
+| `times.discontinuities` | error | yes | `number_of_discontinuities` vs the index flags |
 | `header.entry-count` | warning | yes | `number_of_entries` in each file |
-| `header.max-entry-size` | warning | yes | `maximum_entry_size` in each file |
+| `header.max-entry-size` | info | yes | `maximum_entry_size` in each file (`.tdat` value informational) |
 
 `Validator.available_checks()` returns the same table at runtime, with each
 check's full description; `--list-checks` prints it.
 
 ### Notes on individual checks
 
-**`sizing.difference-bytes` is the one that crashes readers.** meflib's
-`RED_allocate_processing_struct` skips the allocation entirely for a size of
-`0`, leaving `difference_buffer` NULL for `RED_decode` to write through — and
-`0` is not this field's NO_ENTRY sentinel (`0xFFFFFFFF`), so a reader cannot
-tell it was never set. mef3io **≤ 1.1.2** left it at `0`. See
+**How these fields actually reach a reader.** meflib does not allocate from
+them internally; it exposes helpers that take a section-2 declaration as a
+buffer size and validate none of them, and it is the *application* built on
+meflib that passes one in. Two such helpers matter here:
+
+- `RED_allocate_processing_struct` takes `difference_buffer_size` from its
+  caller. For a size of `0` it skips the allocation entirely, leaving
+  `difference_buffer` NULL for `RED_decode` to write through. meflib ships a
+  guard for exactly this, `RED_check_RPS_allocation`, but **never calls it**
+  (declared `meflib.h:1186`, defined `meflib.c:6534`, zero call sites), so
+  there is no error path at all — just the NULL write. This is the route the
+  reported CyberPSG crash took.
+- `find_discontinuity_indices` (`meflib.c:3548`) `malloc`s exactly
+  `number_of_discontinuities` entries and then writes one per *flagged block*,
+  looping to `number_of_blocks`. A declared `0` with the flags present — which
+  is what the legacy `mef_tools` writer produces — is a straight heap overflow.
+
+The legacy `pymef` reader passes neither: it sizes from
+`RED_MAX_DIFFERENCE_BYTES(maximum_block_samples)`. That is why the oracle never
+saw any of this, and it is also why `times.discontinuities` is rated an error
+here despite looking cosmetic: it is the best-evidenced hazard in the registry.
+
+mef3io **≤ 1.1.2** left `maximum_difference_bytes` at `0`. See
 [the format reference](mef3_format.md#the-buffer-sizing-declarations).
 
 It is also the one declaration not derivable from the block index — it lives in
@@ -165,14 +188,15 @@ all. That over-declares by a few bytes, which is the safe direction.
 writers mix the two within a segment. Comparisons allow one sample period of
 slack, because per-block microsecond rounding moves the end slightly.
 
-**Some checks fire on perfectly readable legacy files.** The pymef writer
-leaves `block_interval` and `number_of_discontinuities` at `0`, stores
-`recording_duration` as `number_of_samples / fs` (which omits gaps, where
-meflib defines it as the span), computes the contiguous maxima as if the
-segment had no discontinuities, and writes a *sample count* into `.tdat`'s
-`maximum_entry_size` where the field is a byte size. None of those are
-reader-fatal; all are repairable. See the
-[legacy comparison](legacy_comparison.md#section-2-buffer-sizing--mef3io-is-stricter-than-pymef).
+**Some checks fire on perfectly readable legacy files.** The legacy
+`mef_tools` wrapper zeroes `block_interval` and `number_of_discontinuities`
+(pymef's own default is `-1`); pymef stores `recording_duration` as
+`number_of_samples / fs`, which omits gaps where meflib's rollup computes the
+span; `maximum_contiguous_block_bytes` gets the whole `.tdat` body and
+`maximum_contiguous_samples` is never assigned; and `.tdat`'s
+`maximum_entry_size` gets a sample count. Of these only
+`number_of_discontinuities` is reader-fatal (see above). See the
+[legacy comparison](legacy_comparison.md#section-2-buffer-sizing-mef3io-is-stricter-than-pymef).
 
 ## Adding a check
 

@@ -12,7 +12,9 @@ import numpy as np
 class SessionDeclarationWarning(UserWarning):
     """A session leaves size declarations unset that other readers rely on.
 
-    Raised on open, once per session. It never affects mef3io's own reads —
+    Raised on open, once per process per session (Python's default warning
+    filter suppresses a repeat of the same message from the same line). It
+    never affects mef3io's own reads —
     mef3io sizes every buffer from the block headers themselves — but
     meflib-based readers (CyberPSG and most established MEF tooling) allocate
     from metadata section 2 before decoding, and cannot tell an unset field
@@ -136,10 +138,23 @@ class Reader:
             )
 
     def _collect_declaration_issues(self) -> list:
-        try:
-            return list(self._impl.declaration_issues())
-        except AttributeError:  # pragma: no cover - backends without the hook
-            return []
+        # getattr rather than try/except: a bare `except AttributeError` around
+        # the call would also swallow one raised *inside* it, and a backend with
+        # a typo would then report every session as clean.
+        fn = getattr(self._impl, "declaration_issues", None)
+        return list(fn()) if fn is not None else []
+
+    @property
+    def declaration_issues(self) -> list:
+        """Section-2 size declarations this session leaves unset.
+
+        The structured form of the :class:`SessionDeclarationWarning` raised on
+        open: a list of ``{"channel", "segment", "field"}`` dicts, empty when
+        the session declares everything. Free — computed at open from metadata
+        that was already parsed. It sees only what is *missing*; use
+        :class:`mef3io.Validator` to find what is merely wrong.
+        """
+        return list(self._declaration_issues)
 
     def _ensure_impl(self):
         if self._impl is None:

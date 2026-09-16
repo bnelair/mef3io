@@ -37,8 +37,10 @@ from .validate import (  # noqa: E402
     Check,
     Finding,
     Report,
+    SkippedSegment,
     Validator,
     available_checks,
+    describe_check,
     repair_session,
     validate_session,
 )
@@ -46,7 +48,8 @@ from .validate import (  # noqa: E402
 __all__ = [
     "Reader", "Writer", "Metadata", "Subject", "Acquisition",
     "MefReader", "MefWriter", "archive_session", "extract_session",
-    "Validator", "Check", "Finding", "Report", "available_checks",
+    "Validator", "Check", "Finding", "Report", "SkippedSegment",
+    "available_checks", "describe_check",
     "validate_session", "repair_session", "SessionDeclarationWarning",
     "have_cpp_backend", "__version__",
 ]

@@ -105,23 +105,35 @@ before it decodes anything; see
 [the format reference](mef3_format.md#the-buffer-sizing-declarations).
 Writers disagree about them:
 
-| Field | legacy pymef | mef3io |
+| Field | legacy stack | mef3io |
 |---|---|---|
 | `maximum_difference_bytes` | largest `difference_bytes` seen | same |
 | `maximum_contiguous_block_bytes` | the whole `.tdat` body | bytes in the longest run between discontinuities |
-| `maximum_contiguous_blocks` | every block in the segment | blocks in the longest run |
-| `maximum_contiguous_samples` | left at `0` | samples in the longest run |
-| `number_of_discontinuities` | left at `0` | the real count |
+| `maximum_contiguous_blocks` | the longest run (same as mef3io) | blocks in the longest run |
+| `maximum_contiguous_samples` | never assigned | samples in the longest run |
+| `number_of_discontinuities` | `0` (from the `mef_tools` wrapper; pymef's own default is `-1`) | the real count |
+| `.tdat` `maximum_entry_size` | a sample count | largest block in bytes (mef3io's reading; meflib defines neither) |
 
-pymef treats the segment as one contiguous run regardless of the discontinuity
-flags it wrote, so its contiguous figures over-declare on any segment with a
-gap (and `maximum_contiguous_samples` is simply never filled in). mef3io
-measures each run against the same `.tidx` discontinuity flag a reader uses.
+"Legacy stack" matters here: several of these come from the `mef_tools`
+wrapper rather than from pymef. pymef defaults `block_interval` and
+`number_of_discontinuities` to `-1`; `mef_tools/io.py` overwrites them with
+`0`, and `0` is the value that hurts.
 
-Neither reader depends on the fields — pymef sizes from
-`RED_MAX_DIFFERENCE_BYTES(samps_per_mef_block)` and mef3io from each block's own
-header — so this divergence changes no decoded value in either direction. It
-matters only to third-party readers that trust the declarations.
+pymef computes `maximum_contiguous_block_bytes` as the whole data body
+regardless of the discontinuity flags it wrote, and never assigns
+`maximum_contiguous_samples`. mef3io measures each run against the same `.tidx`
+discontinuity flag a reader uses — though since no reference reader consumes
+this family at all, its repair only ever raises these fields, never lowers
+them.
+
+Neither reader depends on `maximum_difference_bytes` — pymef sizes from
+`RED_MAX_DIFFERENCE_BYTES(maximum_block_samples)` and mef3io from each block's
+own header — so that divergence changes no decoded value in either direction.
+It matters to third-party readers that trust the declarations.
+`number_of_discontinuities` is different in kind: meflib's own
+`find_discontinuity_indices` (`meflib.c:3548`) `malloc`s exactly that many
+entries and writes one per flagged block, so the legacy `0` is a heap overflow
+in any application that calls `find_discontinuity_samples`.
 
 mef3io **≤ 1.1.2** left `maximum_difference_bytes` and
 `maximum_contiguous_block_bytes` at `0`, which those readers cannot distinguish

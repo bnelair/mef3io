@@ -170,7 +170,6 @@ CORRUPTIONS = {
         lambda t, path: _patch_s2(t, "number_of_samples", 7),
         "number_of_samples",
     ),
-    "index.start-sample": (lambda t, path: _patch_s2(t, "start_sample", 5), "start_sample"),
     "sizing.block-maxima": (
         lambda t, path: _patch_s2(t, "maximum_block_bytes", 1),
         "maximum_block_bytes",
@@ -205,6 +204,26 @@ CORRUPTIONS = {
         "data maximum_entry_size",
     ),
 }
+
+
+def test_start_sample_is_reported_but_never_repaired(tmp_path):
+    """Writers disagree on what .tidx start_sample means: mef3io stores
+    channel-absolute values in both places, pymef resets the index to 0 in
+    every segment and keeps section 2 cumulative — and its reader depends on
+    exactly that split. Rewriting one convention into the other makes a working
+    session segfault pymef, so this check reports and never repairs."""
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+
+    assert not mef3io.Validator.describe_check("index.start-sample").repairable
+    with pytest.raises(ValueError, match="not repairable"):
+        mef3io.Validator(str(path)).repair(["index.start-sample"])
+
+    # The pymef layout — index restarts at 0, section 2 stays cumulative — must
+    # NOT be reported: it is correct for that writer.
+    _patch_s2(tmet, "start_sample", 4000)
+    assert "index.start-sample" not in _ids(mef3io.Validator(str(path)).validate())
 
 
 def test_every_repairable_check_is_covered():
@@ -679,4 +698,343 @@ def test_legacy_written_session_reports_known_divergences(tmp_path):
         "times.discontinuities",        # left at 0 despite writing the flags
         "header.max-entry-size",        # .tdat gets samples, not bytes
     }, report.summary()
-    assert not report.errors, "none of the legacy quirks are reader-fatal"
+    # number_of_discontinuities = 0 with the flags written is rated an error on
+    # purpose: meflib's find_discontinuity_indices (meflib.c:3548) mallocs
+    # exactly that many entries and writes one per flagged block.
+    assert {f.check_id for f in report.errors} == {"times.discontinuities"}
+
+
+# --- data-safety regressions (each of these once destroyed data) -------------
+
+
+S1_ENCRYPTION_OFFSET = 1024  # section 1, byte 0: section-2 encryption level
+S2_BYTES = 10752
+
+
+def _fix_tmet_crcs(raw):
+    struct.pack_into("<I", raw, 4, m.crc32(bytes(raw[UH_BYTES:METADATA_FILE_BYTES])))
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
+
+
+def test_repair_preserves_bytes_it_does_not_model(tmp_path):
+    """Section 2 carries a 2160-byte protected region at 6432 and a 2160-byte
+    discretionary region at 8592 that this struct does not model. Re-serializing
+    the section would zero all 4320 of them."""
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+
+    raw = bytearray(tmet.read_bytes())
+    raw[S2 + 6432 : S2 + 6432 + 24] = b"PROTECTED-REGION-PAYLOAD"
+    raw[S2 + 8592 : S2 + 8592 + 22] = b"DISCRETIONARY-PAYLOAD!"
+    _fix_tmet_crcs(raw)
+    tmet.write_bytes(bytes(raw))
+
+    _patch_s2(tmet, "maximum_difference_bytes", 0)
+    mef3io.Validator(str(path)).fix("sizing.difference-bytes")
+
+    after = tmet.read_bytes()
+    assert after[S2 + 6432 : S2 + 6432 + 24] == b"PROTECTED-REGION-PAYLOAD"
+    assert after[S2 + 8592 : S2 + 8592 + 22] == b"DISCRETIONARY-PAYLOAD!"
+    assert _read_s2(tmet, "maximum_difference_bytes") > 0
+
+
+def test_level_2_encrypted_section_2_is_re_encrypted_with_the_right_key(tmp_path):
+    """meflib allows section 2 at either encryption level. Assuming level 1
+    re-encrypts a level-2 section with the wrong key, leaving CRC-valid garbage
+    that no reader can open."""
+    path = tmp_path / "enc.mefd"
+    x = np.arange(4000, dtype=np.int32)
+    w = mef3io.Writer(str(path), password1="lvl1", password2="lvl2")
+    w.write_int32("ch1", x, 0.5, START, FS)
+    w.close()
+    tmet = _tmet(path)
+
+    # Re-stage the file as a level-2 section 2: decrypt with L1, re-encrypt
+    # with L2, and say so in section 1.
+    l1, l2 = m.extract_password_bytes("lvl1"), m.extract_password_bytes("lvl2")
+    raw = bytearray(tmet.read_bytes())
+    plain = bytearray(m.aes128_ecb_decrypt(bytes(raw[S2 : S2 + S2_BYTES]), l1))
+    struct.pack_into("<I", plain, 6388, 0)  # clear maximum_difference_bytes
+    raw[S2 : S2 + S2_BYTES] = m.aes128_ecb_encrypt(bytes(plain), l2)
+    raw[S1_ENCRYPTION_OFFSET] = 2
+    _fix_tmet_crcs(raw)
+    tmet.write_bytes(bytes(raw))
+
+    validator = mef3io.Validator(str(path), password="lvl2")
+    assert "sizing.difference-bytes" in _ids(validator.validate())
+    assert validator.fix("sizing.difference-bytes").segments_repaired == 1
+
+    # It must still decrypt with the key section 1 names.
+    after = m.aes128_ecb_decrypt(
+        bytes(bytearray(tmet.read_bytes())[S2 : S2 + S2_BYTES]), l2
+    )
+    assert struct.unpack_from("<I", after, 6388)[0] > 0
+    assert struct.unpack_from("<d", after, 6160)[0] == FS, "sampling frequency survived"
+    with mef3io.Reader(str(path), password="lvl2") as r:
+        np.testing.assert_array_equal(r.read_raw("ch1")["samples"], x)
+
+
+def test_tdat_backup_copies_only_the_universal_header(tmp_path):
+    """Only a .tdat's first 1024 bytes are ever rewritten. Copying the whole
+    file to protect them would be a multi-gigabyte write on a real session."""
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tdat = _tmet(path).with_suffix(".tdat")
+    assert tdat.stat().st_size > 4 * UH_BYTES, "need a body worth not copying"
+
+    _patch_uh(tdat, "maximum_entry_size", 2)
+    header_before = tdat.read_bytes()[:UH_BYTES]
+    mef3io.Validator(str(path)).fix("header.max-entry-size")
+
+    backups = list(Path(str(path) + ".repair-backup").rglob("*.tdat.universal-header"))
+    assert len(backups) == 1
+    assert backups[0].stat().st_size == UH_BYTES, "the whole .tdat must not be copied"
+    assert backups[0].read_bytes() == header_before, "and it must be the pre-repair header"
+    assert tdat.read_bytes()[:UH_BYTES] != header_before, "the live header did change"
+
+
+def test_backup_stays_outside_a_session_given_with_a_trailing_separator(tmp_path):
+    """Shell tab-completion produces 's.mefd/'. Naive concatenation then puts
+    the backup inside the session, where an archive would pack it."""
+    path = tmp_path / "s.mefd"
+    _write(path)
+    _patch_s2(_tmet(path), "maximum_difference_bytes", 0)
+
+    mef3io.Validator(str(path) + os.sep).fix("sizing.difference-bytes")
+    assert Path(str(path) + ".repair-backup").is_dir()
+    assert not (path / ".repair-backup").exists()
+
+
+def test_empty_index_is_reported_never_repaired(tmp_path):
+    """A .tidx truncated to its header is CRC-valid (an empty body hashes to the
+    seed). Deriving a truth from it would write zeros over the only remaining
+    record of what the intact .tdat holds."""
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+    tidx = tmet.with_suffix(".tidx")
+    before = _read_s2(tmet, "number_of_samples")
+    assert before > 0
+
+    head = bytearray(tidx.read_bytes()[:UH_BYTES])
+    struct.pack_into("<I", head, 4, m.crc32(b""))
+    struct.pack_into("<I", head, 0, m.crc32(bytes(head[4:UH_BYTES])))
+    tidx.write_bytes(bytes(head))
+
+    validator = mef3io.Validator(str(path))
+    report = validator.validate()
+    assert not report.ok
+    assert report.skipped and "damaged" in report.skipped[0].reason
+    digest = _tree_digest(path)
+    validator.repair(["index.sample-count", "times.segment-bounds"])
+    assert _tree_digest(path) == digest, "a damaged segment must not be rewritten"
+    assert _read_s2(tmet, "number_of_samples") == before
+
+
+def test_crc_no_entry_sentinel_is_not_corruption(tmp_path):
+    """CRC_START_VALUE is meflib's 'no entry'. metadata.cpp accepts it, so the
+    validator must not call such a session corrupt — it reads perfectly."""
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+    raw = bytearray(tmet.read_bytes())
+    struct.pack_into("<I", raw, 4, 0xFFFFFFFF)  # body_CRC = no entry
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
+    tmet.write_bytes(bytes(raw))
+
+    with mef3io.Reader(str(path)) as r:
+        assert len(r.read_raw("ch1")["samples"]) > 0
+    report = mef3io.Validator(str(path)).validate()
+    assert "crc.metadata" not in _ids(report)
+    assert report.ok, report.summary()
+
+
+def test_index_trailing_padding_is_tolerated(tmp_path):
+    """Foreign writers pad past the last index entry; hashing the padding would
+    reject an intact block table."""
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tidx = _tmet(path).with_suffix(".tidx")
+    tidx.write_bytes(tidx.read_bytes() + b"\x00" * 16)
+
+    report = mef3io.Validator(str(path)).validate()
+    assert "crc.index" not in _ids(report)
+    assert report.ok, report.summary()
+
+
+def test_contiguous_repair_grows_but_never_shrinks(tmp_path):
+    """No reference reader consumes maximum_contiguous_*, so the longest-run
+    reading is inferred. Raising an under-declaration is safe either way;
+    lowering an over-declaration is not."""
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+    _patch_s2(tmet, "maximum_contiguous_samples", 10**9)
+    _patch_s2(tmet, "maximum_contiguous_block_bytes", 0)
+
+    mef3io.Validator(str(path)).fix("sizing.contiguous")
+    assert _read_s2(tmet, "maximum_contiguous_samples") == 10**9, "over-declaration kept"
+    assert _read_s2(tmet, "maximum_contiguous_block_bytes") > 0, "under-declaration raised"
+
+
+def test_garbage_block_header_never_becomes_the_declaration(tmp_path):
+    """.tdat carries no CRC check, so a corrupt block header can present any
+    value. Writing it back would install the NO_ENTRY sentinel the check exists
+    to remove, and the repair would never converge."""
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+    tdat = tmet.with_suffix(".tdat")
+    raw = bytearray(tdat.read_bytes())
+    struct.pack_into("<I", raw, UH_BYTES + 28, 0xFFFFFFFF)  # first block's difference_bytes
+    tdat.write_bytes(bytes(raw))
+    _patch_s2(tmet, "maximum_difference_bytes", 0)
+
+    mef3io.Validator(str(path)).fix("sizing.difference-bytes")
+    stored = _read_s2(tmet, "maximum_difference_bytes")
+    assert stored not in (0, 0xFFFFFFFF)
+    assert stored <= 5 * _read_s2(tmet, "maximum_block_samples")
+    assert mef3io.Validator(str(path)).validate().ok, "the repair must converge"
+
+
+# --- API and CLI safety regressions -----------------------------------------
+
+
+def test_a_filter_matching_nothing_is_not_a_clean_result(tmp_path):
+    """A typo'd channel once examined zero segments, found zero problems, and
+    exited 0 — a CI gate written that way would pass forever."""
+    path = tmp_path / "s.mefd"
+    _write(path)
+    _patch_s2(_tmet(path), "maximum_difference_bytes", 0)
+
+    report = mef3io.Validator(str(path), channels=["nosuchchannel"]).validate()
+    assert report.segments_checked == 0
+    assert not report.ok
+    assert "NOT a clean result" in report.summary()
+    assert mef3io.Validator(str(path), segments=[42]).validate().ok is False
+
+
+@pytest.mark.parametrize("kwargs", [{"channels": "ch1"}, {"segments": "0"}])
+def test_a_bare_string_filter_is_rejected(tmp_path, kwargs):
+    """list("ch1") is ['c','h','1'] — which matches no channel and would have
+    reported the session clean."""
+    with pytest.raises(TypeError, match="not a single string"):
+        mef3io.Validator(str(tmp_path / "s.mefd"), **kwargs)
+
+
+def test_repair_rejects_a_bare_string_of_check_ids(tmp_path):
+    path = tmp_path / "s.mefd"
+    _write(path)
+    with pytest.raises(TypeError, match="not a single string"):
+        mef3io.Validator(str(path)).repair("sizing.difference-bytes")
+
+
+def test_summary_keeps_pointing_at_what_is_still_repairable(tmp_path):
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+    _patch_s2(tmet, "maximum_difference_bytes", 0)
+    _patch_s2(tmet, "block_interval", 0)
+
+    report = mef3io.Validator(str(path)).repair(["sizing.difference-bytes"])
+    assert "times.block-interval" in report.repairable_check_ids
+    assert "sizing.difference-bytes" not in report.repairable_check_ids
+    assert "Still repairable" in report.summary()
+
+
+def test_by_check_follows_registry_order(tmp_path):
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+    _patch_s2(tmet, "block_interval", 0)
+    _patch_s2(tmet, "number_of_blocks", 99)
+
+    grouped = list(mef3io.Validator(str(path)).validate().by_check())
+    registry = [c.id for c in mef3io.available_checks()]
+    assert grouped == sorted(grouped, key=registry.index)
+
+
+def test_legacy_drop_in_warns_like_the_native_reader(tmp_path):
+    """MefReader is the entry point legacy users actually use, so it must carry
+    the same warning as mef3io.Reader."""
+    path = tmp_path / "s.mefd"
+    _write(path)
+    _patch_s2(_tmet(path), "maximum_difference_bytes", 0)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        mef3io.MefReader(str(path))
+    assert [w for w in caught if issubclass(w.category, mef3io.SessionDeclarationWarning)]
+
+
+def test_reader_exposes_the_structured_declaration_issues(tmp_path):
+    path = tmp_path / "s.mefd"
+    _write(path)
+    _patch_s2(_tmet(path), "maximum_difference_bytes", 0)
+
+    with mef3io.Reader(str(path), warn_declarations=False) as r:
+        issues = r.declaration_issues
+    assert [i["field"] for i in issues] == ["maximum_difference_bytes"]
+    assert issues[0]["channel"] == "ch1"
+
+
+def test_cli_reports_bad_input_without_a_traceback(tmp_path):
+    env = dict(os.environ, PYTHONPATH=str(Path(mef3io.__file__).resolve().parent.parent))
+    path = tmp_path / "s.mefd"
+    _write(path)
+
+    missing = subprocess.run(
+        [sys.executable, "-m", "mef3io", "validate", str(tmp_path / "nope.mefd")],
+        capture_output=True, text=True, env=env,
+    )
+    assert missing.returncode == 2, "a usage error must differ from 'session has defects'"
+    assert "Traceback" not in missing.stderr
+    assert missing.stderr.startswith("error: ")
+
+    bad_check = subprocess.run(
+        [sys.executable, "-m", "mef3io", "validate", str(path), "--check", "nope.id"],
+        capture_output=True, text=True, env=env,
+    )
+    assert bad_check.returncode == 2
+    assert "Traceback" not in bad_check.stderr
+    assert "--list-checks" in bad_check.stderr
+
+    combined = subprocess.run(
+        [sys.executable, "-m", "mef3io", "validate", str(path),
+         "--check", "sizing.contiguous", "--repair", "sizing.difference-bytes"],
+        capture_output=True, text=True, env=env,
+    )
+    assert combined.returncode == 2, "--check with --repair must not be silently ignored"
+
+
+def test_cli_reads_a_password_from_the_environment(tmp_path):
+    """A password on argv lands in ps output, shell history and CI logs."""
+    path = tmp_path / "enc.mefd"
+    w = mef3io.Writer(str(path), password1="lvl1", password2="lvl2")
+    w.write_int32("ch1", np.arange(2000, dtype=np.int32), 1.0, START, FS)
+    w.close()
+
+    env = dict(
+        os.environ,
+        PYTHONPATH=str(Path(mef3io.__file__).resolve().parent.parent),
+        MEF_PW="lvl2",
+    )
+    out = subprocess.run(
+        [sys.executable, "-m", "mef3io", "validate", str(path), "--password-env", "MEF_PW"],
+        capture_output=True, text=True, env=env,
+    )
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "1 segment(s) checked" in out.stdout
+
+
+def test_docs_check_table_matches_the_registry():
+    """The table in docs/validation.md is the reference users act on; it must
+    not drift from the registry (it already did once, on severities)."""
+    import re
+
+    doc = (REPO / "docs" / "validation.md").read_text()
+    rows = re.findall(r"^\| `([a-z.\-]+)` \| (\w+) \| (yes|no) \|", doc, re.M)
+    documented = [(cid, sev, rep == "yes") for cid, sev, rep in rows]
+    actual = [(c.id, c.severity, c.repairable) for c in mef3io.available_checks()]
+    assert documented == actual

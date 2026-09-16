@@ -284,8 +284,16 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     s2.maximum_contiguous_blocks = contiguous.blocks();
     s2.maximum_contiguous_block_bytes = contiguous.block_bytes();
     s2.maximum_contiguous_samples = contiguous.samples();
-    s2.maximum_native_sample_value = static_cast<sf8>(global_max);
-    s2.minimum_native_sample_value = static_cast<sf8>(global_min);
+    // Native units = counts * units_conversion_factor, with the pair swapped
+    // for a negative factor (pymef3_file.c:972-978). Storing raw counts here
+    // would disagree with every other MEF writer by a factor of 1/ufact.
+    {
+      const sf8 ufact = spec.units_conversion_factor;
+      const sf8 hi = static_cast<sf8>(global_max) * ufact;
+      const sf8 lo = static_cast<sf8>(global_min) * ufact;
+      s2.maximum_native_sample_value = ufact >= 0.0 ? hi : lo;
+      s2.minimum_native_sample_value = ufact >= 0.0 ? lo : hi;
+    }
 
     fmt::MetadataSection3 s3;
     s3.recording_time_offset = rto;
@@ -465,6 +473,9 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   ContiguousRun contiguous;
   ui4 index_max_block_samples = 0;
   si8 index_max_block_bytes = 0;
+  si8 index_total_samples = 0;
+  si8 index_n_discontinuities = 0;
+  std::size_t index_entries = 0;
   {
     std::vector<ui1> file = read_whole_file(tidx_path);
     auto uh = fmt::UniversalHeader::parse(file);
@@ -482,6 +493,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     std::span<const ui1> entries =
         std::span<const ui1>(file).subspan(fmt::UNIVERSAL_HEADER_BYTES);
     const std::size_t n_entries = entries.size() / fmt::TIME_SERIES_INDEX_BYTES;
+    index_entries = n_entries;
     for (std::size_t i = 0; i < n_entries; ++i) {
       auto e = fmt::TimeSeriesIndex::parse(
           entries.subspan(i * fmt::TIME_SERIES_INDEX_BYTES, fmt::TIME_SERIES_INDEX_BYTES));
@@ -493,6 +505,8 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
       contiguous.add(discontinuity, samples, bytes);
       index_max_block_samples = std::max(index_max_block_samples, samples);
       index_max_block_bytes = std::max<si8>(index_max_block_bytes, bytes);
+      index_total_samples += samples;
+      if (discontinuity) ++index_n_discontinuities;
     }
   }
 
@@ -501,8 +515,14 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   {
     fmt::TimeSeriesMetadataSection2 s2 = md.section2;
     const si8 seg_start = to_user_time(md.universal_header.start_time, rto);
-    s2.number_of_samples += appended_samples;
-    s2.number_of_blocks += static_cast<si8>(nb);
+    // Totals come from the index, which describes every block old and new.
+    // Folding onto the stored value carries a foreign writer's mistake forward
+    // for the life of the file: the legacy stack writes 0 discontinuities while
+    // writing the flags, and a NO_ENTRY (-1) total would make every subsequent
+    // append off by one.
+    s2.number_of_samples = index_total_samples;
+    s2.number_of_blocks = static_cast<si8>(index_entries);
+    s2.number_of_discontinuities = index_n_discontinuities;
     s2.recording_duration = last_end - seg_start;
     // Derived from the index rather than max()'d onto the stored value: a
     // foreign segment may carry NO_ENTRY (0xFFFFFFFF / -1) here, and a max()
@@ -511,7 +531,6 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     s2.maximum_block_bytes = std::max<si8>(index_max_block_bytes, max_block_bytes);
     s2.maximum_block_samples = std::max(index_max_block_samples, max_block_samples);
     s2.block_interval = static_cast<si8>(std::llround(s2.maximum_block_samples * 1e6 / fs_hz));
-    s2.number_of_discontinuities += n_discont;
     s2.maximum_contiguous_blocks = contiguous.blocks();
     s2.maximum_contiguous_block_bytes = contiguous.block_bytes();
     s2.maximum_contiguous_samples = contiguous.samples();
@@ -528,10 +547,19 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
         std::max(max_difference_bytes, stored_is_usable
                                            ? stored_difference_bytes
                                            : red_max_difference_bytes(index_max_block_samples));
-    s2.maximum_native_sample_value =
-        std::max(s2.maximum_native_sample_value, static_cast<sf8>(new_max));
-    s2.minimum_native_sample_value =
-        std::min(s2.minimum_native_sample_value, static_cast<sf8>(new_min));
+    // These are in NATIVE units (counts * units_conversion_factor), not raw
+    // counts - see pymef3_file.c:972-978, which also swaps the pair when the
+    // factor is negative. Folding a raw si4 onto them mixes units and lands the
+    // value out by 1/ufact, permanently, since later appends max() against it.
+    {
+      const sf8 ufact = s2.units_conversion_factor;
+      const sf8 new_hi = static_cast<sf8>(new_max) * ufact;
+      const sf8 new_lo = static_cast<sf8>(new_min) * ufact;
+      const sf8 hi = ufact >= 0.0 ? new_hi : new_lo;
+      const sf8 lo = ufact >= 0.0 ? new_lo : new_hi;
+      s2.maximum_native_sample_value = std::max(s2.maximum_native_sample_value, hi);
+      s2.minimum_native_sample_value = std::min(s2.minimum_native_sample_value, lo);
+    }
 
     std::vector<ui1> s2buf(fmt::TIME_SERIES_METADATA_SECTION_2_BYTES);
     s2.serialize(s2buf);

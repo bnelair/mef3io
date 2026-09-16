@@ -13,7 +13,7 @@ against the legacy stack.
 ## Status
 
 Read and write are implemented and cross-validated against the legacy
-`pymef` / `mef_tools` stack in both directions (~229 Python tests + standalone
+`pymef` / `mef_tools` stack in both directions (~253 Python tests + standalone
 C++ tests). Scope notes:
 
 - **Video** (`.vidd/.vmet/.vidx`) is out of scope (traversal skips it).

@@ -10,7 +10,7 @@ Status: read + write complete, cross-validated **both directions** vs
 pymef/mef_tools (values, NaN gaps, times, encryption none/L1+L2, fractional fs,
 records). In-segment append + per-segment map implemented. Tar session
 archives (single-file `.mefd.tar`, read in place) implemented. Session
-validator + targeted repair implemented (+ an open-time warning). ~229 Python
+validator + targeted repair implemented (+ an open-time warning). ~253 Python
 tests + standalone C++ Catch2 tests. Wheel builds via `python -m build`.
 Parallel decode/encode, byte-deterministic across threads.
 
@@ -160,13 +160,20 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   Partitioning up front also means a block a later one covers outright owns
   nothing, so it is not decoded at all (halves decode time on such geometry).
 - **Section-2 `maximum_*` fields are an ALLOCATION CONTRACT, not statistics.**
-  meflib-based readers (CyberPSG et al.) malloc from them before decoding, and
   `0` is NOT the NO_ENTRY sentinel for any of them (`maximum_difference_bytes`
   / `maximum_block_samples` → `0xFFFFFFFF`; the si8 ones → `-1`), so a reader
-  cannot tell unset from measured. `RED_allocate_processing_struct` *skips* the
-  allocation on size 0 → NULL `difference_buffer` → `RED_decode` writes through
-  it, and meflib's `BehaviorOnFail = Exit` makes even the guarded path a
-  process exit. Fixed in 1.1.3 (reported against 1.1.2, which left
+  cannot tell unset from measured. CAREFUL WITH THE MECHANISM — meflib does NOT
+  allocate from these itself; it exposes helpers that take one as a size and
+  validate none, and the *application* passes them: (a)
+  `RED_allocate_processing_struct` skips the alloc on size 0 → NULL
+  `difference_buffer` → `RED_decode` writes through it, and the guard meflib
+  ships for this (`RED_check_RPS_allocation`, meflib.h:1186 / meflib.c:6534)
+  is NEVER CALLED — no error path at all; (b) `find_discontinuity_indices`
+  (meflib.c:3548) mallocs `number_of_discontinuities` entries then writes one
+  per FLAGGED block — the legacy `mef_tools` `0` is a straight heap overflow,
+  and is the best-evidenced hazard here (hence Error severity). pymef passes
+  neither (it sizes from `RED_MAX_DIFFERENCE_BYTES(maximum_block_samples)`),
+  which is why the oracle never saw any of this. Fixed in 1.1.3 (reported against 1.1.2, which left
   `maximum_difference_bytes` and `maximum_contiguous_block_bytes` at 0 and set
   `maximum_contiguous_blocks`/`_samples` to the channel totals). The writer now
   measures all six: `maximum_difference_bytes` from each encoded block's RED
@@ -175,7 +182,9 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   `.tidx` discontinuity flag — the same flag a reader uses — via the
   `ContiguousRun` accumulator in writer.cpp. Each maximum is tracked
   independently: over-declaring only wastes a reader's allocation,
-  under-declaring truncates its buffer. On APPEND the contiguous trio is
+  under-declaring truncates its buffer. NOTE no reader in reference_files
+  consumes `maximum_contiguous_*` at all, so longest-run is mef3io's INFERENCE
+  — the validator's repair therefore only ever RAISES those three. On APPEND the contiguous trio is
   recomputed exactly from the full `.tidx` (so appending repairs a segment
   written by an older mef3io), but `maximum_difference_bytes` lives in `.tdat`
   headers — folding old blocks in exactly would cost a seek per block and break
@@ -206,6 +215,17 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   "Note" header with an empty body, silently dropping the text), so
   `write_records` rejects any type that is not 4 ASCII bytes up front, before
   opening a file. Unknown 4-char types still pass through with an empty body.
+- **`reference_files/` IS PRESENT in this repo** (gitignored):
+  `meflib-multiplatform/` (authoritative C), `pymef-develop/`, `mef_tools/`,
+  `mef3_dump-main/`. Settle every format question against it — do not reason
+  from memory, and do not trust a doc comment that cites it.
+- **Sign conventions are MIXED WITHIN ONE FILE.** For a pymef/mef_tools
+  session: `.tmet` universal-header times are NEGATED, `.tidx`/`.tdat`
+  universal-header times are NOT, and index block times ARE. So every time
+  comparison must go through `to_user_time` first. Worse, with a non-zero
+  `rto` the legacy stack stores a POSITIVE delta where meflib negates — the two
+  are indistinguishable from the bytes, so the validator's time checks stand
+  down entirely when `rto != 0` rather than risk rewriting a correct file.
 - **Oracle**: use `pymef` `read_ts_channels_sample([ch],[0,nsamp])` for decoded
   int32 (no gap NaN) and `read_ts_channels_uutc` for gap-filled. `mef3_dump` is
   NOT usable (reads the encryption sentinel byte unsigned). Manifest `nsamp` !=

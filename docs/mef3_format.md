@@ -120,13 +120,19 @@ start/end times and `recording_duration` span the gaps. A gridded read
 ### The buffer-sizing declarations
 
 The `maximum_*` block of fields at 6376–6424 is not descriptive trivia — it is the
-allocation contract. A meflib-based reader (CyberPSG and most established MEF
-tooling) sizes its buffers straight from these numbers before it decodes
-anything, so a writer that under-declares hands that reader a buffer too small
-for the data it is about to write into it. `RED_allocate_processing_struct`
-skips the allocation entirely for a size of `0`, leaving `difference_buffer`
-NULL, and meflib's default `BehaviorOnFail = Exit` turns the resulting
-complaint into a process exit rather than a catchable error.
+allocation contract. meflib does not allocate from them itself, but it exposes
+helpers that take one as a buffer size and validate none of them, and
+applications built on it (CyberPSG among them) pass them in before decoding
+anything — so a writer that under-declares hands that reader a buffer too small
+for the data about to go into it.
+
+`RED_allocate_processing_struct` skips the allocation entirely for a
+`difference_buffer_size` of `0`, leaving `difference_buffer` NULL for
+`RED_decode` to write through; meflib ships a guard for exactly this
+(`RED_check_RPS_allocation`) but never calls it, so there is no error path at
+all. Separately, `find_discontinuity_indices` (`meflib.c:3548`) `malloc`s
+`number_of_discontinuities` entries and then writes one per flagged block — so
+an under-declared discontinuity count is a heap overflow inside meflib itself.
 
 **`0` is not the NO_ENTRY sentinel for any of them**, so a reader cannot tell
 an unset field from a genuine measurement:

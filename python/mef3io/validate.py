@@ -35,12 +35,15 @@ On the command line::
 """
 from __future__ import annotations
 
+import dataclasses
+import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 __all__ = [
     "Check",
+    "describe_check",
     "Finding",
     "SkippedSegment",
     "Report",
@@ -49,9 +52,6 @@ __all__ = [
     "validate_session",
     "repair_session",
 ]
-
-_SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2}
-
 
 def _backend():
     from . import _mef3io
@@ -137,7 +137,7 @@ class Report:
         that resolved everything reports ``ok``. A skipped segment always
         does count — an unchecked segment is not a clean one.
         """
-        return not self.unresolved_errors and not self.skipped
+        return bool(self.segments_checked) and not self.unresolved_errors and not self.skipped
 
     @property
     def errors(self) -> tuple[Finding, ...]:
@@ -173,15 +173,16 @@ class Report:
         """
         out: list[str] = []
         for f in self.findings:
-            if f.repairable and f.check_id not in out:
+            if f.repairable and not f.repaired and f.check_id not in out:
                 out.append(f.check_id)
         return out
 
     def by_check(self) -> dict[str, list[Finding]]:
         """Findings grouped by check id, in registry order."""
+        order = {c: i for i, c in enumerate(self.checks_run)}
         grouped: dict[str, list[Finding]] = {}
-        for f in self.findings:
-            grouped.setdefault(f.check_id, []).append(f)
+        for check_id in sorted({f.check_id for f in self.findings}, key=lambda c: order.get(c, 1 << 30)):
+            grouped[check_id] = [f for f in self.findings if f.check_id == check_id]
         return grouped
 
     def by_channel(self) -> dict[str, list[Finding]]:
@@ -195,7 +196,7 @@ class Report:
         lines = []
         head = f"mef3io validation report — {self.path}" if self.path else "mef3io validation report"
         lines.append(head)
-        lines.append("=" * len(head))
+        lines.append("=" * min(len(head), 78))
         lines.append(
             f"{self.segments_checked} segment(s) checked, "
             f"{len(self.checks_run)} check(s) run, "
@@ -206,6 +207,13 @@ class Report:
                 f"{self.segments_repaired} segment(s) repaired "
                 f"({', '.join(self.checks_repaired)})"
             )
+        if not self.segments_checked:
+            lines.append("")
+            lines.append(
+                "No segments were examined — nothing matched the channel/segment filter, "
+                "or the session holds no time-series data. This is NOT a clean result."
+            )
+            return "\n".join(lines)
         if not self.findings and not self.skipped:
             lines.append("")
             lines.append("No problems found — every declaration matches the data on disk.")
@@ -230,7 +238,7 @@ class Report:
                     )
                 else:
                     lines.append(f"    {where}: {hit.message}")
-            if len(hits) > max_examples:
+            if max_examples and len(hits) > max_examples:
                 lines.append(f"    ... and {len(hits) - max_examples} more")
 
         if self.skipped:
@@ -238,13 +246,13 @@ class Report:
             lines.append(f"skipped {len(self.skipped)} segment(s):")
             for s in self.skipped[:max_examples]:
                 lines.append(f"    {s}")
-            if len(self.skipped) > max_examples:
+            if max_examples and len(self.skipped) > max_examples:
                 lines.append(f"    ... and {len(self.skipped) - max_examples} more")
 
         fixable = self.repairable_check_ids
-        if fixable and not self.segments_repaired:
+        if fixable:
             lines.append("")
-            lines.append("Repairable — nothing was changed. To fix, pass the ids explicitly:")
+            lines.append("Still repairable. To fix, pass the ids explicitly:")
             lines.append(f"    Validator(path).repair({fixable!r})")
         return "\n".join(lines)
 
@@ -253,9 +261,17 @@ class Report:
 
 
 def _to_report(raw: dict, path: str) -> Report:
+    finding_fields = {f.name for f in dataclasses.fields(Finding)}
+    skipped_fields = {f.name for f in dataclasses.fields(SkippedSegment)}
     return Report(
-        findings=tuple(Finding(**{**f, "segment": f["segment"]}) for f in raw["findings"]),
-        skipped=tuple(SkippedSegment(**s) for s in raw["skipped"]),
+        findings=tuple(
+            Finding(**{k: v for k, v in f.items() if k in finding_fields})
+            for f in raw["findings"]
+        ),
+        skipped=tuple(
+            SkippedSegment(**{k: v for k, v in s.items() if k in skipped_fields})
+            for s in raw["skipped"]
+        ),
         segments_checked=raw["segments_checked"],
         segments_repaired=raw["segments_repaired"],
         checks_run=tuple(raw["checks_run"]),
@@ -309,6 +325,12 @@ class Validator:
         segments: Sequence[int] | None = None,
         exact_difference_bytes: bool = True,
     ) -> None:
+        if isinstance(channels, (str, bytes)):
+            raise TypeError("channels must be a sequence of names, not a single string")
+        if isinstance(segments, (str, bytes)):
+            raise TypeError(
+                "segments must be a sequence of numbers, not a single string"
+            )
         self.path = str(path)
         self.password = password
         self.channels = list(channels) if channels else []
@@ -378,6 +400,11 @@ class Validator:
             If ``check_ids`` is empty, or names an unknown or non-repairable
             check.
         """
+        if isinstance(check_ids, (str, bytes)):
+            raise TypeError(
+                "check_ids must be a sequence of ids, not a single string — "
+                "use fix(check_id) to apply one repair"
+            )
         ids = list(check_ids)
         if not ids:
             raise ValueError(
@@ -433,7 +460,19 @@ def _main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("path", nargs="?", help="a .mefd directory or .mefd.tar archive")
     parser.add_argument("--password", default="", help="password for an encrypted session")
-    parser.add_argument("--channel", action="append", default=[], help="restrict to this channel")
+    parser.add_argument(
+        "--password-env",
+        metavar="VAR",
+        help="read the password from this environment variable instead of the command "
+        "line, which is visible in ps output, shell history and CI logs",
+    )
+    parser.add_argument(
+        "--channel",
+        action="append",
+        default=[],
+        help="restrict to this channel (repeatable). A name that matches nothing "
+        "examines no segments and is reported as such, not as a clean session.",
+    )
     parser.add_argument(
         "--segment", action="append", type=int, default=[], help="restrict to this segment number"
     )
@@ -464,17 +503,42 @@ def _main(argv: Sequence[str] | None = None) -> int:
     if not args.path:
         parser.error("a session path is required (or --list-checks)")
 
+    password = args.password
+    if args.password_env:
+        if args.password:
+            parser.error("pass --password or --password-env, not both")
+        password = os.environ.get(args.password_env)
+        if password is None:
+            parser.error(f"environment variable {args.password_env} is not set")
     validator = Validator(
         args.path,
-        password=args.password,
+        password=password,
         channels=args.channel,
         segments=args.segment,
         exact_difference_bytes=not args.fast,
     )
-    if args.repair:
-        report = validator.repair(args.repair, backup=not args.no_backup)
-    else:
-        report = validator.validate(args.check)
+    if args.repair and args.check:
+        parser.error(
+            "--check cannot be combined with --repair: a repair always runs the full "
+            "registry so the report stays complete"
+        )
+    for check_id in args.check + args.repair:
+        if describe_check(check_id) is None:
+            parser.error(
+                f"unknown check id: {check_id}\n"
+                "run 'python -m mef3io validate --list-checks' to see them"
+            )
+    try:
+        if args.repair:
+            report = validator.repair(args.repair, backup=not args.no_backup)
+        else:
+            report = validator.validate(args.check)
+    except (RuntimeError, ValueError, OSError) as exc:
+        # A bad path or password reaches here as a C++ exception. A researcher
+        # who typos a path should get one line, not a stack trace — and the
+        # exit code must be distinguishable from "the session has defects".
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     print(report.summary())
     return 0 if report.ok else 1
 

@@ -7,8 +7,10 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <optional>
 #include <set>
 #include <stdexcept>
+#include <tuple>
 
 #include "mef3io/byteio.hpp"
 #include "mef3io/crc.hpp"
@@ -119,6 +121,10 @@ struct SegmentTruth {
   si8 recording_duration = 0;
   si8 block_interval = 0;
   si8 data_bytes = 0;  // sum of block_bytes
+  bool has_blocks = false;  // false => the index is empty; derive nothing from it
+  bool times_known = true;  // false => an entry carried UUTC_NO_ENTRY
+  bool times_comparable = true;  // false => non-zero rto, conventions ambiguous
+  bool difference_bytes_suspect = false;  // a block header exceeded the worst case
   bool offsets_sane = true;
   std::string offset_problem;
 };
@@ -165,13 +171,19 @@ const std::vector<CheckImpl>& check_impls() {
                    const ui4 real_body = crc::calculate(std::span<const ui1>(b).subspan(
                        fmt::UNIVERSAL_HEADER_BYTES,
                        fmt::METADATA_FILE_BYTES - fmt::UNIVERSAL_HEADER_BYTES));
-                   if (stored_header == real_header && stored_body == real_body) return;
+                   // CRC_START_VALUE is meflib's "no entry" for a CRC field.
+                   // metadata.cpp accepts it rather than rejecting the session,
+                   // so the validator must not call such a file corrupt — it
+                   // reads perfectly.
+                   const bool body_ok =
+                       stored_body == real_body || stored_body == fmt::CRC_START_VALUE;
+                   const bool header_ok =
+                       stored_header == real_header || stored_header == fmt::CRC_START_VALUE;
+                   if (header_ok && body_ok) return;
                    hit = true;
-                   f.field = stored_header != real_header ? "header_CRC" : "body_CRC";
-                   f.stored = declared_ui4(stored_header != real_header ? stored_header
-                                                                       : stored_body);
-                   f.expected = declared_ui4(stored_header != real_header ? real_header
-                                                                         : real_body);
+                   f.field = !header_ok ? "header_CRC" : "body_CRC";
+                   f.stored = declared_ui4(!header_ok ? stored_header : stored_body);
+                   f.expected = declared_ui4(!header_ok ? real_header : real_body);
                    f.message = "metadata CRC mismatch; the segment's declarations are not "
                                "trustworthy and will not be repaired";
                  },
@@ -185,17 +197,38 @@ const std::vector<CheckImpl>& check_impls() {
                    const auto& b = s.tidx_bytes;
                    const ui4 real_header = crc::calculate(
                        std::span<const ui1>(b).subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4));
-                   const ui4 real_body =
+                   // Bound the body by the entries the header declares, not by
+                   // EOF: foreign writers pad past the last entry, and hashing
+                   // the padding would reject an intact index (the same trap
+                   // .tmet already avoids). Read the count straight from the
+                   // universal header — this check runs before the index is
+                   // parsed, precisely because nothing derived from it can be
+                   // trusted until the CRCs pass.
+                   const si8 declared_entries =
+                       byteio::read<si8>(b, 32);  // UniversalHeader::number_of_entries
+                   const std::size_t avail = b.size() - fmt::UNIVERSAL_HEADER_BYTES;
+                   const std::size_t entry_bytes =
+                       declared_entries > 0
+                           ? static_cast<std::size_t>(declared_entries) * fmt::TIME_SERIES_INDEX_BYTES
+                           : avail;
+                   const std::size_t body_bytes = std::min(avail, entry_bytes);
+                   const ui4 real_body = crc::calculate(
+                       std::span<const ui1>(b).subspan(fmt::UNIVERSAL_HEADER_BYTES, body_bytes));
+                   const ui4 real_body_to_eof =
                        crc::calculate(std::span<const ui1>(b).subspan(fmt::UNIVERSAL_HEADER_BYTES));
                    const ui4 stored_header = byteio::read<ui4>(b, 0);
                    const ui4 stored_body = byteio::read<ui4>(b, 4);
-                   if (stored_header == real_header && stored_body == real_body) return;
+                   // CRC_START_VALUE is meflib's "no entry" for a CRC field.
+                   const bool header_ok =
+                       stored_header == real_header || stored_header == fmt::CRC_START_VALUE;
+                   const bool body_ok = stored_body == real_body ||
+                                        stored_body == real_body_to_eof ||
+                                        stored_body == fmt::CRC_START_VALUE;
+                   if (header_ok && body_ok) return;
                    hit = true;
-                   f.field = stored_header != real_header ? "header_CRC" : "body_CRC";
-                   f.stored = declared_ui4(stored_header != real_header ? stored_header
-                                                                       : stored_body);
-                   f.expected = declared_ui4(stored_header != real_header ? real_header
-                                                                         : real_body);
+                   f.field = !header_ok ? "header_CRC" : "body_CRC";
+                   f.stored = declared_ui4(!header_ok ? stored_header : stored_body);
+                   f.expected = declared_ui4(!header_ok ? real_header : real_body);
                    f.message = "index CRC mismatch; the block table is damaged";
                  },
                  {}});
@@ -249,21 +282,30 @@ const std::vector<CheckImpl>& check_impls() {
                  }});
 
     v.push_back({{"index.start-sample", "Declared start sample matches the first block",
-                  "start_sample places this segment in the channel-wide sample numbering; a "
-                  "wrong value misaligns the segment against its neighbours.",
-                  Severity::Warning, true},
+                  "start_sample places this segment in the channel-wide sample numbering. "
+                  "REPORT ONLY, never repaired: writers disagree on what .tidx start_sample "
+                  "means. mef3io stores channel-absolute values in both section 2 and the "
+                  "index; pymef resets the index to 0 in every segment and keeps section 2 "
+                  "channel-cumulative, and its reader depends on exactly that split. Rewriting "
+                  "one convention into the other makes a working session unreadable, so this "
+                  "check only speaks up when the index itself is channel-absolute and the two "
+                  "still disagree.",
+                  Severity::Warning, false},
                  [](const SegmentState& s, const SegmentTruth& t, Finding& f, bool& hit) {
+                   if (!t.has_blocks) return;
+                   // index[0].start_sample == 0 is the per-segment convention;
+                   // section 2 being non-zero there is correct, not a defect.
+                   if (t.start_sample == 0) return;
                    if (s.md.section2.start_sample == t.start_sample) return;
                    hit = true;
                    f.field = "start_sample";
                    f.stored = declared_si8(s.md.section2.start_sample);
                    f.expected = num(t.start_sample);
-                   f.message = "metadata start sample disagrees with the first index entry";
+                   f.message = "metadata start sample disagrees with the first index entry "
+                               "(reported only; the two conventions cannot be told apart "
+                               "reliably enough to rewrite)";
                  },
-                 [](const SegmentTruth& t, RepairBuffer& r) {
-                   r.s2.start_sample = t.start_sample;
-                   r.tmet_dirty = true;
-                 }});
+                 {}});
 
     v.push_back({{"sizing.block-maxima", "Largest block is declared correctly",
                   "maximum_block_bytes and maximum_block_samples size a reader's per-block "
@@ -342,18 +384,39 @@ const std::vector<CheckImpl>& check_impls() {
                      f.field = it.name;
                      f.stored = declared_si8(it.stored);
                      f.expected = num(it.expected);
-                     f.message = it.stored < it.expected
-                                     ? "declared contiguous maximum is smaller than a run on disk"
-                                     : "declared contiguous maximum exceeds the longest run on "
-                                       "disk (wasted allocation)";
-                     return;
+                     f.message =
+                         it.stored < it.expected
+                             ? "declared contiguous maximum is smaller than a run on disk"
+                             : "declared contiguous maximum exceeds the longest run on disk "
+                               "(wasted allocation; reported but not rewritten)";
+                     // Prefer reporting an under-declaration: it is the one that
+                     // truncates a reader's buffer, and it must not stay hidden
+                     // behind a harmless over-declaration earlier in the list.
+                     if (it.stored < it.expected) return;
                    }
                  },
                  [](const SegmentTruth& t, RepairBuffer& r) {
-                   r.s2.maximum_contiguous_blocks = t.contiguous_blocks;
-                   r.s2.maximum_contiguous_block_bytes = t.contiguous_block_bytes;
-                   r.s2.maximum_contiguous_samples = t.contiguous_samples;
-                   r.tmet_dirty = true;
+                   // Grow only. No reader in the reference set (meflib, pymef,
+                   // mef3_dump) consumes these fields, so the longest-run
+                   // reading is inferred rather than established. Raising an
+                   // under-declaration is safe under either reading; lowering an
+                   // over-declaration would truncate a reader that treats the
+                   // field as a segment total, so it is left alone.
+                   // make_tuple, not tie: tie would alias the very fields the
+                   // next lines mutate, so the comparison could never differ.
+                   const auto snapshot = std::make_tuple(r.s2.maximum_contiguous_blocks,
+                                                         r.s2.maximum_contiguous_block_bytes,
+                                                         r.s2.maximum_contiguous_samples);
+                   r.s2.maximum_contiguous_blocks =
+                       std::max(r.s2.maximum_contiguous_blocks, t.contiguous_blocks);
+                   r.s2.maximum_contiguous_block_bytes =
+                       std::max(r.s2.maximum_contiguous_block_bytes, t.contiguous_block_bytes);
+                   r.s2.maximum_contiguous_samples =
+                       std::max(r.s2.maximum_contiguous_samples, t.contiguous_samples);
+                   if (snapshot != std::make_tuple(r.s2.maximum_contiguous_blocks,
+                                                   r.s2.maximum_contiguous_block_bytes,
+                                                   r.s2.maximum_contiguous_samples))
+                     r.tmet_dirty = true;
                  }});
 
     v.push_back({{"times.segment-bounds", "Universal-header times bracket the data",
@@ -366,6 +429,7 @@ const std::vector<CheckImpl>& check_impls() {
                  [](const SegmentState& s, const SegmentTruth& t, Finding& f, bool& hit) {
                    const sf8 fs_hz = s.md.section2.sampling_frequency;
                    if (!(fs_hz > 0.0)) return;  // times cannot be derived without fs
+                   if (!t.has_blocks || !t.times_known || !t.times_comparable) return;
                    const si8 slack = static_cast<si8>(std::llround(1e6 / fs_hz)) + 1;
                    struct Item {
                      const char* name;
@@ -415,6 +479,7 @@ const std::vector<CheckImpl>& check_impls() {
                  [](const SegmentState& s, const SegmentTruth& t, Finding& f, bool& hit) {
                    const sf8 fs_hz = s.md.section2.sampling_frequency;
                    if (!(fs_hz > 0.0)) return;
+                   if (!t.has_blocks || !t.times_known || !t.times_comparable) return;
                    const si8 slack = static_cast<si8>(std::llround(1e6 / fs_hz)) + 1;
                    const si8 stored = s.md.section2.recording_duration;
                    if (stored != fmt::SI8_NO_ENTRY && std::abs(stored - t.recording_duration) <= slack)
@@ -456,9 +521,13 @@ const std::vector<CheckImpl>& check_impls() {
 
     v.push_back({{"times.discontinuities", "Discontinuity count matches the index",
                   "number_of_discontinuities should equal the number of blocks flagged "
-                  "discontinuous (a segment always begins with one). The legacy pymef writer "
-                  "leaves it at 0 even when it wrote the flags.",
-                  Severity::Warning, true},
+                  "discontinuous (a segment always begins with one). The legacy mef_tools "
+                  "writer leaves it at 0 even when it wrote the flags. This is the best-"
+                  "evidenced hazard in the registry: meflib's own find_discontinuity_indices "
+                  "(meflib.c:3548) mallocs exactly this many entries and then writes one per "
+                  "flagged block, so an under-declared count is a straight heap overflow in "
+                  "any caller of find_discontinuity_samples.",
+                  Severity::Error, true},
                  [](const SegmentState& s, const SegmentTruth& t, Finding& f, bool& hit) {
                    const si8 stored = s.md.section2.number_of_discontinuities;
                    if (stored == t.n_discontinuities) return;
@@ -506,9 +575,11 @@ const std::vector<CheckImpl>& check_impls() {
 
     v.push_back({{"header.max-entry-size", "Universal headers declare the right entry size",
                   "maximum_entry_size is the largest record in the file: the metadata record "
-                  "(16384 B), one index entry (56 B), or the largest RED block. A reader may "
-                  "allocate from it before reading.",
-                  Severity::Warning, true},
+                  "(16384 B) and one index entry (56 B) are fixed by the format. The .tdat "
+                  "value is INFORMATIONAL: meflib never writes it (only NO_ENTRY) and reads it "
+                  "for record files alone, and the one reference writer stores a sample count "
+                  "there — so 'largest RED block' is mef3io's reading, not a specification.",
+                  Severity::Info, true},
                  [](const SegmentState& s, const SegmentTruth& t, Finding& f, bool& hit) {
                    struct Item {
                      const char* name;
@@ -589,17 +660,36 @@ SegmentTruth derive_truth(const SessionSource& src, const SegmentState& s,
                           const ValidateOptions& opts) {
   SegmentTruth t;
   const auto& idx = s.tidx_bytes;
-  const std::size_t n = idx.size() > fmt::UNIVERSAL_HEADER_BYTES
-                            ? (idx.size() - fmt::UNIVERSAL_HEADER_BYTES) /
-                                  fmt::TIME_SERIES_INDEX_BYTES
-                            : 0;
+  const std::size_t from_size = idx.size() > fmt::UNIVERSAL_HEADER_BYTES
+                                    ? (idx.size() - fmt::UNIVERSAL_HEADER_BYTES) /
+                                          fmt::TIME_SERIES_INDEX_BYTES
+                                    : 0;
+  // The count of entries physically present, NOT the universal header's
+  // declaration — that declaration is itself one of the things under test
+  // (header.entry-count), so deriving the truth from it would make an
+  // under-declared count undetectable. Integer division already ignores a
+  // partial trailing entry, so padding shorter than one entry is harmless;
+  // crc.index bounds its own hash window by the declared count instead.
+  const std::size_t n = from_size;
   t.n_blocks = static_cast<si8>(n);
-  if (n == 0) return t;
+  if (n == 0) {
+    // Nothing to derive from. `has_blocks` stays false so every check that
+    // would otherwise compare against a fabricated zero stays silent — an
+    // empty index is a damaged segment to report, never a truth to write back.
+    return t;
+  }
+  t.has_blocks = true;
 
   t.rto = s.md.section3_available &&
                   s.md.section3.recording_time_offset != fmt::UUTC_NO_ENTRY
               ? s.md.section3.recording_time_offset
               : 0;
+  // With a non-zero recording-time offset, writers disagree on the stored sign
+  // convention (meflib negates; the legacy stack stores a positive delta), and
+  // a single file mixes both across its universal headers and its index. The
+  // two are indistinguishable from the bytes alone, so the time checks stand
+  // down rather than risk rewriting a correct file into an inverted range.
+  t.times_comparable = (t.rto == 0);
 
   si8 run_blocks = 0, run_bytes = 0, run_samples = 0;
   si8 last_start_uutc = 0;
@@ -617,11 +707,15 @@ SegmentTruth derive_truth(const SessionSource& src, const SegmentState& s,
     const bool discontinuity =
         (e.red_block_flags & fmt::RedBlockHeader::DISCONTINUITY_MASK) != 0;
 
+    // start_time is the one index field with a sentinel that would otherwise
+    // reach arithmetic: INT64_MIN makes the later std::abs() difference UB.
+    const bool time_known = e.start_time != fmt::UUTC_NO_ENTRY;
+    if (!time_known) t.times_known = false;
     if (i == 0) {
-      t.first_start_uutc = to_user_time(e.start_time, t.rto);
+      t.first_start_uutc = time_known ? to_user_time(e.start_time, t.rto) : 0;
       t.start_sample = e.start_sample == fmt::SI8_NO_ENTRY ? 0 : e.start_sample;
     }
-    last_start_uutc = to_user_time(e.start_time, t.rto);
+    if (time_known) last_start_uutc = to_user_time(e.start_time, t.rto);
     last_samples = samples;
 
     t.total_samples += samples;
@@ -662,8 +756,18 @@ SegmentTruth derive_truth(const SessionSource& src, const SegmentState& s,
           s.files.tdat_rel,
           static_cast<std::size_t>(e.file_offset) + fmt::RedBlockHeader::DIFFERENCE_BYTES_OFFSET,
           sizeof(ui4));
-      if (head.size() == sizeof(ui4))
-        t.max_difference_bytes = std::max(t.max_difference_bytes, byteio::read<ui4>(head, 0));
+      if (head.size() == sizeof(ui4)) {
+        const ui4 measured = byteio::read<ui4>(head, 0);
+        // .tdat carries no CRC check anywhere in the registry, so a corrupt
+        // block header can present any value. Ignore anything beyond meflib's
+        // own worst case: writing it back would install the very NO_ENTRY
+        // sentinel this check exists to remove, and the repair would never
+        // converge.
+        if (measured != fmt::UI4_NO_ENTRY && measured <= red_max_difference_bytes(samples))
+          t.max_difference_bytes = std::max(t.max_difference_bytes, measured);
+        else
+          t.difference_bytes_suspect = true;
+      }
     }
   }
 
@@ -686,13 +790,46 @@ SegmentTruth derive_truth(const SessionSource& src, const SegmentState& s,
 
 // --- writing repairs ---------------------------------------------------------
 
-void write_all(const std::string& path, std::span<const ui1> bytes) {
-  std::ofstream f(path, std::ios::binary | std::ios::trunc);
-  if (!f) throw IoError("cannot open for write: " + path);
-  f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-  if (!f) throw IoError("write failed: " + path);
+// Flush and close explicitly, checking each. A stream's destructor discards a
+// failed flush, and most of a write sits in the buffer until then — so testing
+// the stream straight after write() only tests that the buffer accepted the
+// bytes, not that they reached the disk. An ENOSPC here must not be silent.
+void finish_stream(std::ofstream& f, const std::string& path) {
+  f.flush();
+  if (!f) throw IoError("write failed (disk full?): " + path);
+  f.close();
+  if (!f) throw IoError("close failed, data may not have reached disk: " + path);
 }
 
+// Replace a file's contents atomically: fill a sibling temp file, flush it,
+// then rename over the target. A crash or a full disk leaves the original
+// untouched instead of a truncated one — which matters because the file being
+// replaced is the only record of what the (much larger) .tdat contains.
+void write_all_atomic(const std::string& path, std::span<const ui1> bytes) {
+  const fsys::path target(path);
+  const fsys::path tmp =
+      target.parent_path() / (target.filename().string() + ".mef3io-repair-tmp");
+  {
+    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+    if (!f) throw IoError("cannot open for write: " + tmp.string());
+    f.write(reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+    if (!f) throw IoError("write failed: " + tmp.string());
+    finish_stream(f, tmp.string());
+  }
+  std::error_code ec;
+  fsys::rename(tmp, target, ec);
+  if (ec) {
+    std::error_code ignored;
+    fsys::remove(tmp, ignored);
+    throw IoError("cannot replace " + path + ": " + ec.message());
+  }
+}
+
+// Patch the first 1024 bytes of a file in place. Deliberately NOT atomic: the
+// alternative is rewriting a multi-gigabyte .tdat to change its header, and
+// the body is untouched, so the stored body CRC stays valid — only the header
+// CRC (over bytes [4, 1024)) is recomputed.
 void overwrite_universal_header(const std::string& path, const fmt::UniversalHeader& uh) {
   std::vector<ui1> head(fmt::UNIVERSAL_HEADER_BYTES);
   {
@@ -701,8 +838,6 @@ void overwrite_universal_header(const std::string& path, const fmt::UniversalHea
     if (!in.read(reinterpret_cast<char*>(head.data()), fmt::UNIVERSAL_HEADER_BYTES))
       throw IoError("short read: " + path);
   }
-  // The body is untouched, so the stored body CRC stays valid; only the header
-  // CRC (over bytes [4, 1024)) has to be recomputed.
   fmt::UniversalHeader patched = uh;
   patched.body_crc = byteio::read<ui4>(head, 4);
   patched.serialize(head);
@@ -710,14 +845,62 @@ void overwrite_universal_header(const std::string& path, const fmt::UniversalHea
   std::fstream out(path, std::ios::binary | std::ios::in | std::ios::out);
   if (!out) throw IoError("cannot open for header update: " + path);
   out.write(reinterpret_cast<const char*>(head.data()), fmt::UNIVERSAL_HEADER_BYTES);
+  out.flush();
   if (!out) throw IoError("header update failed: " + path);
+  out.close();
+  if (!out) throw IoError("close failed, header may not have reached disk: " + path);
 }
 
-void back_up(const std::string& file, const std::string& session_root, const std::string& rel) {
-  const fsys::path dest = fsys::path(session_root + ".repair-backup") / fsys::path(rel);
-  if (fsys::exists(dest)) return;  // never overwrite a pristine backup
+// `<session>.repair-backup`, with any trailing separator stripped first —
+// otherwise "s.mefd/" yields "s.mefd/.repair-backup", i.e. a backup INSIDE the
+// session, which later gets packed into an archive or deleted with it.
+fsys::path backup_root_for(const std::string& session_path) {
+  std::string s = session_path;
+  while (s.size() > 1 && (s.back() == '/' || s.back() == '\\')) s.pop_back();
+  return fsys::path(s + ".repair-backup");
+}
+
+// Copy `file` into the backup tree before it is modified. `limit_bytes` copies
+// only a prefix (the universal header of a .tdat, which is all a header patch
+// can damage — copying a whole multi-gigabyte .tdat to protect 1024 bytes
+// would fill the volume).
+//
+// Written to a ".part" file and renamed, so an interrupted copy can never be
+// mistaken for a pristine backup by the next run; a completed backup is never
+// overwritten.
+void back_up(const std::string& file, const fsys::path& backup_root, const std::string& rel,
+             std::uintmax_t limit_bytes = 0) {
+  const fsys::path dest = backup_root / fsys::path(rel);
+  if (fsys::exists(dest)) return;
   fsys::create_directories(dest.parent_path());
-  fsys::copy_file(file, dest);
+  const fsys::path part = dest.string() + ".part";
+
+  std::ifstream in(file, std::ios::binary);
+  if (!in) throw IoError("cannot open for backup: " + file);
+  const std::uintmax_t total = limit_bytes ? limit_bytes : fsys::file_size(file);
+  std::vector<ui1> buf(static_cast<std::size_t>(std::min<std::uintmax_t>(total, 1u << 20)));
+  {
+    std::ofstream out(part, std::ios::binary | std::ios::trunc);
+    if (!out) throw IoError("cannot open backup for write: " + part.string());
+    std::uintmax_t left = total;
+    while (left > 0) {
+      const std::streamsize chunk =
+          static_cast<std::streamsize>(std::min<std::uintmax_t>(left, buf.size()));
+      if (!in.read(reinterpret_cast<char*>(buf.data()), chunk))
+        throw IoError("short read while backing up: " + file);
+      out.write(reinterpret_cast<const char*>(buf.data()), chunk);
+      if (!out) throw IoError("backup write failed (disk full?): " + part.string());
+      left -= static_cast<std::uintmax_t>(chunk);
+    }
+    finish_stream(out, part.string());
+  }
+  std::error_code ec;
+  fsys::rename(part, dest, ec);
+  if (ec) {
+    std::error_code ignored;
+    fsys::remove(part, ignored);
+    throw IoError("cannot finalize backup " + dest.string() + ": " + ec.message());
+  }
 }
 
 }  // namespace
@@ -766,6 +949,10 @@ const CheckInfo* find_check(const std::string& id) {
 }
 
 bool Report::ok() const {
+  // A run that examined nothing is not a clean run. Without this, a typo in a
+  // channel filter yields zero findings and zero skips, and the session is
+  // reported healthy without a single byte having been read.
+  if (segments_checked == 0) return false;
   for (const auto& f : findings)
     if (f.severity == Severity::Error && !f.repaired) return false;
   return skipped.empty();
@@ -821,6 +1008,12 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       report.skipped.push_back({files.channel, files.segment_number, files.description, reason});
     };
 
+    // One bad segment must not cost the caller the record of what was already
+    // rewritten in the ones before it. On a 254-channel session an exception
+    // escaping here would discard the whole report, leaving no way to tell
+    // which files had been modified.
+    try {
+
     if (!files.missing.empty()) {
       std::string list;
       for (const auto& name : files.missing) list += (list.empty() ? "" : ", ") + name;
@@ -850,7 +1043,11 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     // (which throws on a bad CRC) and can report instead of aborting.
     std::vector<Finding> segment_findings;
     bool integrity_failed = false;
-    for (const auto* impl : active) {
+    // Deliberately iterates the whole registry, not `active`: narrowing the
+    // run with check_ids must never disable the gate that stops a repair from
+    // deriving truth out of bytes that failed their CRC.
+    for (const auto& impl_ref : check_impls()) {
+      const CheckImpl* impl = &impl_ref;
       if (impl->info.id != "crc.metadata" && impl->info.id != "crc.index") continue;
       Finding f;
       bool hit = false;
@@ -888,6 +1085,15 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     }
 
     const SegmentTruth truth = derive_truth(*src, state, opts);
+    if (!truth.has_blocks) {
+      ++report.segments_checked;
+      skip(state.tdat_size > fmt::UNIVERSAL_HEADER_BYTES
+               ? "block index is empty but the data file holds " +
+                     num(static_cast<si8>(state.tdat_size - fmt::UNIVERSAL_HEADER_BYTES)) +
+                     " bytes of blocks; segment is damaged and will not be repaired"
+               : "segment contains no blocks");
+      continue;
+    }
     ++report.segments_checked;
 
     RepairBuffer buffer;
@@ -926,24 +1132,46 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     const std::string tidx_path = src->describe(files.tidx_rel);
     const std::string tdat_path = src->describe(files.tdat_rel);
     if (repair->backup) {
-      if (buffer.tmet_dirty) back_up(tmet_path, path, files.tmet_rel);
-      if (buffer.tidx_dirty) back_up(tidx_path, path, files.tidx_rel);
-      if (buffer.tdat_dirty) back_up(tdat_path, path, files.tdat_rel + ".universal-header");
+      const fsys::path backup_root = backup_root_for(path);
+      if (buffer.tmet_dirty) back_up(tmet_path, backup_root, files.tmet_rel);
+      if (buffer.tidx_dirty) back_up(tidx_path, backup_root, files.tidx_rel);
+      // Only the universal header of a .tdat is ever rewritten, so only that
+      // needs preserving; copying the whole data file would be a multi-gigabyte
+      // write to protect 1024 bytes.
+      if (buffer.tdat_dirty)
+        back_up(tdat_path, backup_root, files.tdat_rel + ".universal-header",
+                fmt::UNIVERSAL_HEADER_BYTES);
     }
 
     if (buffer.tmet_dirty) {
       std::vector<ui1> file = state.tmet_bytes;
-      std::vector<ui1> s2buf(fmt::TIME_SERIES_METADATA_SECTION_2_BYTES);
-      buffer.s2.serialize(s2buf);
-      if (state.md.section1.section_2_encryption > 0) {
+      std::span<ui1> s2_image(file.data() + fmt::METADATA_SECTION_2_OFFSET,
+                              fmt::TIME_SERIES_METADATA_SECTION_2_BYTES);
+      // Section 1 says which key section 2 is under — meflib allows either
+      // level, and assuming level 1 re-encrypts a level-2 section with the
+      // wrong key, leaving CRC-valid garbage no reader can open.
+      const si1 s2_enc = state.md.section1.section_2_encryption;
+      std::optional<std::array<ui1, fmt::PASSWORD_BYTES>> s2_key;
+      if (s2_enc > 0) {
         auto keys = crypto::validate_password(
             opts.password, state.md.universal_header.level_1_password_validation_field,
             state.md.universal_header.level_2_password_validation_field);
-        if (!keys.level1_key) throw PasswordError("level-1 key required to re-encrypt section 2");
-        auto enc = crypto::aes128_ecb_encrypt(s2buf, *keys.level1_key);
-        std::copy(enc.begin(), enc.end(), s2buf.begin());
+        s2_key = (s2_enc == fmt::LEVEL_2_ENCRYPTION) ? keys.level2_key : keys.level1_key;
+        if (!s2_key)
+          throw PasswordError("section 2 is encrypted at level " + std::to_string(s2_enc) +
+                              "; the supplied password does not yield that key: " + tmet_path);
+        auto plain = crypto::aes128_ecb_decrypt(s2_image, *s2_key);
+        std::copy(plain.begin(), plain.end(), s2_image.begin());
       }
-      std::copy(s2buf.begin(), s2buf.end(), file.begin() + fmt::METADATA_SECTION_2_OFFSET);
+      // Patch only the fields a repair can change, in place. Re-serializing the
+      // whole section would zero the protected and discretionary regions (4320
+      // bytes this struct does not model) and could shorten an un-terminated
+      // text field.
+      buffer.s2.serialize_derived_fields(s2_image);
+      if (s2_enc > 0) {
+        auto enc = crypto::aes128_ecb_encrypt(s2_image, *s2_key);
+        std::copy(enc.begin(), enc.end(), s2_image.begin());
+      }
       buffer.tmet_uh.serialize(file);
       const ui4 body_crc = crc::calculate(std::span<const ui1>(file).subspan(
           fmt::UNIVERSAL_HEADER_BYTES,
@@ -952,11 +1180,14 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       const ui4 header_crc = crc::calculate(
           std::span<const ui1>(file).subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4));
       byteio::write<ui4>(file, 0, header_crc);
-      write_all(tmet_path, file);
+      write_all_atomic(tmet_path, file);
     }
     if (buffer.tidx_dirty) overwrite_universal_header(tidx_path, buffer.tidx_uh);
     if (buffer.tdat_dirty) overwrite_universal_header(tdat_path, buffer.tdat_uh);
     ++report.segments_repaired;
+    } catch (const std::exception& e) {
+      skip(std::string("aborted: ") + e.what());
+    }
   }
 
   return report;

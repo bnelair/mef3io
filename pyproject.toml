@@ -50,9 +50,10 @@ MEF3IO_BUILD_TESTS = "OFF"
 testpaths = ["tests", "python/mef3io"]
 # The golden fixtures were written by the legacy stack, which leaves several
 # section-2 size declarations unset — so opening them warns, correctly, on
-# nearly every test. test_p13_validate.py asserts on that warning inside
-# `warnings.catch_warnings()`, which resets filters, so this does not hide it
-# where it is the thing under test.
+# nearly every test. Where the warning IS the thing under test,
+# test_p13_validate.py calls warnings.simplefilter("always") inside a
+# catch_warnings block, which replaces these filters for the duration
+# (catch_warnings itself only saves and restores them).
 # Matched by message rather than by category: pytest resolves this at config
 # time, before conftest.py puts the in-tree package on sys.path, so naming the
 # class here would import the wrong mef3io (or none).

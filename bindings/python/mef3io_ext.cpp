@@ -147,7 +147,14 @@ NB_MODULE(_mef3io, m) {
         opts.segments = std::move(segments);
         opts.check_ids = std::move(check_ids);
         opts.exact_difference_bytes = exact_difference_bytes;
-        return report_to_dict(mef3io::validate_session(path, opts));
+        // Unbounded blocking I/O: with exact_difference_bytes it reads a header
+        // per RED block. Holding the GIL would freeze the whole interpreter.
+        mef3io::Report r;
+        {
+          nb::gil_scoped_release release;
+          r = mef3io::validate_session(path, opts);
+        }
+        return report_to_dict(r);
       },
       nb::arg("path"), nb::arg("password") = "",
       nb::arg("channels") = std::vector<std::string>{},
@@ -173,7 +180,12 @@ NB_MODULE(_mef3io, m) {
         sel.channels = std::move(channels);
         sel.segments = std::move(segments);
         sel.backup = backup;
-        return report_to_dict(mef3io::repair_session(path, sel, opts));
+        mef3io::Report r;
+        {
+          nb::gil_scoped_release release;
+          r = mef3io::repair_session(path, sel, opts);
+        }
+        return report_to_dict(r);
       },
       nb::arg("path"), nb::arg("repair_check_ids"), nb::arg("password") = "",
       nb::arg("channels") = std::vector<std::string>{},
