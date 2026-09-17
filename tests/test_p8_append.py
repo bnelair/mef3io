@@ -191,6 +191,43 @@ def test_append_conflicts_raise(tmp_path):
     assert len(_segd_dirs(path)) == 1  # nothing was written by the failures
 
 
+def test_failed_append_rolls_back_to_the_original_segment(tmp_path):
+    path = str(tmp_path / "s.mefd")
+    a = np.sin(np.arange(2000) / 20)
+    w = m.SessionWriter(path, True)
+    w.write_float("ch1", np.ascontiguousarray(a), START, FS)
+    del w
+
+    segd = Path(_segd_dirs(path)[0])
+    tmet = segd / "ch1-000000.tmet"
+    tidx = segd / "ch1-000000.tidx"
+    tdat = segd / "ch1-000000.tdat"
+    before = {p.name: p.read_bytes() for p in (tmet, tidx, tdat)}
+
+    # The append path stages .tidx through this sibling temp file. Blocking its
+    # creation forces a failure AFTER .tdat has been appended, which is the
+    # rollback case that used to leave the segment half-updated.
+    blocker = segd / "ch1-000000.tidx.mef3io-tmp"
+    blocker.mkdir()
+    (blocker / "keep").write_text("x")
+    try:
+        w = m.SessionWriter(path, False)
+        t2 = START + int(2000 / FS * 1e6)
+        with pytest.raises(RuntimeError, match="cannot open for write"):
+            w.write_float("ch1", np.ascontiguousarray(a), t2, FS)
+        del w
+    finally:
+        (blocker / "keep").unlink()
+        blocker.rmdir()
+
+    after = {p.name: p.read_bytes() for p in (tmet, tidx, tdat)}
+    assert after == before
+    with mef3io.Reader(path) as r:
+        got = r.read("ch1")
+    assert len(got) == 2000
+    assert not np.isnan(got).any()
+
+
 def test_segment_map_locates_data_across_huge_gap(tmp_path):
     path = str(tmp_path / "s.mefd")
     a = np.sin(np.arange(2000) / 20)
