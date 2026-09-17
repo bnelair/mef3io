@@ -33,13 +33,23 @@ class MefReader:
 
     __version__ = "mef3io"
 
-    def __init__(self, session_path: str, password2: Optional[str] = None):
+    def __init__(
+        self,
+        session_path: str,
+        password2: Optional[str] = None,
+        warn_declarations: bool = True,
+    ):
         self._r = _mef3io.Reader(str(session_path), password2 or "")
         # The legacy drop-in is exactly the entry point people with legacy-
         # written sessions use, so it must carry the same open-time warning as
         # mef3io.Reader — otherwise the population most affected is the one
         # population never told.
-        issues = list(self._r.declaration_issues())
+        #
+        # It also needs the same opt-out. `mef_tools.io.MefReader` never
+        # warned, so a project that swaps in the drop-in and runs its suite
+        # with -W error turns working code into a hard failure — on a session
+        # whose data this very warning describes as intact.
+        issues = list(self._r.declaration_issues()) if warn_declarations else []
         if issues:
             warnings.warn(
                 _declaration_warning_text(issues, str(session_path)),

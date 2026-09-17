@@ -316,6 +316,34 @@ def _to_report(raw: dict, path: str) -> Report:
     )
 
 
+def _as_filter(value, name: str, item_type):
+    """Normalise a channel/segment filter, where empty means "everything".
+
+    `None` means unfiltered. A bare scalar does NOT: segments are numbered from
+    0, so `segments=0` is the obvious way to name the first one, and treating a
+    falsy scalar as "no filter" silently widened a repair from one segment to
+    the whole session. A string is rejected outright rather than being iterated
+    into characters.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes)):
+        raise TypeError(
+            f"{name} must be a sequence, not a single string — "
+            f"pass [{value!r}] for one item"
+        )
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        raise TypeError(
+            f"{name} must be a sequence, not a bare {type(value).__name__} — "
+            f"pass [{value!r}] for one item. ({name}=0 would otherwise read as "
+            f"'no filter', i.e. every segment.)"
+        )
+    try:
+        return [item_type(v) for v in value]
+    except TypeError as exc:  # not iterable at all
+        raise TypeError(f"{name} must be a sequence or None, got {type(value).__name__}") from exc
+
+
 def available_checks() -> list[Check]:
     """Every check, in the order they run. Ids are stable API."""
     return [Check(**c) for c in _backend().validation_checks()]
@@ -361,16 +389,12 @@ class Validator:
         segments: Sequence[int] | None = None,
         exact_difference_bytes: bool = True,
     ) -> None:
-        if isinstance(channels, (str, bytes)):
-            raise TypeError("channels must be a sequence of names, not a single string")
-        if isinstance(segments, (str, bytes)):
-            raise TypeError(
-                "segments must be a sequence of numbers, not a single string"
-            )
         self.path = str(path)
-        self.password = password
-        self.channels = list(channels) if channels else []
-        self.segments = [int(s) for s in segments] if segments else []
+        # None is the idiom this package teaches elsewhere (Reader accepts it),
+        # and the extension only takes str.
+        self.password = password or ""
+        self.channels = _as_filter(channels, "channels", str)
+        self.segments = _as_filter(segments, "segments", int)
         self.exact_difference_bytes = bool(exact_difference_bytes)
 
     # --- inspection -------------------------------------------------------
@@ -396,8 +420,11 @@ class Validator:
             self.path,
             password=self.password,
             channels=self.channels,
+            # A bare string here used to be iterated into characters, producing
+            # "unknown check id: s". repair_session and the constructor both
+            # guard this; validate() was the one hole.
+            check_ids=_as_filter(check_ids, "check_ids", str),
             segments=self.segments,
-            check_ids=list(check_ids) if check_ids else [],
             exact_difference_bytes=self.exact_difference_bytes,
         )
         return _to_report(raw, self.path)

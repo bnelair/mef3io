@@ -266,11 +266,23 @@ def test_every_repairable_check_is_covered():
 
 @pytest.mark.parametrize("check_id", sorted(CORRUPTIONS))
 def test_check_detects_and_fix_repairs(tmp_path, check_id):
+    """Detect finds the corruption, and the repair restores the writer's bytes.
+
+    The post-repair assertion is a tree digest taken BEFORE the corruption, not
+    just "the check stops firing". Re-running detect only proves that detect
+    and repair agree with each other, and several checks have deliberately
+    loose tolerances (a sample period for times, 1% for block_interval), so a
+    repair writing a wrong-but-tolerated value passed. Comparing against the
+    writer's own output closes that: every repair here restores it byte for
+    byte.
+    """
     corrupt, expected_field = CORRUPTIONS[check_id]
     path = tmp_path / "s.mefd"
     _write(path)
     tmet = _tmet(path)
+    pristine = _tree_digest(path)
     corrupt(tmet, path)
+    assert _tree_digest(path) != pristine, "the corruption must actually change bytes"
 
     validator = mef3io.Validator(str(path))
 
@@ -292,6 +304,10 @@ def test_check_detects_and_fix_repairs(tmp_path, check_id):
     after = validator.validate()
     assert check_id not in _ids(after)
     assert after.ok, after.summary()
+    # The real oracle: the writer, not the validator's own detect.
+    assert _tree_digest(path) == pristine, (
+        f"{check_id}: repair did not restore the writer's bytes"
+    )
 
 
 def test_repair_touches_only_the_selected_check(tmp_path):
@@ -513,7 +529,11 @@ def test_encrypted_session_is_repaired_and_stays_readable(tmp_path):
     plain = m.aes128_ecb_decrypt(bytes(after), m.extract_password_bytes("lvl1"))
     off, fmt = S2_FIELDS["maximum_difference_bytes"]
     assert struct.unpack_from(fmt, plain, off)[0] > 0
-    assert b"\x00" * 64 != after[:64], "section 2 must not have been left in plaintext"
+    # A real discriminator: the stored bytes must not BE the plaintext. The
+    # previous check here compared against 64 NULs, which neither ciphertext
+    # nor plaintext ever starts with (section 2 opens with channel_description,
+    # filled by the writer), so it could not fail and proved nothing.
+    assert after != plain, "section 2 was left in plaintext"
 
     with mef3io.Reader(str(path), password="lvl2") as r:
         np.testing.assert_array_equal(r.read_raw("ch1")["samples"], x)
@@ -1448,3 +1468,250 @@ def test_summary_never_states_something_untrue(tmp_path):
     line = [l for l in report.summary().splitlines() if "segment(s) repaired" in l][0]
     assert "sizing.difference-bytes" in line
     assert "index.block-count" not in line, f"named a check that wrote nothing: {line}"
+
+
+# --- contracts that had no coverage at all (found by mutation testing) -------
+
+
+def test_crc_index_detects_a_damaged_block_table(tmp_path):
+    """Nothing exercised the crc.index detect, so disabling it passed the suite.
+
+    That check is the only thing arming the integrity gate, which is the only
+    thing stopping a repair from deriving sample counts, block counts, maxima
+    and segment times out of a corrupted block table.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+    tidx = Path(tmet).with_suffix(".tidx")
+
+    raw = bytearray(tidx.read_bytes())
+    real = struct.unpack_from("<I", raw, 4)[0]
+    struct.pack_into("<I", raw, 4, real ^ 0xA5A5A5A5)  # a wrong CRC, not a sentinel
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
+    tidx.write_bytes(bytes(raw))
+
+    report = mef3io.Validator(str(path)).validate()
+    assert "crc.index" in _ids(report), report.summary()
+    assert not report.ok
+    # The gate: no other check may report, and nothing may be repaired.
+    assert _ids(report) == {"crc.index"}, "a bad CRC must stop every other check"
+    assert any("CRC" in s.reason for s in report.skipped)
+
+    digest = _tree_digest(path)
+    out = mef3io.repair_session(str(path), ["index.sample-count", "index.block-count"])
+    assert _tree_digest(path) == digest, "a corrupt index must never be repaired from"
+    assert out.segments_repaired == 0
+
+
+def test_start_sample_check_fires_on_a_later_segment(tmp_path):
+    """The existing test patches segment 0, where detect returns early.
+
+    `truth.start_sample == 0` there, so the "must not be reported" assertion
+    passed on an early return rather than on the convention logic, and
+    disabling the detect entirely kept the suite green. Segment 1 is where a
+    channel-absolute index start_sample actually exists.
+    """
+    path = tmp_path / "s.mefd"
+    n = 4000
+    rng = np.random.default_rng(0)
+    x = rng.normal(0, 3000, n).astype(np.int32)
+    w = mef3io.Writer(str(path))
+    w.write_int32("ch1", x, 0.5, START, FS)
+    w.write_int32("ch1", x, 0.5, START + int(n / FS * 1e6) + int(5e6), FS, new_segment=True)
+    w.close()
+
+    segs = sorted(Path(path).rglob("ch1-*.tmet"))
+    assert len(segs) == 2, [s.name for s in segs]
+    assert _read_s2(segs[1], "start_sample") == n, "segment 1 is channel-absolute here"
+
+    _patch_s2(segs[1], "start_sample", 12345)
+    report = mef3io.Validator(str(path)).validate()
+    hits = [f for f in report.findings if f.check_id == "index.start-sample"]
+    assert hits, report.summary()
+    assert hits[0].stored == "12345" and hits[0].expected == str(n)
+    assert not hits[0].repairable, "the two conventions cannot be told apart safely"
+
+    # ...and it is still report-only: nothing is written.
+    digest = _tree_digest(path)
+    with pytest.raises(ValueError):
+        mef3io.repair_session(str(path), ["index.start-sample"])
+    assert _tree_digest(path) == digest
+
+
+def test_open_time_warning_covers_every_allocation_field(tmp_path):
+    """unset_declarations checks six fields; only one was ever asserted.
+
+    Deleting five of the six checks kept the suite green, so five could stop
+    being reported without anything noticing.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+    fields = [
+        "maximum_block_bytes",
+        "maximum_block_samples",
+        "maximum_difference_bytes",
+        "maximum_contiguous_blocks",
+        "maximum_contiguous_block_bytes",
+        "maximum_contiguous_samples",
+    ]
+    for f in fields:
+        _patch_s2(tmet, f, 0)
+
+    with mef3io.Reader(str(path), warn_declarations=False) as r:
+        reported = {i["field"] for i in r.declaration_issues}
+    assert reported == set(fields), f"missing: {set(fields) - reported}"
+
+
+def test_a_repair_that_declines_is_reported_as_outstanding(tmp_path):
+    """`repaired` follows what RepairFn returned, and a decline is not a repair.
+
+    sizing.difference-bytes declines when it has nothing safe to write — it
+    will not install 0, which is the NULL-buffer value the check exists to
+    remove. The finding must then stay outstanding rather than being reported
+    as fixed, or a "repair until clean" loop never terminates and Report.ok
+    discounts an error that is still on disk.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path, gap_us=0)
+    tmet = _tmet(path)
+    tidx = Path(tmet).with_suffix(".tidx")
+
+    # Every block's sample count at NO_ENTRY: nothing can be measured and even
+    # meflib's worst-case bound (5 x samples) comes out as 0.
+    raw = bytearray(tidx.read_bytes())
+    for i in range((len(raw) - UH_BYTES) // 56):
+        struct.pack_into("<I", raw, UH_BYTES + i * 56 + 24, 0xFFFFFFFF)
+    struct.pack_into("<I", raw, 4, m.crc32(bytes(raw[UH_BYTES:])))
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
+    tidx.write_bytes(bytes(raw))
+    _patch_s2(tmet, "maximum_difference_bytes", 0)
+
+    before = Path(tmet).read_bytes()
+    report = mef3io.repair_session(str(path), ["sizing.difference-bytes"])
+
+    hits = [f for f in report.findings if f.check_id == "sizing.difference-bytes"]
+    assert hits, report.summary()
+    assert not any(f.repaired for f in hits), "a decline is not a repair"
+    assert report.segments_repaired == 0
+    assert Path(tmet).read_bytes() == before, "nothing may be written"
+    assert _read_s2(tmet, "maximum_difference_bytes") == 0, "and 0 must not be re-installed"
+
+
+# --- resource hygiene --------------------------------------------------------
+
+
+def test_repeated_open_close_does_not_leak(tmp_path):
+    """Opening and closing the same session repeatedly must not accumulate.
+
+    The reader owns a C++ session holding parsed metadata per segment plus
+    decode buffers, so a missed release can hide from Python's own accounting.
+    Three signals, chosen because each catches what the others miss:
+
+      * live ``Reader`` objects — deterministic, catches a reference cycle or a
+        missed ``close``;
+      * live object count — deterministic, catches Python-side retention;
+      * peak RSS — the only signal for a pure C++ leak that retains no Python
+        object at all, and necessarily the coarsest.
+
+    The thresholds are set from measurement, not taste. Over 500 cycles a clean
+    run gives 0 extra objects, 0 live readers and ~1.3 MiB of allocator noise;
+    deliberately retaining each reader gives 1500 objects, 525 readers and
+    ~6.3 MiB. An earlier version of this test used 200 cycles and much looser
+    bounds and did NOT fail against that deliberate leak — it was verified
+    against one before these numbers were chosen.
+    """
+    resource = pytest.importorskip("resource", reason="POSIX only")
+    import gc
+
+    path = tmp_path / "s.mefd"
+    _write(path, channels=("ch1", "ch2"))
+
+    def cycle():
+        with mef3io.Reader(str(path), warn_declarations=False) as r:
+            for ch in ("ch1", "ch2"):
+                assert len(r.read_raw(ch)["samples"]) > 0
+        # The validator opens the same files through the same source layer.
+        mef3io.Validator(str(path)).validate()
+
+    def live_readers():
+        return sum(1 for o in gc.get_objects() if type(o).__name__ == "Reader")
+
+    # Warm-up: the first opens populate caches, lazy imports and allocator
+    # arenas. That one-off growth is not a leak.
+    for _ in range(25):
+        cycle()
+    gc.collect()
+    base_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    base_objects = len(gc.get_objects())
+
+    for _ in range(500):
+        cycle()
+    gc.collect()
+
+    assert live_readers() == 0, f"{live_readers()} reader(s) still alive after 500 cycles"
+    objects_grown = len(gc.get_objects()) - base_objects
+    assert objects_grown < 200, f"{objects_grown} Python objects survived 500 cycles"
+
+    # ru_maxrss is bytes on macOS, kilobytes on Linux.
+    to_mib = (1 << 20) if sys.platform == "darwin" else 1024
+    growth_mib = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - base_rss) / to_mib
+    assert growth_mib < 4.0, (
+        f"peak RSS grew {growth_mib:.1f} MiB over 500 open/close cycles after "
+        f"warm-up — a clean run measures about 1.3 MiB"
+    )
+
+
+def test_thousands_of_reads_from_one_reader_do_not_accumulate(tmp_path):
+    """The training-loop pattern: open once, read many windows.
+
+    A DataLoader keeps a reader alive and pulls thousands of windows from it,
+    so anything retained per READ — a decoded block, a cached range, a numpy
+    view holding its base buffer — accumulates without any open/close to flush
+    it. This is the access pattern that matters most in practice and it is not
+    covered by opening and closing repeatedly.
+
+    Measured: 3000 windowed reads grow peak RSS by ~0.3 MiB and the live object
+    count not at all, so the bounds here are tight on purpose. A per-read
+    retention of even one 4-second window (2048 samples, 8 KiB) would be ~24
+    MiB over this loop.
+    """
+    resource = pytest.importorskip("resource", reason="POSIX only")
+    import gc
+
+    path = tmp_path / "s.mefd"
+    fs, n = 256.0, 120_000
+    rng = np.random.default_rng(0)
+    w = mef3io.Writer(str(path))
+    w.write_int32("ch1", rng.integers(-30000, 30000, n).astype(np.int32), 0.5, START, fs)
+    w.close()
+
+    span_us = int(n / fs * 1e6)
+    window_us = int(4e6)
+    to_mib = (1 << 20) if sys.platform == "darwin" else 1024
+
+    with mef3io.Reader(str(path), warn_declarations=False) as r:
+        def draw(count):
+            for _ in range(count):
+                t0 = START + int(rng.integers(0, span_us - window_us))
+                assert r.read("ch1", t0, t0 + window_us).size > 0
+                d = r.read_raw("ch1", t0, t0 + window_us)
+                assert d["samples"].size > 0
+
+        draw(150)  # warm up
+        gc.collect()
+        base_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        base_objects = len(gc.get_objects())
+
+        draw(1500)
+        gc.collect()
+        grown_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        objects_grown = len(gc.get_objects()) - base_objects
+
+    growth_mib = (grown_rss - base_rss) / to_mib
+    assert objects_grown < 100, f"{objects_grown} objects retained over 3000 reads"
+    assert growth_mib < 3.0, (
+        f"peak RSS grew {growth_mib:.2f} MiB over 3000 reads from one open reader "
+        f"— a clean run measures well under 1 MiB"
+    )

@@ -20,6 +20,14 @@
 #include "mef3io/metadata.hpp"
 #include "mef3io/source.hpp"
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 namespace fsys = std::filesystem;
 
 namespace mef3io {
@@ -549,7 +557,12 @@ const std::vector<CheckImpl>& check_impls() {
                    if (!t.has_blocks || !t.times_known || !t.times_comparable) return;
                    const si8 slack = static_cast<si8>(std::llround(1e6 / fs_hz)) + 1;
                    const si8 stored = s.md.section2.recording_duration;
-                   if (stored != fmt::SI8_NO_ENTRY && std::abs(stored - t.recording_duration) <= slack)
+                   // Both sentinels, not just SI8_NO_ENTRY: declared_si8 renders
+                   // UUTC_NO_ENTRY here too because meflib writes it into this
+                   // si8 field in the channel/session rollup, and INT64_MIN
+                   // reaching the subtraction below is signed overflow.
+                   if (stored != fmt::SI8_NO_ENTRY && stored != fmt::UUTC_NO_ENTRY &&
+                       std::abs(stored - t.recording_duration) <= slack)
                      return;
                    hit = true;
                    f.field = "recording_duration";
@@ -902,7 +915,20 @@ SegmentTruth derive_truth(const SessionSource& src, const SegmentState& s,
     // gaps (meflib.c: ABS(latest_end) - ABS(earliest_start)). The legacy pymef
     // writer instead stores number_of_samples / fs, which omits the gaps.
     t.recording_duration = t.end_uutc - t.first_start_uutc;
-    t.block_interval = static_cast<si8>(std::llround(t.max_block_samples * 1e6 / fs_hz));
+    // NOMINAL, not "the largest block that happens to be present". A segment
+    // whose blocks are all shorter than the writer's nominal block — a short
+    // final segment, a brief recording, one closed early — would otherwise
+    // yield an expectation well below the correct value, and the repair would
+    // LOWER a correct declaration. Take the larger of what section 2 declares
+    // and what is on disk. (meflib never computes this field at all: it inits
+    // to NO_ENTRY at meflib.c:4570 and resets it at :5514-5515 / :6193-6194,
+    // so the derivation is mef3io's inference either way.)
+    const ui4 declared_block_samples = s.md.section2.maximum_block_samples;
+    const ui4 nominal_samples =
+        declared_block_samples == fmt::UI4_NO_ENTRY
+            ? t.max_block_samples
+            : std::max(declared_block_samples, t.max_block_samples);
+    t.block_interval = static_cast<si8>(std::llround(nominal_samples * 1e6 / fs_hz));
   }
   return t;
 }
@@ -913,6 +939,58 @@ SegmentTruth derive_truth(const SessionSource& src, const SegmentState& s,
 // failed flush, and most of a write sits in the buffer until then — so testing
 // the stream straight after write() only tests that the buffer accepted the
 // bytes, not that they reached the disk. An ENOSPC here must not be silent.
+// Flush a file's contents all the way to stable storage. A rename is ORDERED,
+// not durable: without this, a power cut can leave the rename visible and the
+// data behind it missing — and a short .tmet throws from the metadata loader,
+// which takes the whole session down, not just that segment.
+void fsync_file(const std::string& path) {
+#ifdef _WIN32
+  HANDLE h = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE) return;
+  FlushFileBuffers(h);
+  CloseHandle(h);
+#else
+  const int fd = ::open(path.c_str(), O_RDONLY);
+  if (fd < 0) return;
+  ::fsync(fd);
+  ::close(fd);
+#endif
+}
+
+// A rename is only durable once the DIRECTORY entry is flushed too. Windows
+// exposes no directory handle to flush and does not need one.
+void fsync_directory(const fsys::path& dir) {
+#ifndef _WIN32
+  const int fd = ::open(dir.string().c_str(), O_RDONLY);
+  if (fd < 0) return;
+  ::fsync(fd);
+  ::close(fd);
+#else
+  (void)dir;
+#endif
+}
+
+// Carry the target's permissions — and, where the platform has them, owner and
+// group — onto the replacement. A fresh temp file is created under the process
+// umask, so without this a repair silently widens access to a .tmet, which is
+// the file holding metadata section 3: subject_name, subject_id, recording
+// location. Run as root over a user-owned tree it would also change ownership,
+// after which the original user's next acquisition write fails.
+void copy_file_identity(const fsys::path& from, const fsys::path& to) {
+  std::error_code ec;
+  const auto st = fsys::status(from, ec);
+  if (!ec) fsys::permissions(to, st.permissions(), fsys::perm_options::replace, ec);
+#ifndef _WIN32
+  struct stat s {};
+  if (::stat(from.string().c_str(), &s) == 0) {
+    // Best effort: an unprivileged process cannot chown, and that is not a
+    // reason to fail a repair it has already computed.
+    if (::chown(to.string().c_str(), s.st_uid, s.st_gid) != 0) { /* ignored */ }
+  }
+#endif
+}
+
 void finish_stream(std::ofstream& f, const std::string& path) {
   f.flush();
   if (!f) throw IoError("write failed (disk full?): " + path);
@@ -936,6 +1014,11 @@ void write_all_atomic(const std::string& path, std::span<const ui1> bytes) {
     if (!f) throw IoError("write failed: " + tmp.string());
     finish_stream(f, tmp.string());
   }
+  // The target still exists here, so its mode/owner can be carried across
+  // before it is replaced. Then flush the data before the rename, and the
+  // directory entry after it.
+  copy_file_identity(target, tmp);
+  fsync_file(tmp.string());
   std::error_code ec;
   fsys::rename(tmp, target, ec);
   if (ec) {
@@ -943,6 +1026,7 @@ void write_all_atomic(const std::string& path, std::span<const ui1> bytes) {
     fsys::remove(tmp, ignored);
     throw IoError("cannot replace " + path + ": " + ec.message());
   }
+  fsync_directory(target.parent_path());
 }
 
 // Patch the first 1024 bytes of a file in place. Deliberately NOT atomic: the
@@ -968,6 +1052,7 @@ void overwrite_universal_header(const std::string& path, const fmt::UniversalHea
   if (!out) throw IoError("header update failed: " + path);
   out.close();
   if (!out) throw IoError("close failed, header may not have reached disk: " + path);
+  fsync_file(path);
 }
 
 // `<session>.repair-backup`, with any trailing separator stripped first —
@@ -1013,6 +1098,9 @@ void back_up(const std::string& file, const fsys::path& backup_root, const std::
     }
     finish_stream(out, part.string());
   }
+  // The backup exists to survive exactly the crash that fsync guards against;
+  // an unflushed one can come back empty from the same power cut.
+  fsync_file(part.string());
   std::error_code ec;
   fsys::rename(part, dest, ec);
   if (ec) {
@@ -1020,6 +1108,7 @@ void back_up(const std::string& file, const fsys::path& backup_root, const std::
     fsys::remove(part, ignored);
     throw IoError("cannot finalize backup " + dest.string() + ": " + ec.message());
   }
+  fsync_directory(dest.parent_path());
 }
 
 }  // namespace
