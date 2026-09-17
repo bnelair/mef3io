@@ -7,6 +7,12 @@
 #include <fstream>
 #include <limits>
 #include <random>
+#include <system_error>
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 #include "mef3io/byteio.hpp"
 #include "mef3io/crc.hpp"
@@ -51,6 +57,56 @@ std::vector<ui1> read_whole_file(const std::string& path) {
   return buf;
 }
 
+void finish_stream(std::ofstream& f, const std::string& path) {
+  f.flush();
+  if (!f) throw IoError("write failed (disk full?): " + path);
+  f.close();
+  if (!f) throw IoError("close failed, data may not have reached disk: " + path);
+}
+
+void replace_file(const fs::path& tmp, const fs::path& target) {
+#ifdef _WIN32
+  if (MoveFileExW(tmp.wstring().c_str(), target.wstring().c_str(),
+                  MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    return;
+  const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
+  throw IoError("cannot replace " + target.string() + ": " + ec.message());
+#else
+  std::error_code ec;
+  fs::rename(tmp, target, ec);
+  if (!ec) return;
+  throw IoError("cannot replace " + target.string() + ": " + ec.message());
+#endif
+}
+
+void write_file_atomic(const std::string& path, std::span<const ui1> bytes) {
+  const fs::path target(path);
+  const fs::path tmp = target.parent_path() / (target.filename().string() + ".mef3io-tmp");
+  std::error_code ignored;
+  fs::remove(tmp, ignored);
+  try {
+    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+    if (!f) throw IoError("cannot open for write: " + tmp.string());
+    f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    if (!f) throw IoError("write failed: " + tmp.string());
+    finish_stream(f, tmp.string());
+    replace_file(tmp, target);
+  } catch (...) {
+    fs::remove(tmp, ignored);
+    throw;
+  }
+}
+
+void overwrite_file_prefix(const std::string& path, std::span<const ui1> bytes) {
+  std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
+  if (!f) throw IoError("cannot open for header update: " + path);
+  f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+  f.flush();
+  if (!f) throw IoError("header update failed: " + path);
+  f.close();
+  if (!f) throw IoError("close failed, header may not have reached disk: " + path);
+}
+
 std::array<ui1, 16> random_uuid() {
   std::array<ui1, 16> u{};
   std::random_device rd;
@@ -59,10 +115,7 @@ std::array<ui1, 16> random_uuid() {
 }
 
 void write_file(const std::string& path, const std::vector<ui1>& bytes) {
-  std::ofstream f(path, std::ios::binary | std::ios::trunc);
-  if (!f) throw IoError("cannot open for write: " + path);
-  f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-  if (!f) throw IoError("write failed: " + path);
+  write_file_atomic(path, bytes);
 }
 
 // Fill body then header CRC of a universal-header-prefixed file image in place.
@@ -393,7 +446,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   const si8 old_tdat_size = static_cast<si8>(fs::file_size(tdat_path));
   std::vector<fmt::TimeSeriesIndex> index;
   si8 appended_samples = 0, running_offset = old_tdat_size;
-  si8 last_end = old_end, n_discont = 0;
+  si8 last_end = old_end;
   ui4 max_block_bytes = 0;
   ui4 max_block_samples = 0;
   ui4 max_difference_bytes = 0;
@@ -419,16 +472,16 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
       new_max = std::max(new_max, bmax[i]);
       new_min = std::min(new_min, bmin[i]);
     }
-    if (blk.discontinuity) ++n_discont;
     last_end = blk.start_uutc + static_cast<si8>(std::llround(blk.samples.size() * 1e6 / fs_hz));
     appended_samples += static_cast<si8>(blk.samples.size());
   }
   const si8 end_disk = to_disk_time(last_end, rto);
 
-  // --- .tdat: append the new blocks. The Koopman CRC has no final XOR, so the
-  // stored body CRC is a resumable running state: seed from it and update with
-  // only the appended bytes — appends stay O(new data) instead of re-reading
-  // the whole (potentially huge) existing body.
+  // --- Read the current .tdat header and advance its resumable body CRC with
+  // the new bytes in memory. The Koopman CRC has no final XOR, so the stored
+  // body CRC is a running state: update it with only the appended bytes —
+  // appends stay O(new data) instead of re-reading the whole (potentially
+  // huge) existing body.
   //
   // The universal header is patched further down, AFTER the .tidx has been
   // walked. Its entry count and maximum entry size describe the whole segment,
@@ -443,41 +496,36 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
       throw IoError("short read: " + tdat_path);
     in.close();
     tdat_body_crc = byteio::read<ui4>(tdat_uh, 4);
-
-    std::ofstream app(tdat_path, std::ios::binary | std::ios::app);
-    if (!app) throw IoError("cannot open for append: " + tdat_path);
     for (std::size_t i = 0; i < nb; ++i) {
-      app.write(reinterpret_cast<const char*>(encoded[i].data()),
-                static_cast<std::streamsize>(encoded[i].size()));
       tdat_body_crc = crc::calculate(encoded[i], tdat_body_crc);
     }
-    if (!app) throw IoError("append failed: " + tdat_path);
   }
 
-  // --- .tidx: small; extend in memory and rewrite. The full entry list is the
-  // only place the pre-existing blocks are described cheaply, so the section-2
-  // sizing statistics that span the whole segment are recomputed from it here
-  // rather than folded into whatever the old .tmet happened to declare. That
-  // also repairs those fields on segments written before mef3io filled them
-  // in. ---
+  // --- Build the new .tidx in memory. The full entry list is the only place
+  // the pre-existing blocks are described cheaply, so the section-2 sizing
+  // statistics that span the whole segment are recomputed from it here rather
+  // than folded into whatever the old .tmet happened to declare. That also
+  // repairs those fields on segments written before mef3io filled them in. ---
   ContiguousRun contiguous;
   ui4 index_max_block_samples = 0;
   si8 index_max_block_bytes = 0;
   si8 index_total_samples = 0;
   si8 index_n_discontinuities = 0;
   std::size_t index_entries = 0;
+  std::vector<ui1> new_tidx = read_whole_file(tidx_path);
+  const std::size_t old_tidx_size = new_tidx.size();
+  std::vector<ui1> old_tidx_uh(new_tidx.begin(), new_tidx.begin() + fmt::UNIVERSAL_HEADER_BYTES);
   {
-    std::vector<ui1> file = read_whole_file(tidx_path);
-    auto uh = fmt::UniversalHeader::parse(file);
+    auto uh = fmt::UniversalHeader::parse(new_tidx);
     uh.end_time = end_disk;
     std::vector<ui1> entry(fmt::TIME_SERIES_INDEX_BYTES);
     for (const auto& e : index) {
       e.serialize(entry);
-      file.insert(file.end(), entry.begin(), entry.end());
+      new_tidx.insert(new_tidx.end(), entry.begin(), entry.end());
     }
 
     std::span<const ui1> entries =
-        std::span<const ui1>(file).subspan(fmt::UNIVERSAL_HEADER_BYTES);
+        std::span<const ui1>(new_tidx).subspan(fmt::UNIVERSAL_HEADER_BYTES);
     const std::size_t n_entries = entries.size() / fmt::TIME_SERIES_INDEX_BYTES;
     index_entries = n_entries;
     // Count what the file now holds, rather than adding to what the old header
@@ -486,9 +534,8 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     // meflib clamps number_of_blocks DOWN to this field (meflib.c:5983-5984,
     // :6005-6006), so an undercount makes the segment read short, or empty.
     uh.number_of_entries = static_cast<si8>(n_entries);
-    uh.serialize(file);
-    finalize_crcs(file);
-    write_file(tidx_path, file);
+    uh.serialize(new_tidx);
+    finalize_crcs(new_tidx);
     for (std::size_t i = 0; i < n_entries; ++i) {
       auto e = fmt::TimeSeriesIndex::parse(
           entries.subspan(i * fmt::TIME_SERIES_INDEX_BYTES, fmt::TIME_SERIES_INDEX_BYTES));
@@ -505,31 +552,28 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     }
   }
 
-  // --- .tdat universal header, now that the index has been walked. Both
-  // fields describe the whole segment, so both come from the index rather than
-  // from the old header: `number_of_entries` is what meflib clamps
-  // number_of_blocks down to, and `maximum_entry_size` folded onto a stored
-  // value would keep a foreign writer's number (the legacy stack stores a
-  // SAMPLE COUNT there) or meflib's NO_ENTRY. ---
+  // --- Build the new .tdat universal header, now that the index has been
+  // walked. Both fields describe the whole segment, so both come from the
+  // index rather than from the old header: `number_of_entries` is what meflib
+  // clamps number_of_blocks down to, and `maximum_entry_size` folded onto a
+  // stored value would keep a foreign writer's number (the legacy stack stores
+  // a SAMPLE COUNT there) or meflib's NO_ENTRY. ---
+  std::vector<ui1> new_tdat_uh = tdat_uh;
   {
-    auto uh = fmt::UniversalHeader::parse(tdat_uh);
+    auto uh = fmt::UniversalHeader::parse(new_tdat_uh);
     uh.end_time = end_disk;
     uh.number_of_entries = static_cast<si8>(index_entries);
     uh.maximum_entry_size = index_max_block_bytes;
-    uh.serialize(tdat_uh);
-    byteio::write<ui4>(tdat_uh, 4, tdat_body_crc);
-    const ui4 header_crc =
-        crc::calculate(std::span<const ui1>(tdat_uh).subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4));
-    byteio::write<ui4>(tdat_uh, 0, header_crc);
-    std::fstream hdr(tdat_path, std::ios::binary | std::ios::in | std::ios::out);
-    if (!hdr) throw IoError("cannot open for header update: " + tdat_path);
-    hdr.write(reinterpret_cast<const char*>(tdat_uh.data()), fmt::UNIVERSAL_HEADER_BYTES);
-    hdr.flush();
-    if (!hdr) throw IoError("header update failed: " + tdat_path);
+    uh.serialize(new_tdat_uh);
+    byteio::write<ui4>(new_tdat_uh, 4, tdat_body_crc);
+    const ui4 header_crc = crc::calculate(
+        std::span<const ui1>(new_tdat_uh).subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4));
+    byteio::write<ui4>(new_tdat_uh, 0, header_crc);
   }
 
-  // --- .tmet: update section-2 statistics, re-encrypt, rewrite. Section 1 and
-  // section 3 bytes (and the password validation fields) are left verbatim. ---
+  // --- Build the new .tmet in memory. Section 1 and section 3 bytes (and the
+  // password validation fields) are left verbatim. ---
+  std::vector<ui1> new_tmet = tmet;
   {
     fmt::TimeSeriesMetadataSection2 s2 = md.section2;
     const si8 seg_start = to_user_time(md.universal_header.start_time, rto);
@@ -586,13 +630,74 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
       auto e2 = crypto::aes128_ecb_encrypt(s2buf, *keys.level1_key);
       std::copy(e2.begin(), e2.end(), s2buf.begin());
     }
-    std::copy(s2buf.begin(), s2buf.end(), tmet.begin() + fmt::METADATA_SECTION_2_OFFSET);
+    std::copy(s2buf.begin(), s2buf.end(), new_tmet.begin() + fmt::METADATA_SECTION_2_OFFSET);
 
     fmt::UniversalHeader uh = md.universal_header;
     uh.end_time = end_disk;
-    uh.serialize(tmet);
-    finalize_crcs(tmet);
-    write_file(tmet_path, tmet);
+    uh.serialize(new_tmet);
+    finalize_crcs(new_tmet);
+  }
+
+  bool appended_tdat = false;
+  bool wrote_tidx = false;
+  bool patched_tdat_header = false;
+  bool wrote_tmet = false;
+  try {
+    {
+      std::ofstream app(tdat_path, std::ios::binary | std::ios::app);
+      if (!app) throw IoError("cannot open for append: " + tdat_path);
+      appended_tdat = true;  // any later failure may have left partial bytes on disk
+      for (std::size_t i = 0; i < nb; ++i) {
+        app.write(reinterpret_cast<const char*>(encoded[i].data()),
+                  static_cast<std::streamsize>(encoded[i].size()));
+      }
+      if (!app) throw IoError("append failed: " + tdat_path);
+      finish_stream(app, tdat_path);
+    }
+
+    write_file(tidx_path, new_tidx);
+    wrote_tidx = true;
+    overwrite_file_prefix(tdat_path, new_tdat_uh);
+    patched_tdat_header = true;
+    write_file(tmet_path, new_tmet);
+    wrote_tmet = true;
+  } catch (...) {
+    std::string rollback_error;
+    auto note_rollback = [&](const std::string& what) {
+      if (rollback_error.empty()) rollback_error = what;
+    };
+    if (wrote_tmet) {
+      try {
+        write_file(tmet_path, tmet);
+      } catch (const std::exception& e) {
+        note_rollback(std::string("tmet rollback failed: ") + e.what());
+      }
+    }
+    if (wrote_tidx) {
+      try {
+        std::vector<ui1> rollback_tidx = new_tidx;
+        rollback_tidx.resize(old_tidx_size);
+        std::copy(old_tidx_uh.begin(), old_tidx_uh.end(), rollback_tidx.begin());
+        write_file(tidx_path, rollback_tidx);
+      } catch (const std::exception& e) {
+        note_rollback(std::string("tidx rollback failed: ") + e.what());
+      }
+    }
+    if (patched_tdat_header) {
+      try {
+        overwrite_file_prefix(tdat_path, tdat_uh);
+      } catch (const std::exception& e) {
+        note_rollback(std::string("tdat header rollback failed: ") + e.what());
+      }
+    }
+    if (appended_tdat) {
+      std::error_code ec;
+      fs::resize_file(tdat_path, static_cast<std::uintmax_t>(old_tdat_size), ec);
+      if (ec) note_rollback("tdat truncate rollback failed: " + ec.message());
+    }
+    if (!rollback_error.empty())
+      throw IoError("append failed and rollback was incomplete: " + rollback_error);
+    throw;
   }
 
   return appended_samples;

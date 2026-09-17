@@ -31,7 +31,36 @@ from typing import Optional
 # 2: added "declaration_issues". A v1 snapshot has no such key, so a warm open
 # from one would silently skip the open-time warning until the session changed
 # on disk; bumping invalidates them instead, and the next open rebuilds.
-CACHE_FORMAT_VERSION = 2
+# 3: fingerprints now include a content signature, so fixed-size/header-only
+# rewrites still invalidate snapshots on coarse-mtime filesystems.
+CACHE_FORMAT_VERSION = 3
+METADATA_FILE_BYTES = 16384
+
+
+def _hash_bytes(path: Path, nbytes: int | None = None) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        if nbytes is None:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        else:
+            h.update(f.read(nbytes))
+    return h.hexdigest()[:16]
+
+
+def _fingerprint_file(path: Path) -> list:
+    st = path.stat()
+    # Repairs can rewrite a fixed-size .tmet or only the .tidx universal header
+    # without changing either size or, on coarse filesystems, mtime. Include a
+    # small content signature so those updates still invalidate warm-start
+    # snapshots.
+    if path.suffix == ".tmet":
+        sig = _hash_bytes(path, METADATA_FILE_BYTES)
+    elif path.suffix == ".tidx":
+        sig = _hash_bytes(path, 1024)
+    else:
+        return [st.st_size, st.st_mtime_ns]
+    return [st.st_size, st.st_mtime_ns, sig]
 
 
 def _os_cache_dir() -> Path:
@@ -63,7 +92,7 @@ def resolve_cache_path(session_path: str, cache) -> Optional[Path]:
 
 
 def _fingerprints(session_path: str) -> dict:
-    """(relpath -> [size, mtime_ns]) for every metadata/index file in the tree.
+    """(relpath -> [size, mtime_ns, signature]) for metadata/index files.
 
     Tar sessions (a single archive file) are fingerprinted as that one file —
     globbing inside them is impossible, and an empty dict would make a stale
@@ -71,13 +100,11 @@ def _fingerprints(session_path: str) -> dict:
     """
     root = Path(session_path)
     if root.is_file():
-        st = root.stat()
-        return {root.name: [st.st_size, st.st_mtime_ns]}
+        return {root.name: _fingerprint_file(root)}
     fp = {}
     for pattern in ("*.timd/*.segd/*.tmet", "*.timd/*.segd/*.tidx"):
         for f in root.glob(pattern):
-            st = f.stat()
-            fp[str(f.relative_to(root))] = [st.st_size, st.st_mtime_ns]
+            fp[str(f.relative_to(root))] = _fingerprint_file(f)
     return fp
 
 
