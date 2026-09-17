@@ -763,6 +763,117 @@ def test_legacy_written_session_reports_known_divergences(tmp_path):
 
 # --- data-safety regressions (each of these once destroyed data) -------------
 
+def test_repair_refuses_an_index_that_stops_short_of_the_data(tmp_path):
+    """An index missing entries must never become the new declarations.
+
+    A truncated index stays internally consistent — monotonic offsets, every
+    block inside .tdat, its own CRC covering what is left — so neither the CRC
+    gate nor index.block-offsets sees it. But the blocks it no longer mentions
+    are still on disk, and every declaration derived from it is SMALLER than
+    the truth. Writing that back over section 2 destroys the last record of
+    what the data file holds.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path, gap_us=0)
+    tmet = _tmet(path)
+    tidx = Path(tmet).with_suffix(".tidx")
+    true_samples = _read_s2(tmet, "number_of_samples")
+    assert true_samples > 0
+
+    # Drop the second half of the index and make the file internally
+    # consistent again, exactly as a tool that rewrote it would leave things.
+    raw = bytearray(tidx.read_bytes())
+    n = (len(raw) - UH_BYTES) // 56
+    keep = max(1, n // 2)
+    raw = raw[: UH_BYTES + keep * 56]
+    struct.pack_into("<q", raw, 32, keep)  # number_of_entries
+    struct.pack_into("<I", raw, 4, m.crc32(bytes(raw[UH_BYTES:])))
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
+    tidx.write_bytes(bytes(raw))
+
+    report = mef3io.Validator(str(path)).validate()
+    assert "index.data-coverage" in _ids(report), report.summary()
+    assert not report.ok
+
+    digest = _tree_digest(path)
+    repaired = mef3io.repair_session(
+        str(path), ["index.sample-count", "index.block-count", "sizing.contiguous"]
+    )
+    assert _tree_digest(path) == digest, "a short index must not be written back"
+    assert repaired.segments_repaired == 0
+    assert not any(f.repaired for f in repaired.findings)
+    assert any("nothing was repaired" in s.reason for s in repaired.skipped), repaired.summary()
+    assert _read_s2(tmet, "number_of_samples") == true_samples
+
+
+def test_repair_refuses_a_structurally_unsound_index(tmp_path):
+    """index.block-offsets firing must stop the repairs derived from that index.
+
+    Reported-then-repaired-from-anyway is what turned a readable session into
+    an unreadable one: the declarations were rewritten out of bytes the
+    validator had just called unsound.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path, gap_us=0)
+    tmet = _tmet(path)
+    tidx = Path(tmet).with_suffix(".tidx")
+
+    # Trailing padding past the declared entry count: the body CRC is bounded
+    # by that count, so crc.index still passes and the phantom entry is read.
+    tidx.write_bytes(tidx.read_bytes() + b"\x00" * 56)
+
+    report = mef3io.Validator(str(path)).validate()
+    assert "index.block-offsets" in _ids(report), report.summary()
+
+    digest = _tree_digest(path)
+    repaired = mef3io.repair_session(
+        str(path),
+        ["index.block-count", "header.entry-count", "times.segment-bounds",
+         "times.recording-duration", "sizing.contiguous"],
+    )
+    assert _tree_digest(path) == digest, "an unsound index must not be written back"
+    assert repaired.segments_repaired == 0
+    assert any("nothing was repaired" in s.reason for s in repaired.skipped)
+
+
+def test_time_checks_stand_down_when_the_offset_is_unknown(tmp_path):
+    """An unreadable recording-time offset is UNKNOWN, not zero.
+
+    Section 3 carries the recording-time offset and is level-2 encrypted by
+    default, so opening an encrypted session with a level-1 password — an
+    ordinary, valid thing to do — hides it. Treating that as zero made the time
+    checks compare against the wrong baseline, and repairing then rewrote a
+    correct session's declared bounds to garbage.
+
+    The session here must have a NON-ZERO offset: with rto == 0 "unknown" and
+    "zero" coincide and the test would prove nothing. mef3io's own writer
+    always writes zero, so this uses the legacy writer.
+    """
+    pytest.importorskip("mef_tools", reason="legacy oracle not installed")
+    from mef_tools.io import MefWriter
+
+    path = tmp_path / "rto.mefd"
+    w = MefWriter(str(path), overwrite=True, password1="lvl1", password2="lvl2")
+    w.record_offset = START  # non-zero recording-time offset
+    w.write_data(np.arange(1000, dtype=np.int32), "ch1", START, FS, precision=0)
+    del w
+
+    # Level 2 sees section 3 and the offset; level 1 does not. Neither may
+    # report a time defect on a session whose times are correct.
+    for password in ("lvl2", "lvl1"):
+        report = mef3io.Validator(str(path), password=password).validate()
+        assert "times.segment-bounds" not in _ids(report), (
+            f"password {password!r} reported a time defect on a correct session:\n"
+            + report.summary()
+        )
+
+    # ...and a repair asked for with only level-1 access must write nothing.
+    digest = _tree_digest(path)
+    mef3io.repair_session(str(path), ["times.segment-bounds"], password="lvl1")
+    assert _tree_digest(path) == digest, "times must not be rewritten against an unknown offset"
+
+
+
 
 S1_ENCRYPTION_OFFSET = 1024  # section 1, byte 0: section-2 encryption level
 S2_BYTES = 10752

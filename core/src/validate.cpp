@@ -123,10 +123,16 @@ struct SegmentTruth {
   si8 data_bytes = 0;  // sum of block_bytes
   bool has_blocks = false;  // false => the index is empty; derive nothing from it
   bool times_known = true;  // false => an entry carried UUTC_NO_ENTRY
-  bool times_comparable = true;  // false => non-zero rto, conventions ambiguous
+  bool rto_known = true;    // false => section 3 unreadable; rto is UNKNOWN, not 0
+  bool times_comparable = true;  // false => rto non-zero or unknown; conventions ambiguous
   bool difference_bytes_suspect = false;  // a block header exceeded the worst case
   bool offsets_sane = true;
   std::string offset_problem;
+  // False => the index stops short of the data file, i.e. it describes less
+  // than .tdat actually holds. An index that has lost entries still looks
+  // internally consistent, so nothing else catches it.
+  bool index_covers_data = true;
+  si8 unaccounted_tail_bytes = 0;
 };
 
 // The mutable declarations a repair may write back.
@@ -248,6 +254,29 @@ const std::vector<CheckImpl>& check_impls() {
                    hit = true;
                    f.field = "file_offset";
                    f.message = t.offset_problem;
+                 },
+                 {}});
+
+    v.push_back({{"index.data-coverage", "The index describes the whole data file",
+                  "The last block the .tidx accounts for should end at the end of .tdat. When it "
+                  "stops short, the index has lost entries while the blocks themselves are still "
+                  "on disk — a truncated or partially rewritten index. Such an index stays "
+                  "internally consistent (monotonic offsets, every block inside the file, its own "
+                  "CRC covering what is left), so no other check sees it, and every declaration "
+                  "derived from it is SMALLER than the truth. Not repairable, and it blocks "
+                  "repairs on the segment: the index is the only cheap description of .tdat, and "
+                  "writing a short one back over section 2 destroys the last record of what the "
+                  "data file contains.",
+                  Severity::Error, false},
+                 [](const SegmentState&, const SegmentTruth& t, Finding& f, bool& hit) {
+                   if (t.index_covers_data) return;
+                   hit = true;
+                   f.field = "file_offset";
+                   f.stored = num(t.data_bytes);
+                   f.expected = num(t.data_bytes + t.unaccounted_tail_bytes);
+                   f.message = "the block index stops " + num(t.unaccounted_tail_bytes) +
+                               " bytes short of the end of the data file; entries are missing "
+                               "and nothing will be repaired in this segment";
                  },
                  {}});
 
@@ -704,16 +733,25 @@ SegmentTruth derive_truth(const SessionSource& src, const SegmentState& s,
   }
   t.has_blocks = true;
 
-  t.rto = s.md.section3_available &&
-                  s.md.section3.recording_time_offset != fmt::UUTC_NO_ENTRY
-              ? s.md.section3.recording_time_offset
-              : 0;
+  // "Unknown" and "zero" are DIFFERENT states, and conflating them is a
+  // data-loss bug. Section 3 holds the recording-time offset and is level-2
+  // encrypted by default (meflib.h:405), so `section3_available` is false for
+  // any encrypted session opened with a level-1 password — an ordinary, valid
+  // way to open a file. Falling back to 0 there and then deriving
+  // `times_comparable` from `rto == 0` would declare the times comparable
+  // precisely when the offset cannot be seen, and a time repair would then
+  // rewrite a correct session's bounds against the wrong baseline.
+  t.rto_known = s.md.section3_available &&
+                s.md.section3.recording_time_offset != fmt::UUTC_NO_ENTRY;
+  t.rto = t.rto_known ? s.md.section3.recording_time_offset : 0;
   // With a non-zero recording-time offset, writers disagree on the stored sign
   // convention (meflib negates; the legacy stack stores a positive delta), and
   // a single file mixes both across its universal headers and its index. The
   // two are indistinguishable from the bytes alone, so the time checks stand
   // down rather than risk rewriting a correct file into an inverted range.
-  t.times_comparable = (t.rto == 0);
+  // They stand down for an unknown offset too, for the same reason: the
+  // baseline is unavailable, so nothing derived from it can be trusted.
+  t.times_comparable = t.rto_known && t.rto == 0;
 
   si8 run_blocks = 0, run_bytes = 0, run_samples = 0;
   si8 last_start_uutc = 0;
@@ -793,6 +831,20 @@ SegmentTruth derive_truth(const SessionSource& src, const SegmentState& s,
           t.difference_bytes_suspect = true;
       }
     }
+  }
+
+  // Does the index actually describe the whole data file? An index that has
+  // lost entries — truncated, or rewritten by a tool that dropped some — stays
+  // internally consistent: its offsets are monotonic, every block fits inside
+  // .tdat, and its own CRC covers exactly what is left. Nothing else here
+  // notices. But the blocks it no longer mentions are still on disk, and the
+  // declarations derived from such an index are smaller than the truth, so
+  // writing them back destroys the only remaining record of what .tdat holds.
+  // `previous_end_offset` is the end of the last block the index accounts for.
+  if (t.offsets_sane && static_cast<std::uint64_t>(previous_end_offset) < s.tdat_size) {
+    t.index_covers_data = false;
+    t.unaccounted_tail_bytes =
+        static_cast<si8>(s.tdat_size) - previous_end_offset;
   }
 
   t.difference_bytes_exact = opts.exact_difference_bytes && t.offsets_sane;
@@ -1127,6 +1179,21 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     buffer.tdat_uh = state.tdat_uh_parsed;
     bool any_repair = false;
 
+    // Everything a repair writes is derived from the block index, so the index
+    // has to be trustworthy before any of it may be written back. A CRC failure
+    // already stops the segment earlier; these two are the cases a CRC cannot
+    // see, because the damaged index is internally consistent:
+    //
+    //   * offsets that overlap, run backwards, or point outside .tdat — the
+    //     index describes a file that is not the one on disk;
+    //   * an index that stops short of the end of .tdat — entries are missing,
+    //     so every derived declaration is too small.
+    //
+    // Both were reported before this gate existed and then repaired FROM
+    // ANYWAY, which turned a readable session into an unreadable one. Checks
+    // still all run, so the report stays complete; only the writing stops.
+    const bool index_trustworthy = truth.offsets_sane && truth.index_covers_data;
+
     for (const auto* impl : active) {
       if (impl->info.id == "crc.metadata" || impl->info.id == "crc.index") continue;
       Finding f;
@@ -1144,7 +1211,7 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       f.channel = files.channel;
       f.segment_number = files.segment_number;
       f.path = files.description;
-      if (repair && impl->repair && to_repair.count(impl->info.id) &&
+      if (repair && impl->repair && index_trustworthy && to_repair.count(impl->info.id) &&
           selected(repair->channels, files.channel) &&
           selected(repair->segments, files.segment_number)) {
         // Only what the repair actually wrote counts. A repair is allowed to
@@ -1158,6 +1225,14 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       }
       report.findings.push_back(std::move(f));
     }
+
+    // Say so out loud. A caller that asked for repairs and silently got none
+    // would reasonably read the report as "nothing needed fixing".
+    if (repair && !index_trustworthy)
+      skip(truth.offsets_sane
+               ? "the block index does not describe the whole data file; nothing was repaired "
+                 "in this segment"
+               : "the block index is structurally unsound; nothing was repaired in this segment");
 
     if (!any_repair) continue;
 
