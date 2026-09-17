@@ -196,6 +196,23 @@ repair, which pins the cause to this field and nothing else about the file.
 plain in `meflib.c`, but no crash has been reproduced against it. Both are
 errors; only one has a post-mortem.
 
+### The fix, confirmed against the affected reader
+
+A session written by the current version, and a legacy session brought up to
+date with `repair_session`, were both opened in CyberPSG and **decoded** —
+traces drawn, no access violation. Decoding is the part that matters: in the
+original failure `ReadSession` succeeded and the crash came later, inside RED
+decoding, so a session that merely *opens* proves nothing.
+
+The recording's gap also rendered in the right place and at the right length
+(3.0 s, at 47–53% of a 49.875 s record), which says block placement by
+timestamp agrees there as well.
+
+This covers the repaired file, in which `maximum_contiguous_block_bytes` was
+**lowered** from the legacy writer's whole-file total to the longest run — the
+only declaration the repair ever makes smaller rather than larger, and so the
+one most worth confirming in practice rather than arguing from the index.
+
 mef3io **≤ 1.1.2** left `maximum_difference_bytes` at `0`. See
 [the format reference](mef3_format.md#the-buffer-sizing-declarations).
 

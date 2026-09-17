@@ -191,6 +191,18 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   inside RED decoding was reproduced against a meflib-based reader, and an
   in-memory-only patch of that single field decoded byte-identically to the
   on-disk repair — which isolates the cause to it. Do not rank (b) above (a).
+  THE FIX IS CONFIRMED AGAINST THAT READER FAMILY (2026-09-17): a session
+  written by this version, and a legacy `mef_tools` session brought up to date
+  by `repair_session`, were both opened in CyberPSG and DECODED — traces drawn,
+  no access violation. That is the half that matters: the original failure let
+  `ReadSession` succeed and blew up later inside `RED_decode`, so "it opens" is
+  not evidence. The gap also landed in the right place and with the right
+  duration (3.0 s at 47-53% of a 49.875 s record), so block placement by
+  timestamp agrees there too — a third independent reader backing the
+  reconciliation below. Note this covers the repaired file, in which
+  `maximum_contiguous_block_bytes` was LOWERED from the legacy whole-file total
+  to the longest run; that was the only declaration made smaller rather than
+  larger, and it is the one now known to be safe in practice.
   (Details of that investigation are held privately; do not restate them in
   tracked files — this repo is public.)
   pymef passes
