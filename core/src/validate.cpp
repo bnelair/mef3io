@@ -369,8 +369,11 @@ const std::vector<CheckImpl>& check_impls() {
     v.push_back({{"sizing.contiguous", "Contiguous-run maxima match the index",
                   "The maximum_contiguous_* trio describes the longest run of blocks between "
                   "discontinuities. Under-declaring truncates a reader's run buffer; "
-                  "over-declaring (mef3io <= 1.1.2 wrote whole-channel totals) wastes memory, "
-                  "and 0 in maximum_contiguous_block_bytes reads as a real zero.",
+                  "over-declaring (mef3io <= 1.1.2 wrote whole-channel totals, and recorders "
+                  "in the field declare whole-session ones) wastes memory — one observed file "
+                  "declared 22,129,876 contiguous samples against 76,800 present, 84 MiB per "
+                  "channel. 0 in maximum_contiguous_block_bytes reads as a real zero. Repaired "
+                  "in both directions: the declaration states what the index holds.",
                   Severity::Warning, true},
                  [](const SegmentState& s, const SegmentTruth& t, Finding& f, bool& hit) {
                    const auto& s2 = s.md.section2;
@@ -396,35 +399,32 @@ const std::vector<CheckImpl>& check_impls() {
                          it.stored < it.expected
                              ? "declared contiguous maximum is smaller than a run on disk"
                              : "declared contiguous maximum exceeds the longest run on disk "
-                               "(wasted allocation; reported but not rewritten)";
+                               "(wasted allocation)";
                      // Prefer reporting an under-declaration: it is the one that
                      // truncates a reader's buffer, and it must not stay hidden
-                     // behind a harmless over-declaration earlier in the list.
+                     // behind a less urgent over-declaration earlier in the list.
                      if (it.stored < it.expected) return;
                    }
                  },
                  [](const SegmentTruth& t, RepairBuffer& r) {
-                   // Grow only. No reader in the reference set (meflib, pymef,
-                   // mef3_dump) consumes these fields, so the longest-run
-                   // reading is inferred rather than established. Raising an
-                   // under-declaration is safe under either reading; lowering an
-                   // over-declaration would truncate a reader that treats the
-                   // field as a segment total, so it is left alone.
+                   // Write the measured truth, in whichever direction it lies.
+                   // The field's job is to describe the data, and the longest
+                   // run between discontinuity flags is what the index holds —
+                   // the same quantity mef3io's own writer measures and the same
+                   // one the third-party fix_mef3_sizing.py patcher writes, so a
+                   // session repaired by either tool now agrees with the other.
                    // make_tuple, not tie: tie would alias the very fields the
                    // next lines mutate, so the comparison could never differ.
                    const auto snapshot = std::make_tuple(r.s2.maximum_contiguous_blocks,
                                                          r.s2.maximum_contiguous_block_bytes,
                                                          r.s2.maximum_contiguous_samples);
-                   r.s2.maximum_contiguous_blocks =
-                       std::max(r.s2.maximum_contiguous_blocks, t.contiguous_blocks);
-                   r.s2.maximum_contiguous_block_bytes =
-                       std::max(r.s2.maximum_contiguous_block_bytes, t.contiguous_block_bytes);
-                   r.s2.maximum_contiguous_samples =
-                       std::max(r.s2.maximum_contiguous_samples, t.contiguous_samples);
+                   r.s2.maximum_contiguous_blocks = t.contiguous_blocks;
+                   r.s2.maximum_contiguous_block_bytes = t.contiguous_block_bytes;
+                   r.s2.maximum_contiguous_samples = t.contiguous_samples;
                    if (snapshot == std::make_tuple(r.s2.maximum_contiguous_blocks,
                                                    r.s2.maximum_contiguous_block_bytes,
                                                    r.s2.maximum_contiguous_samples))
-                     return false;  // nothing to raise: the finding stands unrepaired
+                     return false;
                    r.tmet_dirty = true;
                    return true;
                  }});

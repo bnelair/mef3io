@@ -1,10 +1,10 @@
 """Command-line entry point: ``python -m mef3io <command> ...``.
 
-Today there is one command, ``validate``, which checks a session's declarations
-against its data and repairs only what you explicitly name::
+``validate`` reads; ``repair`` writes. They are separate commands so that
+neither can be reached by accident from the other::
 
     python -m mef3io validate SESSION.mefd
-    python -m mef3io validate SESSION.mefd --repair sizing.difference-bytes
+    python -m mef3io repair SESSION.mefd --check sizing.difference-bytes
     python -m mef3io validate --list-checks
 """
 from __future__ import annotations
@@ -13,8 +13,8 @@ import sys
 from typing import Sequence
 
 COMMANDS = {
-    "validate": "check a session's declarations against its data, and repair "
-                "only the checks you name",
+    "validate": "check a session's declarations against its data (never writes)",
+    "repair": "rewrite only the declarations for the checks you name",
 }
 
 
@@ -37,10 +37,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"unknown command: {command}\n", file=sys.stderr)
         print(_usage(), file=sys.stderr)
         return 2
-    if command == "validate":
+    if command in ("validate", "repair"):
         from .validate import _main
 
-        return _main(rest)
+        return _main(rest, repair=command == "repair")
     raise AssertionError(f"unhandled command {command}")  # pragma: no cover
 
 

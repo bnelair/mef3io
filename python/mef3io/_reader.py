@@ -43,7 +43,7 @@ def _declaration_warning_text(issues: list, path: str) -> str:
         "block headers themselves, and the data is intact. It does affect "
         "meflib-based readers (e.g. CyberPSG), which allocate from these fields. "
         "Run mef3io.Validator(path).validate() for detail, or "
-        "python -m mef3io validate <path> --repair <check-id> to fix the file."
+        "python -m mef3io repair <path> --check <check-id> to fix the file."
     )
 
 

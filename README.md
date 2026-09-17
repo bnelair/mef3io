@@ -37,7 +37,8 @@ C++ tests). Scope notes:
   rewriting the session fixes it outright. See
   [docs/mef3_format.md](docs/mef3_format.md#the-buffer-sizing-declarations).
 - **Validation**: `mef3io.Validator` checks a session's declarations against
-  its data and repairs only the checks you name — see
+  its data and never writes; `mef3io.repair_session` rewrites only the checks
+  you name — see
   [Validating and repairing](docs/validation.md). Opening a session that leaves
   those declarations unset warns once, saying plainly that reading is
   unaffected.

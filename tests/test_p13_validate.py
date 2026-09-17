@@ -1,12 +1,14 @@
 """P13: the session Validator — checking declarations against the data, and
 repairing only what the caller explicitly selects.
 
-Two contracts are pinned hard here, because they are what makes the tool safe
+Three contracts are pinned hard here, because they are what makes the tool safe
 to point at real recordings:
 
-* ``validate()`` never writes a byte.
-* ``repair()`` writes only the checks named in its argument, and refuses an
-  empty selection — there is no implicit "fix everything".
+* ``Validator`` never writes a byte, and has no method that could — writing
+  lives in the separate ``repair_session()`` function.
+* ``repair_session()`` writes only the checks named in its argument, and
+  refuses an empty selection — there is no implicit "fix everything".
+* ``Finding.repaired`` means "this was written", never "a repair was offered".
 """
 import hashlib
 import os
@@ -113,6 +115,24 @@ def _ids(report):
     return {f.check_id for f in report.findings}
 
 
+def _repair(validator, check_ids, **kwargs):
+    """Repair the session a validator points at, with its same options.
+
+    A Validator is read-only by construction, so repairs go through the
+    separate module-level function; tests keep using a validator to say which
+    session and options are in play.
+    """
+    return mef3io.repair_session(
+        validator.path,
+        check_ids,
+        password=validator.password,
+        channels=validator.channels,
+        segments=validator.segments,
+        exact_difference_bytes=validator.exact_difference_bytes,
+        **kwargs,
+    )
+
+
 # --- the registry ------------------------------------------------------------
 
 
@@ -149,6 +169,18 @@ def test_clean_session_has_no_findings(tmp_path):
     assert report.segments_checked == 2
     assert len(report.checks_run) == len(mef3io.available_checks())
     assert "No problems found" in report.summary()
+
+
+def test_validator_has_no_way_to_write():
+    """A checker checks. Writing lives in repair_session(), under its own name.
+
+    Pinned as a test and not just a convention: the point of the split is that
+    an operator cannot reach a mutation from an object they opened to inspect,
+    so re-attaching one to Validator must fail here rather than in the field.
+    """
+    public = {n for n in dir(mef3io.Validator) if not n.startswith("_")}
+    assert not (public & {"repair", "fix", "write", "apply"}), public
+    assert callable(mef3io.repair_session)
 
 
 def test_validate_never_writes(tmp_path):
@@ -218,7 +250,7 @@ def test_start_sample_is_reported_but_never_repaired(tmp_path):
 
     assert not mef3io.Validator.describe_check("index.start-sample").repairable
     with pytest.raises(ValueError, match="not repairable"):
-        mef3io.Validator(str(path)).repair(["index.start-sample"])
+        mef3io.repair_session(str(path), ["index.start-sample"])
 
     # The pymef layout — index restarts at 0, section 2 stays cumulative — must
     # NOT be reported: it is correct for that writer.
@@ -255,7 +287,7 @@ def test_check_detects_and_fix_repairs(tmp_path, check_id):
     assert check_id in _ids(full)
 
     # ...and fixing that one check clears it, without needing a second pass.
-    repaired = validator.fix(check_id)
+    repaired = _repair(validator, [check_id])
     assert any(f.check_id == check_id and f.repaired for f in repaired.findings)
     after = validator.validate()
     assert check_id not in _ids(after)
@@ -269,7 +301,7 @@ def test_repair_touches_only_the_selected_check(tmp_path):
     _patch_s2(tmet, "maximum_difference_bytes", 0)
     _patch_s2(tmet, "block_interval", 0)
 
-    report = mef3io.Validator(str(path)).repair(["sizing.difference-bytes"])
+    report = mef3io.repair_session(str(path), ["sizing.difference-bytes"])
     assert {f.check_id for f in report.repaired} == {"sizing.difference-bytes"}
 
     remaining = _ids(mef3io.Validator(str(path)).validate())
@@ -284,7 +316,7 @@ def test_repair_respects_channel_and_segment_filters(tmp_path):
     for ch in ("ch1", "ch2"):
         _patch_s2(_tmet(path, ch), "maximum_difference_bytes", 0)
 
-    report = mef3io.Validator(str(path), channels=["ch1"]).repair(["sizing.difference-bytes"])
+    report = mef3io.repair_session(str(path), ["sizing.difference-bytes"], channels=["ch1"])
     assert {f.channel for f in report.findings} == {"ch1"}
     assert _read_s2(_tmet(path, "ch1"), "maximum_difference_bytes") > 0
     assert _read_s2(_tmet(path, "ch2"), "maximum_difference_bytes") == 0
@@ -299,7 +331,7 @@ def test_repair_refuses_an_empty_selection(tmp_path):
     _patch_s2(_tmet(path), "maximum_difference_bytes", 0)
     before = _tree_digest(path)
     with pytest.raises(ValueError, match="never implicit"):
-        mef3io.Validator(str(path)).repair([])
+        mef3io.repair_session(str(path), [])
     assert _tree_digest(path) == before
 
 
@@ -309,7 +341,7 @@ def test_repair_rejects_unknown_or_unrepairable_checks(tmp_path, bad):
     _write(path)
     before = _tree_digest(path)
     with pytest.raises(ValueError):
-        mef3io.Validator(str(path)).repair([bad])
+        mef3io.repair_session(str(path), [bad])
     assert _tree_digest(path) == before
 
 
@@ -317,7 +349,7 @@ def test_repair_of_a_clean_session_changes_nothing(tmp_path):
     path = tmp_path / "s.mefd"
     _write(path)
     before = _tree_digest(path)
-    report = mef3io.Validator(str(path)).repair(["sizing.difference-bytes"])
+    report = mef3io.repair_session(str(path), ["sizing.difference-bytes"])
     assert report.segments_repaired == 0
     assert _tree_digest(path) == before
 
@@ -332,7 +364,7 @@ def test_repair_backs_up_before_rewriting(tmp_path):
     _patch_s2(tmet, "maximum_difference_bytes", 0)
     original = tmet.read_bytes()
 
-    mef3io.Validator(str(path)).repair(["sizing.difference-bytes"])
+    mef3io.repair_session(str(path), ["sizing.difference-bytes"])
     backups = list(Path(str(path) + ".repair-backup").rglob("*.tmet"))
     assert len(backups) == 1
     assert backups[0].read_bytes() == original
@@ -340,7 +372,7 @@ def test_repair_backs_up_before_rewriting(tmp_path):
 
     # A second repair must not clobber the pristine backup.
     _patch_s2(tmet, "maximum_difference_bytes", 0)
-    mef3io.Validator(str(path)).repair(["sizing.difference-bytes"])
+    mef3io.repair_session(str(path), ["sizing.difference-bytes"])
     assert backups[0].read_bytes() == original
 
 
@@ -348,7 +380,7 @@ def test_backup_can_be_declined(tmp_path):
     path = tmp_path / "s.mefd"
     _write(path)
     _patch_s2(_tmet(path), "maximum_difference_bytes", 0)
-    mef3io.Validator(str(path)).repair(["sizing.difference-bytes"], backup=False)
+    mef3io.repair_session(str(path), ["sizing.difference-bytes"], backup=False)
     assert not Path(str(path) + ".repair-backup").exists()
 
 
@@ -364,7 +396,7 @@ def test_bad_crc_is_reported_and_left_alone(tmp_path):
     tmet.write_bytes(bytes(raw))
     before = _tree_digest(path)
 
-    report = mef3io.Validator(str(path)).repair(["index.block-count"])
+    report = mef3io.repair_session(str(path), ["index.block-count"])
     assert "crc.metadata" in _ids(report)
     assert report.errors
     assert not report.ok
@@ -420,7 +452,7 @@ def test_repaired_session_still_reads_identically(tmp_path):
         _patch_s2(tmet, fld, value)
 
     validator = mef3io.Validator(str(path))
-    report = validator.repair(validator.validate().repairable_check_ids)
+    report = _repair(validator, validator.validate().repairable_check_ids)
     assert report.segments_repaired == 1
     assert validator.validate().ok
 
@@ -469,7 +501,7 @@ def test_encrypted_session_is_repaired_and_stays_readable(tmp_path):
     ciphertext_before = Path(tmet).read_bytes()[S2 : S2 + 10752]
     assert "sizing.difference-bytes" in _ids(validator.validate())
 
-    report = validator.repair(["sizing.difference-bytes"])
+    report = _repair(validator, ["sizing.difference-bytes"])
     assert report.segments_repaired == 1
     assert [f.repaired for f in report.findings if f.check_id == "sizing.difference-bytes"] == [True]
     assert validator.validate().ok
@@ -511,7 +543,7 @@ def test_tar_session_validates_but_cannot_be_repaired(tmp_path):
 
     assert mef3io.Validator(archive).validate().ok
     with pytest.raises(RuntimeError, match="tar"):
-        mef3io.Validator(archive).repair(["sizing.difference-bytes"])
+        mef3io.repair_session(archive, ["sizing.difference-bytes"])
 
 
 # --- the fast path -----------------------------------------------------------
@@ -525,7 +557,7 @@ def test_fast_mode_still_catches_an_unset_difference_bytes(tmp_path):
 
     validator = mef3io.Validator(str(path), exact_difference_bytes=False)
     assert "sizing.difference-bytes" in _ids(validator.validate())
-    validator.fix("sizing.difference-bytes")
+    _repair(validator, ["sizing.difference-bytes"])
     # Without reading .tdat the repair uses meflib's worst case, so it is a safe
     # over-declaration rather than the exact maximum.
     bound = 5 * _read_s2(tmet, "maximum_block_samples")
@@ -550,7 +582,7 @@ def test_report_groups_and_summarizes(tmp_path):
     text = report.summary()
     assert "sizing.difference-bytes" in text
     assert "2 segment(s)" in text
-    assert "repair(" in text, "the summary should say how to opt in to the fix"
+    assert "repair_session(" in text, "the summary should say how to opt in to the fix"
 
 
 # --- command line ------------------------------------------------------------
@@ -580,9 +612,18 @@ def test_cli_reports_and_repairs_only_when_asked(tmp_path):
     assert "sizing.difference-bytes" in report.stdout
     assert _read_s2(_tmet(path), "maximum_difference_bytes") == 0, "reporting must not write"
 
-    fixed = subprocess.run(
+    # Writing is a different command; `validate` has no way to reach it.
+    no_such_flag = subprocess.run(
         [sys.executable, "-m", "mef3io", "validate", str(path),
          "--repair", "sizing.difference-bytes"],
+        capture_output=True, text=True, env=env,
+    )
+    assert no_such_flag.returncode == 2, "validate must not accept --repair"
+    assert _read_s2(_tmet(path), "maximum_difference_bytes") == 0
+
+    fixed = subprocess.run(
+        [sys.executable, "-m", "mef3io", "repair", str(path),
+         "--check", "sizing.difference-bytes"],
         capture_output=True, text=True, env=env,
     )
     assert fixed.returncode == 0, fixed.stdout + fixed.stderr
@@ -666,7 +707,7 @@ def test_repairing_clears_the_open_warning(tmp_path):
     path = tmp_path / "s.mefd"
     _write(path)
     _patch_s2(_tmet(path), "maximum_difference_bytes", 0)
-    mef3io.Validator(str(path)).fix("sizing.difference-bytes")
+    mef3io.repair_session(str(path), ["sizing.difference-bytes"])
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -731,7 +772,7 @@ def test_repair_preserves_bytes_it_does_not_model(tmp_path):
     tmet.write_bytes(bytes(raw))
 
     _patch_s2(tmet, "maximum_difference_bytes", 0)
-    mef3io.Validator(str(path)).fix("sizing.difference-bytes")
+    mef3io.repair_session(str(path), ["sizing.difference-bytes"])
 
     after = tmet.read_bytes()
     assert after[S2 + 6432 : S2 + 6432 + 24] == b"PROTECTED-REGION-PAYLOAD"
@@ -763,7 +804,7 @@ def test_level_2_encrypted_section_2_is_re_encrypted_with_the_right_key(tmp_path
 
     validator = mef3io.Validator(str(path), password="lvl2")
     assert "sizing.difference-bytes" in _ids(validator.validate())
-    assert validator.fix("sizing.difference-bytes").segments_repaired == 1
+    assert _repair(validator, ["sizing.difference-bytes"]).segments_repaired == 1
 
     # It must still decrypt with the key section 1 names.
     after = m.aes128_ecb_decrypt(
@@ -785,7 +826,7 @@ def test_tdat_backup_copies_only_the_universal_header(tmp_path):
 
     _patch_uh(tdat, "maximum_entry_size", 2)
     header_before = tdat.read_bytes()[:UH_BYTES]
-    mef3io.Validator(str(path)).fix("header.max-entry-size")
+    mef3io.repair_session(str(path), ["header.max-entry-size"])
 
     backups = list(Path(str(path) + ".repair-backup").rglob("*.tdat.universal-header"))
     assert len(backups) == 1
@@ -801,7 +842,7 @@ def test_backup_stays_outside_a_session_given_with_a_trailing_separator(tmp_path
     _write(path)
     _patch_s2(_tmet(path), "maximum_difference_bytes", 0)
 
-    mef3io.Validator(str(path) + os.sep).fix("sizing.difference-bytes")
+    mef3io.repair_session(str(path) + os.sep, ["sizing.difference-bytes"])
     assert Path(str(path) + ".repair-backup").is_dir()
     assert not (path / ".repair-backup").exists()
 
@@ -827,7 +868,7 @@ def test_empty_index_is_reported_never_repaired(tmp_path):
     assert not report.ok
     assert report.skipped and "damaged" in report.skipped[0].reason
     digest = _tree_digest(path)
-    validator.repair(["index.sample-count", "times.segment-bounds"])
+    _repair(validator, ["index.sample-count", "times.segment-bounds"])
     assert _tree_digest(path) == digest, "a damaged segment must not be rewritten"
     assert _read_s2(tmet, "number_of_samples") == before
 
@@ -863,46 +904,60 @@ def test_index_trailing_padding_is_tolerated(tmp_path):
     assert report.ok, report.summary()
 
 
-def test_contiguous_repair_grows_but_never_shrinks(tmp_path):
-    """No reference reader consumes maximum_contiguous_*, so the longest-run
-    reading is inferred. Raising an under-declaration is safe either way;
-    lowering an over-declaration is not."""
-    path = tmp_path / "s.mefd"
-    _write(path)
-    tmet = _tmet(path)
-    _patch_s2(tmet, "maximum_contiguous_samples", 10**9)
-    _patch_s2(tmet, "maximum_contiguous_block_bytes", 0)
+def test_contiguous_repair_states_what_the_index_holds(tmp_path):
+    """The declaration describes the data, in whichever direction it is wrong.
 
-    mef3io.Validator(str(path)).fix("sizing.contiguous")
-    assert _read_s2(tmet, "maximum_contiguous_samples") == 10**9, "over-declaration kept"
-    assert _read_s2(tmet, "maximum_contiguous_block_bytes") > 0, "under-declaration raised"
-
-
-def test_declined_repair_is_not_reported_as_repaired(tmp_path):
-    """A repair that deliberately writes nothing must say so.
-
-    sizing.contiguous refuses to lower an over-declaration — the case actually
-    observed in the field (a recorder declaring 22,129,876 contiguous samples
-    against 76,800 present). Reporting that as `repaired` would tell an
-    operator the session was fixed while the declaration stayed on disk, and a
-    "repair until clean" loop would never terminate.
+    Over-declaring is the case seen in the field (a recorder declaring
+    22,129,876 contiguous samples against 76,800 present, 84 MiB per channel of
+    pointless allocation); under-declaring truncates a reader's run buffer.
+    Both are corrected to the longest run between discontinuity flags.
     """
     path = tmp_path / "s.mefd"
     _write(path)
     tmet = _tmet(path)
-    # Over-declared ONLY: nothing here is repairable under the grow-only rule.
+    truth_samples = _read_s2(tmet, "maximum_contiguous_samples")
+    truth_bytes = _read_s2(tmet, "maximum_contiguous_block_bytes")
+    assert truth_samples > 0 and truth_bytes > 0, "writer must measure these"
+
+    _patch_s2(tmet, "maximum_contiguous_samples", 10**9)  # over
+    _patch_s2(tmet, "maximum_contiguous_block_bytes", 0)  # under
+
+    mef3io.repair_session(str(path), ["sizing.contiguous"])
+    assert _read_s2(tmet, "maximum_contiguous_samples") == truth_samples, "over-declaration lowered"
+    assert _read_s2(tmet, "maximum_contiguous_block_bytes") == truth_bytes, "under-declaration raised"
+    assert "sizing.contiguous" not in _ids(mef3io.Validator(str(path)).validate())
+
+
+def test_repaired_means_bytes_changed(tmp_path):
+    """`repaired` and segments_repaired must track what was actually written.
+
+    A repair may decline (RepairFn returns whether it changed a declaration).
+    Reporting a declined one as repaired would tell an operator a session was
+    fixed while the defect stayed on disk, let Report.ok discount an
+    error-severity finding, and make a "repair until clean" loop non-terminating.
+    Both halves of the correspondence are pinned here.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+
+    # Nothing wrong -> nothing written, nothing claimed.
+    clean = tmet.read_bytes()
+    report = mef3io.repair_session(str(path), ["sizing.contiguous"])
+    assert report.segments_repaired == 0
+    assert not any(f.repaired for f in report.findings)
+    assert tmet.read_bytes() == clean, "a clean session must not be rewritten"
+
+    # Something wrong -> written, and claimed exactly once.
     _patch_s2(tmet, "maximum_contiguous_samples", 22_129_876)
-    before = tmet.read_bytes()
-
-    report = mef3io.Validator(str(path)).repair(["sizing.contiguous"])
-
-    assert tmet.read_bytes() == before, "nothing should have been written"
-    assert report.segments_repaired == 0, "no segment was repaired"
+    report = mef3io.repair_session(str(path), ["sizing.contiguous"])
     hits = [f for f in report.findings if f.check_id == "sizing.contiguous"]
-    assert hits, "the over-declaration must still be reported"
-    assert not any(f.repaired for f in hits), "a declined repair is not a repair"
-    # And it is still there on a fresh look, which is the operator-visible half.
-    assert "sizing.contiguous" in _ids(mef3io.Validator(str(path)).validate())
+    assert hits and all(f.repaired for f in hits)
+    assert report.segments_repaired == 1
+    # Restoring the one corrupted field reproduces the original file exactly,
+    # CRCs included — the repair touched that field and nothing else.
+    assert tmet.read_bytes() == clean
+    assert "sizing.contiguous" not in _ids(mef3io.Validator(str(path)).validate())
 
 
 def test_garbage_block_header_never_becomes_the_declaration(tmp_path):
@@ -918,7 +973,7 @@ def test_garbage_block_header_never_becomes_the_declaration(tmp_path):
     tdat.write_bytes(bytes(raw))
     _patch_s2(tmet, "maximum_difference_bytes", 0)
 
-    mef3io.Validator(str(path)).fix("sizing.difference-bytes")
+    mef3io.repair_session(str(path), ["sizing.difference-bytes"])
     stored = _read_s2(tmet, "maximum_difference_bytes")
     assert stored not in (0, 0xFFFFFFFF)
     assert stored <= 5 * _read_s2(tmet, "maximum_block_samples")
@@ -954,7 +1009,7 @@ def test_repair_rejects_a_bare_string_of_check_ids(tmp_path):
     path = tmp_path / "s.mefd"
     _write(path)
     with pytest.raises(TypeError, match="not a single string"):
-        mef3io.Validator(str(path)).repair("sizing.difference-bytes")
+        mef3io.repair_session(str(path), "sizing.difference-bytes")
 
 
 def test_summary_keeps_pointing_at_what_is_still_repairable(tmp_path):
@@ -964,7 +1019,7 @@ def test_summary_keeps_pointing_at_what_is_still_repairable(tmp_path):
     _patch_s2(tmet, "maximum_difference_bytes", 0)
     _patch_s2(tmet, "block_interval", 0)
 
-    report = mef3io.Validator(str(path)).repair(["sizing.difference-bytes"])
+    report = mef3io.repair_session(str(path), ["sizing.difference-bytes"])
     assert "times.block-interval" in report.repairable_check_ids
     assert "sizing.difference-bytes" not in report.repairable_check_ids
     assert "Still repairable" in report.summary()
@@ -1010,6 +1065,7 @@ def test_cli_reports_bad_input_without_a_traceback(tmp_path):
     env = dict(os.environ, PYTHONPATH=str(Path(mef3io.__file__).resolve().parent.parent))
     path = tmp_path / "s.mefd"
     _write(path)
+    digest_before_bad_input = _tree_digest(path)
 
     missing = subprocess.run(
         [sys.executable, "-m", "mef3io", "validate", str(tmp_path / "nope.mefd")],
@@ -1027,12 +1083,15 @@ def test_cli_reports_bad_input_without_a_traceback(tmp_path):
     assert "Traceback" not in bad_check.stderr
     assert "--list-checks" in bad_check.stderr
 
-    combined = subprocess.run(
-        [sys.executable, "-m", "mef3io", "validate", str(path),
-         "--check", "sizing.contiguous", "--repair", "sizing.difference-bytes"],
+    # `repair` without a --check is the "fix everything" shortcut that must not
+    # exist: it has to name what it is about to rewrite.
+    unselected = subprocess.run(
+        [sys.executable, "-m", "mef3io", "repair", str(path)],
         capture_output=True, text=True, env=env,
     )
-    assert combined.returncode == 2, "--check with --repair must not be silently ignored"
+    assert unselected.returncode == 2, "repair must refuse an empty selection"
+    assert "Traceback" not in unselected.stderr
+    assert _tree_digest(path) == digest_before_bad_input
 
 
 def test_cli_reads_a_password_from_the_environment(tmp_path):

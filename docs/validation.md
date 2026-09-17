@@ -34,34 +34,46 @@ sizing.difference-bytes  [error]  254 segment(s)
     ... and 251 more
 
 Still repairable. To fix, pass the ids explicitly:
-    Validator(path).repair(['sizing.difference-bytes', ...])
+    mef3io.repair_session(path, ['sizing.difference-bytes', ...])
 ```
 
-## Two rules
+## Three rules
 
-**Nothing is repaired implicitly.** `validate()` only reads. `repair()` takes
-an explicit list of check ids and touches nothing else — there is deliberately
-no "fix everything" shortcut, and an empty selection raises `ValueError`.
+**A validator only validates.** `Validator` cannot write a byte — it has no
+repair method at all. Writing lives in `mef3io.repair_session()`, a separate
+function with a name that says what it does, so a session cannot be modified
+by someone who opened it to look.
+
+**Nothing is repaired implicitly.** `repair_session()` takes an explicit list
+of check ids and touches nothing else — there is deliberately no "fix
+everything" shortcut, and an empty selection raises `ValueError`.
 
 **Every call returns the full report.** A repair still runs every check, so you
-see the whole picture and not only the part you chose to fix.
-`Finding.repaired` marks what was actually written.
+see the whole picture and not only the part you chose to fix. `Finding.repaired`
+marks what was **actually written** — a repair that declines to change anything
+(see [`sizing.contiguous`](#the-checks)) is reported as still outstanding, and
+does not count towards `segments_repaired`.
 
 ```python
 report = v.check("sizing.difference-bytes")        # one check, read-only
-report = v.fix("sizing.difference-bytes")          # one repair
-report = v.repair(["sizing.contiguous", "times.block-interval"])
-report = v.repair(v.validate().repairable_check_ids)   # opt in to all of them
+
+mef3io.repair_session(path, ["sizing.difference-bytes"])
+mef3io.repair_session(path, ["sizing.contiguous", "times.block-interval"])
+mef3io.repair_session(path, v.validate().repairable_check_ids)  # all of them
 ```
 
-From the command line:
+From the command line — `validate` reads, `repair` writes, and neither can be
+reached from the other:
 
 ```bash
 python -m mef3io validate SESSION.mefd
 python -m mef3io validate SESSION.mefd --check sizing.difference-bytes
-python -m mef3io validate SESSION.mefd --repair sizing.difference-bytes
+python -m mef3io repair   SESSION.mefd --check sizing.difference-bytes
 python -m mef3io validate --list-checks
 ```
+
+`repair` requires at least one `--check`; run without one it exits 2 and writes
+nothing.
 
 The exit status follows `Report.ok`: `0` when no **error**-severity finding is
 left outstanding and no segment was skipped, `1` otherwise. Warnings alone do
@@ -100,8 +112,8 @@ declarations unset across 254 channel(s): maximum_difference_bytes (254
 segment(s)). This does NOT affect reading with mef3io — every buffer is sized
 from the block headers themselves, and the data is intact. It does affect
 meflib-based readers (e.g. CyberPSG), which allocate from these fields. Run
-mef3io.Validator(path).validate() for detail, or python -m mef3io validate
-<path> --repair <check-id> to fix the file.
+mef3io.Validator(path).validate() for detail, or python -m mef3io repair
+<path> --check <check-id> to fix the file.
 ```
 
 It costs nothing: every segment's metadata is already parsed at open, so the

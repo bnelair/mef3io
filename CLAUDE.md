@@ -74,15 +74,23 @@ validate.py`, `python/mef3io/__main__.py`): a REGISTRY of 15 checks comparing a
 session's declarations against its data, run in a fixed order (integrity →
 structure → sizing → times → headers). Adding a check = ONE entry with
 `detect` + optional `repair` lambdas; ordering/filtering/reporting/bindings/CLI
-pick it up free. Two invariants, both test-pinned: `validate()` never writes a
-byte, and `repair()` requires an explicit non-empty check-id list (no
-"fix everything"; empty/unknown/non-repairable → `std::invalid_argument` →
-ValueError). Repairs rewrite ONLY declarations (s2 + the three universal
-headers) — never samples or the index — back up to `<session>.repair-backup/`,
-skip any segment whose CRC fails, and reject tar archives. `Report.ok` ignores
-findings repaired in the same pass. Python: `mef3io.Validator(path)` with
-`.validate()/.check(id)/.repair([ids])/.fix(id)`, `Report.summary()`, plus
-`python -m mef3io validate <path> [--repair ID] [--list-checks] [--fast]`
+pick it up free. THREE invariants, all test-pinned: (1) **a Validator only
+validates** — it has NO repair/fix method, writing lives in the separate
+`mef3io.repair_session(path, ids)` function, and a test asserts the class never
+regrows one, so nobody mutates a session through an object they opened to
+inspect; (2) `repair_session()` requires an explicit non-empty check-id list
+(no "fix everything"; empty/unknown/non-repairable → `std::invalid_argument` →
+ValueError); (3) `Finding.repaired` / `segments_repaired` count ONLY what was
+actually written — `RepairFn` returns whether it changed a declaration, so a
+repair that declines is reported as still outstanding (this bit: the caller used
+to mark every selected finding repaired, so a declined one reported success and
+left the defect on disk). Repairs rewrite ONLY declarations (s2 + the three
+universal headers) — never samples or the index — back up to
+`<session>.repair-backup/`, skip any segment whose CRC fails, and reject tar
+archives. `Report.ok` ignores findings repaired in the same pass. CLI:
+`python -m mef3io validate <path> [--check ID] [--list-checks] [--fast]` reads,
+`python -m mef3io repair <path> --check ID [--no-backup]` writes and refuses an
+empty selection — separate subcommands, neither reachable from the other
 (`__main__.py` exists so `-m` doesn't double-import the package). On READ,
 `Session::declaration_issues()` scans the already-parsed s2 for unset sizes
 (free — no extra I/O, sees only missing, not wrong) and `Reader` emits one
@@ -188,9 +196,14 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   `.tidx` discontinuity flag — the same flag a reader uses — via the
   `ContiguousRun` accumulator in writer.cpp. Each maximum is tracked
   independently: over-declaring only wastes a reader's allocation,
-  under-declaring truncates its buffer. NOTE no reader in reference_files
-  consumes `maximum_contiguous_*` at all, so longest-run is mef3io's INFERENCE
-  — the validator's repair therefore only ever RAISES those three. On APPEND the contiguous trio is
+  under-declaring truncates its buffer. `maximum_contiguous_*` is repaired in
+  BOTH directions — the declaration must state what the index holds. (It was
+  grow-only until 2026-09-17, on the reasoning that no reader in
+  reference_files consumes the trio so longest-run is mef3io's inference;
+  reverted because that left the field-observed case unfixable — a recorder
+  declaring 22,129,876 contiguous samples against 76,800 present, 84 MiB per
+  channel, ~21 GB over 254 channels — and because it made mef3io disagree with
+  `fix_mef3_sizing.py`, which lowers, on the same file.) On APPEND the contiguous trio is
   recomputed exactly from the full `.tidx` (so appending repairs a segment
   written by an older mef3io), but `maximum_difference_bytes` lives in `.tdat`
   headers — folding old blocks in exactly would cost a seek per block and break

@@ -1,4 +1,4 @@
-"""Validate a MEF 3.0 session, and repair what the data itself can prove.
+"""Validate a MEF 3.0 session, and — separately — repair what the data proves.
 
 A MEF session declares, in metadata section 2 and the universal headers, a
 number of quantities that are really re-derivable from the data: how many
@@ -7,30 +7,33 @@ allocate. Readers trust those declarations — meflib-based ones (CyberPSG and
 similar) allocate from them *before* decoding anything — so a wrong declaration
 is a defect in the file even when every sample on disk is intact.
 
-Two rules shape this API:
+Three rules shape this API:
 
-* **Nothing is repaired implicitly.** :meth:`Validator.validate` only reads.
-  :meth:`Validator.repair` takes an explicit list of check ids and touches
-  nothing else; there is deliberately no "fix everything" shortcut.
+* **A Validator only validates.** :class:`Validator` cannot write a byte: it
+  has no repair method at all. Writing lives in :func:`repair_session`, a
+  separate function with a name that says so, so no one can modify a session
+  while believing they are inspecting one.
+* **Nothing is repaired implicitly.** :func:`repair_session` takes an explicit
+  list of check ids and touches nothing else; there is deliberately no "fix
+  everything" shortcut.
 * **Every call returns the full report.** A repair still runs every check, so
   you see the whole picture and not only the part you chose to fix.
 
 Typical use::
 
-    from mef3io import Validator
+    import mef3io
 
-    v = Validator("subject.mefd")
-    report = v.validate()
+    report = mef3io.Validator("subject.mefd").validate()
     print(report.summary())
 
     if not report.ok:
-        v.repair(["sizing.difference-bytes"])       # one specific fix
-        v.repair(report.repairable_check_ids)       # or opt in to all of them
+        # Writing is a different call, made deliberately.
+        mef3io.repair_session("subject.mefd", ["sizing.difference-bytes"])
 
 On the command line::
 
     python -m mef3io validate SESSION.mefd
-    python -m mef3io validate SESSION.mefd --repair sizing.difference-bytes
+    python -m mef3io repair SESSION.mefd --check sizing.difference-bytes
     python -m mef3io validate --list-checks
 """
 from __future__ import annotations
@@ -169,7 +172,7 @@ class Report:
     def repairable_check_ids(self) -> list[str]:
         """Distinct check ids that reported something a repair could fix.
 
-        Pass these to :meth:`Validator.repair` to opt in deliberately.
+        Pass these to :func:`repair_session` to opt in deliberately.
         """
         out: list[str] = []
         for f in self.findings:
@@ -253,7 +256,7 @@ class Report:
         if fixable:
             lines.append("")
             lines.append("Still repairable. To fix, pass the ids explicitly:")
-            lines.append(f"    Validator(path).repair({fixable!r})")
+            lines.append(f"    mef3io.repair_session(path, {fixable!r})")
         return "\n".join(lines)
 
     def __str__(self) -> str:  # pragma: no cover - convenience
@@ -294,14 +297,14 @@ def describe_check(check_id: str) -> Check | None:
 
 
 class Validator:
-    """Validate — and, when explicitly asked, repair — one MEF 3.0 session.
+    """Check one MEF 3.0 session. Read-only: it cannot write a byte.
+
+    There is no repair method here by design — see :func:`repair_session`.
 
     Parameters
     ----------
     path : str
-        A ``.mefd`` directory or a ``.mefd.tar`` archive. Archives can be
-        validated but not repaired (an archive cannot be rewritten in place;
-        extract it first).
+        A ``.mefd`` directory or a ``.mefd.tar`` archive.
     password : str, optional
         Needed to read section 2 of an encrypted session.
     channels : sequence of str, optional
@@ -313,8 +316,8 @@ class Validator:
         ``maximum_difference_bytes``. It is the one declaration not derivable
         from the block index, so the exact answer costs one small read per
         block. Set ``False`` on very large sessions: the check then only
-        reports a clearly-unset value and repairs it to meflib's worst-case
-        bound, without touching ``.tdat`` at all.
+        reports a clearly-unset value, bounded by meflib's worst case, without
+        touching ``.tdat`` at all.
     """
 
     def __init__(
@@ -370,63 +373,6 @@ class Validator:
         """Run one named check. Never modifies the session."""
         return self.validate([check_id])
 
-    # --- repairing (explicit only) ----------------------------------------
-
-    def repair(self, check_ids: Sequence[str], backup: bool = True) -> Report:
-        """Write back the repairs named in ``check_ids`` — and only those.
-
-        Every check still runs, so the returned report describes the whole
-        session; ``Finding.repaired`` marks what was actually written.
-
-        Only declarations are rewritten: metadata section 2 and the universal
-        headers of ``.tmet``/``.tidx``/``.tdat``. Sample data and the block
-        index are never touched. A segment whose CRCs do not verify is reported
-        and left alone.
-
-        Parameters
-        ----------
-        check_ids : sequence of str
-            Which repairs to apply. Required and non-empty — repairs are never
-            implicit. :attr:`Report.repairable_check_ids` lists the candidates.
-        backup : bool, default True
-            Copy each file before rewriting it, into
-            ``<session>.repair-backup/`` (outside the session tree, so no
-            reader mistakes a backup for data). An existing backup is never
-            overwritten.
-
-        Raises
-        ------
-        ValueError
-            If ``check_ids`` is empty, or names an unknown or non-repairable
-            check.
-        """
-        if isinstance(check_ids, (str, bytes)):
-            raise TypeError(
-                "check_ids must be a sequence of ids, not a single string — "
-                "use fix(check_id) to apply one repair"
-            )
-        ids = list(check_ids)
-        if not ids:
-            raise ValueError(
-                "repair() needs an explicit list of check ids — repairs are never implicit. "
-                "Use Validator.validate().repairable_check_ids to see the candidates."
-            )
-        raw = _backend().repair_session(
-            self.path,
-            ids,
-            password=self.password,
-            channels=self.channels,
-            segments=self.segments,
-            check_ids=[],
-            exact_difference_bytes=self.exact_difference_bytes,
-            backup=bool(backup),
-        )
-        return _to_report(raw, self.path)
-
-    def fix(self, check_id: str, backup: bool = True) -> Report:
-        """Apply one named repair. Sugar for ``repair([check_id])``."""
-        return self.repair([check_id], backup=backup)
-
     def __repr__(self) -> str:  # pragma: no cover - convenience
         return f"Validator({self.path!r})"
 
@@ -439,25 +385,91 @@ def validate_session(path: str, **kwargs) -> Report:
     return Validator(path, **kwargs).validate()
 
 
-def repair_session(path: str, check_ids: Sequence[str], backup: bool = True, **kwargs) -> Report:
-    """Repair only the named checks of a session and return the full report.
+def repair_session(
+    path: str,
+    check_ids: Sequence[str],
+    backup: bool = True,
+    **kwargs,
+) -> Report:
+    """Rewrite the declarations named in ``check_ids`` — and only those.
 
-    Accepts the same keyword arguments as :class:`Validator`.
+    This is the only function in mef3io that modifies an existing session, and
+    it is deliberately not a method of :class:`Validator`: inspecting a session
+    and rewriting one should not be reachable through the same object.
+
+    Every check still runs, so the returned report describes the whole session;
+    ``Finding.repaired`` marks what was actually written — a repair that
+    declines to change anything is not counted.
+
+    Only declarations are rewritten: metadata section 2 and the universal
+    headers of ``.tmet``/``.tidx``/``.tdat``. Sample data and the block index
+    are never touched. A segment whose CRCs do not verify is reported and left
+    alone, and a ``.mefd.tar`` archive is refused outright (extract it first).
+
+    Parameters
+    ----------
+    path : str
+        A ``.mefd`` directory. Archives cannot be rewritten in place.
+    check_ids : sequence of str
+        Which repairs to apply. Required and non-empty — repairs are never
+        implicit. :attr:`Report.repairable_check_ids` lists the candidates.
+    backup : bool, default True
+        Copy each file before rewriting it, into ``<session>.repair-backup/``
+        (outside the session tree, so no reader mistakes a backup for data).
+        An existing backup is never overwritten.
+    **kwargs
+        The same keyword arguments as :class:`Validator` (``password``,
+        ``channels``, ``segments``, ``exact_difference_bytes``).
+
+    Raises
+    ------
+    ValueError
+        If ``check_ids`` is empty, or names an unknown or non-repairable check.
     """
-    return Validator(path, **kwargs).repair(check_ids, backup=backup)
+    if isinstance(check_ids, (str, bytes)):
+        raise TypeError(
+            "check_ids must be a sequence of ids, not a single string — "
+            "pass [check_id] to apply one repair"
+        )
+    ids = list(check_ids)
+    if not ids:
+        raise ValueError(
+            "repair_session() needs an explicit list of check ids — repairs are never "
+            "implicit. Use Validator(path).validate().repairable_check_ids to see the "
+            "candidates."
+        )
+    v = Validator(path, **kwargs)
+    raw = _backend().repair_session(
+        v.path,
+        ids,
+        password=v.password,
+        channels=v.channels,
+        segments=v.segments,
+        check_ids=[],
+        exact_difference_bytes=v.exact_difference_bytes,
+        backup=bool(backup),
+    )
+    return _to_report(raw, v.path)
 
 
 # --- command line ----------------------------------------------------------
 
 
-def _main(argv: Sequence[str] | None = None) -> int:
+def _build_parser(repair: bool) -> "argparse.ArgumentParser":
     import argparse
 
-    parser = argparse.ArgumentParser(
-        prog="python -m mef3io validate",
-        description="Check a MEF 3.0 session's declarations against its data, and "
-        "optionally repair the ones the data can prove.",
-    )
+    if repair:
+        parser = argparse.ArgumentParser(
+            prog="python -m mef3io repair",
+            description="Rewrite the declarations named with --check, and only those. "
+            "This command writes to the session; 'validate' never does.",
+        )
+    else:
+        parser = argparse.ArgumentParser(
+            prog="python -m mef3io validate",
+            description="Check a MEF 3.0 session's declarations against its data. "
+            "Never writes — use 'python -m mef3io repair' for that.",
+        )
     parser.add_argument("path", nargs="?", help="a .mefd directory or .mefd.tar archive")
     parser.add_argument("--password", default="", help="password for an encrypted session")
     parser.add_argument(
@@ -477,16 +489,18 @@ def _main(argv: Sequence[str] | None = None) -> int:
         "--segment", action="append", type=int, default=[], help="restrict to this segment number"
     )
     parser.add_argument(
-        "--check", action="append", default=[], help="run only this check id (repeatable)"
-    )
-    parser.add_argument(
-        "--repair",
+        "--check",
         action="append",
         default=[],
         metavar="CHECK_ID",
-        help="repair this check id (repeatable). Without it nothing is ever written.",
+        help="repair this check id (repeatable, required)"
+        if repair
+        else "run only this check id (repeatable)",
     )
-    parser.add_argument("--no-backup", action="store_true", help="do not back up rewritten files")
+    if repair:
+        parser.add_argument(
+            "--no-backup", action="store_true", help="do not back up rewritten files"
+        )
     parser.add_argument(
         "--fast",
         action="store_true",
@@ -494,6 +508,11 @@ def _main(argv: Sequence[str] | None = None) -> int:
         "not measured",
     )
     parser.add_argument("--list-checks", action="store_true", help="print the registry and exit")
+    return parser
+
+
+def _main(argv: Sequence[str] | None = None, repair: bool = False) -> int:
+    parser = _build_parser(repair)
     args = parser.parse_args(argv)
 
     if args.list_checks:
@@ -502,6 +521,11 @@ def _main(argv: Sequence[str] | None = None) -> int:
         return 0
     if not args.path:
         parser.error("a session path is required (or --list-checks)")
+    if repair and not args.check:
+        parser.error(
+            "repair needs at least one --check CHECK_ID — repairs are never implicit. "
+            "Run 'python -m mef3io validate PATH' first to see what is repairable."
+        )
 
     password = args.password
     if args.password_env:
@@ -510,29 +534,25 @@ def _main(argv: Sequence[str] | None = None) -> int:
         password = os.environ.get(args.password_env)
         if password is None:
             parser.error(f"environment variable {args.password_env} is not set")
-    validator = Validator(
-        args.path,
+    opts = dict(
         password=password,
         channels=args.channel,
         segments=args.segment,
         exact_difference_bytes=not args.fast,
     )
-    if args.repair and args.check:
-        parser.error(
-            "--check cannot be combined with --repair: a repair always runs the full "
-            "registry so the report stays complete"
-        )
-    for check_id in args.check + args.repair:
+    for check_id in args.check:
         if describe_check(check_id) is None:
             parser.error(
                 f"unknown check id: {check_id}\n"
                 "run 'python -m mef3io validate --list-checks' to see them"
             )
     try:
-        if args.repair:
-            report = validator.repair(args.repair, backup=not args.no_backup)
+        if repair:
+            report = repair_session(
+                args.path, args.check, backup=not args.no_backup, **opts
+            )
         else:
-            report = validator.validate(args.check)
+            report = Validator(args.path, **opts).validate(args.check)
     except (RuntimeError, ValueError, OSError) as exc:
         # A bad path or password reaches here as a C++ exception. A researcher
         # who typos a path should get one line, not a stack trace — and the
