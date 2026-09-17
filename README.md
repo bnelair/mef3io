@@ -27,14 +27,16 @@ C++ tests). Scope notes:
 - **Pure-Python backend**: not yet implemented (`backend="pure"` raises).
 - **Append** extends the channel's last segment in place (legacy semantics);
   `new_segment=True` forces a fresh segment.
-- **Third-party reader compatibility**: metadata section 2 declares buffer
-  sizes that applications built on meflib (CyberPSG and similar) may pass to
-  its decoder — meflib itself never allocates from them. Versions
-  **≤ 1.1.2** left `maximum_difference_bytes` and
-  `maximum_contiguous_block_bytes` at `0`, which such an application cannot
-  tell from an unset field — sessions they wrote read fine in mef3io and pymef
-  (pymef sizes from the block's own sample count) but can crash an application
-  that does pass the field. Since **1.1.3** all of them are measured from the
+- **Third-party reader compatibility**: metadata section 2 declares the buffer
+  sizes readers built on meflib (CyberPSG and similar) allocate from. How a
+  given stack consumes them varies by meflib build — some pass these fields
+  straight to the decoder, others size from the block's own sample count — so
+  mef3io treats all of them as load-bearing. Versions **≤ 1.1.2** left
+  `maximum_difference_bytes` and `maximum_contiguous_block_bytes` at `0`, which
+  a reader cannot tell from an unset field: a crash from exactly this has been
+  reproduced in the field. (Sessions they wrote still read correctly in mef3io
+  and in pymef, which sizes from the sample count — which is why it went
+  unnoticed for so long.) Since **1.1.3** all of them are measured from the
   blocks written; appending to an older segment repairs it in place, and
   rewriting the session fixes it outright. See
   [docs/mef3_format.md](docs/mef3_format.md#the-buffer-sizing-declarations).

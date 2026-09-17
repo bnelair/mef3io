@@ -170,9 +170,16 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
 - **Section-2 `maximum_*` fields are an ALLOCATION CONTRACT, not statistics.**
   `0` is NOT the NO_ENTRY sentinel for any of them (`maximum_difference_bytes`
   / `maximum_block_samples` → `0xFFFFFFFF`; the si8 ones → `-1`), so a reader
-  cannot tell unset from measured. CAREFUL WITH THE MECHANISM — meflib does NOT
-  allocate from these itself; it exposes helpers that take one as a size and
-  validate none, and the *application* passes them: (a)
+  cannot tell unset from measured. CAREFUL WITH THE MECHANISM — and do NOT
+  conclude "no reader consumes this" from `reference_files/`. THAT IS ONE
+  MEFLIB BUILD. In the copy vendored here `RED_allocate_processing_struct` has
+  no call site at all (only the prototype meflib.h:1184 and the definition
+  meflib.c:6453) and the fields are merely initialised, rolled up and printed —
+  but the meflib build behind CyberPSG DOES allocate from section-2 sizes, and
+  that is where the crash was reproduced. That build is not available to us, so
+  the vendored source can prove a mechanism EXISTS and can never prove one does
+  not. Treat all six as load-bearing; prefer over-declaring (wastes memory) to
+  under-declaring (truncates a buffer). The two known mechanisms: (a)
   `RED_allocate_processing_struct` skips the alloc on size 0 → NULL
   `difference_buffer` → `RED_decode` writes through it, and the guard meflib
   ships for this (`RED_check_RPS_allocation`, meflib.h:1186 / meflib.c:6534)

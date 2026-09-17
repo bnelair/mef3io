@@ -739,10 +739,26 @@ def test_legacy_written_session_reports_known_divergences(tmp_path):
         "times.discontinuities",        # left at 0 despite writing the flags
         "header.max-entry-size",        # .tdat gets samples, not bytes
     }, report.summary()
-    # number_of_discontinuities = 0 with the flags written is rated an error on
-    # purpose: meflib's find_discontinuity_indices (meflib.c:3548) mallocs
-    # exactly that many entries and writes one per flagged block.
-    assert {f.check_id for f in report.errors} == {"times.discontinuities"}
+    # Both errors here are zero-size allocation hazards, and both are rated so
+    # on purpose:
+    #
+    #   times.discontinuities — number_of_discontinuities = 0 with the flags
+    #   written. meflib's find_discontinuity_indices (meflib.c:3548) mallocs
+    #   exactly that many entries and then writes one per flagged block.
+    #
+    #   sizing.contiguous — pymef leaves maximum_contiguous_samples at 0 while
+    #   the longest run really is a full block's worth. 0 is not the si8
+    #   NO_ENTRY sentinel (-1), so a reader sizing a run buffer from the field
+    #   cannot tell it was never set. Under-declaring is the truncating
+    #   direction and is an error; pymef's over-declared
+    #   maximum_contiguous_block_bytes in the same segment is only a warning.
+    assert {f.check_id for f in report.errors} == {
+        "times.discontinuities",
+        "sizing.contiguous",
+    }
+    contiguous = [f for f in report.findings if f.check_id == "sizing.contiguous"]
+    assert contiguous[0].field == "maximum_contiguous_samples"
+    assert contiguous[0].stored == "0" and contiguous[0].severity == "error"
 
 
 # --- data-safety regressions (each of these once destroyed data) -------------
@@ -902,6 +918,37 @@ def test_index_trailing_padding_is_tolerated(tmp_path):
     report = mef3io.Validator(str(path)).validate()
     assert "crc.index" not in _ids(report)
     assert report.ok, report.summary()
+
+
+def test_contiguous_severity_follows_the_direction(tmp_path):
+    """Under-declaring is an error; over-declaring is only a warning.
+
+    The two are not equally dangerous. A reader that sizes a run buffer from
+    these fields truncates it when they are too small — and `0` is not the si8
+    NO_ENTRY sentinel, so it reads as a real zero. Declaring too much only
+    wastes memory.
+
+    This must not be downgraded on the grounds that no reader in
+    reference_files consumes the trio: that is one meflib build, and a deployed
+    build is known to allocate from section-2 sizes that the vendored one
+    ignores.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+    truth = _read_s2(tmet, "maximum_contiguous_samples")
+    assert truth > 0
+
+    _patch_s2(tmet, "maximum_contiguous_samples", 0)
+    under = [f for f in mef3io.Validator(str(path)).validate().findings
+             if f.check_id == "sizing.contiguous"]
+    assert under and under[0].severity == "error", "under-declaration truncates"
+    assert not mef3io.Validator(str(path)).validate().ok
+
+    _patch_s2(tmet, "maximum_contiguous_samples", truth * 1000)
+    over = [f for f in mef3io.Validator(str(path)).validate().findings
+            if f.check_id == "sizing.contiguous"]
+    assert over and over[0].severity == "warning", "over-declaration only wastes"
 
 
 def test_contiguous_repair_states_what_the_index_holds(tmp_path):

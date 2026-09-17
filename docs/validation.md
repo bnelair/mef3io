@@ -51,8 +51,8 @@ everything" shortcut, and an empty selection raises `ValueError`.
 **Every call returns the full report.** A repair still runs every check, so you
 see the whole picture and not only the part you chose to fix. `Finding.repaired`
 marks what was **actually written** — a repair that declines to change anything
-(see [`sizing.contiguous`](#the-checks)) is reported as still outstanding, and
-does not count towards `segments_repaired`.
+is reported as still outstanding, and does not count towards
+`segments_repaired`.
 
 ```python
 report = v.check("sizing.difference-bytes")        # one check, read-only
@@ -150,7 +150,7 @@ declarations a reader allocates from, then the time fields. Ids are stable API.
 | `index.start-sample` | warning | no | `start_sample` vs the first index entry (writers disagree; report only) |
 | `sizing.block-maxima` | error | yes | `maximum_block_bytes` / `maximum_block_samples` |
 | `sizing.difference-bytes` | error | yes | `maximum_difference_bytes` vs the RED block headers |
-| `sizing.contiguous` | warning | yes | The `maximum_contiguous_*` trio vs the longest run (raised only, never lowered) |
+| `sizing.contiguous` | warning | yes | The `maximum_contiguous_*` trio vs the longest run. **Error when under-declared** (truncates a reader's run buffer; `0` is not the sentinel); warning when over-declared (wastes memory). Repaired in both directions |
 | `times.segment-bounds` | warning | yes | Universal-header start/end vs the blocks |
 | `times.recording-duration` | warning | yes | `recording_duration` vs the segment's span |
 | `times.block-interval` | warning | yes | `block_interval` vs the block geometry |

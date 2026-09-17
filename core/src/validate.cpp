@@ -368,13 +368,17 @@ const std::vector<CheckImpl>& check_impls() {
 
     v.push_back({{"sizing.contiguous", "Contiguous-run maxima match the index",
                   "The maximum_contiguous_* trio describes the longest run of blocks between "
-                  "discontinuities. Under-declaring truncates a reader's run buffer; "
-                  "over-declaring (mef3io <= 1.1.2 wrote whole-channel totals, and recorders "
-                  "in the field declare whole-session ones) wastes memory — observed files "
-                  "over-declare by two to three orders of magnitude, and the waste scales "
-                  "with channel count. 0 in maximum_contiguous_block_bytes reads as a real "
-                  "zero. Repaired in both directions: the declaration states what the index "
-                  "holds.",
+                  "discontinuities. Severity depends on the direction, because the two are not "
+                  "equally dangerous: UNDER-declaring is an ERROR — a reader that allocates a "
+                  "run buffer from these fields truncates it, and 0 in "
+                  "maximum_contiguous_block_bytes reads as a real zero, not as unset. "
+                  "OVER-declaring is a warning: it only wastes memory, though recorders in the "
+                  "field over-declare by two to three orders of magnitude and the waste scales "
+                  "with channel count (mef3io <= 1.1.2 wrote whole-channel totals). Repaired in "
+                  "both directions: the declaration states what the index holds. Do NOT downgrade "
+                  "the under-declared case on the grounds that no reader in reference_files "
+                  "consumes the trio — that is one meflib build, and a deployed build is known to "
+                  "allocate from section-2 sizes that this one ignores.",
                   Severity::Warning, true},
                  [](const SegmentState& s, const SegmentTruth& t, Finding& f, bool& hit) {
                    const auto& s2 = s.md.section2;
@@ -396,15 +400,17 @@ const std::vector<CheckImpl>& check_impls() {
                      f.field = it.name;
                      f.stored = declared_si8(it.stored);
                      f.expected = num(it.expected);
+                     const bool under = it.stored < it.expected;
+                     f.severity = under ? Severity::Error : Severity::Warning;
                      f.message =
-                         it.stored < it.expected
-                             ? "declared contiguous maximum is smaller than a run on disk"
-                             : "declared contiguous maximum exceeds the longest run on disk "
-                               "(wasted allocation)";
+                         under ? "declared contiguous maximum is smaller than a run on disk; a "
+                                 "reader sizing a run buffer from it truncates"
+                               : "declared contiguous maximum exceeds the longest run on disk "
+                                 "(wasted allocation)";
                      // Prefer reporting an under-declaration: it is the one that
                      // truncates a reader's buffer, and it must not stay hidden
                      // behind a less urgent over-declaration earlier in the list.
-                     if (it.stored < it.expected) return;
+                     if (under) return;
                    }
                  },
                  [](const SegmentTruth& t, RepairBuffer& r) {
@@ -1125,10 +1131,15 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       if (impl->info.id == "crc.metadata" || impl->info.id == "crc.index") continue;
       Finding f;
       bool hit = false;
+      // Seeded before detect so a check can RAISE the severity of a particular
+      // finding. Some defects are only dangerous in one direction:
+      // under-declaring a buffer size can truncate a reader that allocates from
+      // it, while over-declaring the same field only wastes memory. The
+      // registry entry carries the ordinary case; detect sharpens it.
+      f.severity = impl->info.severity;
       impl->detect(state, truth, f, hit);
       if (!hit) continue;
       f.check_id = impl->info.id;
-      f.severity = impl->info.severity;
       f.repairable = impl->info.repairable;
       f.channel = files.channel;
       f.segment_number = files.segment_number;
@@ -1136,11 +1147,11 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       if (repair && impl->repair && to_repair.count(impl->info.id) &&
           selected(repair->channels, files.channel) &&
           selected(repair->segments, files.segment_number)) {
-        // Only what the repair actually wrote counts. A repair may decline
-        // (sizing.contiguous will not lower an over-declaration), and marking a
-        // declined one `repaired` would report a defect as fixed while leaving
-        // it on disk — and, for an error-severity check, would let Report::ok
-        // discount it. The finding then stays outstanding, as it should.
+        // Only what the repair actually wrote counts. A repair is allowed to
+        // decline, and marking a declined one `repaired` would report a defect
+        // as fixed while leaving it on disk — and, for an error-severity
+        // finding, would let Report::ok discount it. The finding then stays
+        // outstanding, as it should.
         const bool changed = impl->repair(truth, buffer);
         f.repaired = changed;
         any_repair = any_repair || changed;
