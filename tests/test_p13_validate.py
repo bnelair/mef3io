@@ -1343,3 +1343,75 @@ def test_difference_bytes_repair_never_writes_zero_or_under_declares(tmp_path):
     assert written2 == 5 * _read_s2(tmet2, "maximum_block_samples"), (
         "a maximum over only the readable blocks under-declares the buffer"
     )
+
+
+def test_a_failed_write_is_not_reported_as_repaired(tmp_path):
+    """`repaired` must mean the bytes reached disk, not that a buffer changed.
+
+    The three files of a segment are written in sequence with no cross-file
+    transaction, so a failure partway leaves them disagreeing. Marking the
+    finding repaired before the write told the operator the defect was fixed
+    while it was still on disk — and for an error-severity finding, let
+    Report.ok discount it. A read-only file is an ordinary state on archival
+    storage; ENOSPC and a network-filesystem hiccup produce the same shape.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+    tidx = Path(tmet).with_suffix(".tidx")
+    tdat = Path(tmet).with_suffix(".tdat")
+    for f in (tmet, tidx, tdat):
+        _patch_uh(f, "number_of_entries", 7)
+
+    os.chmod(tidx, 0o444)
+    try:
+        report = mef3io.repair_session(str(path), ["header.entry-count"])
+    finally:
+        os.chmod(tidx, 0o644)
+
+    hits = [f for f in report.findings if f.check_id == "header.entry-count"]
+    assert hits, "the defect must still be reported"
+    assert not any(f.repaired for f in hits), "nothing reached disk; nothing is repaired"
+    assert report.segments_repaired == 0
+    # The operator has to be told which files did move, or the segment is
+    # unrecoverable without diffing it by hand.
+    reasons = " ".join(s.reason for s in report.skipped)
+    assert "ALREADY MODIFIED" in reasons, reasons
+    assert ".tmet" in reasons, reasons
+    # And the finding is still offered as repairable, rather than filtered out
+    # by `repaired` as it was before.
+    assert "header.entry-count" in report.repairable_check_ids
+
+
+def test_summary_never_states_something_untrue(tmp_path):
+    """Three things summary() used to assert that were false."""
+    # 1. A skipped segment's reason must survive, even when every segment was
+    #    skipped — that reason is the whole message (e.g. a wrong password).
+    enc = tmp_path / "enc.mefd"
+    w = mef3io.Writer(str(enc), password1="lvl1", password2="lvl2")
+    w.write_int32("ch1", np.arange(2000, dtype=np.int32), 1.0, START, FS)
+    w.close()
+    report = mef3io.Validator(str(enc), password="WRONG").validate()
+    assert report.segments_checked == 0 and report.skipped
+    text = report.summary()
+    assert "password" in text, text
+
+    # 2. A filtered run must not claim the whole session is clean.
+    path = tmp_path / "s.mefd"
+    _write(path)
+    _patch_s2(_tmet(path), "maximum_difference_bytes", 0)
+    text = mef3io.Validator(str(path)).validate(["header.entry-count"]).summary()
+    assert "every declaration matches" not in text, text
+    assert "NOT run" in text, text
+    # ...while a full clean run still may.
+    clean = tmp_path / "clean.mefd"
+    _write(clean)
+    assert "every declaration matches" in mef3io.Validator(str(clean)).validate().summary()
+
+    # 3. The repair line must name what was written, not what was selected.
+    report = mef3io.repair_session(
+        str(path), ["sizing.difference-bytes", "times.block-interval", "index.block-count"]
+    )
+    line = [l for l in report.summary().splitlines() if "segment(s) repaired" in l][0]
+    assert "sizing.difference-bytes" in line
+    assert "index.block-count" not in line, f"named a check that wrote nothing: {line}"

@@ -194,6 +194,23 @@ class Report:
             grouped.setdefault(f.channel, []).append(f)
         return grouped
 
+    def _append_skipped(self, lines: list[str], max_examples: int) -> None:
+        """Render the skipped segments, with the reason each was skipped.
+
+        A skipped segment is one the validator could not vouch for, so its
+        reason is often the single most useful line in the report — "the
+        password is wrong", "the CRC does not verify". It must never be
+        dropped; :class:`SkippedSegment` promises as much.
+        """
+        if not self.skipped:
+            return
+        lines.append("")
+        lines.append(f"skipped {len(self.skipped)} segment(s):")
+        for s in self.skipped[:max_examples]:
+            lines.append(f"    {s}")
+        if max_examples and len(self.skipped) > max_examples:
+            lines.append(f"    ... and {len(self.skipped) - max_examples} more")
+
     def summary(self, max_examples: int = 3) -> str:
         """A full human-readable report: counts, then each check that fired."""
         lines = []
@@ -206,20 +223,42 @@ class Report:
             f"{len(self.errors)} error(s), {len(self.warnings)} warning(s)"
         )
         if self.segments_repaired:
+            # What was WRITTEN, not what the caller asked for. `checks_repaired`
+            # is the request (the C++ assigns it before touching a segment), so
+            # rendering it here claimed repairs that never happened.
+            written = sorted({f.check_id for f in self.repaired})
             lines.append(
-                f"{self.segments_repaired} segment(s) repaired "
-                f"({', '.join(self.checks_repaired)})"
+                f"{self.segments_repaired} segment(s) repaired ({', '.join(written)})"
             )
+            not_written = [c for c in self.checks_repaired if c not in written]
+            if not_written:
+                lines.append(
+                    f"    selected but wrote nothing: {', '.join(not_written)}"
+                )
         if not self.segments_checked:
             lines.append("")
             lines.append(
                 "No segments were examined — nothing matched the channel/segment filter, "
                 "or the session holds no time-series data. This is NOT a clean result."
             )
+            # Fall through to the skipped block rather than returning: when
+            # every segment was skipped, the reason each was skipped is the
+            # only thing the user actually needs, and returning here discarded
+            # it — a wrong password printed the filter explanation instead.
+            self._append_skipped(lines, max_examples)
             return "\n".join(lines)
         if not self.findings and not self.skipped:
             lines.append("")
-            lines.append("No problems found — every declaration matches the data on disk.")
+            if len(self.checks_run) < len(available_checks()):
+                # A filtered run cannot speak for the checks it did not run.
+                not_run = len(available_checks()) - len(self.checks_run)
+                lines.append(
+                    f"No problems found by the {len(self.checks_run)} check(s) selected. "
+                    f"{not_run} check(s) were NOT run — this is not a clean bill of health "
+                    f"for the session."
+                )
+            else:
+                lines.append("No problems found — every declaration matches the data on disk.")
             return "\n".join(lines)
 
         grouped = self.by_check()
@@ -244,13 +283,7 @@ class Report:
             if max_examples and len(hits) > max_examples:
                 lines.append(f"    ... and {len(hits) - max_examples} more")
 
-        if self.skipped:
-            lines.append("")
-            lines.append(f"skipped {len(self.skipped)} segment(s):")
-            for s in self.skipped[:max_examples]:
-                lines.append(f"    {s}")
-            if max_examples and len(self.skipped) > max_examples:
-                lines.append(f"    ... and {len(self.skipped) - max_examples} more")
+        self._append_skipped(lines, max_examples)
 
         fixable = self.repairable_check_ids
         if fixable:

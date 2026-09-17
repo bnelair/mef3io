@@ -1124,6 +1124,15 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       report.skipped.push_back({files.channel, files.segment_number, files.description, reason});
     };
 
+    // A finding is marked `repaired` only once the segment's writes have all
+    // succeeded, so these are staged out here where the catch below can still
+    // reach them. `files_written` records what was already replaced when a
+    // later write throws — a segment whose three files disagree is recoverable
+    // only if the operator is told which ones moved.
+    std::vector<Finding> staged;
+    std::vector<std::size_t> pending_repair;  // indices into `staged`
+    std::vector<std::string> files_written;
+
     // One bad segment must not cost the caller the record of what was already
     // rewritten in the ones before it. On a 254-channel session an exception
     // escaping here would discard the whole report, leaving no way to tell
@@ -1254,16 +1263,20 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       if (repair && impl->repair && index_trustworthy && to_repair.count(impl->info.id) &&
           selected(repair->channels, files.channel) &&
           selected(repair->segments, files.segment_number)) {
-        // Only what the repair actually wrote counts. A repair is allowed to
-        // decline, and marking a declined one `repaired` would report a defect
-        // as fixed while leaving it on disk — and, for an error-severity
-        // finding, would let Report::ok discount it. The finding then stays
-        // outstanding, as it should.
+        // Only what the repair actually wrote counts, and at this point
+        // NOTHING has been written — `repair` has mutated an in-memory buffer
+        // and no more. A repair may also decline outright. So the finding is
+        // only remembered as pending here; `repaired` is set after the
+        // segment's writes succeed. Marking it now would report a defect as
+        // fixed when the write later fails, and for an error-severity finding
+        // would let Report::ok discount something still on disk.
         const bool changed = impl->repair(truth, buffer);
-        f.repaired = changed;
-        any_repair = any_repair || changed;
+        if (changed) {
+          pending_repair.push_back(staged.size());
+          any_repair = true;
+        }
       }
-      report.findings.push_back(std::move(f));
+      staged.push_back(std::move(f));
     }
 
     // Say so out loud. A caller that asked for repairs and silently got none
@@ -1274,7 +1287,10 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
                  "in this segment"
                : "the block index is structurally unsound; nothing was repaired in this segment");
 
-    if (!any_repair) continue;
+    if (!any_repair) {
+      report.findings.insert(report.findings.end(), staged.begin(), staged.end());
+      continue;
+    }
 
     // Write back. Only declarations move: section 2 and the universal headers.
     const std::string tmet_path = src->describe(files.tmet_rel);
@@ -1330,12 +1346,34 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
           std::span<const ui1>(file).subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4));
       byteio::write<ui4>(file, 0, header_crc);
       write_all_atomic(tmet_path, file);
+      files_written.push_back(files.tmet_rel);
     }
-    if (buffer.tidx_dirty) overwrite_universal_header(tidx_path, buffer.tidx_uh);
-    if (buffer.tdat_dirty) overwrite_universal_header(tdat_path, buffer.tdat_uh);
+    if (buffer.tidx_dirty) {
+      overwrite_universal_header(tidx_path, buffer.tidx_uh);
+      files_written.push_back(files.tidx_rel);
+    }
+    if (buffer.tdat_dirty) {
+      overwrite_universal_header(tdat_path, buffer.tdat_uh);
+      files_written.push_back(files.tdat_rel);
+    }
+    // Everything reached disk: only now is a finding a repair.
+    for (const auto i : pending_repair) staged[i].repaired = true;
     ++report.segments_repaired;
+    report.findings.insert(report.findings.end(), staged.begin(), staged.end());
     } catch (const std::exception& e) {
-      skip(std::string("aborted: ") + e.what());
+      // The findings still belong in the report — losing them would hide what
+      // was wrong with the segment as well as failing to fix it. None is marked
+      // repaired: whatever was staged did not all reach disk.
+      report.findings.insert(report.findings.end(), staged.begin(), staged.end());
+      std::string reason = std::string("aborted: ") + e.what();
+      if (!files_written.empty()) {
+        std::string list;
+        for (const auto& f : files_written) list += (list.empty() ? "" : ", ") + f;
+        reason += " — ALREADY MODIFIED before the failure: " + list +
+                  " (this segment's files no longer agree; restore from " +
+                  backup_root_for(path).string() + ")";
+      }
+      skip(reason);
     }
   }
 
