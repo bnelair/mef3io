@@ -1048,8 +1048,37 @@ def test_crc_no_entry_sentinel_is_not_corruption(tmp_path):
     with mef3io.Reader(str(path)) as r:
         assert len(r.read_raw("ch1")["samples"]) > 0, "such a session must still open"
     report = mef3io.Validator(str(path)).validate()
-    assert "crc.metadata" not in _ids(report), report.summary()
+    # Accepted — but reported, because "never computed" is not "verified", and
+    # silence here would render an unverifiable file as a checked one.
+    hits = [f for f in report.findings if f.check_id == "crc.metadata"]
+    assert hits, report.summary()
+    assert all(f.severity == "warning" for f in hits), "unverifiable is not corrupt"
     assert report.ok, report.summary()
+    # ...and the warning must not disarm the rest of the registry.
+    assert len(report.checks_run) == len(mef3io.available_checks())
+    assert not report.skipped, report.summary()
+
+
+def test_a_corrupt_universal_header_is_not_excused_by_its_own_zeroed_crc(tmp_path):
+    """The no-entry exemption must not be grantable by the damage itself.
+
+    `0` is meflib's "never computed" marker AND what a torn write or a sparse
+    hole leaves behind. Excusing the header CRC on the CRC field alone let the
+    corruption switch off the only check that would have caught it: a `.tmet`
+    with its first 512 bytes zeroed then opened, read back 0 samples, and was
+    reported `ok`. The exemption now also requires the rest of the universal
+    header to be self-consistent.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+    raw = bytearray(tmet.read_bytes())
+    raw[0:512] = bytes(512)  # takes the type string and both CRCs with it
+    tmet.write_bytes(bytes(raw))
+
+    with pytest.raises(RuntimeError, match="CRC"):
+        with mef3io.Reader(str(path)) as r:
+            r.read_raw("ch1")
 
 
 def test_a_corrupt_crc_of_0xffffffff_is_still_corruption(tmp_path):
@@ -1602,6 +1631,7 @@ def test_a_repair_that_declines_is_reported_as_outstanding(tmp_path):
 # --- resource hygiene --------------------------------------------------------
 
 
+@pytest.mark.leak
 def test_repeated_open_close_does_not_leak(tmp_path):
     """Opening and closing the same session repeatedly must not accumulate.
 
@@ -1663,6 +1693,7 @@ def test_repeated_open_close_does_not_leak(tmp_path):
     )
 
 
+@pytest.mark.leak
 def test_thousands_of_reads_from_one_reader_do_not_accumulate(tmp_path):
     """The training-loop pattern: open once, read many windows.
 

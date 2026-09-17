@@ -195,11 +195,28 @@ const std::vector<CheckImpl>& check_impls() {
                    // (meflib.h:1214). metadata.cpp accepts a no-entry CRC
                    // rather than rejecting the session, so the validator must
                    // not call such a file corrupt — it reads perfectly.
-                   const bool body_ok =
-                       stored_body == real_body || stored_body == fmt::CRC_NO_ENTRY;
-                   const bool header_ok =
-                       stored_header == real_header || stored_header == fmt::CRC_NO_ENTRY;
-                   if (header_ok && body_ok) return;
+                   const bool body_no_entry = stored_body == fmt::CRC_NO_ENTRY;
+                   const bool header_no_entry = stored_header == fmt::CRC_NO_ENTRY;
+                   const bool body_ok = stored_body == real_body || body_no_entry;
+                   const bool header_ok = stored_header == real_header || header_no_entry;
+                   if (header_ok && body_ok) {
+                     // Accepted, but say so: "not computed" is not "verified".
+                     // Silence here rendered an UNVERIFIABLE file as a clean
+                     // one, and a torn write that zeroes a CRC would then have
+                     // switched off the only check that could have caught it.
+                     // A warning, not an error — the file may be perfectly
+                     // good, and a streaming writer legitimately produces this.
+                     if (!header_no_entry && !body_no_entry) return;
+                     hit = true;
+                     f.severity = Severity::Warning;
+                     f.field = header_no_entry ? "header_CRC" : "body_CRC";
+                     f.stored = "NO_ENTRY";
+                     f.expected = declared_ui4(header_no_entry ? real_header : real_body);
+                     f.message =
+                         "the writer never computed this CRC (meflib's CRC_NO_ENTRY), so these "
+                         "bytes cannot be verified; accepted, but not checked";
+                     return;
+                   }
                    hit = true;
                    f.field = !header_ok ? "header_CRC" : "body_CRC";
                    f.stored = declared_ui4(!header_ok ? stored_header : stored_body);
@@ -285,9 +302,14 @@ const std::vector<CheckImpl>& check_impls() {
                    f.field = "file_offset";
                    f.stored = num(t.data_bytes);
                    f.expected = num(t.data_bytes + t.unaccounted_tail_bytes);
-                   f.message = "the block index stops " + num(t.unaccounted_tail_bytes) +
-                               " bytes short of the end of the data file; entries are missing "
-                               "and nothing will be repaired in this segment";
+                   f.message =
+                       num(t.unaccounted_tail_bytes) +
+                       " bytes of the data file lie past the last block the index describes. "
+                       "Either index entries are missing (repair would write declarations "
+                       "smaller than the data), or an append was interrupted after .tdat grew "
+                       "and before .tidx was rewritten, leaving an unreferenced tail — in which "
+                       "case the index is correct and the tail is the thing to remove. The two "
+                       "are indistinguishable from here, so nothing is repaired in this segment.";
                  },
                  {}});
 
@@ -498,8 +520,12 @@ const std::vector<CheckImpl>& check_impls() {
                   "that seeks by time skips a segment whose declared range does not cover its "
                   "blocks. Compared as absolute uUTC — a stored time may be negated (meflib's "
                   "'offset applied' marker) or not, and both mean the same instant — with one "
-                  "sample period of slack for per-block microsecond rounding.",
-                  Severity::Warning, true},
+                  "sample period of slack for per-block microsecond rounding. An ERROR, not "
+                  "a cosmetic one: it fires exactly when the declared range fails to cover the "
+                  "blocks, and a reader that seeks by time then returns NOTHING for a segment "
+                  "whose samples are all present and intact — verified, a .tmet with corrupted "
+                  "universal-header times reads back 0 samples.",
+                  Severity::Error, true},
                  [](const SegmentState& s, const SegmentTruth& t, Finding& f, bool& hit) {
                    const sf8 fs_hz = s.md.section2.sampling_frequency;
                    if (!(fs_hz > 0.0)) return;  // times cannot be derived without fs
@@ -1268,16 +1294,23 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       if (impl->info.id != "crc.metadata" && impl->info.id != "crc.index") continue;
       Finding f;
       bool hit = false;
+      // Seeded before detect, as in the main loop, so an integrity check can
+      // lower a particular finding's severity.
+      f.severity = impl->info.severity;
       impl->detect(state, SegmentTruth{}, f, hit);
       if (!hit) continue;
       f.check_id = impl->info.id;
-      f.severity = impl->info.severity;
       f.repairable = impl->info.repairable;
       f.channel = files.channel;
       f.segment_number = files.segment_number;
       f.path = files.description;
+      // Only a genuine MISMATCH disarms the rest of the segment. These checks
+      // also report a CRC the writer never computed, which is a warning: the
+      // bytes are unverifiable, not known-bad, and treating that as a failure
+      // would strip every other check from a legitimate streaming writer's
+      // file — including the difference-bytes error this registry exists for.
+      if (f.severity == Severity::Error) integrity_failed = true;
       segment_findings.push_back(std::move(f));
-      integrity_failed = true;
     }
     if (integrity_failed) {
       report.findings.insert(report.findings.end(), segment_findings.begin(),
@@ -1286,6 +1319,10 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       skip("CRC mismatch; remaining checks skipped and nothing repaired");
       continue;
     }
+    // Unverifiable-CRC warnings still belong in the report; the segment simply
+    // carries on being checked.
+    report.findings.insert(report.findings.end(), segment_findings.begin(),
+                           segment_findings.end());
 
     try {
       state.md = load_time_series_metadata(state.tmet_bytes, opts.password);
@@ -1373,7 +1410,8 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
 
     // Say so out loud. A caller that asked for repairs and silently got none
     // would reasonably read the report as "nothing needed fixing".
-    if (repair && !index_trustworthy)
+    if (repair && !index_trustworthy && selected(repair->channels, files.channel) &&
+        selected(repair->segments, files.segment_number))
       skip(truth.offsets_sane
                ? "the block index does not describe the whole data file; nothing was repaired "
                  "in this segment"
@@ -1462,8 +1500,13 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
         std::string list;
         for (const auto& f : files_written) list += (list.empty() ? "" : ", ") + f;
         reason += " — ALREADY MODIFIED before the failure: " + list +
-                  " (this segment's files no longer agree; restore from " +
-                  backup_root_for(path).string() + ")";
+                  " (this segment's files no longer agree)";
+        // Only name a backup that exists. Sending an operator to a directory
+        // that was never created, mid-incident, is worse than saying nothing.
+        if (repair->backup)
+          reason += "; restore from " + backup_root_for(path).string();
+        else
+          reason += "; no backup was taken (backup=false)";
       }
       skip(reason);
     }

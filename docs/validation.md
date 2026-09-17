@@ -152,7 +152,7 @@ declarations a reader allocates from, then the time fields. Ids are stable API.
 | `sizing.block-maxima` | error | yes | `maximum_block_bytes` / `maximum_block_samples` |
 | `sizing.difference-bytes` | error | yes | `maximum_difference_bytes` vs the RED block headers |
 | `sizing.contiguous` | warning | yes | The `maximum_contiguous_*` trio vs the longest run. **Error when under-declared** (truncates a reader's run buffer; `0` is not the sentinel); warning when over-declared (wastes memory). Repaired in both directions |
-| `times.segment-bounds` | warning | yes | Universal-header start/end vs the blocks |
+| `times.segment-bounds` | error | yes | Universal-header start/end vs the blocks |
 | `times.recording-duration` | warning | yes | `recording_duration` vs the segment's span |
 | `times.block-interval` | warning | yes | `block_interval` vs the block geometry |
 | `times.discontinuities` | error | yes | `number_of_discontinuities` vs the index flags |
