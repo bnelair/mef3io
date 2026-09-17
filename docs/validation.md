@@ -186,14 +186,14 @@ saw any of this, and it is also why `times.discontinuities` is rated an error
 here despite looking cosmetic.
 
 The two hazards are evidenced differently, and the difference is worth keeping
-straight. `sizing.difference-bytes` has been **reproduced**: driving CyberPSG's
-own `CertiCon.MEFWrapper.dll` + `MefLibDll.dll` against a real session, a
-declared `0` raised `0xC0000005` inside `REDDecode`, and patching that one field
-*in memory only* — same file, same channel, same blocks — produced decoded
-output byte-identical to the on-disk repair, which pins the cause to this field
-and nothing else about the file. `times.discontinuities` rests on reading the C
-source above; the overflow is plain in `meflib.c`, but no crash has been
-reproduced against it. Both are errors; only one has a post-mortem.
+straight. `sizing.difference-bytes` has been **reproduced**: against a
+meflib-based reader, a declared `0` raised an access violation inside RED
+decoding, and patching that one field *in memory only* — same file, same
+channel, same blocks — produced decoded output byte-identical to the on-disk
+repair, which pins the cause to this field and nothing else about the file.
+`times.discontinuities` rests on reading the C source above; the overflow is
+plain in `meflib.c`, but no crash has been reproduced against it. Both are
+errors; only one has a post-mortem.
 
 mef3io **≤ 1.1.2** left `maximum_difference_bytes` at `0`. See
 [the format reference](mef3_format.md#the-buffer-sizing-declarations).

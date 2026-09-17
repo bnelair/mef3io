@@ -907,10 +907,10 @@ def test_index_trailing_padding_is_tolerated(tmp_path):
 def test_contiguous_repair_states_what_the_index_holds(tmp_path):
     """The declaration describes the data, in whichever direction it is wrong.
 
-    Over-declaring is the case seen in the field (a recorder declaring
-    22,129,876 contiguous samples against 76,800 present, 84 MiB per channel of
-    pointless allocation); under-declaring truncates a reader's run buffer.
-    Both are corrected to the longest run between discontinuity flags.
+    Over-declaring is the case seen in the field (recorders over-declare these
+    by orders of magnitude, wasting allocation that scales with channel count);
+    under-declaring truncates a reader's run buffer. Both are corrected to the
+    longest run between discontinuity flags.
     """
     path = tmp_path / "s.mefd"
     _write(path)

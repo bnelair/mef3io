@@ -180,11 +180,12 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   (meflib.c:3548) mallocs `number_of_discontinuities` entries then writes one
   per FLAGGED block — the legacy `mef_tools` `0` is a straight heap overflow
   (hence Error severity), though established by reading the C source, NOT by
-  reproducing a crash. (a) is the one with a post-mortem: `tmp/stitch_mef3-main`
-  (the third-party stitcher/patcher, gitignored) reproduced `0xC0000005` in
-  `REDDecode` through CyberPSG's own `MEFWrapper`/`MefLibDll`, and an
+  reproducing a crash. (a) is the one with a post-mortem: an access violation
+  inside RED decoding was reproduced against a meflib-based reader, and an
   in-memory-only patch of that single field decoded byte-identically to the
   on-disk repair — which isolates the cause to it. Do not rank (b) above (a).
+  (Details of that investigation are held privately; do not restate them in
+  tracked files — this repo is public.)
   pymef passes
   neither (it sizes from `RED_MAX_DIFFERENCE_BYTES(maximum_block_samples)`),
   which is why the oracle never saw any of this. Fixed in 1.1.3 (reported against 1.1.2, which left
@@ -200,10 +201,10 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   BOTH directions — the declaration must state what the index holds. (It was
   grow-only until 2026-09-17, on the reasoning that no reader in
   reference_files consumes the trio so longest-run is mef3io's inference;
-  reverted because that left the field-observed case unfixable — a recorder
-  declaring 22,129,876 contiguous samples against 76,800 present, 84 MiB per
-  channel, ~21 GB over 254 channels — and because it made mef3io disagree with
-  `fix_mef3_sizing.py`, which lowers, on the same file.) On APPEND the contiguous trio is
+  reverted because that left over-declaration unfixable — recorders in the
+  field over-declare these by orders of magnitude, and the wasted allocation
+  scales with channel count — and because it made mef3io disagree with an
+  independent third-party patcher, which lowers, on the same file.) On APPEND the contiguous trio is
   recomputed exactly from the full `.tidx` (so appending repairs a segment
   written by an older mef3io), but `maximum_difference_bytes` lives in `.tdat`
   headers — folding old blocks in exactly would cost a seek per block and break
@@ -211,8 +212,8 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   back to meflib's `RED_MAX_DIFFERENCE_BYTES` = `5 × maximum_block_samples`.
   READ PATH NEVER CONSULTS THESE — mef3io sizes from each block's own header,
   so zeros/sentinels/nonsense still read fine; `test_p12_sizing.py` pins both
-  halves. Cross-checked against the third-party `fix_mef3_sizing.py` patcher
-  (`--diff-bytes exact` → "already consistent").
+  halves. Cross-checked against an independent third-party patcher in exact
+  mode → "already consistent".
 - **RED encode**: first emitted byte is junk (meflib overwrites stats[255] then
   restores) → drop emitted[0], payload = emitted[1:] at offset 304; stored
   difference_bytes = generated+1. Lossless no-detrend/no-scale, pymef-readable.

@@ -370,10 +370,11 @@ const std::vector<CheckImpl>& check_impls() {
                   "The maximum_contiguous_* trio describes the longest run of blocks between "
                   "discontinuities. Under-declaring truncates a reader's run buffer; "
                   "over-declaring (mef3io <= 1.1.2 wrote whole-channel totals, and recorders "
-                  "in the field declare whole-session ones) wastes memory — one observed file "
-                  "declared 22,129,876 contiguous samples against 76,800 present, 84 MiB per "
-                  "channel. 0 in maximum_contiguous_block_bytes reads as a real zero. Repaired "
-                  "in both directions: the declaration states what the index holds.",
+                  "in the field declare whole-session ones) wastes memory — observed files "
+                  "over-declare by two to three orders of magnitude, and the waste scales "
+                  "with channel count. 0 in maximum_contiguous_block_bytes reads as a real "
+                  "zero. Repaired in both directions: the declaration states what the index "
+                  "holds.",
                   Severity::Warning, true},
                  [](const SegmentState& s, const SegmentTruth& t, Finding& f, bool& hit) {
                    const auto& s2 = s.md.section2;
@@ -411,8 +412,8 @@ const std::vector<CheckImpl>& check_impls() {
                    // The field's job is to describe the data, and the longest
                    // run between discontinuity flags is what the index holds —
                    // the same quantity mef3io's own writer measures and the same
-                   // one the third-party fix_mef3_sizing.py patcher writes, so a
-                   // session repaired by either tool now agrees with the other.
+                   // one an independent third-party patcher writes, so a session
+                   // repaired by either tool now agrees with the other.
                    // make_tuple, not tie: tie would alias the very fields the
                    // next lines mutate, so the comparison could never differ.
                    const auto snapshot = std::make_tuple(r.s2.maximum_contiguous_blocks,
