@@ -272,15 +272,27 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   appends reuse the segment's precision. `Reader.segments(ch)` maps what data
   is where per segment. First appended block keeps discontinuity=true (readers
   are time-gridded so contiguous appends stay seamless).
-- **Off-grid block times: placement rule not reconciled with meflib.** With
-  jittered block timestamps, meflib/pymef `read_ts_channels_uutc` lays blocks
-  out contiguously by sample count within a continuous run (ignoring the
-  per-block timestamp until a discontinuity), while mef3io grids every block by
-  its own timestamp. Both are self-consistent and thread-invariant; they place
-  data differently on such files. Reproduce with `tests/test_p6_threads.py`'s
-  `_shift_block_times` + pymef. Decide deliberately before changing — real
-  production sessions are affected, and one segment-level error currently
-  fails the whole session (a per-segment/lenient mode is also open).
+- **Off-grid block times: RECONCILED — the old entry here was wrong.** It
+  claimed pymef `read_ts_channels_uutc` packs blocks contiguously by sample
+  count while mef3io grids by timestamp, and that the two are unreconciled on
+  real files. Not so. pymef takes `times_specified`: `read_ts_channels_uutc`
+  passes `True` (mef_session.py:1401) and places EVERY block by its own
+  timestamp — `decomp_data + ((block_start_time_offset - start_time)/1e6 * fs
+  + 0.5)`, pymef3_file.c:2250. The contiguous `sample_counter` packing is the
+  `else` branch (:2258), reached only by `read_ts_channels_sample`
+  (mef_session.py:1325, no 4th arg). Same rule as mef3io's, so on a real file
+  they AGREE — verified: jitter every block off-grid and both readers return
+  identical samples.
+  WHAT THE OLD REPRODUCTION ACTUALLY SHOWED: `tests/test_p6_threads.py`'s
+  `_shift_block_times` rewrites ONLY the `.tidx`. A block's start time is
+  stored TWICE — in the index entry and in its RED header (`.tdat` +40) — and
+  that helper desynchronises them. mef3io reads the index copy; pymef's uutc
+  path reads the RED-header copy. Two readers, two different copies of one
+  value, by construction. Nothing about placement philosophy.
+  THE REAL REMAINDER is that mef3io never cross-checks the two copies, so a
+  file whose copies disagree is read without complaint (open issue #11). The
+  thread-invariance tests that use the helper are still valid — they exercise
+  overlapping output ranges, which is all they claim to.
 - **Do NOT `pip install -e .` for C++ dev** — scikit-build-core's editable hook
   loads an install-time extension snapshot that shadows the dev_build symlink
   (meta-path beats sys.path). Keep mef3io uninstalled; use scripts/dev_build.sh.
