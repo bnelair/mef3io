@@ -402,3 +402,51 @@ def test_a_1_1_2_style_session_still_reads_and_repairs_losslessly(tmp_path):
     with mef3io.Reader(str(path)) as r:
         assert np.array_equal(r.read_raw("ch1")["samples"], samples_before)
     assert np.array_equal(samples_before[: len(written)], written)
+
+
+def _patch_uh_field(file, offset, value):
+    """Set one si8 universal-header field, repairing the header CRC."""
+    raw = bytearray(Path(file).read_bytes())
+    struct.pack_into("<q", raw, offset, value)
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
+    Path(file).write_bytes(bytes(raw))
+
+
+def test_append_sets_universal_header_counts_from_the_index(tmp_path):
+    """Both .tdat/.tidx header fields must describe the segment, not be folded
+    onto whatever the old header claimed.
+
+    meflib clamps number_of_blocks DOWN to number_of_entries
+    (meflib.c:5983-5984, :6005-6006) with no floor, so an entry count folded
+    onto meflib's own NO_ENTRY (-1) makes the segment read short — empty, when
+    a single block is appended. maximum_entry_size folded onto a stored value
+    keeps the legacy writer's sample count, which is far below the real
+    largest block in bytes.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path, gap_us=0, n=4000)
+    tmet = _segments(path)[0]
+    tidx, tdat = Path(tmet).with_suffix(".tidx"), Path(tmet).with_suffix(".tdat")
+
+    # meflib's own convention on both headers, as a foreign writer leaves them.
+    NUMBER_OF_ENTRIES, MAXIMUM_ENTRY_SIZE = 32, 40
+    for f in (tidx, tdat):
+        _patch_uh_field(f, NUMBER_OF_ENTRIES, -1)
+        _patch_uh_field(f, MAXIMUM_ENTRY_SIZE, -1)
+
+    w = mef3io.Writer(str(path))
+    w.write_int32("ch1", np.arange(100, dtype=np.int32), 0.5,
+                  START + int(8000 / FS * 1e6) + int(1e6), FS)
+    w.close()
+
+    blocks = (len(tidx.read_bytes()) - UH_BYTES) // TIDX_RECORD_BYTES
+    true_max_bytes = _real_stats(tmet)["maximum_block_bytes"]
+    for f in (tidx, tdat):
+        raw = Path(f).read_bytes()
+        entries = struct.unpack_from("<q", raw, NUMBER_OF_ENTRIES)[0]
+        assert entries == blocks, f"{Path(f).suffix}: {entries} != {blocks} blocks on disk"
+    tdat_max = struct.unpack_from("<q", tdat.read_bytes(), MAXIMUM_ENTRY_SIZE)[0]
+    assert tdat_max == true_max_bytes, f".tdat maximum_entry_size {tdat_max} != {true_max_bytes}"
+
+    # And mef3io's own output must satisfy mef3io's own validator.
+    assert mef3io.Validator(str(path)).validate().ok

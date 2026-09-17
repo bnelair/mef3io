@@ -1282,3 +1282,64 @@ def test_docs_check_table_matches_the_registry():
     documented = [(cid, sev, rep == "yes") for cid, sev, rep in rows]
     actual = [(c.id, c.severity, c.repairable) for c in mef3io.available_checks()]
     assert documented == actual
+
+
+def test_difference_bytes_repair_never_writes_zero_or_under_declares(tmp_path):
+    """The repair must not install the very defect the check exists to remove.
+
+    maximum_difference_bytes sizes a reader's RED difference buffer. Writing 0
+    leaves a meflib-based reader decoding into a NULL pointer; writing a
+    maximum taken over only the blocks that could be read under-declares it,
+    which truncates the buffer instead. Both are the crash direction.
+
+    .tdat carries no CRC check in the registry, so a corrupt block header can
+    present any value — the measurement has to be able to fail safely.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path, gap_us=0)
+    tmet = _tmet(path)
+    tidx = Path(tmet).with_suffix(".tidx")
+    tdat = Path(tmet).with_suffix(".tdat")
+
+    idx = tidx.read_bytes()
+    offsets = [
+        struct.unpack_from("<q", idx, UH_BYTES + i * 56)[0]
+        for i in range((len(idx) - UH_BYTES) // 56)
+    ]
+    assert len(offsets) > 1
+
+    # Every block header implausible: nothing can be measured at all.
+    raw = bytearray(tdat.read_bytes())
+    for off in offsets:
+        struct.pack_into("<I", raw, off + 28, 0xFFFFFFFF)
+    tdat.write_bytes(bytes(raw))
+    _patch_s2(tmet, "maximum_difference_bytes", 0)
+
+    report = mef3io.repair_session(str(path), ["sizing.difference-bytes"])
+    written = _read_s2(tmet, "maximum_difference_bytes")
+    bound = 5 * _read_s2(tmet, "maximum_block_samples")
+    assert written != 0, "0 is the NULL-buffer value this check exists to remove"
+    assert written == bound, "with no usable measurement it must be meflib's worst case"
+    # And it must say the number is a bound, not a measurement.
+    msg = " ".join(f.message for f in report.findings if f.check_id == "sizing.difference-bytes")
+    assert "bound" in msg, msg
+
+    # Now only ONE header is corrupt: the survivors' maximum is an
+    # under-estimate, so the bound must be used rather than that maximum.
+    path2 = tmp_path / "s2.mefd"
+    _write(path2, gap_us=0)
+    tmet2 = _tmet(path2)
+    tidx2 = Path(tmet2).with_suffix(".tidx")
+    tdat2 = Path(tmet2).with_suffix(".tdat")
+    idx2 = tidx2.read_bytes()
+    first = struct.unpack_from("<q", idx2, UH_BYTES)[0]
+    raw2 = bytearray(tdat2.read_bytes())
+    struct.pack_into("<I", raw2, first + 28, 0xFFFFFFFF)
+    tdat2.write_bytes(bytes(raw2))
+    _patch_s2(tmet2, "maximum_difference_bytes", 0)
+
+    mef3io.repair_session(str(path2), ["sizing.difference-bytes"])
+    written2 = _read_s2(tmet2, "maximum_difference_bytes")
+    assert written2 == 5 * _read_s2(tmet2, "maximum_block_samples"), (
+        "a maximum over only the readable blocks under-declares the buffer"
+    )

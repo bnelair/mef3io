@@ -388,8 +388,25 @@ const std::vector<CheckImpl>& check_impls() {
                    f.message = unset ? "difference buffer size is never set; a meflib-based "
                                        "reader allocates nothing and decodes into NULL"
                                      : "declared difference buffer is smaller than a block on disk";
+                   // Say which kind of number the expectation is. Substituting a
+                   // bound for a measurement without saying so would leave an
+                   // operator believing the file was measured exactly.
+                   if (!t.difference_bytes_exact)
+                     f.message +=
+                         t.difference_bytes_suspect
+                             ? " (expected value is meflib's worst-case bound, not a "
+                               "measurement: a block header was unreadable or implausible, so "
+                               "the measured maximum would have been too small)"
+                             : " (expected value is meflib's worst-case bound, not a "
+                               "measurement)";
                  },
                  [](const SegmentTruth& t, RepairBuffer& r) {
+                   // Never write 0 — that is the NULL-buffer value the check
+                   // exists to remove. derive_truth guarantees a positive
+                   // bound whenever the measurement is unusable, so a 0 here
+                   // means the segment carries no blocks worth sizing for and
+                   // the repair declines rather than installing the defect.
+                   if (t.max_difference_bytes == 0) return false;
                    r.s2.maximum_difference_bytes = t.max_difference_bytes;
                    r.tmet_dirty = true;
                    return true;
@@ -812,23 +829,34 @@ SegmentTruth derive_truth(const SessionSource& src, const SegmentState& s,
       previous_end_offset = e.file_offset + block_bytes;
     }
 
-    if (opts.exact_difference_bytes && block_bytes >= fmt::RED_BLOCK_HEADER_BYTES &&
-        t.offsets_sane) {
-      auto head = src.read_range(
-          s.files.tdat_rel,
-          static_cast<std::size_t>(e.file_offset) + fmt::RedBlockHeader::DIFFERENCE_BYTES_OFFSET,
-          sizeof(ui4));
-      if (head.size() == sizeof(ui4)) {
-        const ui4 measured = byteio::read<ui4>(head, 0);
-        // .tdat carries no CRC check anywhere in the registry, so a corrupt
-        // block header can present any value. Ignore anything beyond meflib's
-        // own worst case: writing it back would install the very NO_ENTRY
-        // sentinel this check exists to remove, and the repair would never
-        // converge.
-        if (measured != fmt::UI4_NO_ENTRY && measured <= red_max_difference_bytes(samples))
-          t.max_difference_bytes = std::max(t.max_difference_bytes, measured);
-        else
+    if (opts.exact_difference_bytes && t.offsets_sane) {
+      // Every block must contribute, or the maximum is taken over a subset and
+      // is therefore an UNDER-estimate — the direction that truncates a
+      // reader's buffer. Each way a block can fail to contribute sets
+      // `difference_bytes_suspect`, which downgrades the whole segment from
+      // "measured" to "bounded" below. A block too short to hold a RED header
+      // cannot be read at all, so it counts as a failure, not as a zero.
+      if (block_bytes < fmt::RED_BLOCK_HEADER_BYTES) {
+        t.difference_bytes_suspect = true;
+      } else {
+        auto head = src.read_range(
+            s.files.tdat_rel,
+            static_cast<std::size_t>(e.file_offset) + fmt::RedBlockHeader::DIFFERENCE_BYTES_OFFSET,
+            sizeof(ui4));
+        if (head.size() != sizeof(ui4)) {
           t.difference_bytes_suspect = true;
+        } else {
+          const ui4 measured = byteio::read<ui4>(head, 0);
+          // .tdat carries no CRC check anywhere in the registry, so a corrupt
+          // block header can present any value. Anything past meflib's own
+          // worst case is not a measurement: writing it back would install the
+          // very NO_ENTRY sentinel this check exists to remove, and the repair
+          // would never converge.
+          if (measured != fmt::UI4_NO_ENTRY && measured <= red_max_difference_bytes(samples))
+            t.max_difference_bytes = std::max(t.max_difference_bytes, measured);
+          else
+            t.difference_bytes_suspect = true;
+        }
       }
     }
   }
@@ -847,7 +875,19 @@ SegmentTruth derive_truth(const SessionSource& src, const SegmentState& s,
         static_cast<si8>(s.tdat_size) - previous_end_offset;
   }
 
-  t.difference_bytes_exact = opts.exact_difference_bytes && t.offsets_sane;
+  // A measurement counts as exact only when EVERY block contributed one. If
+  // any block was skipped (`difference_bytes_suspect`) the maximum is taken
+  // over the survivors and is too small; if none contributed it is 0 — which
+  // is the exact NULL-buffer value this check exists to remove, and writing it
+  // back would report the defect as repaired while leaving it on disk.
+  //
+  // The fallback is meflib's own worst case, 5 bytes per sample. It is a
+  // bound, so it can over-declare by a few bytes per block; that costs a
+  // reader a little memory, where under-declaring corrupts it. We only take
+  // that trade when the exact answer is genuinely unavailable — the default
+  // path measures, so a healthy segment is declared exactly.
+  t.difference_bytes_exact = opts.exact_difference_bytes && t.offsets_sane &&
+                             !t.difference_bytes_suspect && t.max_difference_bytes > 0;
   if (!t.difference_bytes_exact)
     t.max_difference_bytes = red_max_difference_bytes(t.max_block_samples);
 
