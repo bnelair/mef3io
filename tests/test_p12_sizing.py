@@ -341,3 +341,64 @@ def test_reader_ignores_section2_sizing_fields(tmp_path, patch):
     )
     np.testing.assert_array_equal(got_raw["samples"], expected_raw["samples"])
     np.testing.assert_array_equal(got_raw["valid"], expected_raw["valid"])
+
+
+# --- backwards compatibility with sessions written by mef3io <= 1.1.2 --------
+
+
+def test_a_1_1_2_style_session_still_reads_and_repairs_losslessly(tmp_path):
+    """Sessions already on disk from mef3io <= 1.1.2 must keep working.
+
+    Those exist in the field and cannot be rewritten from source, so three
+    things have to hold, and none of them may regress quietly:
+
+      * mef3io reads them bit-identically — the read path sizes every buffer
+        from each block's own header and must never consult these fields;
+      * the validator flags them rather than passing them silently;
+      * repairing them changes declarations ONLY. `.tdat` must come back
+        byte-identical, and the samples must survive unchanged.
+
+    The declarations reproduced here are exactly what 1.1.2's writer emitted:
+    `maximum_difference_bytes` and `maximum_contiguous_block_bytes` left at 0
+    (0 is not the NO_ENTRY sentinel for either), and the other two
+    `maximum_contiguous_*` fields set to the channel totals rather than to the
+    longest run between discontinuities.
+    """
+    path = tmp_path / "s.mefd"
+    written = _write(path, gap_us=int(5e6))
+    tmet = _segments(path)[0]
+    before = _read_section2(tmet)
+    tdat = Path(tmet).with_suffix(".tdat")
+    tdat_before = tdat.read_bytes()
+
+    with mef3io.Reader(str(path)) as r:
+        samples_before = r.read_raw("ch1")["samples"].copy()
+
+    _patch_section2(
+        tmet,
+        maximum_difference_bytes=0,
+        maximum_contiguous_block_bytes=0,
+        maximum_contiguous_blocks=before["number_of_blocks"],
+        maximum_contiguous_samples=before["number_of_samples"],
+    )
+
+    # 1. Reads are unaffected by the bad declarations.
+    with mef3io.Reader(str(path)) as r:
+        assert np.array_equal(r.read_raw("ch1")["samples"], samples_before)
+
+    # 2. The validator does not wave it through.
+    ids = {f.check_id for f in mef3io.Validator(str(path)).validate().findings}
+    assert "sizing.difference-bytes" in ids
+    assert "sizing.contiguous" in ids
+
+    # 3. Repair rewrites declarations and nothing else.
+    mef3io.repair_session(str(path), ["sizing.difference-bytes", "sizing.contiguous"])
+    assert tdat.read_bytes() == tdat_before, "sample data must not be touched"
+    after = _read_section2(tmet)
+    assert after["maximum_difference_bytes"] > 0
+    assert after["maximum_contiguous_block_bytes"] > 0
+    assert mef3io.Validator(str(path)).validate().ok
+
+    with mef3io.Reader(str(path)) as r:
+        assert np.array_equal(r.read_raw("ch1")["samples"], samples_before)
+    assert np.array_equal(samples_before[: len(written)], written)
