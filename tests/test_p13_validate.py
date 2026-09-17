@@ -878,6 +878,33 @@ def test_contiguous_repair_grows_but_never_shrinks(tmp_path):
     assert _read_s2(tmet, "maximum_contiguous_block_bytes") > 0, "under-declaration raised"
 
 
+def test_declined_repair_is_not_reported_as_repaired(tmp_path):
+    """A repair that deliberately writes nothing must say so.
+
+    sizing.contiguous refuses to lower an over-declaration — the case actually
+    observed in the field (a recorder declaring 22,129,876 contiguous samples
+    against 76,800 present). Reporting that as `repaired` would tell an
+    operator the session was fixed while the declaration stayed on disk, and a
+    "repair until clean" loop would never terminate.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+    # Over-declared ONLY: nothing here is repairable under the grow-only rule.
+    _patch_s2(tmet, "maximum_contiguous_samples", 22_129_876)
+    before = tmet.read_bytes()
+
+    report = mef3io.Validator(str(path)).repair(["sizing.contiguous"])
+
+    assert tmet.read_bytes() == before, "nothing should have been written"
+    assert report.segments_repaired == 0, "no segment was repaired"
+    hits = [f for f in report.findings if f.check_id == "sizing.contiguous"]
+    assert hits, "the over-declaration must still be reported"
+    assert not any(f.repaired for f in hits), "a declined repair is not a repair"
+    # And it is still there on a fresh look, which is the operator-visible half.
+    assert "sizing.contiguous" in _ids(mef3io.Validator(str(path)).validate())
+
+
 def test_garbage_block_header_never_becomes_the_declaration(tmp_path):
     """.tdat carries no CRC check, so a corrupt block header can present any
     value. Writing it back would install the NO_ENTRY sentinel the check exists

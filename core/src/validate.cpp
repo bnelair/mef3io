@@ -137,7 +137,11 @@ struct RepairBuffer {
 };
 
 using DetectFn = std::function<void(const SegmentState&, const SegmentTruth&, Finding&, bool&)>;
-using RepairFn = std::function<void(const SegmentTruth&, RepairBuffer&)>;
+// Returns whether it actually changed a declaration. A repair is allowed to
+// decline (sizing.contiguous refuses to lower an over-declaration), and a
+// declined repair must not be reported as one — `repaired` on a finding means
+// "this was written", not "a repair was offered".
+using RepairFn = std::function<bool(const SegmentTruth&, RepairBuffer&)>;
 
 struct CheckImpl {
   CheckInfo info;
@@ -262,6 +266,7 @@ const std::vector<CheckImpl>& check_impls() {
                  [](const SegmentTruth& t, RepairBuffer& r) {
                    r.s2.number_of_blocks = t.n_blocks;
                    r.tmet_dirty = true;
+                   return true;
                  }});
 
     v.push_back({{"index.sample-count", "Declared sample count matches the index",
@@ -279,6 +284,7 @@ const std::vector<CheckImpl>& check_impls() {
                  [](const SegmentTruth& t, RepairBuffer& r) {
                    r.s2.number_of_samples = t.total_samples;
                    r.tmet_dirty = true;
+                   return true;
                  }});
 
     v.push_back({{"index.start-sample", "Declared start sample matches the first block",
@@ -329,6 +335,7 @@ const std::vector<CheckImpl>& check_impls() {
                    r.s2.maximum_block_bytes = t.max_block_bytes;
                    r.s2.maximum_block_samples = t.max_block_samples;
                    r.tmet_dirty = true;
+                   return true;
                  }});
 
     v.push_back({{"sizing.difference-bytes", "Difference buffer size is declared",
@@ -356,6 +363,7 @@ const std::vector<CheckImpl>& check_impls() {
                  [](const SegmentTruth& t, RepairBuffer& r) {
                    r.s2.maximum_difference_bytes = t.max_difference_bytes;
                    r.tmet_dirty = true;
+                   return true;
                  }});
 
     v.push_back({{"sizing.contiguous", "Contiguous-run maxima match the index",
@@ -413,10 +421,12 @@ const std::vector<CheckImpl>& check_impls() {
                        std::max(r.s2.maximum_contiguous_block_bytes, t.contiguous_block_bytes);
                    r.s2.maximum_contiguous_samples =
                        std::max(r.s2.maximum_contiguous_samples, t.contiguous_samples);
-                   if (snapshot != std::make_tuple(r.s2.maximum_contiguous_blocks,
+                   if (snapshot == std::make_tuple(r.s2.maximum_contiguous_blocks,
                                                    r.s2.maximum_contiguous_block_bytes,
                                                    r.s2.maximum_contiguous_samples))
-                     r.tmet_dirty = true;
+                     return false;  // nothing to raise: the finding stands unrepaired
+                   r.tmet_dirty = true;
+                   return true;
                  }});
 
     v.push_back({{"times.segment-bounds", "Universal-header times bracket the data",
@@ -467,6 +477,7 @@ const std::vector<CheckImpl>& check_impls() {
                      uh->end_time = to_disk_time(t.end_uutc, t.rto);
                    }
                    r.tmet_dirty = r.tidx_dirty = r.tdat_dirty = true;
+                   return true;
                  }});
 
     v.push_back({{"times.recording-duration", "Recording duration spans the segment",
@@ -493,6 +504,7 @@ const std::vector<CheckImpl>& check_impls() {
                  [](const SegmentTruth& t, RepairBuffer& r) {
                    r.s2.recording_duration = t.recording_duration;
                    r.tmet_dirty = true;
+                   return true;
                  }});
 
     v.push_back({{"times.block-interval", "Block interval is set",
@@ -517,16 +529,18 @@ const std::vector<CheckImpl>& check_impls() {
                  [](const SegmentTruth& t, RepairBuffer& r) {
                    r.s2.block_interval = t.block_interval;
                    r.tmet_dirty = true;
+                   return true;
                  }});
 
     v.push_back({{"times.discontinuities", "Discontinuity count matches the index",
                   "number_of_discontinuities should equal the number of blocks flagged "
                   "discontinuous (a segment always begins with one). The legacy mef_tools "
-                  "writer leaves it at 0 even when it wrote the flags. This is the best-"
-                  "evidenced hazard in the registry: meflib's own find_discontinuity_indices "
-                  "(meflib.c:3548) mallocs exactly this many entries and then writes one per "
-                  "flagged block, so an under-declared count is a straight heap overflow in "
-                  "any caller of find_discontinuity_samples.",
+                  "writer leaves it at 0 even when it wrote the flags. meflib's own "
+                  "find_discontinuity_indices (meflib.c:3548) mallocs exactly this many "
+                  "entries and then writes one per flagged block, so an under-declared count "
+                  "is a straight heap overflow in any caller of find_discontinuity_samples. "
+                  "Established by reading the C source, not by reproducing a crash — unlike "
+                  "sizing.difference-bytes, which has both.",
                   Severity::Error, true},
                  [](const SegmentState& s, const SegmentTruth& t, Finding& f, bool& hit) {
                    const si8 stored = s.md.section2.number_of_discontinuities;
@@ -540,6 +554,7 @@ const std::vector<CheckImpl>& check_impls() {
                  [](const SegmentTruth& t, RepairBuffer& r) {
                    r.s2.number_of_discontinuities = t.n_discontinuities;
                    r.tmet_dirty = true;
+                   return true;
                  }});
 
     v.push_back({{"header.entry-count", "Universal headers declare the right entry count",
@@ -571,6 +586,7 @@ const std::vector<CheckImpl>& check_impls() {
                    r.tidx_uh.number_of_entries = t.n_blocks;
                    r.tdat_uh.number_of_entries = t.n_blocks;
                    r.tmet_dirty = r.tidx_dirty = r.tdat_dirty = true;
+                   return true;
                  }});
 
     v.push_back({{"header.max-entry-size", "Universal headers declare the right entry size",
@@ -608,6 +624,7 @@ const std::vector<CheckImpl>& check_impls() {
                    r.tidx_uh.maximum_entry_size = fmt::TIME_SERIES_INDEX_BYTES;
                    r.tdat_uh.maximum_entry_size = t.max_block_bytes;
                    r.tmet_dirty = r.tidx_dirty = r.tdat_dirty = true;
+                   return true;
                  }});
 
     return v;
@@ -1118,9 +1135,14 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       if (repair && impl->repair && to_repair.count(impl->info.id) &&
           selected(repair->channels, files.channel) &&
           selected(repair->segments, files.segment_number)) {
-        impl->repair(truth, buffer);
-        f.repaired = true;
-        any_repair = true;
+        // Only what the repair actually wrote counts. A repair may decline
+        // (sizing.contiguous will not lower an over-declaration), and marking a
+        // declined one `repaired` would report a defect as fixed while leaving
+        // it on disk — and, for an error-severity check, would let Report::ok
+        // discount it. The finding then stays outstanding, as it should.
+        const bool changed = impl->repair(truth, buffer);
+        f.repaired = changed;
+        any_repair = any_repair || changed;
       }
       report.findings.push_back(std::move(f));
     }

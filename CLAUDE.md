@@ -170,8 +170,14 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   ships for this (`RED_check_RPS_allocation`, meflib.h:1186 / meflib.c:6534)
   is NEVER CALLED — no error path at all; (b) `find_discontinuity_indices`
   (meflib.c:3548) mallocs `number_of_discontinuities` entries then writes one
-  per FLAGGED block — the legacy `mef_tools` `0` is a straight heap overflow,
-  and is the best-evidenced hazard here (hence Error severity). pymef passes
+  per FLAGGED block — the legacy `mef_tools` `0` is a straight heap overflow
+  (hence Error severity), though established by reading the C source, NOT by
+  reproducing a crash. (a) is the one with a post-mortem: `tmp/stitch_mef3-main`
+  (the third-party stitcher/patcher, gitignored) reproduced `0xC0000005` in
+  `REDDecode` through CyberPSG's own `MEFWrapper`/`MefLibDll`, and an
+  in-memory-only patch of that single field decoded byte-identically to the
+  on-disk repair — which isolates the cause to it. Do not rank (b) above (a).
+  pymef passes
   neither (it sizes from `RED_MAX_DIFFERENCE_BYTES(maximum_block_samples)`),
   which is why the oracle never saw any of this. Fixed in 1.1.3 (reported against 1.1.2, which left
   `maximum_difference_bytes` and `maximum_contiguous_block_bytes` at 0 and set
