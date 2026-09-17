@@ -450,3 +450,102 @@ def test_append_sets_universal_header_counts_from_the_index(tmp_path):
 
     # And mef3io's own output must satisfy mef3io's own validator.
     assert mef3io.Validator(str(path)).validate().ok
+
+
+# --- acceptance: bidirectional oracle, including the allocation contract -----
+
+
+ALLOCATION_FIELDS = (
+    "maximum_block_bytes",
+    "maximum_block_samples",
+    "maximum_difference_bytes",
+    "number_of_discontinuities",
+    "maximum_contiguous_blocks",
+    "maximum_contiguous_block_bytes",
+    "maximum_contiguous_samples",
+)
+
+
+def _assert_allocation_contract(session):
+    """Every field a meflib-based reader allocates from is set and exact.
+
+    `0` is not the NO_ENTRY sentinel for any of these, so an unset one is
+    indistinguishable from a measured one and the reader sizes a buffer from
+    it. Checked against the blocks actually on disk, not merely for
+    non-zeroness, so an over-declaration fails too — the requirement is exact,
+    not merely safe.
+    """
+    for tmet in _segments(session):
+        declared, real = _read_section2(tmet), _real_stats(tmet)
+        for name in ALLOCATION_FIELDS:
+            v = declared[name]
+            assert v not in (0, UI4_NO_ENTRY, -1), f"{tmet.name}: {name} is unset ({v})"
+            if name in real:
+                assert v == real[name], f"{tmet.name}: {name} declared {v}, on disk {real[name]}"
+
+
+def test_acceptance_mef3io_written_session_is_exact_and_oracle_readable(tmp_path):
+    """A session this version writes: declarations exact, and the oracle reads
+    every sample of it bit-identically through both of its APIs."""
+    pymef = pytest.importorskip("pymef.mef_session", reason="oracle not installed")
+
+    path = tmp_path / "s.mefd"
+    x = _write(path, gap_us=int(3e6), n=6000, channels=("ch1", "ch2"))
+    assert mef3io.Validator(str(path)).validate().ok
+    _assert_allocation_contract(path)
+
+    n = 2 * len(x)
+    s = pymef.MefSession(str(path), "")
+    try:
+        for ch in ("ch1", "ch2"):
+            got = np.asarray(s.read_ts_channels_sample(ch, [0, n])).astype(np.int32)
+            assert np.array_equal(got, np.concatenate([x, x])), f"{ch}: sample read"
+            span = [START, START + int(len(x) / FS * 1e6) + int(3e6) + int(len(x) / FS * 1e6)]
+            g = np.asarray(s.read_ts_channels_uutc(ch, span), dtype=float)
+            present = ~np.isnan(g)
+            assert present.sum() > 0 and (~present).sum() > 0, "the gap must survive as NaN"
+            assert np.array_equal(g[present].astype(np.int32),
+                                  np.concatenate([x, x])[: int(present.sum())]), f"{ch}: uutc read"
+    finally:
+        s.close()
+
+
+def test_acceptance_legacy_session_reads_and_upgrades_losslessly(tmp_path):
+    """A session the legacy stack wrote: mef3io reads it bit-identically, the
+    fixer brings its declarations up to exact, and BOTH readers still return
+    the same samples afterwards."""
+    pymef = pytest.importorskip("pymef.mef_session", reason="oracle not installed")
+    pytest.importorskip("mef_tools", reason="legacy writer not installed")
+    from mef_tools.io import MefWriter
+
+    path = tmp_path / "legacy.mefd"
+    rng = np.random.default_rng(3)
+    x = rng.integers(-30000, 30000, 6000).astype(np.int32)
+    w = MefWriter(str(path), overwrite=True)
+    w.write_data(x[:3000], "ch1", START, FS, precision=0)
+    w.write_data(x[3000:], "ch1", START + int(3000 / FS * 1e6) + int(3e6), FS, precision=0)
+    del w
+
+    def read_mef3io():
+        with mef3io.Reader(str(path)) as r:
+            d = r.read_raw("ch1")
+        return d["samples"][d["valid"].astype(bool)].astype(np.int32)
+
+    def read_oracle():
+        s = pymef.MefSession(str(path), "")
+        try:
+            return np.asarray(s.read_ts_channels_sample("ch1", [0, len(x)])).astype(np.int32)
+        finally:
+            s.close()
+
+    assert np.array_equal(read_mef3io(), x), "mef3io must read the legacy session as written"
+    assert np.array_equal(read_oracle(), x)
+
+    report = mef3io.Validator(str(path)).validate()
+    assert not report.ok, "the legacy declarations really are wrong"
+    mef3io.repair_session(str(path), report.repairable_check_ids)
+
+    assert mef3io.Validator(str(path)).validate().ok, "the fixer must leave it clean"
+    _assert_allocation_contract(path)
+    assert np.array_equal(read_mef3io(), x), "repair must not disturb the samples"
+    assert np.array_equal(read_oracle(), x), "the oracle must still read it after repair"
