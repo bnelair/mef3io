@@ -16,3 +16,7 @@ matlab/*.mex*
 site/
 # local scratch (e.g. third-party repos dropped in for investigation)
 tmp/
+
+# agent worktrees and local Claude Code state
+.claude/worktrees/
+.claude/settings.local.json
