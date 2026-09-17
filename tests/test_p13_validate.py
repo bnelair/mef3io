@@ -1001,21 +1001,54 @@ def test_empty_index_is_reported_never_repaired(tmp_path):
 
 
 def test_crc_no_entry_sentinel_is_not_corruption(tmp_path):
-    """CRC_START_VALUE is meflib's 'no entry'. metadata.cpp accepts it, so the
-    validator must not call such a session corrupt — it reads perfectly."""
+    """meflib's "never computed" CRC marker is 0 — CRC_NO_ENTRY, meflib.h:234.
+
+    NOT CRC_START_VALUE (0xFFFFFFFF), which is only the register seed
+    (meflib.h:1214); this test asserted the opposite until 2026-09-17 and
+    pinned the wrong belief in place. meflib computes a body CRC only when it
+    writes a whole file at once and says in-source that piecemeal writers must
+    do it themselves, so a streaming recorder legitimately ships 0.
+
+    Getting this backwards is a compatibility bug in both directions: a
+    legitimate file is called corrupt — which skips every other check on the
+    segment, and for the header CRC throws from the metadata constructor and
+    takes the whole session down — while a CRC genuinely corrupted to
+    0xFFFFFFFF is waved through.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+
+    # Both universal-header CRCs at meflib's no-entry value.
+    raw = bytearray(tmet.read_bytes())
+    struct.pack_into("<I", raw, 4, 0)  # body_CRC = CRC_NO_ENTRY
+    struct.pack_into("<I", raw, 0, 0)  # header_CRC = CRC_NO_ENTRY
+    tmet.write_bytes(bytes(raw))
+
+    with mef3io.Reader(str(path)) as r:
+        assert len(r.read_raw("ch1")["samples"]) > 0, "such a session must still open"
+    report = mef3io.Validator(str(path)).validate()
+    assert "crc.metadata" not in _ids(report), report.summary()
+    assert report.ok, report.summary()
+
+
+def test_a_corrupt_crc_of_0xffffffff_is_still_corruption(tmp_path):
+    """The other half: 0xFFFFFFFF is not a sentinel, so it must not be excused.
+
+    It was, which meant a body CRC corrupted to exactly that value was waved
+    through as "never computed" and the metadata was trusted.
+    """
     path = tmp_path / "s.mefd"
     _write(path)
     tmet = _tmet(path)
     raw = bytearray(tmet.read_bytes())
-    struct.pack_into("<I", raw, 4, 0xFFFFFFFF)  # body_CRC = no entry
+    struct.pack_into("<I", raw, 4, 0xFFFFFFFF)  # a wrong body CRC, not a marker
     struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
     tmet.write_bytes(bytes(raw))
 
-    with mef3io.Reader(str(path)) as r:
-        assert len(r.read_raw("ch1")["samples"]) > 0
     report = mef3io.Validator(str(path)).validate()
-    assert "crc.metadata" not in _ids(report)
-    assert report.ok, report.summary()
+    assert "crc.metadata" in _ids(report), report.summary()
+    assert not report.ok
 
 
 def test_index_trailing_padding_is_tolerated(tmp_path):

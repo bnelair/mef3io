@@ -19,19 +19,24 @@ TimeSeriesMetadata load_time_series_metadata(std::span<const ui1> tmet_bytes,
 
   TimeSeriesMetadata md;
   md.universal_header = UniversalHeader::parse(tmet_bytes);
-  if (!md.universal_header.header_crc_valid(tmet_bytes))
+  // A stored CRC of CRC_NO_ENTRY (0) means the writer never computed one —
+  // meflib's own marker, and legitimate: it computes a body CRC only when
+  // writing a whole file at once. Rejecting it here would throw from this
+  // constructor and take the WHOLE SESSION down over a file that reads
+  // perfectly. A real mismatch still throws.
+  if (md.universal_header.header_crc != CRC_NO_ENTRY &&
+      !md.universal_header.header_crc_valid(tmet_bytes))
     throw CrcError("tmet universal header CRC mismatch");
   // The body CRC covers sections 1-3 (encryption flags, fs/ufact/counts,
   // subject metadata) — 15/16 of the file. Without this check, body
-  // corruption silently yields garbage scaling. CRC_START_VALUE doubles as
-  // meflib's "no entry": skip validation for writers that never filled it.
+  // corruption silently yields garbage scaling.
   //
   // Bound the CRC by the record's declared size, NOT by EOF: .tmet is a
   // fixed-length record (1024 B universal header + 15360 B of sections) and
   // some writers leave trailing bytes past its end. Those bytes are not part
   // of the record the stored CRC was computed over, so hashing to EOF rejects
   // intact metadata as corrupt — and every read of such a session fails.
-  if (md.universal_header.body_crc != CRC_START_VALUE) {
+  if (md.universal_header.body_crc != CRC_NO_ENTRY) {
     ui4 body = crc::calculate(
         tmet_bytes.subspan(UNIVERSAL_HEADER_BYTES, METADATA_FILE_BYTES - UNIVERSAL_HEADER_BYTES));
     if (body != md.universal_header.body_crc)

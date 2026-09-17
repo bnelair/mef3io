@@ -181,14 +181,16 @@ const std::vector<CheckImpl>& check_impls() {
                    const ui4 real_body = crc::calculate(std::span<const ui1>(b).subspan(
                        fmt::UNIVERSAL_HEADER_BYTES,
                        fmt::METADATA_FILE_BYTES - fmt::UNIVERSAL_HEADER_BYTES));
-                   // CRC_START_VALUE is meflib's "no entry" for a CRC field.
-                   // metadata.cpp accepts it rather than rejecting the session,
-                   // so the validator must not call such a file corrupt — it
-                   // reads perfectly.
+                   // CRC_NO_ENTRY (0) is meflib's "never computed" marker —
+                   // meflib.h:234, written at meflib.c:689 and :4614-4615. NOT
+                   // CRC_START_VALUE, which is only the register seed
+                   // (meflib.h:1214). metadata.cpp accepts a no-entry CRC
+                   // rather than rejecting the session, so the validator must
+                   // not call such a file corrupt — it reads perfectly.
                    const bool body_ok =
-                       stored_body == real_body || stored_body == fmt::CRC_START_VALUE;
+                       stored_body == real_body || stored_body == fmt::CRC_NO_ENTRY;
                    const bool header_ok =
-                       stored_header == real_header || stored_header == fmt::CRC_START_VALUE;
+                       stored_header == real_header || stored_header == fmt::CRC_NO_ENTRY;
                    if (header_ok && body_ok) return;
                    hit = true;
                    f.field = !header_ok ? "header_CRC" : "body_CRC";
@@ -228,12 +230,13 @@ const std::vector<CheckImpl>& check_impls() {
                        crc::calculate(std::span<const ui1>(b).subspan(fmt::UNIVERSAL_HEADER_BYTES));
                    const ui4 stored_header = byteio::read<ui4>(b, 0);
                    const ui4 stored_body = byteio::read<ui4>(b, 4);
-                   // CRC_START_VALUE is meflib's "no entry" for a CRC field.
+                   // CRC_NO_ENTRY (0) is meflib's "never computed" marker; see
+                   // the note on crc.metadata above.
                    const bool header_ok =
-                       stored_header == real_header || stored_header == fmt::CRC_START_VALUE;
+                       stored_header == real_header || stored_header == fmt::CRC_NO_ENTRY;
                    const bool body_ok = stored_body == real_body ||
                                         stored_body == real_body_to_eof ||
-                                        stored_body == fmt::CRC_START_VALUE;
+                                        stored_body == fmt::CRC_NO_ENTRY;
                    if (header_ok && body_ok) return;
                    hit = true;
                    f.field = !header_ok ? "header_CRC" : "body_CRC";
