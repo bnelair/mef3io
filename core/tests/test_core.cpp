@@ -19,6 +19,7 @@
 #include "mef3io/red.hpp"
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
+#include "mef3io/validate.hpp"
 
 using namespace mef3io;
 
@@ -192,6 +193,186 @@ TEST_CASE("In-segment append extends the last segment") {
   REQUIRE(map[0].start_sample == 0);
   REQUIRE(map[0].number_of_samples == 2000);
   REQUIRE(map[0].number_of_blocks == 2);
+  fsys::remove_all(dir);
+}
+
+TEST_CASE("Section-2 sizing declarations match the blocks on disk") {
+  namespace fsys = std::filesystem;
+  const auto dir = fsys::temp_directory_path() / "mef3io_sizing_test.mefd";
+  fsys::remove_all(dir);
+
+  const si8 start = 1577836800000000;
+  const sf8 fs = 250.0;
+  std::vector<si4> a(3000);
+  std::mt19937 rng(7);
+  std::uniform_int_distribution<si4> dist(-30000, 30000);
+  for (auto& v : a) v = dist(rng);
+  {
+    SessionWriter w(dir.string(), true);
+    w.write_int32("ch1", a, 1.0, start, fs);
+    // A gap, so the segment holds two contiguous runs rather than one.
+    const si8 t2 = start + static_cast<si8>(std::llround(3000 / fs * 1e6)) + 5000000;
+    w.write_int32("ch1", a, 1.0, t2, fs);
+  }
+
+  const auto seg = dir / "ch1.timd" / "ch1-000000.segd";
+  auto read_file = [](const fsys::path& p) {
+    std::ifstream f(p, std::ios::binary | std::ios::ate);
+    REQUIRE(f);
+    std::vector<ui1> buf(static_cast<std::size_t>(f.tellg()));
+    f.seekg(0);
+    f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+    return buf;
+  };
+
+  auto md = load_time_series_metadata(read_file(seg / "ch1-000000.tmet"), "");
+  const auto& s2 = md.section2;
+
+  // Recompute every declared maximum from the index and the RED block headers.
+  auto tidx = read_file(seg / "ch1-000000.tidx");
+  auto tdat = read_file(seg / "ch1-000000.tdat");
+  const std::size_t n_blocks =
+      (tidx.size() - fmt::UNIVERSAL_HEADER_BYTES) / fmt::TIME_SERIES_INDEX_BYTES;
+  REQUIRE(n_blocks > 1);
+
+  ui4 max_difference_bytes = 0, max_block_samples = 0;
+  si8 max_block_bytes = 0;
+  si8 run_blocks = 0, run_bytes = 0, run_samples = 0;
+  si8 max_run_blocks = 0, max_run_bytes = 0, max_run_samples = 0;
+  for (std::size_t i = 0; i < n_blocks; ++i) {
+    auto e = fmt::TimeSeriesIndex::parse(std::span<const ui1>(tidx).subspan(
+        fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES,
+        fmt::TIME_SERIES_INDEX_BYTES));
+    auto bh = fmt::RedBlockHeader::parse(std::span<const ui1>(tdat).subspan(
+        static_cast<std::size_t>(e.file_offset), fmt::RED_BLOCK_HEADER_BYTES));
+
+    max_difference_bytes = std::max(max_difference_bytes, bh.difference_bytes);
+    max_block_samples = std::max(max_block_samples, e.number_of_samples);
+    max_block_bytes = std::max<si8>(max_block_bytes, e.block_bytes);
+
+    if (e.red_block_flags & fmt::RedBlockHeader::DISCONTINUITY_MASK)
+      run_blocks = run_bytes = run_samples = 0;
+    ++run_blocks;
+    run_bytes += e.block_bytes;
+    run_samples += e.number_of_samples;
+    max_run_blocks = std::max(max_run_blocks, run_blocks);
+    max_run_bytes = std::max(max_run_bytes, run_bytes);
+    max_run_samples = std::max(max_run_samples, run_samples);
+  }
+
+  REQUIRE(s2.maximum_difference_bytes == max_difference_bytes);
+  REQUIRE(s2.maximum_block_samples == max_block_samples);
+  REQUIRE(s2.maximum_block_bytes == max_block_bytes);
+  REQUIRE(s2.maximum_contiguous_blocks == max_run_blocks);
+  REQUIRE(s2.maximum_contiguous_block_bytes == max_run_bytes);
+  REQUIRE(s2.maximum_contiguous_samples == max_run_samples);
+
+  // 0 is not the NO_ENTRY sentinel for any of these, so a reader cannot tell an
+  // unset field from a real measurement: none of them may be left at 0.
+  REQUIRE(s2.maximum_difference_bytes > 0);
+  REQUIRE(s2.maximum_difference_bytes != fmt::UI4_NO_ENTRY);
+  REQUIRE(s2.maximum_contiguous_block_bytes > 0);
+  // The gap splits the segment, so a contiguous run is shorter than the whole.
+  REQUIRE(s2.maximum_contiguous_samples < s2.number_of_samples);
+  // meflib sizes its difference buffer at 5 bytes/sample worst case.
+  REQUIRE(s2.maximum_difference_bytes <= 5 * s2.maximum_block_samples);
+
+  fsys::remove_all(dir);
+}
+
+TEST_CASE("Validator reports declaration defects and repairs only what is selected") {
+  namespace fsys = std::filesystem;
+  const auto dir = fsys::temp_directory_path() / "mef3io_validate_test.mefd";
+  fsys::remove_all(dir);
+
+  const si8 start = 1577836800000000;
+  const sf8 fs = 250.0;
+  std::vector<si4> a(3000);
+  std::mt19937 rng(11);
+  std::uniform_int_distribution<si4> dist(-30000, 30000);
+  for (auto& v : a) v = dist(rng);
+  {
+    SessionWriter w(dir.string(), true);
+    w.write_int32("ch1", a, 1.0, start, fs);
+  }
+
+  // A session mef3io just wrote must satisfy every check.
+  REQUIRE(validate_session(dir.string()).ok());
+  REQUIRE(validate_session(dir.string()).findings.empty());
+
+  const auto tmet = dir / "ch1.timd" / "ch1-000000.segd" / "ch1-000000.tmet";
+  auto patch_s2_ui4 = [&](int section_offset, ui4 value) {
+    std::vector<ui1> raw(fmt::METADATA_FILE_BYTES);
+    {
+      std::ifstream in(tmet, std::ios::binary);
+      REQUIRE(in);
+      in.read(reinterpret_cast<char*>(raw.data()), fmt::METADATA_FILE_BYTES);
+    }
+    byteio::write<ui4>(raw, fmt::METADATA_SECTION_2_OFFSET + section_offset, value);
+    byteio::write<ui4>(raw, 4,
+                       crc::calculate(std::span<const ui1>(raw).subspan(
+                           fmt::UNIVERSAL_HEADER_BYTES,
+                           fmt::METADATA_FILE_BYTES - fmt::UNIVERSAL_HEADER_BYTES)));
+    byteio::write<ui4>(raw, 0,
+                       crc::calculate(std::span<const ui1>(raw).subspan(
+                           4, fmt::UNIVERSAL_HEADER_BYTES - 4)));
+    std::ofstream out(tmet, std::ios::binary | std::ios::trunc);
+    REQUIRE(out);
+    out.write(reinterpret_cast<const char*>(raw.data()), fmt::METADATA_FILE_BYTES);
+  };
+
+  // Simulate a writer that never set the difference-buffer size (mef3io
+  // <= 1.1.2) and also left the block interval at 0 (legacy pymef).
+  patch_s2_ui4(6388, 0);  // maximum_difference_bytes
+  patch_s2_ui4(6392, 0);  // block_interval (low half of an si8; 0 either way)
+
+  auto report = validate_session(dir.string());
+  REQUIRE_FALSE(report.ok());
+  bool saw_difference_bytes = false;
+  for (const auto& f : report.findings)
+    if (f.check_id == "sizing.difference-bytes") {
+      saw_difference_bytes = true;
+      REQUIRE(f.severity == Severity::Error);
+      REQUIRE(f.repairable);
+      REQUIRE_FALSE(f.repaired);
+    }
+  REQUIRE(saw_difference_bytes);
+
+  // Repairs are never implicit.
+  REQUIRE_THROWS_AS(repair_session(dir.string(), RepairSelection{}), std::invalid_argument);
+  RepairSelection not_repairable;
+  not_repairable.check_ids = {"crc.metadata"};
+  REQUIRE_THROWS_AS(repair_session(dir.string(), not_repairable), std::invalid_argument);
+
+  // Repairing one check leaves the other finding outstanding.
+  RepairSelection one;
+  one.check_ids = {"sizing.difference-bytes"};
+  one.backup = false;
+  auto repaired = repair_session(dir.string(), one);
+  REQUIRE(repaired.segments_repaired == 1);
+
+  auto after = validate_session(dir.string());
+  for (const auto& f : after.findings) REQUIRE(f.check_id != "sizing.difference-bytes");
+  bool interval_still_open = false;
+  for (const auto& f : after.findings)
+    if (f.check_id == "times.block-interval") interval_still_open = true;
+  REQUIRE(interval_still_open);
+
+  // Opting in to the rest clears the session, and it still decodes.
+  RepairSelection rest;
+  rest.check_ids = after.repairable_check_ids();
+  rest.backup = false;
+  REQUIRE_FALSE(rest.check_ids.empty());
+  repair_session(dir.string(), rest);
+  REQUIRE(validate_session(dir.string()).ok());
+
+  Session ses(dir.string());
+  auto runs = ses.read_runs("ch1");
+  si8 total = 0;
+  for (const auto& r : runs) total += static_cast<si8>(r.samples.size());
+  REQUIRE(total == 3000);
+  REQUIRE(runs.front().samples.front() == a.front());
+
   fsys::remove_all(dir);
 }
 

@@ -191,6 +191,43 @@ def test_append_conflicts_raise(tmp_path):
     assert len(_segd_dirs(path)) == 1  # nothing was written by the failures
 
 
+def test_failed_append_rolls_back_to_the_original_segment(tmp_path):
+    path = str(tmp_path / "s.mefd")
+    a = np.sin(np.arange(2000) / 20)
+    w = m.SessionWriter(path, True)
+    w.write_float("ch1", np.ascontiguousarray(a), START, FS)
+    del w
+
+    segd = Path(_segd_dirs(path)[0])
+    tmet = segd / "ch1-000000.tmet"
+    tidx = segd / "ch1-000000.tidx"
+    tdat = segd / "ch1-000000.tdat"
+    before = {p.name: p.read_bytes() for p in (tmet, tidx, tdat)}
+
+    # The append path stages .tidx through this sibling temp file. Blocking its
+    # creation forces a failure AFTER .tdat has been appended, which is the
+    # rollback case that used to leave the segment half-updated.
+    blocker = segd / "ch1-000000.tidx.mef3io-tmp"
+    blocker.mkdir()
+    (blocker / "keep").write_text("x")
+    try:
+        w = m.SessionWriter(path, False)
+        t2 = START + int(2000 / FS * 1e6)
+        with pytest.raises(RuntimeError, match="cannot open for write"):
+            w.write_float("ch1", np.ascontiguousarray(a), t2, FS)
+        del w
+    finally:
+        (blocker / "keep").unlink()
+        blocker.rmdir()
+
+    after = {p.name: p.read_bytes() for p in (tmet, tidx, tdat)}
+    assert after == before
+    with mef3io.Reader(path) as r:
+        got = r.read("ch1")
+    assert len(got) == 2000
+    assert not np.isnan(got).any()
+
+
 def test_segment_map_locates_data_across_huge_gap(tmp_path):
     path = str(tmp_path / "s.mefd")
     a = np.sin(np.arange(2000) / 20)
@@ -231,3 +268,35 @@ def test_compat_writer_appends_in_segment(tmp_path):
     legacy = np.asarray(MefReader(path).get_data("ch1"), float)
     assert len(legacy) == 6000
     assert np.allclose(legacy, np.round(np.concatenate([a, a]), 3))
+
+
+def test_append_preserves_file_mode(tmp_path):
+    """Appending must not widen a restricted file.
+
+    `write_file` replaces via a temp file and rename, so the replacement is
+    created under the process umask unless the target's identity is carried
+    across. The `.tmet` carries metadata section 3 — the subject fields — and a
+    deliberately group-restricted session must stay that way after a write.
+    """
+    import os
+    import stat
+
+    path = tmp_path / "s.mefd"
+    fs, start = 256.0, 1577836800000000
+    w = mef3io.Writer(str(path))
+    w.write_int32("ch1", np.arange(2000, dtype=np.int32), 1.0, start, fs)
+    w.close()
+
+    tmet = sorted(Path(path).rglob("*.tmet"))[0]
+    tidx = tmet.with_suffix(".tidx")
+    for f in (tmet, tidx):
+        os.chmod(f, 0o640)
+    before = {f: stat.S_IMODE(os.stat(f).st_mode) for f in (tmet, tidx)}
+
+    w = mef3io.Writer(str(path))
+    w.write_int32("ch1", np.arange(500, dtype=np.int32), 1.0,
+                  start + int(2000 / fs * 1e6), fs)
+    w.close()
+
+    for f, mode in before.items():
+        assert stat.S_IMODE(os.stat(f).st_mode) == mode, f"{f.name} mode changed"

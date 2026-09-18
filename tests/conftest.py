@@ -29,3 +29,40 @@ for parent in [MEF3IO_ROOT, *MEF3IO_ROOT.parents]:
     if (parent / "mef_tools" / "__init__.py").exists():
         sys.path.insert(0, str(parent))
         break
+
+
+# --- opt-in markers ---------------------------------------------------------
+#
+# The leak tests loop hundreds of open/close cycles and thousands of reads and
+# assert on peak RSS. That is slow, and RSS on a shared CI runner is noisy
+# enough that a tight bound would flake. They are the kind of thing you run
+# deliberately — before a release, or when touching the read path — not on
+# every push, so they are skipped unless asked for:
+#
+#     python -m pytest tests --run-leak
+#     python -m pytest tests -m leak --run-leak     # just these
+import pytest  # noqa: E402
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-leak",
+        action="store_true",
+        default=False,
+        help="run the memory-leak tests (slow, and RSS-sensitive)",
+    )
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "leak: resource-hygiene test; needs --run-leak (slow, RSS-sensitive)"
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--run-leak"):
+        return
+    skip = pytest.mark.skip(reason="needs --run-leak (slow, RSS-sensitive)")
+    for item in items:
+        if "leak" in item.keywords:
+            item.add_marker(skip)

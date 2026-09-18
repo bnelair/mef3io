@@ -17,6 +17,7 @@
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
 #include "mef3io/tar.hpp"
+#include "mef3io/validate.hpp"
 #include "mef3io/types.hpp"
 #include "mef3io/version.hpp"
 #include "mef3io/writer.hpp"
@@ -44,6 +45,44 @@ std::span<const mef3io::ui1> as_span(nb::bytes b) {
 }
 nb::bytes to_bytes(std::span<const mef3io::ui1> s) {
   return nb::bytes(reinterpret_cast<const char*>(s.data()), s.size());
+}
+}  // namespace
+
+namespace {
+nb::dict report_to_dict(const mef3io::Report& r) {
+  nb::list findings;
+  for (const auto& f : r.findings) {
+    nb::dict d;
+    d["check_id"] = f.check_id;
+    d["severity"] = mef3io::severity_name(f.severity);
+    d["channel"] = f.channel;
+    d["segment"] = f.segment_number;
+    d["path"] = f.path;
+    d["field"] = f.field;
+    d["stored"] = f.stored;
+    d["expected"] = f.expected;
+    d["message"] = f.message;
+    d["repairable"] = f.repairable;
+    d["repaired"] = f.repaired;
+    findings.append(d);
+  }
+  nb::list skipped;
+  for (const auto& s : r.skipped) {
+    nb::dict d;
+    d["channel"] = s.channel;
+    d["segment"] = s.segment_number;
+    d["path"] = s.path;
+    d["reason"] = s.reason;
+    skipped.append(d);
+  }
+  nb::dict out;
+  out["findings"] = findings;
+  out["skipped"] = skipped;
+  out["segments_checked"] = r.segments_checked;
+  out["segments_repaired"] = r.segments_repaired;
+  out["checks_run"] = r.checks_run;
+  out["checks_repaired"] = r.checks_repaired;
+  return out;
 }
 }  // namespace
 
@@ -78,6 +117,82 @@ NB_MODULE(_mef3io, m) {
   m.def("extract_session", &mef3io::extract_session, nb::arg("tar_path"),
         nb::arg("dest_dir") = "", nb::arg("overwrite") = false,
         "Unpack a session archive back into a directory and return its path.");
+
+  // --- validation / repair (dicts in, dicts out; mef3io.validate wraps them) ---
+  m.def(
+      "validation_checks",
+      [] {
+        nb::list out;
+        for (const auto& c : mef3io::checks()) {
+          nb::dict d;
+          d["id"] = c.id;
+          d["title"] = c.title;
+          d["description"] = c.description;
+          d["severity"] = mef3io::severity_name(c.severity);
+          d["repairable"] = c.repairable;
+          out.append(d);
+        }
+        return out;
+      },
+      "The validation check registry, in the order checks run.");
+
+  m.def(
+      "validate_session",
+      [](const std::string& path, const std::string& password,
+         std::vector<std::string> channels, std::vector<int> segments,
+         std::vector<std::string> check_ids, bool exact_difference_bytes) {
+        mef3io::ValidateOptions opts;
+        opts.password = password;
+        opts.channels = std::move(channels);
+        opts.segments = std::move(segments);
+        opts.check_ids = std::move(check_ids);
+        opts.exact_difference_bytes = exact_difference_bytes;
+        // Unbounded blocking I/O: with exact_difference_bytes it reads a header
+        // per RED block. Holding the GIL would freeze the whole interpreter.
+        mef3io::Report r;
+        {
+          nb::gil_scoped_release release;
+          r = mef3io::validate_session(path, opts);
+        }
+        return report_to_dict(r);
+      },
+      nb::arg("path"), nb::arg("password") = "",
+      nb::arg("channels") = std::vector<std::string>{},
+      nb::arg("segments") = std::vector<int>{},
+      nb::arg("check_ids") = std::vector<std::string>{},
+      nb::arg("exact_difference_bytes") = true,
+      "Check a session's declarations against its data. Reads only.");
+
+  m.def(
+      "repair_session",
+      [](const std::string& path, std::vector<std::string> repair_check_ids,
+         const std::string& password, std::vector<std::string> channels,
+         std::vector<int> segments, std::vector<std::string> check_ids,
+         bool exact_difference_bytes, bool backup) {
+        mef3io::ValidateOptions opts;
+        opts.password = password;
+        opts.channels = channels;
+        opts.segments = segments;
+        opts.check_ids = std::move(check_ids);
+        opts.exact_difference_bytes = exact_difference_bytes;
+        mef3io::RepairSelection sel;
+        sel.check_ids = std::move(repair_check_ids);
+        sel.channels = std::move(channels);
+        sel.segments = std::move(segments);
+        sel.backup = backup;
+        mef3io::Report r;
+        {
+          nb::gil_scoped_release release;
+          r = mef3io::repair_session(path, sel, opts);
+        }
+        return report_to_dict(r);
+      },
+      nb::arg("path"), nb::arg("repair_check_ids"), nb::arg("password") = "",
+      nb::arg("channels") = std::vector<std::string>{},
+      nb::arg("segments") = std::vector<int>{},
+      nb::arg("check_ids") = std::vector<std::string>{},
+      nb::arg("exact_difference_bytes") = true, nb::arg("backup") = true,
+      "Validate, then write back only the selected repairs. Never implicit.");
 
   // Exposed for parity tests against the Python oracles.
   m.def(
@@ -386,6 +501,20 @@ NB_MODULE(_mef3io, m) {
            nb::arg("password") = "", nb::arg("n_threads") = 0)
       .def("set_threads", &mef3io::Reader::set_threads)
       .def_prop_ro("channels", &mef3io::Reader::channels)
+      .def(
+          "declaration_issues",
+          [](mef3io::Reader& r) {
+            nb::list out;
+            for (const auto& i : r.declaration_issues()) {
+              nb::dict d;
+              d["channel"] = i.channel;
+              d["segment"] = i.segment_number;
+              d["field"] = i.field;
+              out.append(d);
+            }
+            return out;
+          },
+          "Section-2 size declarations this session leaves unset. Free to call.")
       .def("info",
            [](mef3io::Reader& r, const std::string& ch) {
              const auto& ci = r.info(ch);
