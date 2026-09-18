@@ -70,7 +70,7 @@ core/tests/test_tar.cpp, tests/test_p11_tar.py, tar block in
 matlab/test_mef3io.m.
 
 Validator/repair (`core/{include,src}/…/validate.{hpp,cpp}`, `python/mef3io/
-validate.py`, `python/mef3io/__main__.py`): a REGISTRY of 15 checks comparing a
+validate.py`, `python/mef3io/__main__.py`): a REGISTRY of 17 checks comparing a
 session's declarations against its data, run in a fixed order (integrity →
 structure → sizing → times → headers). Adding a check = ONE entry with
 `detect` + optional `repair` lambdas; ordering/filtering/reporting/bindings/CLI

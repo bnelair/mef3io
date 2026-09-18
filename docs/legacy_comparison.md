@@ -122,9 +122,11 @@ wrapper rather than from pymef. pymef defaults `block_interval` and
 pymef computes `maximum_contiguous_block_bytes` as the whole data body
 regardless of the discontinuity flags it wrote, and never assigns
 `maximum_contiguous_samples`. mef3io measures each run against the same `.tidx`
-discontinuity flag a reader uses — though since no reference reader consumes
-this family at all, its repair only ever raises these fields, never lowers
-them.
+discontinuity flag a reader uses, and its repair writes that measured value in
+BOTH directions — so a legacy file's whole-file over-declaration is brought
+down to the longest run, not just raised where it was too small. Under-declaring
+is the truncating direction and is rated an error; over-declaring only wastes
+memory and is a warning.
 
 Neither reader depends on `maximum_difference_bytes` — pymef sizes from
 `RED_MAX_DIFFERENCE_BYTES(maximum_block_samples)` and mef3io from each block's

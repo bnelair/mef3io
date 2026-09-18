@@ -1746,3 +1746,58 @@ def test_thousands_of_reads_from_one_reader_do_not_accumulate(tmp_path):
         f"peak RSS grew {growth_mib:.2f} MiB over 3000 reads from one open reader "
         f"— a clean run measures well under 1 MiB"
     )
+
+
+def test_repair_refuses_an_index_with_unknown_entry_sizes(tmp_path):
+    """An entry at NO_ENTRY makes every derived total too small.
+
+    The sentinel is coerced to 0 so it cannot inflate a total, which means the
+    totals under-count instead — and writing those back under-declares a
+    reader's buffer, the direction that truncates. Observed before this gate:
+    number_of_samples rewritten from 4000 down to 1440.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path, gap_us=0)
+    tmet = _tmet(path)
+    tidx = Path(tmet).with_suffix(".tidx")
+    before = _read_s2(tmet, "number_of_samples")
+
+    raw = bytearray(tidx.read_bytes())
+    struct.pack_into("<I", raw, UH_BYTES + 24, 0xFFFFFFFF)  # entry 0 sample count
+    struct.pack_into("<I", raw, 4, m.crc32(bytes(raw[UH_BYTES:])))
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
+    tidx.write_bytes(bytes(raw))
+
+    report = mef3io.Validator(str(path)).validate()
+    assert "index.entry-counts" in _ids(report), report.summary()
+    assert not report.ok
+
+    digest = _tree_digest(path)
+    out = mef3io.repair_session(str(path), ["index.sample-count", "sizing.contiguous"])
+    assert _tree_digest(path) == digest, "totals derived from unknown sizes must not be written"
+    assert out.segments_repaired == 0
+    assert _read_s2(tmet, "number_of_samples") == before
+
+
+def test_unverified_index_crc_is_reported_like_metadata(tmp_path):
+    """An unverified `.tidx` must not read as a verified one.
+
+    crc.metadata reports a no-entry CRC; crc.index returned silently, so a
+    block table whose bytes were never checked produced no finding at all —
+    and the repairs derive their truth from exactly those bytes.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tidx = Path(_tmet(path)).with_suffix(".tidx")
+    raw = bytearray(tidx.read_bytes())
+    struct.pack_into("<I", raw, 4, 0)  # body_CRC = CRC_NO_ENTRY
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
+    tidx.write_bytes(bytes(raw))
+
+    report = mef3io.Validator(str(path)).validate()
+    hits = [f for f in report.findings if f.check_id == "crc.index"]
+    assert hits, report.summary()
+    assert all(f.severity == "warning" for f in hits), "unverifiable is not corrupt"
+    # ...and it must not disarm the rest of the registry.
+    assert len(report.checks_run) == len(mef3io.available_checks())
+    assert not report.skipped, report.summary()

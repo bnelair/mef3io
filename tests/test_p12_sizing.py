@@ -549,3 +549,92 @@ def test_acceptance_legacy_session_reads_and_upgrades_losslessly(tmp_path):
     _assert_allocation_contract(path)
     assert np.array_equal(read_mef3io(), x), "repair must not disturb the samples"
     assert np.array_equal(read_oracle(), x), "the oracle must still read it after repair"
+
+
+def test_append_onto_a_padded_index_keeps_the_session_readable(tmp_path):
+    """Trailing `.tidx` padding is tolerated on READ, so it must survive a write.
+
+    Foreign writers pad past the last index entry and `crc.index` deliberately
+    accepts that (it bounds its hash by the declared entry count). But the
+    append used to insert new entries after the padding, putting every one of
+    them at a broken stride — the reader then rejected the whole file with
+    "index file body is not a whole number of entries". mef3io corrupting a
+    session it considers valid, with its own writer.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path, gap_us=0, n=4000)
+    tmet = _segments(path)[0]
+    tidx = Path(tmet).with_suffix(".tidx")
+
+    raw = bytearray(tidx.read_bytes()) + bytes(16)  # under one entry: tolerated
+    struct.pack_into("<I", raw, 4, m.crc32(bytes(raw[UH_BYTES:])))
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
+    tidx.write_bytes(bytes(raw))
+    assert mef3io.Validator(str(path)).validate().ok, "the padding must be tolerated"
+
+    w = mef3io.Writer(str(path))
+    w.write_int32("ch1", np.arange(500, dtype=np.int32), 0.5,
+                  START + int(8000 / FS * 1e6), FS)
+    w.close()
+
+    body = len(tidx.read_bytes()) - UH_BYTES
+    assert body % TIDX_RECORD_BYTES == 0, "the index must stay a whole number of entries"
+    assert mef3io.Validator(str(path)).validate().ok
+    with mef3io.Reader(str(path)) as r:
+        assert r.read_raw("ch1")["samples"].size > 0
+
+
+def test_append_refuses_an_index_entry_with_an_unknown_size(tmp_path):
+    """An entry at NO_ENTRY cannot be totalled, so the append must not guess.
+
+    Coercing the sentinel to 0 keeps it from inflating a total, but then every
+    figure derived from the index is too SMALL — and the append writes those
+    figures back as the segment's declarations, under-declaring a reader's
+    buffer. Refusing is the safe answer; the validator names the segment.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path, gap_us=0, n=4000)
+    tmet = _segments(path)[0]
+    tidx = Path(tmet).with_suffix(".tidx")
+
+    raw = bytearray(tidx.read_bytes())
+    struct.pack_into("<I", raw, UH_BYTES + 24, UI4_NO_ENTRY)  # entry 0 sample count
+    struct.pack_into("<I", raw, 4, m.crc32(bytes(raw[UH_BYTES:])))
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
+    tidx.write_bytes(bytes(raw))
+
+    before = _read_section2(tmet)["number_of_samples"]
+    w = mef3io.Writer(str(path))
+    with pytest.raises(RuntimeError, match="NO_ENTRY|unset"):
+        w.write_int32("ch1", np.arange(100, dtype=np.int32), 0.5,
+                      START + int(8000 / FS * 1e6), FS)
+    try:
+        w.close()
+    except Exception:
+        pass
+    assert _read_section2(tmet)["number_of_samples"] == before, "declarations must not shrink"
+
+
+def test_append_replaces_an_under_declared_difference_bytes(tmp_path):
+    """Appending must not carry an existing under-declaration forward.
+
+    Screening only 0 and NO_ENTRY treated a stored `1` as a real measurement,
+    so appending to an already-defective segment preserved the crash-class
+    defect rather than repairing it. Anything below the worst case for the
+    largest block cannot be verified without re-reading every old block header,
+    so the bound is taken instead.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path, gap_us=0, n=4000)
+    tmet = _segments(path)[0]
+    _patch_section2(tmet, maximum_difference_bytes=1)  # a real under-declaration
+
+    w = mef3io.Writer(str(path))
+    w.write_int32("ch1", np.arange(500, dtype=np.int32), 0.5,
+                  START + int(8000 / FS * 1e6), FS)
+    w.close()
+
+    declared = _read_section2(tmet)
+    assert declared["maximum_difference_bytes"] > 1, "the under-declaration rode forward"
+    assert declared["maximum_difference_bytes"] >= _real_stats(tmet)["maximum_difference_bytes"]
+    assert mef3io.Validator(str(path)).validate().ok

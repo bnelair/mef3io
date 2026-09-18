@@ -470,6 +470,18 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     std::vector<ui1> file = read_whole_file(tidx_path);
     auto uh = fmt::UniversalHeader::parse(file);
     uh.end_time = end_disk;
+    // Drop any trailing bytes that do not form a whole entry before appending.
+    // Foreign writers pad past the last entry — the validator deliberately
+    // tolerates that (crc.index bounds its hash by the declared count) — but
+    // appending after the padding puts every new entry at a broken stride, and
+    // the reader then rejects the whole file with "index file body is not a
+    // whole number of entries". Reproduced: a 16-byte pad plus one append made
+    // the session unreadable.
+    if (file.size() > fmt::UNIVERSAL_HEADER_BYTES) {
+      const std::size_t body = file.size() - fmt::UNIVERSAL_HEADER_BYTES;
+      const std::size_t whole = body - (body % fmt::TIME_SERIES_INDEX_BYTES);
+      file.resize(fmt::UNIVERSAL_HEADER_BYTES + whole);
+    }
     std::vector<ui1> entry(fmt::TIME_SERIES_INDEX_BYTES);
     for (const auto& e : index) {
       e.serialize(entry);
@@ -495,8 +507,19 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
       const bool discontinuity = (e.red_block_flags & fmt::RedBlockHeader::DISCONTINUITY_MASK) != 0;
       // A foreign index may leave an entry's counts at NO_ENTRY; treat those as
       // nothing rather than letting 0xFFFFFFFF inflate the totals.
-      const ui4 samples = e.number_of_samples == fmt::UI4_NO_ENTRY ? 0 : e.number_of_samples;
-      const ui4 bytes = e.block_bytes == fmt::UI4_NO_ENTRY ? 0 : e.block_bytes;
+      // An entry that does not say how big its block is cannot be totalled.
+      // Coercing it to 0 (so a sentinel cannot inflate the total) makes every
+      // figure derived here too SMALL, and those figures are about to be
+      // written back as the segment's declarations — under-declaring a
+      // reader's buffer, the direction that truncates. Refuse the append
+      // instead; `python -m mef3io validate` names the segment.
+      if (e.number_of_samples == fmt::UI4_NO_ENTRY || e.block_bytes == fmt::UI4_NO_ENTRY)
+        throw WriteConflictError(
+            "cannot append: an existing .tidx entry leaves its sample or byte count unset "
+            "(NO_ENTRY), so the segment's totals cannot be recomputed without under-declaring "
+            "them: " + tidx_path);
+      const ui4 samples = e.number_of_samples;
+      const ui4 bytes = e.block_bytes;
       contiguous.add(discontinuity, samples, bytes);
       index_max_block_samples = std::max(index_max_block_samples, samples);
       index_max_block_bytes = std::max<si8>(index_max_block_bytes, bytes);
@@ -559,12 +582,19 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     // write NO_ENTRY) fall back to meflib's own worst case over the blocks the
     // index describes, which bounds them without reading .tdat.
     const ui4 stored_difference_bytes = s2.maximum_difference_bytes;
-    const bool stored_is_usable =
-        stored_difference_bytes != 0 && stored_difference_bytes != fmt::UI4_NO_ENTRY;
+    // A stored value is only usable if it could actually be a real maximum for
+    // the blocks the index describes. Screening just 0 and NO_ENTRY let an
+    // existing UNDER-declaration (say 1) ride forward untouched, so appending
+    // to an already-defective segment preserved the crash-class defect instead
+    // of repairing it. Anything below the worst case for the largest block is
+    // unverifiable without re-reading every old .tdat header, so take the
+    // bound: over-declaring costs a reader memory, under-declaring truncates.
+    const ui4 bound = red_max_difference_bytes(index_max_block_samples);
+    const bool stored_is_usable = stored_difference_bytes != 0 &&
+                                  stored_difference_bytes != fmt::UI4_NO_ENTRY &&
+                                  stored_difference_bytes >= max_difference_bytes;
     s2.maximum_difference_bytes =
-        std::max(max_difference_bytes, stored_is_usable
-                                           ? stored_difference_bytes
-                                           : red_max_difference_bytes(index_max_block_samples));
+        stored_is_usable ? std::max(max_difference_bytes, stored_difference_bytes) : bound;
     // These are in NATIVE units (counts * units_conversion_factor), not raw
     // counts - see pymef3_file.c:972-978, which also swaps the pair when the
     // factor is negative. Folding a raw si4 onto them mixes units and lands the

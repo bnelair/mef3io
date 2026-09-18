@@ -141,6 +141,11 @@ struct SegmentTruth {
   // internally consistent, so nothing else catches it.
   bool index_covers_data = true;
   si8 unaccounted_tail_bytes = 0;
+  // False => some entry left number_of_samples or block_bytes at NO_ENTRY.
+  // Those are coerced to 0 so a sentinel cannot inflate a total, which means
+  // every total derived here is then an UNDER-estimate.
+  bool index_counts_known = true;
+  si8 unknown_count_entries = 0;
 };
 
 // The mutable declarations a repair may write back.
@@ -152,9 +157,9 @@ struct RepairBuffer {
 
 using DetectFn = std::function<void(const SegmentState&, const SegmentTruth&, Finding&, bool&)>;
 // Returns whether it actually changed a declaration. A repair is allowed to
-// decline (sizing.contiguous refuses to lower an over-declaration), and a
-// declined repair must not be reported as one — `repaired` on a finding means
-// "this was written", not "a repair was offered".
+// decline — sizing.difference-bytes will not write 0, the NULL-buffer value it
+// exists to remove — and a declined repair must not be reported as one:
+// `repaired` on a finding means "this was written", not "a repair was offered".
 using RepairFn = std::function<bool(const SegmentTruth&, RepairBuffer&)>;
 
 struct CheckImpl {
@@ -259,10 +264,25 @@ const std::vector<CheckImpl>& check_impls() {
                    // the note on crc.metadata above.
                    const bool header_ok =
                        stored_header == real_header || stored_header == fmt::CRC_NO_ENTRY;
+                   const bool body_no_entry = stored_body == fmt::CRC_NO_ENTRY;
+                   const bool header_no_entry = stored_header == fmt::CRC_NO_ENTRY;
                    const bool body_ok = stored_body == real_body ||
-                                        stored_body == real_body_to_eof ||
-                                        stored_body == fmt::CRC_NO_ENTRY;
-                   if (header_ok && body_ok) return;
+                                        stored_body == real_body_to_eof || body_no_entry;
+                   if (header_ok && body_ok) {
+                     // Same rule as crc.metadata: accepted, but reported. An
+                     // unverified index must not read as a verified one — the
+                     // repairs derive their truth from exactly these bytes.
+                     if (!header_no_entry && !body_no_entry) return;
+                     hit = true;
+                     f.severity = Severity::Warning;
+                     f.field = header_no_entry ? "header_CRC" : "body_CRC";
+                     f.stored = "NO_ENTRY";
+                     f.expected = declared_ui4(header_no_entry ? real_header : real_body);
+                     f.message =
+                         "the writer never computed this CRC (meflib's CRC_NO_ENTRY), so the "
+                         "block table cannot be verified; accepted, but not checked";
+                     return;
+                   }
                    hit = true;
                    f.field = !header_ok ? "header_CRC" : "body_CRC";
                    f.stored = declared_ui4(!header_ok ? stored_header : stored_body);
@@ -310,6 +330,28 @@ const std::vector<CheckImpl>& check_impls() {
                        "and before .tidx was rewritten, leaving an unreferenced tail — in which "
                        "case the index is correct and the tail is the thing to remove. The two "
                        "are indistinguishable from here, so nothing is repaired in this segment.";
+                 },
+                 {}});
+
+    v.push_back({{"index.entry-counts", "Every index entry declares its size",
+                  "Each .tidx entry carries the block's sample count and byte count. An entry "
+                  "that leaves either at NO_ENTRY does not say how big its block is, and this "
+                  "module coerces such a value to 0 so a sentinel cannot inflate a total — "
+                  "which makes every total and maximum derived from that index too SMALL. "
+                  "Writing those back would under-declare a reader's buffer, the direction that "
+                  "truncates rather than merely wastes. Not repairable (the missing sizes are "
+                  "only in the .tdat block headers), and it blocks repairs on the segment.",
+                  Severity::Error, false},
+                 [](const SegmentState&, const SegmentTruth& t, Finding& f, bool& hit) {
+                   if (t.index_counts_known) return;
+                   hit = true;
+                   f.field = "number_of_samples/block_bytes";
+                   f.stored = "NO_ENTRY";
+                   f.expected = "a real size";
+                   f.message = num(t.unknown_count_entries) +
+                               " index entr(ies) leave their sample or byte count unset; totals "
+                               "derived from this index would be too small, so nothing is "
+                               "repaired in this segment";
                  },
                  {}});
 
@@ -823,6 +865,12 @@ SegmentTruth derive_truth(const SessionSource& src, const SegmentState& s,
         fmt::TIME_SERIES_INDEX_BYTES));
     // A damaged index may leave counts at NO_ENTRY; treat those as nothing
     // rather than letting 0xFFFFFFFF inflate every total derived here.
+    const bool counts_known =
+        e.number_of_samples != fmt::UI4_NO_ENTRY && e.block_bytes != fmt::UI4_NO_ENTRY;
+    if (!counts_known) {
+      t.index_counts_known = false;
+      ++t.unknown_count_entries;
+    }
     const ui4 samples = e.number_of_samples == fmt::UI4_NO_ENTRY ? 0 : e.number_of_samples;
     const ui4 block_bytes = e.block_bytes == fmt::UI4_NO_ENTRY ? 0 : e.block_bytes;
     const bool discontinuity =
@@ -969,19 +1017,29 @@ SegmentTruth derive_truth(const SessionSource& src, const SegmentState& s,
 // not durable: without this, a power cut can leave the rename visible and the
 // data behind it missing — and a short .tmet throws from the metadata loader,
 // which takes the whole session down, not just that segment.
-void fsync_file(const std::string& path) {
+[[nodiscard]] bool fsync_file(const std::string& path) {
 #ifdef _WIN32
   HANDLE h = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (h == INVALID_HANDLE_VALUE) return;
-  FlushFileBuffers(h);
+  if (h == INVALID_HANDLE_VALUE) return false;
+  const bool ok = FlushFileBuffers(h) != 0;
   CloseHandle(h);
+  return ok;
 #else
   const int fd = ::open(path.c_str(), O_RDONLY);
-  if (fd < 0) return;
-  ::fsync(fd);
-  ::close(fd);
+  if (fd < 0) return false;
+  const bool ok = ::fsync(fd) == 0;
+  return ::close(fd) == 0 && ok;
 #endif
+}
+
+// Flush, and fail loudly if the flush did not happen. Used where the whole
+// point of the call is durability: silently renaming an unflushed file over a
+// good one would give back exactly the guarantee the caller was promised and
+// did not get.
+void fsync_file_or_throw(const std::string& path) {
+  if (!fsync_file(path))
+    throw IoError("could not flush to disk, the write is not durable: " + path);
 }
 
 // A rename is only durable once the DIRECTORY entry is flushed too. Windows
@@ -1044,7 +1102,7 @@ void write_all_atomic(const std::string& path, std::span<const ui1> bytes) {
   // before it is replaced. Then flush the data before the rename, and the
   // directory entry after it.
   copy_file_identity(target, tmp);
-  fsync_file(tmp.string());
+  fsync_file_or_throw(tmp.string());
   std::error_code ec;
   fsys::rename(tmp, target, ec);
   if (ec) {
@@ -1078,7 +1136,7 @@ void overwrite_universal_header(const std::string& path, const fmt::UniversalHea
   if (!out) throw IoError("header update failed: " + path);
   out.close();
   if (!out) throw IoError("close failed, header may not have reached disk: " + path);
-  fsync_file(path);
+  (void)fsync_file(path);  // best effort: body unchanged, header is backed up
 }
 
 // `<session>.repair-backup`, with any trailing separator stripped first —
@@ -1126,7 +1184,7 @@ void back_up(const std::string& file, const fsys::path& backup_root, const std::
   }
   // The backup exists to survive exactly the crash that fsync guards against;
   // an unflushed one can come back empty from the same power cut.
-  fsync_file(part.string());
+  fsync_file_or_throw(part.string());
   std::error_code ec;
   fsys::rename(part, dest, ec);
   if (ec) {
@@ -1370,7 +1428,8 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     // Both were reported before this gate existed and then repaired FROM
     // ANYWAY, which turned a readable session into an unreadable one. Checks
     // still all run, so the report stays complete; only the writing stops.
-    const bool index_trustworthy = truth.offsets_sane && truth.index_covers_data;
+    const bool index_trustworthy =
+        truth.offsets_sane && truth.index_covers_data && truth.index_counts_known;
 
     for (const auto* impl : active) {
       if (impl->info.id == "crc.metadata" || impl->info.id == "crc.index") continue;
@@ -1412,10 +1471,13 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     // would reasonably read the report as "nothing needed fixing".
     if (repair && !index_trustworthy && selected(repair->channels, files.channel) &&
         selected(repair->segments, files.segment_number))
-      skip(truth.offsets_sane
-               ? "the block index does not describe the whole data file; nothing was repaired "
-                 "in this segment"
-               : "the block index is structurally unsound; nothing was repaired in this segment");
+      skip(!truth.offsets_sane
+               ? "the block index is structurally unsound; nothing was repaired in this segment"
+               : !truth.index_counts_known
+                     ? "the block index leaves entry sizes unset; nothing was repaired in this "
+                       "segment"
+                     : "the block index does not describe the whole data file; nothing was "
+                       "repaired in this segment");
 
     if (!any_repair) {
       report.findings.insert(report.findings.end(), staged.begin(), staged.end());

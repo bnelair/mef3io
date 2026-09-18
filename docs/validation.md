@@ -146,6 +146,7 @@ declarations a reader allocates from, then the time fields. Ids are stable API.
 | `crc.index` | error | no | The `.tidx` header and body CRCs |
 | `index.block-offsets` | error | no | Every block lies inside `.tdat`, in increasing order |
 | `index.data-coverage` | error | no | The index describes the whole of `.tdat`, with no unaccounted tail. Blocks repairs on the segment |
+| `index.entry-counts` | error | no | Every `.tidx` entry declares its sample and byte count. Unset sizes make every derived total too small. Blocks repairs on the segment |
 | `index.block-count` | error | yes | `number_of_blocks` vs the `.tidx` entry count |
 | `index.sample-count` | error | yes | `number_of_samples` vs the sum over the index |
 | `index.start-sample` | warning | no | `start_sample` vs the first index entry (writers disagree; report only) |
