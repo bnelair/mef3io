@@ -10,6 +10,7 @@
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <system_error>
 #include <tuple>
 
 #include "mef3io/byteio.hpp"
@@ -21,6 +22,7 @@
 #include "mef3io/source.hpp"
 
 #ifdef _WIN32
+#define NOMINMAX
 #include <windows.h>
 #else
 #include <fcntl.h>
@@ -1082,6 +1084,21 @@ void finish_stream(std::ofstream& f, const std::string& path) {
   if (!f) throw IoError("close failed, data may not have reached disk: " + path);
 }
 
+void replace_file(const fsys::path& tmp, const fsys::path& target) {
+#ifdef _WIN32
+  if (MoveFileExW(tmp.wstring().c_str(), target.wstring().c_str(),
+                  MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    return;
+  const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
+  throw IoError("cannot replace " + target.string() + ": " + ec.message());
+#else
+  std::error_code ec;
+  fsys::rename(tmp, target, ec);
+  if (!ec) return;
+  throw IoError("cannot replace " + target.string() + ": " + ec.message());
+#endif
+}
+
 // Replace a file's contents atomically: fill a sibling temp file, flush it,
 // then rename over the target. A crash or a full disk leaves the original
 // untouched instead of a truncated one — which matters because the file being
@@ -1102,13 +1119,17 @@ void write_all_atomic(const std::string& path, std::span<const ui1> bytes) {
   // before it is replaced. Then flush the data before the rename, and the
   // directory entry after it.
   copy_file_identity(target, tmp);
+  // Flush before the rename, and fail loudly if the flush did not happen:
+  // renaming an unflushed file over a good one hands back a durability
+  // guarantee the caller did not get. replace_file is the portable swap
+  // (MoveFileEx + WRITE_THROUGH on Windows).
   fsync_file_or_throw(tmp.string());
-  std::error_code ec;
-  fsys::rename(tmp, target, ec);
-  if (ec) {
+  try {
+    replace_file(tmp, target);
+  } catch (...) {
     std::error_code ignored;
     fsys::remove(tmp, ignored);
-    throw IoError("cannot replace " + path + ": " + ec.message());
+    throw;
   }
   fsync_directory(target.parent_path());
 }
