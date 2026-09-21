@@ -2065,6 +2065,11 @@ def test_open_time_warning_covers_the_si8_no_entry_sentinel(tmp_path):
     )
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX permission bits: on Windows chmod only toggles the read-only "
+    "attribute and st_mode always reads 0o666, so there is nothing to preserve",
+)
 def test_repair_preserves_file_mode(tmp_path):
     """The .tmet holds metadata section 3 — subject name, id, recording location.
 

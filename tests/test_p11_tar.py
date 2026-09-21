@@ -223,10 +223,16 @@ def test_cache_over_tar(tmp_path):
     assert r2._impl is None  # warm start served from the snapshot
     assert r1.info("ch1") == r2.info("ch1")
     # Touching the archive invalidates the snapshot (single-file fingerprint).
+    # Bump by whole SECONDS, not the nanosecond this used to use: NTFS stores
+    # 100-ns ticks and other filesystems are coarser still, so a 1 ns bump
+    # rounds away and the fingerprint never changes. Assert the touch actually
+    # landed, so a filesystem that ignores it fails here rather than silently
+    # turning the check below into a no-op.
     import os
 
     st = tar.stat()
-    os.utime(tar, ns=(st.st_atime_ns, st.st_mtime_ns + 1))
+    os.utime(tar, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
+    assert tar.stat().st_mtime_ns != st.st_mtime_ns, "the filesystem ignored the touch"
     r3 = mef3io.Reader(str(tar), cache=str(cache_file))
     assert r3._impl is not None
 

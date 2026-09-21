@@ -35,18 +35,48 @@ namespace fsys = std::filesystem;
 /// rename visible and the data behind it missing — and a short `.tmet` throws
 /// from the metadata loader, which takes the whole session down, not just that
 /// segment. Returns false rather than throwing so a caller can decide whether
-/// durability is the point of its call.
-[[nodiscard]] inline bool fsync_file(const std::string& path) {
+/// durability is the point of its call; `why` receives the OS error when it
+/// does fail, because "the write is not durable" without a reason is a bug
+/// report nobody can act on.
+///
+/// WINDOWS NEEDS GENERIC_WRITE HERE. `FlushFileBuffers` requires the handle to
+/// carry the write right and fails with ERROR_ACCESS_DENIED without it —
+/// unlike POSIX, where fsync on an O_RDONLY descriptor is perfectly legal.
+/// Opening for read cost nothing on Linux and macOS and made every flush on
+/// Windows a no-op that reported failure: `durability="full"` threw on the
+/// first append, and the paths that ignore the result — `durability="fast"`
+/// and the recovery backups — silently had no durability at all. Do not
+/// "simplify" this back to GENERIC_READ.
+[[nodiscard]] inline bool fsync_file(const std::string& path, std::string* why = nullptr) {
 #ifdef _WIN32
-  HANDLE h = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+  const auto fail = [&](const char* what) {
+    if (why) {
+      const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
+      *why = std::string(what) + ": " + ec.message();
+    }
+    return false;
+  };
+  // The wide entry point, like replace_file: CreateFileA goes through the ANSI
+  // code page, so a session path outside it cannot even be opened.
+  const std::wstring wide = fsys::path(path).wstring();
+  HANDLE h = CreateFileW(wide.c_str(), GENERIC_WRITE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (h == INVALID_HANDLE_VALUE) return false;
-  const bool ok = FlushFileBuffers(h) != 0;
+  if (h == INVALID_HANDLE_VALUE) return fail("cannot open for flushing");
+  if (!FlushFileBuffers(h)) {
+    const bool reported = fail("FlushFileBuffers");
+    CloseHandle(h);
+    return reported;
+  }
   CloseHandle(h);
-  return ok;
+  return true;
 #else
+  const auto fail = [&](const char* what) {
+    if (why) *why = std::string(what) + ": " + std::error_code(errno, std::generic_category()).message();
+    return false;
+  };
   const int fd = ::open(path.c_str(), O_RDONLY);
-  if (fd < 0) return false;
+  if (fd < 0) return fail("cannot open for flushing");
   bool ok;
 #if defined(__APPLE__)
   // macOS has no fdatasync, and its fsync() only pushes the data to the drive
@@ -75,7 +105,14 @@ namespace fsys = std::filesystem;
   // commits for timestamps nobody reads.
   ok = ::fdatasync(fd) == 0;
 #endif
-  return ::close(fd) == 0 && ok;
+  if (!ok) {
+    const int saved = errno;
+    ::close(fd);
+    errno = saved;
+    return fail("fsync");
+  }
+  if (::close(fd) != 0) return fail("close");
+  return true;
 #endif
 }
 
@@ -85,8 +122,10 @@ namespace fsys = std::filesystem;
 /// unflushed file over a good one gives back exactly the guarantee the caller
 /// was promised and did not get.
 inline void fsync_file_or_throw(const std::string& path) {
-  if (!fsync_file(path))
-    throw IoError("could not flush to disk, the write is not durable: " + path);
+  std::string why;
+  if (!fsync_file(path, &why))
+    throw IoError("could not flush to disk, the write is not durable: " + path +
+                  (why.empty() ? "" : " (" + why + ")"));
 }
 
 /// A rename is only durable once the DIRECTORY entry is flushed too. Windows

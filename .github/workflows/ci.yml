@@ -18,14 +18,23 @@ jobs:
         run: python3 scripts/lint_matlab_tests.py
 
   cpp-tests:
-    runs-on: ubuntu-latest
+    # All three platforms, not just Linux. The durability barriers are the most
+    # platform-specific code in the library — fsync, FlushFileBuffers,
+    # F_FULLFSYNC are three different calls with three different rules — and a
+    # Windows-only defect in them shipped while this job was Linux-only.
+    name: C++ tests ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Build and run C++ unit tests
         run: |
-          cmake -S core -B build-core -DMEF3IO_BUILD_TESTS=ON
-          cmake --build build-core -j
-          ctest --test-dir build-core --output-on-failure
+          cmake -S core -B build-core -DMEF3IO_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-core --config Release -j
+          ctest --test-dir build-core -C Release --output-on-failure
 
   python-tests:
     name: pytest ${{ matrix.os }} / py${{ matrix.python-version }}
@@ -37,6 +46,7 @@ jobs:
           - { os: ubuntu-latest, python-version: "3.12" }
           - { os: ubuntu-latest, python-version: "3.13" }
           - { os: macos-latest, python-version: "3.13" }
+          - { os: windows-latest, python-version: "3.13" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -53,21 +63,6 @@ jobs:
           python -c "import mef3io, pathlib; v = pathlib.Path('VERSION').read_text().strip(); assert mef3io.__version__ == v, (mef3io.__version__, v)"
       - name: Run test suite
         run: python -m pytest tests -q
-
-  # Windows has no reliable pymef oracle build; verify compile + import + the
-  # oracle-free subset instead. Full Windows coverage happens in cibuildwheel.
-  windows-smoke:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - name: Install and smoke-test
-        run: |
-          python -m pip install --upgrade pip
-          pip install .
-          python -c "import mef3io; assert mef3io.have_cpp_backend(); print('cpp backend OK,', mef3io.__version__)"
 
   # Newest CPython, oracle-free (the legacy pymef stack may lag new Pythons):
   # compile, import, and a full write/read round trip.

@@ -244,6 +244,28 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   append pays ~3 fsyncs per channel, so a 128-channel append is ~5 s where the
   fresh write is ~0.4 s. That is the price of not corrupting a clinical
   archive; do not "optimise" it away without replacing the guarantee.
+  THE FLUSH IS THREE DIFFERENT CALLS with three different rules, and the
+  platform differences are load-bearing: Linux `fdatasync`, macOS
+  `F_FULLFSYNC` (with an ENOTSUP fallback), Windows `FlushFileBuffers`.
+  **Windows requires the handle to carry GENERIC_WRITE** — unlike POSIX, where
+  fsync on an O_RDONLY descriptor is legal — and opening for read there fails
+  ERROR_ACCESS_DENIED. That shipped: `durability="full"` threw on the first
+  append, and the callers that IGNORE the result (`durability="fast"`, the
+  recovery backups) silently had no durability at all, which is the worse half.
+  Use `CreateFileW`, not `CreateFileA`, or a non-ASCII session path cannot be
+  opened. A round trip can never catch this class of bug — the bytes land
+  either way on an orderly shutdown — so the primitive is tested directly in
+  `core/tests/test_durability.cpp`, and `fsync_file` returns the OS error
+  through its `why` out-param because "the write is not durable" with no cause
+  is a bug report nobody can act on.
+  WHY IT REACHED A RELEASE: no Windows job had ever executed a WRITE. `cpp-tests`
+  was Linux-only, `windows-smoke` only imported the module, and cibuildwheel's
+  `test-command` was also just an import. `tests/test_p18_recovery.py` already
+  covered a `durability="full"` append and would have caught it — on a platform
+  that ran it. Now: `cpp-tests` and `python-tests` both include windows-latest
+  (pymef ships win_amd64 wheels, mef-tools is pure Python, so the oracle stack
+  installs there), and cibuildwheel runs the five oracle-free suites against the
+  built wheel on every arch.
 - **NEVER `finalize_crcs` a `.tmet`, and never `s2.serialize` one you did not
   build.** Both are write-side traps that mirror read-side gotchas above, and
   the append fell into both for a long time (fixed 2026-09-21). (a) `.tmet` is
