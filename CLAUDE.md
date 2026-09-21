@@ -188,8 +188,25 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   FIRST append after opening a segment still walks it once (the existing blocks
   are only described there), so keep ONE Writer open across an acquisition. The
   fast and slow paths MUST produce identical bytes —
-  `test_append_index_cache_matches_the_full_walk` pins exactly that. (2) Docs:
-  `docs/long_recordings.md`.
+  `test_append_index_cache_matches_the_full_walk` pins exactly that. The
+  index is NEVER rewritten whole on either path — the slow path still READS
+  it (the totals and the open contiguous run can only come from the
+  existing entries) but appends in place like the fast one, because a
+  caller that reopens its Writer per block is a natural Python pattern and
+  the rewrite was ~47x write amplification for a 10-min block against a
+  month-long index. `test_an_append_never_rewrites_the_index_or_the_data`
+  pins it for BOTH durability settings, self-calibrating against actual
+  file growth. (2) `durability="fast"` (`Writer(durability=)`) drops the
+  barriers: writes stay ATOMIC so nothing is torn, but cross-file ORDERING
+  goes, so a crash can leave the index referencing data that never landed —
+  detectable and fixed by `recover_session`. fast + all cores is 1.26x
+  meflib; full + 1 thread is 0.49x. (3) `recover_session` (core/src/
+  recover.cpp, `python -m mef3io recover`) is the ONLY thing that may touch
+  the index or data — repair_session never does, which is what keeps it safe
+  on anything. Index-ahead-of-data drops entries; data-ahead-of-index
+  REBUILDS them from the RED block headers (CRC-checked). Dry run by
+  default. (4) Docs: `docs/long_recordings.md`, `docs/validation.md`,
+  `for_agents/INVARIANTS.md`.
 - **Durability is scoped, deliberately** (`core/src/durability.hpp`, shared by
   writer.cpp and validate.cpp — they had drifted, and the path writing SAMPLES
   was less careful than the one rewriting declarations). Three barriers are

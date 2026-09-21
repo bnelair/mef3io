@@ -204,10 +204,13 @@ def test_failed_append_rolls_back_to_the_original_segment(tmp_path):
     tdat = segd / "ch1-000000.tdat"
     before = {p.name: p.read_bytes() for p in (tmet, tidx, tdat)}
 
-    # The append path stages .tidx through this sibling temp file. Blocking its
-    # creation forces a failure AFTER .tdat has been appended, which is the
-    # rollback case that used to leave the segment half-updated.
-    blocker = segd / "ch1-000000.tidx.mef3io-tmp"
+    # The .tmet is the LAST of the three files an append writes, and the only
+    # one still staged through a sibling temp file (the .tdat and .tidx are
+    # extended in place, because rewriting them whole is O(session length)).
+    # Blocking that temp file therefore fails after BOTH the .tdat and the
+    # .tidx have already been modified — the hardest rollback case, and the one
+    # that used to leave the segment half-updated.
+    blocker = segd / "ch1-000000.tmet.mef3io-tmp"
     blocker.mkdir()
     (blocker / "keep").write_text("x")
     try:

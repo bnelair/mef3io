@@ -70,6 +70,24 @@ class Writer:
     metadata : mef3io.Metadata or dict, optional
         Session-wide subject/acquisition metadata written to every channel.
         Also settable later via :meth:`set_metadata` (before writing).
+    durability : {"full", "fast"}, optional
+        How hard an **append** works to survive a crash. Default ``"full"``:
+        the ``.tdat`` is flushed before the ``.tidx`` that references it, and
+        the ``.tidx``/``.tmet`` updates are flushed before being published, so
+        a power cut leaves the segment consistent with the last append either
+        fully present or fully absent.
+
+        ``"fast"`` drops those barriers. Writes stay **atomic**, so no file is
+        ever torn and the session is never half-written; what is given up is
+        the *ordering* between files, so a crash can leave the index
+        referencing data that never landed. That is detectable
+        (:func:`mef3io.validate_session`) and repairable
+        (:func:`mef3io.recover_session`), which is what makes it a trade rather
+        than a footgun. With ``n_threads=0`` it is faster than the reference C
+        implementation, which does no flushing at all.
+
+        A fresh write is unaffected either way — there is nothing underneath it
+        to lose.
 
     Examples
     --------

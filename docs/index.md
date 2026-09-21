@@ -10,6 +10,13 @@ thinly for each language — so float scaling, NaN-gap handling, precision
 inference, appends, and encryption behave exactly the same everywhere, and
 every binding carries the same version number.
 
+!!! tip "Long recordings"
+    These files run for days to months and reach tens of gigabytes **per
+    channel**. [Long recordings](long_recordings.md) covers the append
+    workload, the `durability` knob, and what is guaranteed at that scale;
+    [Validation & repair](validation.md#recovery-after-an-interrupted-write)
+    covers recovering a session after an interrupted write.
+
 ## Why mef3io
 
 - **Fast** — parallel RED encode/decode: **~7–8× faster** than the legacy

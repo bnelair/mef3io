@@ -142,3 +142,63 @@ def test_an_append_does_not_rewrite_the_whole_data_file(big_session, tmp_path):
         f"an append read {read_bytes / 1e6:.1f} MB of a {size / 1e6:.1f} MB .tdat; it should "
         f"only extend it and patch the header"
     )
+
+
+def _io():
+    d = {}
+    for line in open("/proc/self/io"):
+        k, v = line.split()
+        d[k.rstrip(":")] = int(v)
+    return d["rchar"], d["wchar"]
+
+
+@pytest.mark.parametrize("durability", ["full", "fast"])
+def test_an_append_never_rewrites_the_index_or_the_data(tmp_path, durability):
+    """Write amplification must be bounded by the NEW data, not the session.
+
+    Both files an append touches grow without limit over a months-long
+    recording: the `.tdat` to tens of gigabytes *per channel*, the `.tidx` to
+    megabytes. Neither may be rewritten. The `.tdat` is extended in place and
+    its 1024-byte header patched; the `.tidx` likewise — it used to be rewritten
+    whole, which for a caller that reopens its Writer per block (a natural way
+    to use this from Python) was ~47x write amplification against a month-long
+    index.
+
+    Checked for BOTH durability settings: `durability="full"` buys ordering
+    barriers, not a different write strategy.
+    """
+    path = tmp_path / "s.mefd"
+    rng = np.random.default_rng(5)
+    # Small blocks so the index is large relative to the data appended.
+    w = mef3io.Writer(str(path), block_length=256, durability=durability)
+    for i in range(20):
+        w.write_int32("ch1", rng.integers(-(2**30), 2**30, int(FS * 600), dtype=np.int32),
+                      0.1, START + i * 600_000_000, FS)
+    w.close()
+
+    tidx = next(Path(path).rglob("*.tidx"))
+    tdat = next(Path(path).rglob("*.tdat"))
+    index_size, data_size = tidx.stat().st_size, tdat.stat().st_size
+    assert index_size > 200_000, "fixture index too small to detect a rewrite"
+
+    block = rng.integers(-(2**30), 2**30, int(FS * 600), dtype=np.int32)
+
+    # A REOPENED writer: the case that used to rewrite the whole index.
+    w = mef3io.Writer(str(path), block_length=256, durability=durability)
+    before = _io()
+    w.write_int32("ch1", block, 0.1, START + 20 * 600_000_000, FS)
+    read_bytes, written = (a - b for a, b in zip(_io(), before))
+    w.close()
+
+    # Self-calibrating: how much did the files actually GROW? A correct append
+    # writes about that much, plus the 16 KB .tmet. One that rewrites the index
+    # writes `index_size` more than that, which is the whole point.
+    grew = (tidx.stat().st_size - index_size) + (tdat.stat().st_size - data_size)
+    slack = 64 * 1024 + 16 * 1024          # filesystem slop + the .tmet
+    assert written < grew + slack + index_size * 0.25, (
+        f"{durability}: wrote {written / 1e6:.2f} MB while the files grew only "
+        f"{grew / 1e6:.2f} MB, against a {index_size / 1e6:.2f} MB index and a "
+        f"{data_size / 1e6:.1f} MB .tdat — something is being rewritten whole"
+    )
+    # Reading the index once on a reopen is expected; reading the DATA never is.
+    assert read_bytes < data_size * 0.5, f"{durability}: the .tdat was read back"

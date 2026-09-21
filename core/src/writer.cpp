@@ -634,8 +634,9 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   std::vector<ui1> original_tidx;      // slow path: the file, verbatim
   std::vector<ui1> original_tidx_uh;   // fast path: just the header
   const std::size_t original_tidx_size = static_cast<std::size_t>(tidx_size_on_disk);
-  std::vector<ui1> new_tidx;           // slow path only: the whole new file
-  std::vector<ui1> new_tidx_uh;        // fast path only: the patched header
+  std::vector<ui1> new_tidx_uh;        // the patched 1024-byte header
+  // Slow path only: truncate to here (padding stripped) before appending.
+  std::size_t strip_tidx_to = 0;
   ui4 tidx_body_crc = 0;
 
   if (use_cache) {
@@ -674,11 +675,15 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
                        crc::calculate(std::span<const ui1>(new_tidx_uh)
                                           .subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4)));
   } else {
-    new_tidx = read_whole_file(tidx_path);
-    // Keep the file exactly as found, for a byte-exact rollback. Reconstructing
-    // it by truncating the extended copy would fabricate any trailing padding as
-    // zeros, and padding is not necessarily zero.
-    original_tidx = new_tidx;
+    // The existing entries have to be READ — the totals, maxima and open
+    // contiguous run can only come from them, and so can the body CRC. But
+    // they do NOT have to be rewritten: the new entries are appended in place
+    // exactly as on the fast path. Rewriting the whole index here cost a full
+    // extra write per append for a caller that reopens its Writer per block,
+    // which is a natural way to use the library and would be ~47x write
+    // amplification for a 10-minute block against a month-long index.
+    std::vector<ui1> existing = read_whole_file(tidx_path);
+    original_tidx = existing;   // byte-exact rollback, padding included
     // Drop trailing bytes that do not form a whole entry before appending.
     // Foreign writers pad past the last entry and the validator deliberately
     // tolerates it (crc.index bounds its hash by the declared count) — but
@@ -686,31 +691,42 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     // the reader then rejects the whole file with "index file body is not a
     // whole number of entries". Reproduced: 16 bytes of padding plus one append
     // made the session unreadable.
-    if (new_tidx.size() > fmt::UNIVERSAL_HEADER_BYTES) {
-      const std::size_t body = new_tidx.size() - fmt::UNIVERSAL_HEADER_BYTES;
-      new_tidx.resize(fmt::UNIVERSAL_HEADER_BYTES +
+    if (existing.size() > fmt::UNIVERSAL_HEADER_BYTES) {
+      const std::size_t body = existing.size() - fmt::UNIVERSAL_HEADER_BYTES;
+      existing.resize(fmt::UNIVERSAL_HEADER_BYTES +
                       (body - (body % fmt::TIME_SERIES_INDEX_BYTES)));
     }
-    auto uh = fmt::UniversalHeader::parse(new_tidx);
-    uh.end_time = end_disk;
-    new_tidx.insert(new_tidx.end(), new_entries.begin(), new_entries.end());
+    // What the file will be truncated to before the new entries are appended.
+    strip_tidx_to = existing.size();
 
-    std::span<const ui1> entries =
-        std::span<const ui1>(new_tidx).subspan(fmt::UNIVERSAL_HEADER_BYTES);
-    const std::size_t n_entries = entries.size() / fmt::TIME_SERIES_INDEX_BYTES;
-    index_entries = n_entries;
+    std::span<const ui1> existing_entries =
+        std::span<const ui1>(existing).subspan(fmt::UNIVERSAL_HEADER_BYTES);
+    // Rolling CRC over the entries already on disk, then over the new ones —
+    // the same value a whole-body hash would give, computed once.
+    tidx_body_crc = crc::calculate(existing_entries);
+    tidx_body_crc = crc::calculate(new_entries, tidx_body_crc);
+
+    const std::size_t n_entries =
+        existing_entries.size() / fmt::TIME_SERIES_INDEX_BYTES + index.size();
     // Count what the file now holds, rather than adding to what the old header
     // claimed. A foreign or older header may carry meflib's NO_ENTRY (-1) or a
     // plain wrong number, and `stored + nb` propagates that error forever —
     // meflib clamps number_of_blocks DOWN to this field (meflib.c:5983-5984,
     // :6005-6006), so an undercount makes the segment read short, or empty.
-    uh.number_of_entries = static_cast<si8>(n_entries);
-    uh.serialize(new_tidx);
-    finalize_crcs(new_tidx);
-    tidx_body_crc = byteio::read<ui4>(new_tidx, 4);
-    for (std::size_t i = 0; i < n_entries; ++i) {
-      auto e = fmt::TimeSeriesIndex::parse(
-          entries.subspan(i * fmt::TIME_SERIES_INDEX_BYTES, fmt::TIME_SERIES_INDEX_BYTES));
+    index_entries = n_entries;
+    original_tidx_uh.assign(existing.begin(), existing.begin() + fmt::UNIVERSAL_HEADER_BYTES);
+    new_tidx_uh = original_tidx_uh;
+    {
+      auto uh = fmt::UniversalHeader::parse(new_tidx_uh);
+      uh.end_time = end_disk;
+      uh.number_of_entries = static_cast<si8>(n_entries);
+      uh.serialize(new_tidx_uh);
+      byteio::write<ui4>(new_tidx_uh, 4, tidx_body_crc);
+      byteio::write<ui4>(new_tidx_uh, 0,
+                         crc::calculate(std::span<const ui1>(new_tidx_uh)
+                                            .subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4)));
+    }
+    auto fold = [&](const fmt::TimeSeriesIndex& e) {
       const bool discontinuity = (e.red_block_flags & fmt::RedBlockHeader::DISCONTINUITY_MASK) != 0;
       // An entry that does not say how big its block is cannot be totalled.
       // Coercing it to 0 (so a sentinel cannot inflate the total) makes every
@@ -730,7 +746,12 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
       index_max_block_bytes = std::max<si8>(index_max_block_bytes, bytes);
       index_total_samples += samples;
       if (discontinuity) ++index_n_discontinuities;
-    }
+    };
+    const std::size_t n_existing = existing_entries.size() / fmt::TIME_SERIES_INDEX_BYTES;
+    for (std::size_t i = 0; i < n_existing; ++i)
+      fold(fmt::TimeSeriesIndex::parse(existing_entries.subspan(
+          i * fmt::TIME_SERIES_INDEX_BYTES, fmt::TIME_SERIES_INDEX_BYTES)));
+    for (const auto& e : index) fold(e);
   }
 
   // --- Build the new .tdat universal header, now that the index has been
@@ -913,24 +934,30 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     // had already been modified. Rolling back a file that was never touched is
     // harmless; failing to roll back one that was is not.
     wrote_tidx = true;
-    if (use_cache) {
-      // Append the entries, make them durable, and only THEN patch the header
-      // that declares them. The header is what a reader counts, so publishing
-      // it before the entries are on disk is the one ordering that could leave
-      // the index describing bytes that are not there.
-      {
-        std::ofstream app(tidx_path, std::ios::binary | std::ios::app);
-        if (!app) throw IoError("cannot open for append: " + tidx_path);
-        app.write(reinterpret_cast<const char*>(new_entries.data()),
-                  static_cast<std::streamsize>(new_entries.size()));
-        if (!app) throw IoError("append failed: " + tidx_path);
-        finish_stream(app, tidx_path);
-      }
-      if (spec.durable) fsync_file_or_throw(tidx_path);
-      overwrite_file_prefix(tidx_path, new_tidx_uh);
-    } else {
-      write_file(tidx_path, new_tidx, spec.durable);
+    // ONE write path, cached or not: append the entries in place, make them
+    // durable, and only THEN patch the header that declares them. The header is
+    // what a reader counts, so publishing it before the entries are on disk is
+    // the one ordering that could leave the index describing bytes that are not
+    // there. The index is never rewritten whole — at month scale that was a
+    // full extra write of a multi-megabyte file for every append.
+    if (!use_cache && strip_tidx_to) {
+      // Trailing bytes that do not form a whole entry (foreign padding, which
+      // the validator tolerates) go before the new entries are appended.
+      std::error_code ec;
+      if (fs::file_size(tidx_path, ec) != strip_tidx_to)
+        fs::resize_file(tidx_path, static_cast<std::uintmax_t>(strip_tidx_to), ec);
+      if (ec) throw IoError("cannot trim index padding: " + tidx_path + ": " + ec.message());
     }
+    {
+      std::ofstream app(tidx_path, std::ios::binary | std::ios::app);
+      if (!app) throw IoError("cannot open for append: " + tidx_path);
+      app.write(reinterpret_cast<const char*>(new_entries.data()),
+                static_cast<std::streamsize>(new_entries.size()));
+      if (!app) throw IoError("append failed: " + tidx_path);
+      finish_stream(app, tidx_path);
+    }
+    if (spec.durable) fsync_file_or_throw(tidx_path);
+    overwrite_file_prefix(tidx_path, new_tidx_uh);
     patched_tdat_header = true;
     overwrite_file_prefix(tdat_path, new_tdat_uh);
     wrote_tmet = true;
@@ -964,18 +991,21 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     if (wrote_tmet)
       restore(tmet_path, tmet, "tmet", [&] { write_file(tmet_path, tmet); });
     if (wrote_tidx) {
-      if (use_cache) {
-        // Put the length and the header back; nothing else was touched.
-        try {
+      // The file was extended in place, so the original is its first
+      // `original_tidx_size` bytes with the old header. On the slow path any
+      // stripped padding lived in those bytes, so write them back verbatim
+      // rather than truncating — padding is not necessarily zero.
+      try {
+        if (!original_tidx.empty()) {
+          write_file(tidx_path, original_tidx, spec.durable);
+        } else {
           std::error_code ec;
           fs::resize_file(tidx_path, static_cast<std::uintmax_t>(original_tidx_size), ec);
           if (ec) note_rollback("tidx truncate rollback failed: " + ec.message());
           else overwrite_file_prefix(tidx_path, original_tidx_uh);
-        } catch (const std::exception& e) {
-          note_rollback(std::string("tidx rollback failed: ") + e.what());
         }
-      } else {
-        restore(tidx_path, original_tidx, "tidx", [&] { write_file(tidx_path, original_tidx); });
+      } catch (const std::exception& e) {
+        note_rollback(std::string("tidx rollback failed: ") + e.what());
       }
     }
     if (patched_tdat_header) {
@@ -1009,7 +1039,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     // unconditionally — including after a slow path — so the NEXT append can
     // take the fast one.
     cache->valid = true;
-    cache->file_size = use_cache ? original_tidx_size + new_entries.size() : new_tidx.size();
+    cache->file_size = (use_cache ? original_tidx_size : strip_tidx_to) + new_entries.size();
     cache->entries = index_entries;
     cache->total_samples = index_total_samples;
     cache->n_discontinuities = index_n_discontinuities;

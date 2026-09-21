@@ -31,6 +31,12 @@ See the [validation guide](../validation.md) for what each check means.
 
 ::: mef3io.repair_session
 
+::: mef3io.recover_session
+
+::: mef3io.RecoveryReport
+
+::: mef3io.RecoveredSegment
+
 ::: mef3io.SessionDeclarationWarning
 
 ## Metadata objects

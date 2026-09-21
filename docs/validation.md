@@ -248,3 +248,87 @@ truth can be written back — a `repair` lambda. Everything else (ordering,
 filtering, reporting, the bindings, the CLI) picks it up automatically. The
 Python test `tests/test_p13_validate.py` asserts that every repairable check
 has a corruption case, so a new one cannot ship untested.
+
+## Recovery — after an interrupted write
+
+`validate` and `repair` both assume the block index describes the data. If a
+write was interrupted — a crash, a power cut, a killed process — that may not be
+true, and no amount of rewriting declarations will fix it. `recover_session`
+is the tool for that case, and it is the **only** one that may change the block
+index or the data file.
+
+```python
+import mef3io
+
+report = mef3io.recover_session("session.mefd")      # DRY RUN — writes nothing
+print(report.summary())
+
+if report.segments:                                   # something to do
+    report = mef3io.recover_session("session.mefd", apply=True)
+    # the index changed, so the declarations derived from it are now stale
+    ids = mef3io.Validator("session.mefd").validate().repairable_check_ids
+    mef3io.repair_session("session.mefd", ids)
+
+assert mef3io.Validator("session.mefd").validate().ok
+```
+
+The CLI does the whole sequence, including the follow-up repair:
+
+```bash
+python -m mef3io recover session.mefd            # dry run
+python -m mef3io recover session.mefd --apply
+```
+
+### What it does, and why the two cases differ
+
+An interrupted append leaves one of two shapes. They are **not** treated the
+same, because one has lost data and the other has not:
+
+| shape | meaning | action |
+|---|---|---|
+| **index ahead of data** | entries reference `.tdat` bytes that never landed | those samples do not exist — the entries are **dropped** |
+| **data ahead of index** | blocks reached `.tdat` but the index was not extended | those samples **do** exist — the entries are **rebuilt** |
+
+Recovering the second case is possible because a RED block header carries the
+sample count, byte count, start time and discontinuity flag — everything an
+index entry needs. Only blocks whose **CRC verifies** are indexed: a torn tail
+is not a block, and is dropped instead.
+
+### Reading the report
+
+```python
+report.segments          # tuple[RecoveredSegment, ...] — only segments needing work
+report.skipped           # segments that could not be examined, with reasons
+report.segments_examined # how many were looked at
+report.applied           # False for a dry run
+report.backup_root       # where the originals went
+report.nothing_to_do     # True when the session is already consistent
+
+for s in report.segments:
+    print(s.path, s.blocks_recovered, s.blocks_dropped, s.action)
+```
+
+### Safety
+
+- **Dry run by default.** Nothing is written unless you pass `apply=True`.
+- **Backs up what changes, not the file.** The `.tidx`, the `.tdat`'s
+  1024-byte header, and any dropped fragment go to
+  `<session>.recover-backup/`. The `.tdat` itself may be tens of gigabytes —
+  and that is one channel — so copying it to undo a header patch would make the
+  tool unusable on exactly the sessions it is for. Pass `backup=False` to skip.
+- **A healthy session is untouched**, byte for byte.
+- **Tar archives are refused** — extract first.
+- It **streams**: the `.tdat`'s size, plus a 304-byte RED header and the one
+  block it describes, at a handful of offsets. It never loads the data file.
+
+### When you should need it
+
+With the default `durability="full"` an append cannot leave either shape: the
+`.tdat` is flushed before the `.tidx` that references it. Recovery exists for
+`durability="fast"` (see
+[Long recordings](long_recordings.md#the-durability-knob)), for storage that
+lied about a flush, and for sessions produced by tools that make no ordering
+guarantee at all — which includes the reference C library.
+
+If you run `durability="fast"` in production, run `recover` as a routine step
+after any unclean shutdown rather than only when something looks wrong.
