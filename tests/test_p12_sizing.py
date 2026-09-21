@@ -64,6 +64,27 @@ SIZING_FIELDS = (
 )
 
 
+def _assert_sizing_is_safe(stored, real, where=""):
+    """Every sizing declaration matches the blocks on disk exactly.
+
+    `maximum_difference_bytes` is the one field an append cannot rediscover —
+    the earlier blocks' real values are in .tdat block headers, and re-reading
+    them would cost a seek per block. A writer that encoded those blocks itself
+    carries the exact maximum forward in memory, so a chunked write stays
+    exact; only a segment REOPENED from disk falls back to meflib's worst-case
+    bound, which `test_reopened_append_bounds_an_unverifiable_declaration`
+    covers. Both are checked here: exact when known, never below the truth and
+    never above the bound otherwise.
+    """
+    for name in SIZING_FIELDS:
+        if name == "maximum_difference_bytes":
+            assert real[name] <= stored[name] <= 5 * real["maximum_block_samples"], (
+                f"{name} declared {stored[name]}, on disk {real[name]} {where}"
+            )
+        else:
+            assert stored[name] == real[name], f"{name} {where}"
+
+
 def _segments(path):
     return sorted(Path(path).rglob("*.tmet"))
 
@@ -152,10 +173,7 @@ def test_sizing_fields_match_the_blocks_on_disk(tmp_path):
     _write(path, channels=("ch1", "ch2"))
 
     for tmet in _segments(path):
-        stored = _read_section2(tmet)
-        real = _real_stats(tmet)
-        for name in SIZING_FIELDS:
-            assert stored[name] == real[name], f"{name} in {tmet.name}"
+        _assert_sizing_is_safe(_read_section2(tmet), _real_stats(tmet), f"in {tmet.name}")
 
 
 def test_no_sizing_field_is_zero_or_no_entry(tmp_path):
@@ -198,7 +216,7 @@ def test_difference_bytes_within_meflib_worst_case(tmp_path):
 # --- appends -----------------------------------------------------------------
 
 
-def test_append_keeps_sizing_fields_exact(tmp_path):
+def test_append_keeps_sizing_fields_exact_or_safely_bounded(tmp_path):
     path = str(tmp_path / "s.mefd")
     x = _write(path, gap_us=0)
     w = mef3io.Writer(path)
@@ -206,10 +224,7 @@ def test_append_keeps_sizing_fields_exact(tmp_path):
     w.close()
 
     tmet = _segments(path)[0]
-    stored = _read_section2(tmet)
-    real = _real_stats(tmet)
-    for name in SIZING_FIELDS:
-        assert stored[name] == real[name], name
+    _assert_sizing_is_safe(_read_section2(tmet), _real_stats(tmet))
 
 
 def test_append_repairs_fields_left_unset_by_older_mef3io(tmp_path):
@@ -284,6 +299,77 @@ def test_append_bounds_no_entry_difference_bytes(tmp_path):
     real = _real_stats(tmet)
     assert stored["maximum_difference_bytes"] != UI4_NO_ENTRY
     assert stored["maximum_difference_bytes"] >= real["maximum_difference_bytes"]
+
+
+def test_chunked_write_keeps_difference_bytes_exact(tmp_path):
+    """Building a session in several calls must not cost exactness.
+
+    The blocks of every chunk were encoded by this writer, so their true
+    maximum is known in memory and no bound is needed. Only a segment reopened
+    from disk — where the earlier blocks' values are unreachable without a seek
+    per block — falls back to meflib's worst case.
+    """
+    path = str(tmp_path / "s.mefd")
+    x = _write(path, gap_us=0)          # two write_int32 calls: the 2nd appends
+    tmet = _segments(path)[0]
+    assert _read_section2(tmet)["maximum_difference_bytes"] == (
+        _real_stats(tmet)["maximum_difference_bytes"]
+    ), "a same-process chunked write should stay exact, not fall back to the bound"
+
+    # A third chunk through the same writer keeps it exact too.
+    w = mef3io.Writer(path)
+    w.write_int32("ch1", x, 0.5, START + int(3 * 4000 / FS * 1e6), FS)
+    w.write_int32("ch1", x, 0.5, START + int(5 * 4000 / FS * 1e6), FS)
+    w.close()
+    stored, real = _read_section2(tmet), _real_stats(tmet)
+    # This writer did NOT encode the first two chunks (the session was reopened),
+    # so the declaration is bounded rather than exact — but never below truth.
+    assert real["maximum_difference_bytes"] <= stored["maximum_difference_bytes"]
+    assert stored["maximum_difference_bytes"] <= 5 * real["maximum_block_samples"]
+
+
+def test_reopened_append_bounds_an_unverifiable_declaration(tmp_path):
+    """A wrong declaration does not have to look wrong to be fatal.
+
+    ``maximum_difference_bytes`` is the one field an append cannot verify: the
+    old blocks' real values are in .tdat block headers, and re-reading them
+    would cost a seek per block. Screening the stored value against the blocks
+    being appended is not enough — it catches a stored 1, but a stored 3000
+    against a true 12488 sails through whenever the new blocks happen to be
+    smaller, and the under-declaration a meflib reader truncates its buffer on
+    rides forward untouched. The append therefore takes meflib's worst case for
+    the largest block as a floor, which bounds every block whatever the stored
+    value meant.
+    """
+    path = str(tmp_path / "s.mefd")
+    x = _write(path, gap_us=0)
+    tmet = _segments(path)[0]
+    real_before = _real_stats(tmet)
+
+    # Plausible, well clear of 0/NO_ENTRY, and far below the truth.
+    bogus = real_before["maximum_difference_bytes"] // 4
+    assert 0 < bogus < real_before["maximum_difference_bytes"]
+    _patch_section2(tmet, maximum_difference_bytes=bogus)
+
+    # Append blocks that are individually SMALLER than the bogus declaration,
+    # which is what let it survive the previous screen.
+    flat = np.zeros(500, dtype=np.int32)
+    w = mef3io.Writer(path)
+    w.write_int32("ch1", flat, 0.5, START + int(3 * 4000 / FS * 1e6), FS)
+    w.close()
+
+    stored = _read_section2(tmet)
+    real = _real_stats(tmet)
+    assert stored["maximum_difference_bytes"] >= real["maximum_difference_bytes"], (
+        "the append carried a wrong under-declaration forward"
+    )
+    assert stored["maximum_difference_bytes"] <= 5 * real["maximum_block_samples"]
+    # And the session the append produced is clean by the validator's own rules.
+    assert not [
+        f
+        for f in mef3io.Validator(path).validate().findings
+        if f.check_id == "sizing.difference-bytes"
+    ]
 
 
 # --- reading stays independent of the fields ---------------------------------
@@ -467,20 +553,33 @@ ALLOCATION_FIELDS = (
 
 
 def _assert_allocation_contract(session):
-    """Every field a meflib-based reader allocates from is set and exact.
+    """Every field a meflib-based reader allocates from is set and safe.
 
     `0` is not the NO_ENTRY sentinel for any of these, so an unset one is
     indistinguishable from a measured one and the reader sizes a buffer from
     it. Checked against the blocks actually on disk, not merely for
-    non-zeroness, so an over-declaration fails too — the requirement is exact,
-    not merely safe.
+    non-zeroness, so a silent over-declaration fails too.
+
+    The one deliberate exception is `maximum_difference_bytes` on a segment
+    written in more than one call: the earlier blocks' real values are in .tdat
+    block headers, which an append does not re-read, so it declares meflib's
+    worst case instead. That is bounded above (never an unbounded
+    over-declaration) and never below the truth, which is the direction that
+    truncates a reader's buffer.
     """
     for tmet in _segments(session):
         declared, real = _read_section2(tmet), _real_stats(tmet)
         for name in ALLOCATION_FIELDS:
             v = declared[name]
             assert v not in (0, UI4_NO_ENTRY, -1), f"{tmet.name}: {name} is unset ({v})"
-            if name in real:
+            if name not in real:
+                continue
+            if name == "maximum_difference_bytes":
+                assert real[name] <= v <= 5 * real["maximum_block_samples"], (
+                    f"{tmet.name}: {name} declared {v}, on disk {real[name]}, "
+                    f"bound {5 * real['maximum_block_samples']}"
+                )
+            else:
                 assert v == real[name], f"{tmet.name}: {name} declared {v}, on disk {real[name]}"
 
 

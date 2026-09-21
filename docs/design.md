@@ -170,9 +170,12 @@ ABI shim (later) converts to codes. Bindings map to Python exceptions.
   the encoded RED headers, the `maximum_contiguous_*` trio from runs delimited
   by the same `.tidx` discontinuity flag a reader uses. Appends recompute the
   contiguous trio from the full index (repairing segments written before this
-  was implemented) and bound `maximum_difference_bytes` by meflib's
-  `RED_MAX_DIFFERENCE_BYTES` rather than re-reading `.tdat`, which would cost a
-  seek per pre-existing block. The read path never consults these fields — it
+  was implemented). `maximum_difference_bytes` stays exact across a chunked
+  write, because the writer keeps the running maximum for the blocks it encoded
+  itself; for a segment reopened from disk, whose earlier blocks it cannot see
+  without a seek each, it takes meflib's `RED_MAX_DIFFERENCE_BYTES` as a floor
+  instead — an over-declaration only costs a reader memory, while
+  under-declaring truncates the buffer it decodes into. The read path never consults these fields — it
   sizes from each block's own header — so older or foreign declarations stay
   readable. See `docs/mef3_format.md` and `docs/legacy_comparison.md`.
 - Any write invalidates caches for the session (see §6).

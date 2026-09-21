@@ -55,6 +55,17 @@ struct SegmentSpec {
   std::string password_1;  // empty -> unencrypted
   std::string password_2;  // empty -> section 3 not L2-encrypted
   SessionMetadata metadata;  // descriptive/subject fields (see above)
+  /// Exact maximum `difference_bytes` over the segment's PRE-EXISTING blocks,
+  /// or 0 when unknown. Append only; ignored when writing a fresh segment.
+  ///
+  /// The old blocks' real values live in .tdat block headers, so an append that
+  /// had to discover them would pay a seek per block and lose its O(new data)
+  /// cost. With 0 it therefore declares meflib's worst case instead — safe, but
+  /// 1.0-1.4x the truth. A caller that ENCODED those blocks itself already
+  /// knows the exact value and can pass it here to keep the declaration exact;
+  /// it must be a true maximum, since a reader allocates its difference buffer
+  /// from the result and an under-declaration truncates that buffer.
+  ui4 known_difference_bytes = 0;
 };
 
 // Write the three files for one segment into `segment_dir` (which must exist).
@@ -62,8 +73,12 @@ struct SegmentSpec {
 // Blocks are RED-encoded in parallel (n_threads: 0 -> hardware concurrency,
 // 1 -> serial) then assembled into the .tdat in order, so the output is
 // byte-identical regardless of thread count.
+/// `out_max_difference_bytes` (optional) receives the exact maximum
+/// `difference_bytes` measured over the blocks written here, for a caller that
+/// wants to carry it into a later append as `SegmentSpec::known_difference_bytes`.
 si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec& spec,
-                              const std::vector<BlockSpec>& blocks, int n_threads = 0);
+                              const std::vector<BlockSpec>& blocks, int n_threads = 0,
+                              ui4* out_max_difference_bytes = nullptr);
 
 // Append blocks to an EXISTING segment (in-segment append): extends the .tdat
 // and .tidx in place and rewrites the .tmet statistics plus the universal
@@ -73,7 +88,11 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
 // segments need a password granting at least level-1 access (to re-encrypt
 // section 2; section 3 bytes are preserved verbatim). File UUIDs and password
 // validation fields are preserved. Returns the number of samples appended.
+/// `out_max_difference_bytes` (optional) receives the exact maximum
+/// `difference_bytes` over the blocks appended here — the NEW blocks only, not
+/// the segment's declared maximum.
 si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec& spec,
-                               const std::vector<BlockSpec>& blocks, int n_threads = 0);
+                               const std::vector<BlockSpec>& blocks, int n_threads = 0,
+                               ui4* out_max_difference_bytes = nullptr);
 
 }  // namespace mef3io

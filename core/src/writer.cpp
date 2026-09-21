@@ -222,7 +222,8 @@ fmt::UniversalHeader base_uh(const SegmentSpec& spec, const std::string& ftype, 
 }  // namespace
 
 si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec& spec,
-                              const std::vector<BlockSpec>& blocks, int n_threads) {
+                              const std::vector<BlockSpec>& blocks, int n_threads,
+                              ui4* out_max_difference_bytes) {
   if (!fs::is_directory(segment_dir)) throw IoError("segment dir does not exist: " + segment_dir);
   const sf8 fs_hz = spec.sampling_frequency;
   const si8 rto = spec.recording_time_offset;
@@ -411,11 +412,13 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     write_file((fs::path(segment_dir) / (base + ".tmet")).string(), file);
   }
 
+  if (out_max_difference_bytes) *out_max_difference_bytes = max_difference_bytes;
   return total_samples;
 }
 
 si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec& spec,
-                               const std::vector<BlockSpec>& blocks, int n_threads) {
+                               const std::vector<BlockSpec>& blocks, int n_threads,
+                               ui4* out_max_difference_bytes) {
   if (blocks.empty()) return 0;
   const std::string base = segment_base_name(spec);
   const std::string tmet_path = (fs::path(segment_dir) / (base + ".tmet")).string();
@@ -651,19 +654,45 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     // write NO_ENTRY) fall back to meflib's own worst case over the blocks the
     // index describes, which bounds them without reading .tdat.
     const ui4 stored_difference_bytes = s2.maximum_difference_bytes;
-    // A stored value is only usable if it could actually be a real maximum for
-    // the blocks the index describes. Screening just 0 and NO_ENTRY let an
-    // existing UNDER-declaration (say 1) ride forward untouched, so appending
-    // to an already-defective segment preserved the crash-class defect instead
-    // of repairing it. Anything below the worst case for the largest block is
-    // unverifiable without re-reading every old .tdat header, so take the
-    // bound: over-declaring costs a reader memory, under-declaring truncates.
-    const ui4 bound = red_max_difference_bytes(index_max_block_samples);
-    const bool stored_is_usable = stored_difference_bytes != 0 &&
-                                  stored_difference_bytes != fmt::UI4_NO_ENTRY &&
-                                  stored_difference_bytes >= max_difference_bytes;
-    s2.maximum_difference_bytes =
-        stored_is_usable ? std::max(max_difference_bytes, stored_difference_bytes) : bound;
+    // The old blocks' real difference_bytes live in .tdat block headers, and
+    // re-reading them would cost a seek per block and break the O(new data)
+    // cost of an append. A stored value is therefore UNVERIFIABLE from here: it
+    // may be an honest measurement, or a defective writer's under-declaration —
+    // 0, NO_ENTRY, or, just as dangerous, a plausible-looking number that is
+    // simply wrong. Screening it against the blocks being appended does not
+    // separate those cases: it catches a stored 1, but a stored 3000 against a
+    // true 12488 passes whenever the new blocks happen to be smaller, and the
+    // crash-class defect rides forward untouched.
+    //
+    // So take meflib's own worst case for the largest block the index describes
+    // as a FLOOR. It bounds every block in the segment, old and new, whatever
+    // the stored value meant, which makes the result safe without reading one
+    // extra byte. Over-declaring only costs a reader some memory;
+    // under-declaring truncates its buffer, which is the crash this module
+    // exists to prevent. The price is modest — 5 x samples against a real
+    // maximum of roughly 2.5-3 x samples — and this is the only declaration
+    // that pays it; everything the index describes is still exact. A stored
+    // value LARGER than the bound is kept rather than lowered: it cannot be a
+    // real measurement (no RED block exceeds the worst case), but honouring it
+    // costs only memory, and this path deliberately never moves a declaration
+    // in the direction that truncates.
+    //
+    // The one exception: a caller that ENCODED the old blocks itself knows
+    // their exact maximum and passes it in `known_difference_bytes`. Then no
+    // bound is needed — the declaration stays exact across a chunked write,
+    // which is the ordinary way a session is built.
+    ui4 declared_difference_bytes;
+    if (spec.known_difference_bytes != 0) {
+      declared_difference_bytes = std::max(spec.known_difference_bytes, max_difference_bytes);
+    } else {
+      const ui4 bound = red_max_difference_bytes(index_max_block_samples);
+      const bool stored_is_usable =
+          stored_difference_bytes != 0 && stored_difference_bytes != fmt::UI4_NO_ENTRY;
+      declared_difference_bytes = std::max(max_difference_bytes, bound);
+      if (stored_is_usable)
+        declared_difference_bytes = std::max(declared_difference_bytes, stored_difference_bytes);
+    }
+    s2.maximum_difference_bytes = declared_difference_bytes;
     // These are in NATIVE units (counts * units_conversion_factor), not raw
     // counts - see pymef3_file.c:972-978, which also swaps the pair when the
     // factor is negative. Folding a raw si4 onto them mixes units and lands the
@@ -757,6 +786,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     throw;
   }
 
+  if (out_max_difference_bytes) *out_max_difference_bytes = max_difference_bytes;
   return appended_samples;
 }
 

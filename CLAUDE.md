@@ -227,8 +227,19 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   recomputed exactly from the full `.tidx` (so appending repairs a segment
   written by an older mef3io), but `maximum_difference_bytes` lives in `.tdat`
   headers — folding old blocks in exactly would cost a seek per block and break
-  the O(new data) append, so an unusable stored value (0 or NO_ENTRY) falls
-  back to meflib's `RED_MAX_DIFFERENCE_BYTES` = `5 × maximum_block_samples`.
+  the O(new data) append. So the append takes it from the one source that costs
+  nothing: `SessionWriter` carries the exact running maximum in `ChannelState`
+  for every segment IT encoded, and passes it as `SegmentSpec::
+  known_difference_bytes`, which keeps a chunked write exact. Only a segment
+  REOPENED from disk (or written by anyone else) leaves that unknown, and there
+  the stored value is UNVERIFIABLE — it may be honest, or 0, or NO_ENTRY, or a
+  plausible-looking number that is simply wrong — so meflib's
+  `RED_MAX_DIFFERENCE_BYTES` = `5 × maximum_block_samples` is taken as a FLOOR,
+  which bounds every block whatever the stored value meant. Screening the
+  stored value against the blocks being APPENDED is NOT enough and was the bug:
+  it catches a stored 1, but a stored 3000 against a true 12488 rides through
+  whenever the new blocks are smaller. `5 × samples` is also exactly what the
+  third-party patcher writes in its DEFAULT `--diff-bytes bound` mode.
   READ PATH NEVER CONSULTS THESE — mef3io sizes from each block's own header,
   so zeros/sentinels/nonsense still read fine; `test_p12_sizing.py` pins both
   halves. Cross-checked against an independent third-party patcher in exact

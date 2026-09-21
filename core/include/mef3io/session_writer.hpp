@@ -88,6 +88,14 @@ class SessionWriter {
     si8 last_end_uutc = 0;   // for append-time validation
     bool hydrated = true;    // false for channels adopted from disk until their
                              // last segment's metadata has been read back
+    // Exact maximum difference_bytes over the current segment's blocks, valid
+    // only while every one of them was encoded by THIS writer. An append
+    // cannot rediscover the old blocks' values without a seek per block, so
+    // carrying the running maximum here keeps a chunked write exact; a segment
+    // adopted from disk leaves the flag false and the append falls back to
+    // meflib's worst-case bound instead. Reset whenever a new segment starts.
+    ui4 max_difference_bytes = 0;
+    bool difference_bytes_exact = false;
   };
 
   si8 block_length_for(sf8 fs) const;
