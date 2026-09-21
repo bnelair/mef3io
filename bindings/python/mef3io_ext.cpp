@@ -10,13 +10,16 @@
 #include <vector>
 
 #include "mef3io/crc.hpp"
+#include "mef3io/errors.hpp"
 #include "mef3io/crypto.hpp"
 #include "mef3io/metadata.hpp"
 #include "mef3io/reader.hpp"
+#include "mef3io/recover.hpp"
 #include "mef3io/red.hpp"
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
 #include "mef3io/tar.hpp"
+#include "mef3io/validate.hpp"
 #include "mef3io/types.hpp"
 #include "mef3io/version.hpp"
 #include "mef3io/writer.hpp"
@@ -48,6 +51,44 @@ nb::bytes to_bytes(std::span<const mef3io::ui1> s) {
 }  // namespace
 
 namespace {
+nb::dict report_to_dict(const mef3io::Report& r) {
+  nb::list findings;
+  for (const auto& f : r.findings) {
+    nb::dict d;
+    d["check_id"] = f.check_id;
+    d["severity"] = mef3io::severity_name(f.severity);
+    d["channel"] = f.channel;
+    d["segment"] = f.segment_number;
+    d["path"] = f.path;
+    d["field"] = f.field;
+    d["stored"] = f.stored;
+    d["expected"] = f.expected;
+    d["message"] = f.message;
+    d["repairable"] = f.repairable;
+    d["repaired"] = f.repaired;
+    findings.append(d);
+  }
+  nb::list skipped;
+  for (const auto& s : r.skipped) {
+    nb::dict d;
+    d["channel"] = s.channel;
+    d["segment"] = s.segment_number;
+    d["path"] = s.path;
+    d["reason"] = s.reason;
+    skipped.append(d);
+  }
+  nb::dict out;
+  out["findings"] = findings;
+  out["skipped"] = skipped;
+  out["segments_checked"] = r.segments_checked;
+  out["segments_repaired"] = r.segments_repaired;
+  out["checks_run"] = r.checks_run;
+  out["checks_repaired"] = r.checks_repaired;
+  return out;
+}
+}  // namespace
+
+namespace {
 // Flexible int64 from Python: ints and numpy ints exactly, floats and numpy
 // floats via llround (uUTC values are exact in float64). Clear TypeError
 // otherwise. MUST be called while holding the GIL.
@@ -71,13 +112,158 @@ NB_MODULE(_mef3io, m) {
   m.attr("__mef_version_major__") = mef3io::fmt::MEF_VERSION_MAJOR;
   m.attr("__mef_version_minor__") = mef3io::fmt::MEF_VERSION_MINOR;
 
-  m.def("archive_session", &mef3io::archive_session, nb::arg("session_dir"),
-        nb::arg("tar_path") = "", nb::arg("overwrite") = false,
-        "Pack a session directory into a single uncompressed tar archive and "
-        "return the archive path.");
-  m.def("extract_session", &mef3io::extract_session, nb::arg("tar_path"),
-        nb::arg("dest_dir") = "", nb::arg("overwrite") = false,
-        "Unpack a session archive back into a directory and return its path.");
+  // Distinct Python types for the core exceptions. Every one of these derives
+  // from MefError : std::runtime_error, so without this they all reached
+  // Python as a bare RuntimeError and a caller could only tell "wrong
+  // password" from "corrupt file" by matching on the message text. Registered
+  // most-derived FIRST: nanobind tries translators in reverse registration
+  // order, so the base must be registered before its subclasses for the
+  // subclasses to win.
+  // Rooted at RuntimeError, NOT at Exception: every release so far surfaced
+  // these as a bare RuntimeError, so code in the field catches that. Making
+  // MefError a subclass of it means existing `except RuntimeError` keeps
+  // working unchanged while new code can catch the specific type.
+  static nb::exception<mef3io::MefError> mef_error(m, "MefError", PyExc_RuntimeError);
+  static nb::exception<mef3io::FormatError> format_error(m, "FormatError", mef_error.ptr());
+  static nb::exception<mef3io::CrcError> crc_error(m, "CrcError", mef_error.ptr());
+  static nb::exception<mef3io::PasswordError> password_error(m, "PasswordError", mef_error.ptr());
+  static nb::exception<mef3io::IoError> io_error(m, "IoError", mef_error.ptr());
+  static nb::exception<mef3io::WriteConflictError> write_conflict_error(
+      m, "WriteConflictError", mef_error.ptr());
+
+  // Both move the whole session through the filesystem — seconds on a large
+  // one — and touch no Python object while doing it, so they release the GIL
+  // rather than freezing every other thread in the process.
+  m.def(
+      "archive_session",
+      [](const std::string& session_dir, const std::string& tar_path, bool overwrite) {
+        nb::gil_scoped_release rel;
+        return mef3io::archive_session(session_dir, tar_path, overwrite);
+      },
+      nb::arg("session_dir"), nb::arg("tar_path") = "", nb::arg("overwrite") = false,
+      "Pack a session directory into a single uncompressed tar archive and "
+      "return the archive path.");
+  m.def(
+      "extract_session",
+      [](const std::string& tar_path, const std::string& dest_dir, bool overwrite) {
+        nb::gil_scoped_release rel;
+        return mef3io::extract_session(tar_path, dest_dir, overwrite);
+      },
+      nb::arg("tar_path"), nb::arg("dest_dir") = "", nb::arg("overwrite") = false,
+      "Unpack a session archive back into a directory and return its path.");
+
+  m.def(
+      "recover_session",
+      [](const std::string& path, bool apply, bool backup, const std::string& password) {
+        mef3io::RecoveryReport r;
+        {
+          nb::gil_scoped_release rel;
+          r = mef3io::recover_session(path, apply, backup, password);
+        }
+        nb::list segs;
+        for (const auto& s : r.segments) {
+          nb::dict d;
+          d["channel"] = s.channel;
+          d["segment"] = s.segment_number;
+          d["path"] = s.path;
+          d["blocks_before"] = s.blocks_before;
+          d["blocks_after"] = s.blocks_after;
+          d["blocks_recovered"] = s.blocks_recovered;
+          d["blocks_dropped"] = s.blocks_dropped;
+          d["tdat_bytes_dropped"] = s.tdat_bytes_dropped;
+          d["action"] = s.action;
+          segs.append(d);
+        }
+        nb::list skipped;
+        for (const auto& s : r.skipped) skipped.append(s);
+        nb::dict out;
+        out["segments"] = segs;
+        out["skipped"] = skipped;
+        out["segments_examined"] = r.segments_examined;
+        out["applied"] = r.applied;
+        out["backup_root"] = r.backup_root;
+        return out;
+      },
+      nb::arg("path"), nb::arg("apply") = false, nb::arg("backup") = true,
+      nb::arg("password") = "",
+      "Make each segment's block index and data agree after an interrupted "
+      "write. Dry run unless apply=True.");
+
+  // --- validation / repair (dicts in, dicts out; mef3io.validate wraps them) ---
+  m.def(
+      "validation_checks",
+      [] {
+        nb::list out;
+        for (const auto& c : mef3io::checks()) {
+          nb::dict d;
+          d["id"] = c.id;
+          d["title"] = c.title;
+          d["description"] = c.description;
+          d["severity"] = mef3io::severity_name(c.severity);
+          d["repairable"] = c.repairable;
+          out.append(d);
+        }
+        return out;
+      },
+      "The validation check registry, in the order checks run.");
+
+  m.def(
+      "validate_session",
+      [](const std::string& path, const std::string& password,
+         std::vector<std::string> channels, std::vector<int> segments,
+         std::vector<std::string> check_ids, bool exact_difference_bytes) {
+        mef3io::ValidateOptions opts;
+        opts.password = password;
+        opts.channels = std::move(channels);
+        opts.segments = std::move(segments);
+        opts.check_ids = std::move(check_ids);
+        opts.exact_difference_bytes = exact_difference_bytes;
+        // Unbounded blocking I/O: with exact_difference_bytes it reads a header
+        // per RED block. Holding the GIL would freeze the whole interpreter.
+        mef3io::Report r;
+        {
+          nb::gil_scoped_release release;
+          r = mef3io::validate_session(path, opts);
+        }
+        return report_to_dict(r);
+      },
+      nb::arg("path"), nb::arg("password") = "",
+      nb::arg("channels") = std::vector<std::string>{},
+      nb::arg("segments") = std::vector<int>{},
+      nb::arg("check_ids") = std::vector<std::string>{},
+      nb::arg("exact_difference_bytes") = true,
+      "Check a session's declarations against its data. Reads only.");
+
+  m.def(
+      "repair_session",
+      [](const std::string& path, std::vector<std::string> repair_check_ids,
+         const std::string& password, std::vector<std::string> channels,
+         std::vector<int> segments, std::vector<std::string> check_ids,
+         bool exact_difference_bytes, bool backup) {
+        mef3io::ValidateOptions opts;
+        opts.password = password;
+        opts.channels = channels;
+        opts.segments = segments;
+        opts.check_ids = std::move(check_ids);
+        opts.exact_difference_bytes = exact_difference_bytes;
+        mef3io::RepairSelection sel;
+        sel.check_ids = std::move(repair_check_ids);
+        sel.channels = std::move(channels);
+        sel.segments = std::move(segments);
+        sel.backup = backup;
+        mef3io::Report r;
+        {
+          nb::gil_scoped_release release;
+          r = mef3io::repair_session(path, sel, opts);
+        }
+        return report_to_dict(r);
+      },
+      nb::arg("path"), nb::arg("repair_check_ids"), nb::arg("password") = "",
+      nb::arg("channels") = std::vector<std::string>{},
+      nb::arg("segments") = std::vector<int>{},
+      nb::arg("check_ids") = std::vector<std::string>{},
+      nb::arg("exact_difference_bytes") = true, nb::arg("backup") = true,
+      "Validate, then write back only the selected repairs. Never implicit.");
 
   // Exposed for parity tests against the Python oracles.
   m.def(
@@ -254,9 +440,21 @@ NB_MODULE(_mef3io, m) {
              return d;
            })
       .def(
+          "set_index_cache_bytes", &mef3io::Session::set_index_cache_bytes, nb::arg("n"))
+      .def("index_cache_bytes", &mef3io::Session::index_cache_bytes)
+      .def(
           "read_runs",
           [](mef3io::Session& s, const std::string& channel, nb::object t0, nb::object t1) {
-            auto runs = s.read_runs(channel, opt_si8(t0, "t0"), opt_si8(t1, "t1"));
+            // Convert the Python timestamps BEFORE releasing, then decode
+            // without the GIL: this is a full parallel decode and was holding
+            // the interpreter for its entire duration.
+            const auto a = opt_si8(t0, "t0");
+            const auto b = opt_si8(t1, "t1");
+            std::vector<mef3io::DataRun> runs;
+            {
+              nb::gil_scoped_release rel;
+              runs = s.read_runs(channel, a, b);
+            }
             nb::list out;
             for (auto& r : runs) {
               nb::dict d;
@@ -284,6 +482,7 @@ NB_MODULE(_mef3io, m) {
       .def("set_block_length", &mef3io::SessionWriter::set_block_length)
       .def("set_units", &mef3io::SessionWriter::set_units)
       .def("set_threads", &mef3io::SessionWriter::set_threads)
+          .def("set_durable", &mef3io::SessionWriter::set_durable, nb::arg("durable"))
       .def(
           "set_metadata",
           [](mef3io::SessionWriter& w, nb::dict d) {
@@ -337,14 +536,28 @@ NB_MODULE(_mef3io, m) {
                          double ufact, nb::object start, double fs, nb::object valid,
                          bool new_segment) {
             std::span<const mef3io::si4> s(data.data(), data.size());
+            // Copy the mask rather than pointing into the cast result. nb::cast
+            // converts (convert=true), so a mask that is not already contiguous
+            // uint8 — a bool array, float64, int64, a stride-2 slice — is
+            // materialised into a NEW array owned only by the local `v`. `v`
+            // dies at the end of this scope, so a span into it dangles, and the
+            // writer then reads freed memory and lays the gaps out wrong with
+            // no error at all. The copy is one byte per sample and happens once
+            // per call, against an encode that is orders of magnitude dearer.
             std::vector<mef3io::ui1> vbuf;
             std::span<const mef3io::ui1> vspan;
             if (!valid.is_none()) {
               auto v = nb::cast<nb::ndarray<const mef3io::ui1, nb::ndim<1>, nb::c_contig>>(valid);
-              vspan = std::span<const mef3io::ui1>(v.data(), v.size());
+              vbuf.assign(v.data(), v.data() + v.size());
+              vspan = std::span<const mef3io::ui1>(vbuf);
             }
-            mef3io::WriteSummary r =
-                w.write_int32(ch, s, ufact, to_si8(start, "start_uutc"), fs, vspan, new_segment);
+            const mef3io::si8 start_us = to_si8(start, "start_uutc");
+            mef3io::WriteSummary r;
+            {
+              // Match write_float: the encode is long and touches no Python.
+              nb::gil_scoped_release rel;
+              r = w.write_int32(ch, s, ufact, start_us, fs, vspan, new_segment);
+            }
             return summary_dict(r);
           },
           nb::arg("channel"), nb::arg("data"), nb::arg("ufact"), nb::arg("start_uutc"),
@@ -386,6 +599,20 @@ NB_MODULE(_mef3io, m) {
            nb::arg("password") = "", nb::arg("n_threads") = 0)
       .def("set_threads", &mef3io::Reader::set_threads)
       .def_prop_ro("channels", &mef3io::Reader::channels)
+      .def(
+          "declaration_issues",
+          [](mef3io::Reader& r) {
+            nb::list out;
+            for (const auto& i : r.declaration_issues()) {
+              nb::dict d;
+              d["channel"] = i.channel;
+              d["segment"] = i.segment_number;
+              d["field"] = i.field;
+              out.append(d);
+            }
+            return out;
+          },
+          "Section-2 size declarations this session leaves unset. Free to call.")
       .def("info",
            [](mef3io::Reader& r, const std::string& ch) {
              const auto& ci = r.info(ch);

@@ -143,6 +143,20 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     plhs[0] = mxCreateString(out_path);
     return;
   }
+  if (cmd == "recover_session") {
+    need_args(nrhs, 5, "recover_session");
+    std::string path = get_string(prhs[1], "path");
+    int apply = static_cast<int>(get_scalar(prhs[2], "apply"));
+    int backup = static_cast<int>(get_scalar(prhs[3], "backup"));
+    std::string password = get_string(prhs[4], "password");
+    std::vector<char> summary(8192, 0);
+    int64_t segments = 0;
+    check(mef3io_recover_session(path.c_str(), apply, backup, password.c_str(), summary.data(),
+                                 summary.size(), &segments));
+    plhs[0] = mxCreateString(summary.data());
+    if (nlhs > 1) plhs[1] = mxCreateDoubleScalar(static_cast<double>(segments));
+    return;
+  }
   if (cmd == "extract_session") {
     need_args(nrhs, 4, "extract_session");
     std::string tar_path = get_string(prhs[1], "tar_path");
@@ -363,6 +377,12 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     mef3io_writer* w = get_writer(prhs[1]);
     untrack(g_writers, reinterpret_cast<std::uint64_t>(w));
     mef3io_writer_close(w);
+    return;
+  }
+  if (cmd == "writer_set_durable") {
+    need_args(nrhs, 3, "writer_set_durable");
+    check(mef3io_writer_set_durable(get_writer(prhs[1]),
+                                    static_cast<int>(get_scalar(prhs[2], "durable"))));
     return;
   }
   if (cmd == "writer_set_units") {

@@ -259,15 +259,30 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   spec.password_1 = password_1_;
   spec.password_2 = password_2_;
   spec.metadata = metadata_;
+  spec.durable = durable_;
 
+  // Only pass on a maximum this writer measured itself. A segment adopted from
+  // disk leaves the flag false, so the append bounds the blocks it cannot see
+  // rather than trusting a declaration it has no way to verify.
+  if (append && st.difference_bytes_exact) spec.known_difference_bytes = st.max_difference_bytes;
+
+  ui4 written_difference_bytes = 0;
   if (append) {
     // fs / conversion-factor / start-time conflicts are validated against the
     // on-disk metadata inside append_time_series_segment.
-    append_time_series_segment(seg_dir, spec, blocks, n_threads_);
+    append_time_series_segment(seg_dir, spec, blocks, n_threads_, &written_difference_bytes,
+                               &st.index_cache);
   } else {
     fs::create_directories(seg_dir);
-    write_time_series_segment(seg_dir, spec, blocks, n_threads_);
+    write_time_series_segment(seg_dir, spec, blocks, n_threads_, &written_difference_bytes);
+    // A fresh segment holds nothing but the blocks just encoded, so from here
+    // the running maximum is exact — and the index summary from the previous
+    // segment describes a file this channel is no longer appending to.
+    st.max_difference_bytes = 0;
+    st.difference_bytes_exact = true;
+    st.index_cache = AppendIndexCache{};
   }
+  st.max_difference_bytes = std::max(st.max_difference_bytes, written_difference_bytes);
 
   st.sampling_frequency = fs;
   st.units_conversion_factor = ufact;

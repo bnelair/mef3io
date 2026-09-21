@@ -2,6 +2,8 @@
 // to error codes with a thread-local message.
 #include "mef3io/c_api.h"
 
+#include "mef3io/recover.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -261,6 +263,31 @@ int mef3io_reader_record(mef3io_reader* r, const char* channel, int32_t index,
 }
 
 /* ----- archive ----------------------------------------------------------- */
+
+int mef3io_writer_set_durable(mef3io_writer* w, int durable) {
+  if (!w) return fail_argument("writer must not be NULL");
+  return guarded([&] { reinterpret_cast<mef3io::SessionWriter*>(w)->set_durable(durable != 0); });
+}
+
+int mef3io_recover_session(const char* mefd_path, int apply, int backup, const char* password,
+                           char* out_summary, size_t out_summary_bytes, int64_t* out_segments) {
+  if (!mefd_path) return fail_argument("mefd_path must not be NULL");
+  return guarded([&] {
+    const auto report = mef3io::recover_session(mefd_path, apply != 0, backup != 0,
+                                                password ? password : "");
+    if (out_segments) *out_segments = static_cast<int64_t>(report.segments.size());
+    if (out_summary && out_summary_bytes) {
+      std::string text = std::to_string(report.segments_examined) + " segment(s) examined, " +
+                         std::to_string(report.segments.size()) + " needing recovery";
+      if (!report.applied) text += "  (DRY RUN - nothing was written)";
+      for (const auto& s : report.segments) text += "\n    " + s.path + ": " + s.action;
+      for (const auto& s : report.skipped) text += "\n    skipped " + s;
+      if (report.applied && !report.backup_root.empty())
+        text += "\n  originals backed up under " + report.backup_root;
+      copy_str(out_summary, out_summary_bytes, text);
+    }
+  });
+}
 
 int mef3io_archive_session(const char* session_dir, const char* tar_path, int overwrite,
                            char* out_path, size_t out_path_bytes) {

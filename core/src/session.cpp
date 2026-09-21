@@ -8,6 +8,7 @@
 
 #include "mef3io/errors.hpp"
 #include "mef3io/red.hpp"
+#include "mef3io/validate.hpp"
 
 namespace mef3io {
 namespace {
@@ -99,6 +100,7 @@ TimeSeriesMetadata& Session::segment_metadata(SegmentReader& seg) {
 
 std::span<const ui1> Session::segment_index(SegmentReader& seg) {
   if (seg.tidx_bytes.empty()) seg.tidx_bytes = source_->read_all(seg.tidx_path);
+  seg.index_last_used = ++index_tick_;
   return seg.tidx_bytes;
 }
 
@@ -171,33 +173,57 @@ std::vector<DataRun> Session::read_runs(const std::string& channel, std::optiona
 
     auto idx = segment_index(seg);
     const std::size_t n_entries = index_entry_count(idx, source_->describe(seg.tidx_path));
-    auto tdat = source_->read_all(seg.tdat_path);
 
     crypto::AccessKeys keys = crypto::validate_password(
         password_, md.universal_header.level_1_password_validation_field,
         md.universal_header.level_2_password_validation_field);
 
+    // Select the blocks the window actually needs FIRST, then read exactly the
+    // byte extent they span — never the whole .tdat. A segment of a long
+    // recording is tens of gigabytes, and reading it whole to serve a
+    // one-minute request allocates the entire file. This mirrors what
+    // collect_blocks already does for the windowed read path.
+    std::vector<fmt::TimeSeriesIndex> hits;
     for (std::size_t i = 0; i < n_entries; ++i) {
-      auto entry_bytes =
+      auto e = fmt::TimeSeriesIndex::parse(
           idx.subspan(fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES,
-                      fmt::TIME_SERIES_INDEX_BYTES);
-      auto e = fmt::TimeSeriesIndex::parse(entry_bytes);
+                      fmt::TIME_SERIES_INDEX_BYTES));
       if (e.file_offset < 0 || e.number_of_samples == 0) continue;
-
-      si8 block_start = to_user_time(e.start_time, rto);
-      si8 block_end = block_start + static_cast<si8>(std::llround(e.number_of_samples * 1e6 / fs));
+      const si8 block_start = to_user_time(e.start_time, rto);
+      const si8 block_end =
+          block_start + static_cast<si8>(std::llround(e.number_of_samples * 1e6 / fs));
       if (block_end <= t0 || block_start >= t1) continue;  // outside requested range
+      hits.push_back(e);
+    }
+    if (hits.empty()) continue;
 
-      if (static_cast<std::size_t>(e.file_offset) + e.block_bytes > tdat.size())
-        throw FormatError("index points past end of .tdat");
-      std::span<const ui1> block(tdat.data() + e.file_offset, e.block_bytes);
+    // Do not assume the index is sorted: take the true extent, and check it
+    // against the real file size so a damaged index fails loudly rather than
+    // reading wild.
+    std::size_t range_begin = static_cast<std::size_t>(hits.front().file_offset);
+    std::size_t range_end = range_begin;
+    for (const auto& e : hits) {
+      const std::size_t off = static_cast<std::size_t>(e.file_offset);
+      range_begin = std::min(range_begin, off);
+      range_end = std::max(range_end, off + e.block_bytes);
+    }
+    const std::size_t tdat_size = static_cast<std::size_t>(source_->file_size(seg.tdat_path));
+    if (range_end > tdat_size)
+      throw FormatError("index points past end of .tdat: " + source_->describe(seg.tdat_path));
+    const std::vector<ui1> tdat = source_->read_range(seg.tdat_path, range_begin,
+                                                      range_end - range_begin);
+
+    for (const auto& e : hits) {
+      std::span<const ui1> block(tdat.data() + (static_cast<std::size_t>(e.file_offset) -
+                                                range_begin),
+                                 e.block_bytes);
       auto decoded = red::decode_block(block, keys);
 
       // Start a new run on discontinuity or a sample-index gap.
       bool contiguous = current != nullptr && !decoded.discontinuity &&
                         e.start_sample == expected_next_sample;
       if (!contiguous) {
-        runs.push_back(DataRun{block_start, e.start_sample, {}});
+        runs.push_back(DataRun{to_user_time(e.start_time, rto), e.start_sample, {}});
         current = &runs.back();
       }
       current->samples.insert(current->samples.end(), decoded.samples.begin(),
@@ -205,6 +231,10 @@ std::vector<DataRun> Session::read_runs(const std::string& channel, std::optiona
       expected_next_sample = e.start_sample + e.number_of_samples;
     }
   }
+  // Safe point: the operation is finished, so nothing holds a span into a
+  // cached index. The index is ~2% of the data, so an unbounded cache grows
+  // to several GB on a session of a few hundred gigabytes.
+  trim_index_cache();
   return runs;
 }
 
@@ -303,6 +333,58 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
       out.jobs.push_back(job);
     }
   }
+  // Safe point: the operation is finished, so nothing holds a span into a
+  // cached index. The index is ~2% of the data, so an unbounded cache grows
+  // to several GB on a session of a few hundred gigabytes.
+  trim_index_cache();
+  return out;
+}
+
+std::size_t Session::index_cache_bytes() const {
+  std::size_t total = 0;
+  for (const auto& name : channel_names_)
+    for (const auto& seg : channels_.at(name).segments) total += seg.tidx_bytes.capacity();
+  return total;
+}
+
+void Session::trim_index_cache() {
+  if (index_budget_ == 0) return;
+  std::size_t total = index_cache_bytes();
+  if (total <= index_budget_) return;
+
+  // Oldest first. Only called once a public operation has finished, so no
+  // caller is holding a span into any of these buffers — evicting one while it
+  // was in use would be a use-after-free, which is why this is never done
+  // mid-read.
+  struct Victim {
+    std::uint64_t used;
+    SegmentReader* seg;
+  };
+  std::vector<Victim> victims;
+  for (const auto& name : channel_names_)
+    for (auto& seg : channels_.at(name).segments)
+      if (!seg.tidx_bytes.empty()) victims.push_back({seg.index_last_used, &seg});
+  std::sort(victims.begin(), victims.end(),
+            [](const Victim& a, const Victim& b) { return a.used < b.used; });
+
+  for (const auto& v : victims) {
+    if (total <= index_budget_) break;
+    total -= v.seg->tidx_bytes.capacity();
+    std::vector<ui1>().swap(v.seg->tidx_bytes);  // actually release the memory
+    v.seg->index_last_used = 0;
+  }
+}
+
+std::vector<DeclarationIssue> Session::declaration_issues() const {
+  std::vector<DeclarationIssue> out;
+  for (const auto& name : channel_names_) {
+    const Channel& ch = channels_.at(name);
+    for (const auto& seg : ch.segments) {
+      if (!seg.metadata) continue;  // not loaded (should not happen after open)
+      for (const auto& field : unset_declarations(seg.metadata->section2))
+        out.push_back({name, seg.segment_number, field});
+    }
+  }
   return out;
 }
 
@@ -327,6 +409,10 @@ std::vector<SegmentInfo> Session::segment_map(const std::string& channel) {
     si.number_of_blocks = md.section2.number_of_blocks;
     out.push_back(std::move(si));
   }
+  // Safe point: the operation is finished, so nothing holds a span into a
+  // cached index. The index is ~2% of the data, so an unbounded cache grows
+  // to several GB on a session of a few hundred gigabytes.
+  trim_index_cache();
   return out;
 }
 
@@ -357,6 +443,10 @@ std::vector<BlockIndexEntry> Session::read_index(const std::string& channel) {
       out.push_back(b);
     }
   }
+  // Safe point: the operation is finished, so nothing holds a span into a
+  // cached index. The index is ~2% of the data, so an unbounded cache grows
+  // to several GB on a session of a few hundred gigabytes.
+  trim_index_cache();
   return out;
 }
 

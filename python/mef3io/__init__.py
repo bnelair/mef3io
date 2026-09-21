@@ -30,13 +30,48 @@ def have_cpp_backend() -> bool:
 
 
 from ._archive import archive_session, extract_session  # noqa: E402
-from ._reader import Reader  # noqa: E402
+from ._reader import Reader, SessionDeclarationWarning  # noqa: E402
 from ._writer import Writer  # noqa: E402
 from .metadata import Acquisition, Metadata, Subject  # noqa: E402
+from .validate import (  # noqa: E402
+    Check,
+    Finding,
+    Report,
+    SkippedSegment,
+    Validator,
+    available_checks,
+    describe_check,
+    RecoveredSegment,
+    RecoveryReport,
+    recover_session,
+    repair_session,
+    validate_session,
+)
+
+# The core exception types, so a caller can tell "wrong password" from
+# "corrupt file" without matching on message text. All of them subclass
+# RuntimeError, which is what every release so far raised, so existing
+# `except RuntimeError` keeps working unchanged.
+if _HAVE_CPP:
+    MefError = _mef3io.MefError
+    FormatError = _mef3io.FormatError
+    CrcError = _mef3io.CrcError
+    PasswordError = _mef3io.PasswordError
+    IoError = _mef3io.IoError
+    WriteConflictError = _mef3io.WriteConflictError
+else:  # pragma: no cover - only without the extension
+    MefError = FormatError = CrcError = PasswordError = IoError = WriteConflictError = RuntimeError
 
 __all__ = [
     "Reader", "Writer", "Metadata", "Subject", "Acquisition",
     "MefReader", "MefWriter", "archive_session", "extract_session",
+    "Validator", "Check", "Finding", "Report", "SkippedSegment",
+    "available_checks", "describe_check",
+    "validate_session", "repair_session", "recover_session",
+    "RecoveryReport", "RecoveredSegment",
+    "SessionDeclarationWarning",
+    "MefError", "FormatError", "CrcError", "PasswordError", "IoError",
+    "WriteConflictError",
     "have_cpp_backend", "__version__",
 ]
 

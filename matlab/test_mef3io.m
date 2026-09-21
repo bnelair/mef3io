@@ -176,5 +176,45 @@ r = mef3io.Reader(mdPath2);
 assert(strcmp(r.metadata.subject.id, 'S2'));
 delete(r);
 
+% --- durability + recovery -------------------------------------------------
+% Durability='fast' is the DEFAULT, so this is the ordinary write path, not an
+% exotic one. Both settings must produce a session that reads back identically.
+for durability = {'fast', 'full'}
+    dp = fullfile(sessionDir, ['dur_' durability{1} '.mefd']);
+    w = mef3io.Writer(dp, Overwrite=true, Durability=durability{1});
+    w.writeInt32('ch1', int32(1:2000), 0.5, startUutc, 256);
+    delete(w);
+    w = mef3io.Writer(dp, Durability=durability{1});      % reopened: appends
+    w.writeInt32('ch1', int32(1:2000), 0.5, startUutc + int64(2000/256*1e6), 256);
+    delete(w);
+    r = mef3io.Reader(dp);
+    got = r.read('ch1');
+    delete(r);
+    assert(numel(got) == 4000, 'durability=%s: expected 4000 samples', durability{1});
+
+    % A healthy session needs no recovery, and a dry run must never write.
+    before = dir(fullfile(dp, '**', '*'));
+    summary = mef3io.recoverSession(dp);
+    after = dir(fullfile(dp, '**', '*'));
+    assert(numel(before) == numel(after), 'recoverSession dry run changed the tree');
+    assert(ischar(summary) && ~isempty(summary), 'recoverSession returned no summary');
+    [~, nSeg] = mef3io.recoverSession(dp, Apply=true);
+    assert(nSeg == 0, 'a healthy session should need no recovery, got %d', nSeg);
+end
+
+% An invalid Durability must be rejected by the argument validator.
+gotError = false;
+try
+    mef3io.Writer(fullfile(sessionDir, 'bad.mefd'), Overwrite=true, Durability='sometimes');
+catch
+    gotError = true;
+end
+assert(gotError, 'Durability must reject an unknown value');
+
+% Tar archives are read-only, so recovery must refuse one.
+gotError = false;
+try mef3io.recoverSession(tarPath, Apply=true); catch, gotError = true; end
+assert(gotError, 'recoverSession must refuse a tar archive');
+
 fprintf('test_mef3io: all assertions passed (%s)\n', sessionDir);
 end

@@ -13,6 +13,32 @@ The native API:
 
 ::: mef3io.extract_session
 
+## Validation and repair
+
+See the [validation guide](../validation.md) for what each check means.
+
+::: mef3io.Validator
+
+::: mef3io.Report
+
+::: mef3io.Finding
+
+::: mef3io.Check
+
+::: mef3io.available_checks
+
+::: mef3io.validate_session
+
+::: mef3io.repair_session
+
+::: mef3io.recover_session
+
+::: mef3io.RecoveryReport
+
+::: mef3io.RecoveredSegment
+
+::: mef3io.SessionDeclarationWarning
+
 ## Metadata objects
 
 ::: mef3io.Metadata

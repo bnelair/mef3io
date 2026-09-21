@@ -74,7 +74,15 @@ inline constexpr si4 GMT_OFFSET_NO_ENTRY = -86401;
 inline constexpr si4 RED_NAN = static_cast<si4>(0x80000000);  // INT32_MIN
 
 // --- CRC ---
+// The initial register value inside the CRC routine (meflib.h:1214). It is NOT
+// a sentinel and must never be compared against a stored CRC field.
 inline constexpr ui4 CRC_START_VALUE = 0xFFFFFFFFu;
+// meflib's "this CRC was never computed" marker (meflib.h:234 CRC_NO_ENTRY,
+// aliased for the universal header at :360/:362 and written at meflib.c:689,
+// :4614-4615). meflib only computes a body CRC when it writes a whole file at
+// once and notes in-source that piecemeal writers must do it themselves, so a
+// streaming recorder legitimately ships this value.
+inline constexpr ui4 CRC_NO_ENTRY = 0u;
 
 // --- File type strings (4 chars + null in a 5-byte field) ---
 inline constexpr const char* FILE_TYPE_SESSION = "mefd";

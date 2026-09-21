@@ -9,6 +9,16 @@ classdef Writer < handle
     %   w.writeAnnotations(struct('time', {t}, 'text', {'note'}), 'ch1');
     %   delete(w)                                       % or let it go out of scope
     %
+    % Durability: these files are built by appending for days to months, so
+    % the append is the hot path. Durability='fast' (the default) performs no
+    % flushes, matching every MEF writer before this one — the reference C
+    % library flushes nothing at all. An unclean shutdown can then leave the
+    % block index and the data disagreeing; mef3io.recoverSession detects and
+    % repairs exactly that, rebuilding missing index entries from the RED
+    % block headers. Durability='full' adds the barriers, making each append
+    % all-or-nothing across the three files with no recovery step, at roughly
+    % 2.5x the cost per append.
+    %
     % Encrypted sessions: pass Password1 and Password2 (both required).
     % Times are uUTC: microseconds since the Unix epoch (int64 or double).
     % `path` must end .mefd (enforced); tar archives are read-only and
@@ -29,9 +39,12 @@ classdef Writer < handle
                 opts.BlockLength (1, 1) double = 0
                 opts.Threads (1, 1) double = 0
                 opts.Metadata = []   % mef3io.Metadata or a struct of fields
+                opts.Durability (1, :) char {mustBeMember(opts.Durability, ...
+                    {'fast', 'full'})} = 'fast'
             end
             obj.h = mef3io_mex('writer_open', path, double(opts.Overwrite), ...
                                opts.Password1, opts.Password2);
+            mef3io_mex('writer_set_durable', obj.h, double(strcmp(opts.Durability, 'full')));
             if ~isempty(opts.Units)
                 mef3io_mex('writer_set_units', obj.h, opts.Units);
             end

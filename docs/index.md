@@ -10,6 +10,13 @@ thinly for each language — so float scaling, NaN-gap handling, precision
 inference, appends, and encryption behave exactly the same everywhere, and
 every binding carries the same version number.
 
+!!! tip "Long recordings"
+    These files run for days to months and reach tens of gigabytes **per
+    channel**. [Long recordings](long_recordings.md) covers the append
+    workload, the `durability` knob, and what is guaranteed at that scale;
+    [Validation & repair](validation.md#recovery-after-an-interrupted-write)
+    covers recovering a session after an interrupted write.
+
 ## Why mef3io
 
 - **Fast** — parallel RED encode/decode: **~7–8× faster** than the legacy
@@ -62,6 +69,16 @@ The same session opens in MATLAB (`mef3io.Reader('session.mefd')`) and C++
 Read + write are complete and released; in-segment append matches legacy
 semantics. Out of scope: MEF video files. Records cover Note, EDFA, SyLg,
 Seiz. The pure-Python fallback backend is not yet implemented.
+
+Sessions written by mef3io **≤ 1.1.2** under-declare the section-2 buffer sizes
+that meflib-based readers (CyberPSG and similar) allocate from; they read
+correctly in mef3io and pymef but can crash such a reader. Since 1.1.3 those
+fields are measured from the blocks written — appending to an older segment
+repairs it in place, and rewriting the session fixes it outright. Opening such
+a session warns once, saying plainly that reading is unaffected; see
+[Validating and repairing](validation.md) to inspect or fix a file, and
+[the format reference](mef3_format.md#the-buffer-sizing-declarations) for what
+the declarations mean.
 
 mef3io is developed at the Mayo Clinic BNEL (Bioelectronics Neurophysiology
 and Engineering Lab).

@@ -164,6 +164,19 @@ int mef3io_archive_session(const char* session_dir, const char* tar_path, int ov
 /* Inverse: unpack a session archive back into a directory. dest_dir NULL or
  * "" strips the ".tar" suffix ("name.mefd.tar" -> "name.mefd"). Refuses an
  * existing target unless overwrite. The directory path lands in out_path. */
+/* ----- recovery ---------------------------------------------------------- */
+
+/* Make each segment's block index and data agree again after an interrupted
+ * write. `apply` 0 reports what it WOULD do and writes nothing. `backup` saves
+ * what changes (never the whole .tdat, which may be tens of gigabytes) under
+ * "<session>.recover-backup". A human-readable summary lands in `out_summary`.
+ * `out_segments` receives the number of segments needing work (may be NULL).
+ *
+ * Unlike a declaration repair this may change the block index, so it is a dry
+ * run by default. Re-derive the declarations afterwards. */
+int mef3io_recover_session(const char* mefd_path, int apply, int backup, const char* password,
+                           char* out_summary, size_t out_summary_bytes, int64_t* out_segments);
+
 int mef3io_extract_session(const char* tar_path, const char* dest_dir, int overwrite,
                            char* out_path, size_t out_path_bytes);
 
@@ -178,6 +191,14 @@ int mef3io_writer_set_units(mef3io_writer* w, const char* units);
 int mef3io_writer_set_metadata(mef3io_writer* w, const mef3io_metadata* md);
 int mef3io_writer_set_block_length(mef3io_writer* w, int64_t samples_per_block);
 int mef3io_writer_set_threads(mef3io_writer* w, int n_threads);
+/* Flush appends to stable storage. 0 (the DEFAULT) does not: these files are
+ * built by appending for days to months, so the append is the hot path, and
+ * the barriers cost ~2.5x on it. An unclean shutdown can then leave the index
+ * and the data disagreeing — detected by validation and repaired by
+ * mef3io_recover_session, which rebuilds missing index entries from the RED
+ * block headers. Non-zero makes each append all-or-nothing across the three
+ * files, with no recovery step needed. */
+int mef3io_writer_set_durable(mef3io_writer* w, int durable);
 
 typedef struct {
   int64_t samples_written;

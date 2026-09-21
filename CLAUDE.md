@@ -9,7 +9,8 @@ of scope. The legacy `mef_tools`/`pymef` stack is the correctness oracle.
 Status: read + write complete, cross-validated **both directions** vs
 pymef/mef_tools (values, NaN gaps, times, encryption none/L1+L2, fractional fs,
 records). In-segment append + per-segment map implemented. Tar session
-archives (single-file `.mefd.tar`, read in place) implemented. ~143 Python
+archives (single-file `.mefd.tar`, read in place) implemented. Session
+validator + targeted repair implemented (+ an open-time warning). ~253 Python
 tests + standalone C++ Catch2 tests. Wheel builds via `python -m build`.
 Parallel decode/encode, byte-deterministic across threads.
 
@@ -36,6 +37,7 @@ packed-struct casts), `crc` (Koopman-32), `crypto` (SHA-256, AES-128-ECB,
 two-level password), `headers` (UniversalHeader, MetadataSection1/2/3,
 TimeSeriesIndex, RedBlockHeader — parse/serialize by explicit offset),
 `metadata` (.tmet loader: CRC→password→decrypt), `red` (decode + encode),
+`validate` (check registry + targeted repair; see below),
 `session` (lazy .mefd/.timd/.segd tree, indexed reads, `collect_blocks`; ALL
 read-path file access funnels through `source`), `source` (SessionSource
 abstraction: DirectorySource/TarSource), `tar` (uncompressed .mefd.tar session
@@ -66,6 +68,42 @@ Benchmarked on a ~2 GB session: full-read throughput identical to the dir,
 windowed reads ~8% slower, open faster; archive ~0.56 GB/s. Tests:
 core/tests/test_tar.cpp, tests/test_p11_tar.py, tar block in
 matlab/test_mef3io.m.
+
+Validator/repair (`core/{include,src}/…/validate.{hpp,cpp}`, `python/mef3io/
+validate.py`, `python/mef3io/__main__.py`): a REGISTRY of 18 checks comparing a
+session's declarations against its data, run in a fixed order (integrity →
+structure → sizing → times → headers). Adding a check = ONE entry with
+`detect` + optional `repair` lambdas; ordering/filtering/reporting/bindings/CLI
+pick it up free. THREE invariants, all test-pinned: (1) **a Validator only
+validates** — it has NO repair/fix method, writing lives in the separate
+`mef3io.repair_session(path, ids)` function, and a test asserts the class never
+regrows one, so nobody mutates a session through an object they opened to
+inspect; (2) `repair_session()` requires an explicit non-empty check-id list
+(no "fix everything"; empty/unknown/non-repairable → `std::invalid_argument` →
+ValueError); (3) `Finding.repaired` / `segments_repaired` count ONLY what was
+actually written — `RepairFn` returns whether it changed a declaration, so a
+repair that declines is reported as still outstanding (this bit: the caller used
+to mark every selected finding repaired, so a declined one reported success and
+left the defect on disk). Repairs rewrite ONLY declarations (s2 + the three
+universal headers) — never samples or the index — back up to
+`<session>.repair-backup/`, skip any segment whose CRC fails, and reject tar
+archives. `Report.ok` ignores findings repaired in the same pass. CLI:
+`python -m mef3io validate <path> [--check ID] [--list-checks] [--fast]` reads,
+`python -m mef3io repair <path> --check ID [--no-backup]` writes and refuses an
+empty selection — separate subcommands, neither reachable from the other
+(`__main__.py` exists so `-m` doesn't double-import the package). On READ,
+`Session::declaration_issues()` scans the already-parsed s2 for unset sizes
+(free — no extra I/O, sees only missing, not wrong) and `Reader` emits one
+`SessionDeclarationWarning` per open saying reads are unaffected; it rides in
+the cache snapshot so warm opens still warn; `warn_declarations=False` or a
+category filter silences it (pyproject filters it by MESSAGE for the suite —
+naming the class there imports the wrong mef3io at pytest config time). Checks
+validated against the meflib C source: `recording_duration` is a SPAN
+(meflib.c:5479), `.tdat maximum_entry_size` is BYTES (pymef writes samples —
+its bug), and times must be compared as ABSOLUTE uUTC because pymef negates
+block times but not universal-header times. Docs: `docs/validation.md`. Tests:
+`tests/test_p13_validate.py` (asserts every repairable check has a corruption
+case, so a new one cannot ship untested) + a Catch2 case.
 
 Session metadata (subject/acquisition): `mef3io.Metadata`/`Subject`/
 `Acquisition` dataclasses (`python/mef3io/metadata.py`), settable via
@@ -118,6 +156,109 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   `METADATA_FILE_BYTES`, NOT taken to EOF — hashing the padding rejects intact
   metadata as "corrupted" and, since it throws in the ctor, kills the whole
   session (reported in 1.1.1: 1094 padded files, 0 actually corrupt).
+- **NEVER READ OR COPY A `.tdat` WHOLE. ~30 GB is ONE CHANNEL**, so a session
+  runs to hundreds of GB or TBs. This is the single easiest way to make the
+  library unusable on the files it exists for, and it has been reintroduced
+  more than once. The rules: (a) a READ takes the byte extent the request needs
+  — select the index entries first, compute min/max offset, then ONE
+  `source_->read_range`, and check that extent against `file_size` so a damaged
+  index fails loudly instead of reading wild (`collect_blocks` and `read_runs`
+  both do this; `read_runs` did NOT until 2026-09-21 and pulled the whole file
+  in for a one-minute window — 83.5 MB read for 0.47 MB of data). (b) VALIDATE
+  never reads the body: `SegmentState` keeps `tdat_uh` (1024 B) and
+  `tdat_size` only. (c) RECOVERY streams — it needs the SIZE plus a 304-byte
+  RED header (and the one block it describes) at a few offsets. (d) BACK UP
+  WHAT CHANGES, NOT THE FILE: the repair path saves the `.tdat`'s 1024-byte
+  header, and recovery saves the header plus the sub-block fragment it drops.
+  Copying 30 GB to undo 200 bytes is not a backup, it is an outage. (e) `tar`
+  archive/extract stream in 1 MB chunks — keep it that way. Measure with
+  `/proc/self/io` `rchar`, which counts bytes read exactly and does not flake
+  the way RSS does; `tests/test_p17_large_files.py` pins the read paths.
+  (f) `Session` CACHES each segment's `.tidx`, and the index is ~2% of the
+  data, so an unbounded cache is O(session) — several GB resident on a
+  few-hundred-GB recording. Capped via `set_index_cache_bytes` (default
+  256 MB) with LRU eviction, done ONLY at the end of a public call:
+  `segment_index` hands out a SPAN into those bytes, so evicting mid-read is
+  a use-after-free. (g) Benchmark the real shape with
+  `benchmarks/long_session_benchmark.py` (24 h x 16 ch @ 512 Hz, 10-min
+  appends, windowed reads): watch GROWTH (must stay ~1.00), write/read
+  AMPLIFICATION and duty cycle. It validates + dry-run recovers at the end
+  and exits non-zero on either failure. Measured there: 1.6x faster per
+  block than mef_tools, in a file 1.8x smaller, growth 1.00x — WITH the
+  durability barriers the legacy stack does not have.
+- **The MAIN use case is a session appended to for DAYS TO MONTHS** (5-20 min
+  blocks per channel). Two consequences, both load-bearing. (1) An append must
+  be O(NEW data), never O(total blocks) — section 2 describes ALL of a segment's
+  blocks, so the obvious implementation re-reads/CRCs/walks/rewrites the whole
+  `.tidx` every time, which is QUADRATIC over the recording (~14 MB `.tidx` per
+  channel at one month). `AppendIndexCache` (writer.hpp, held per channel in
+  `SessionWriter::ChannelState`) carries the index summary across appends, so
+  entries are appended IN PLACE and the body CRC is EXTENDED over just the new
+  bytes — the Koopman CRC is a rolling state with no final inversion, so
+  `crc(A||B) == crc(B, crc(A))`, which the `.tdat` path had always used and the
+  `.tidx` now does too. Measured: growth over 10 h went 1.77x -> 1.11x. The
+  FIRST append after opening a segment still walks it once (the existing blocks
+  are only described there), so keep ONE Writer open across an acquisition. The
+  fast and slow paths MUST produce identical bytes —
+  `test_append_index_cache_matches_the_full_walk` pins exactly that. The
+  index is NEVER rewritten whole on either path — the slow path still READS
+  it (the totals and the open contiguous run can only come from the
+  existing entries) but appends in place like the fast one, because a
+  caller that reopens its Writer per block is a natural Python pattern and
+  the rewrite was ~47x write amplification for a 10-min block against a
+  month-long index. `test_an_append_never_rewrites_the_index_or_the_data`
+  pins it for BOTH durability settings, self-calibrating against actual
+  file growth. (2) `durability="fast"` (`Writer(durability=)`) drops the
+  barriers. NOTE this is the DEFAULT (changed 2026-09-21) and it is NOT an
+  "atomic writes" story: `.tdat` and `.tidx` are extended IN PLACE, so without
+  barriers a crash can leave a torn tail on either, an index referencing data
+  that never landed, or blocks the index never mentioned. Only `.tmet` is
+  published by rename. Every one of those is detectable (`index.block-offsets`,
+  `index.data-coverage`, the body CRCs, `header.entry-count`) and fixed by
+  `recover_session`, which is what makes the default defensible — the failure
+  mode is "run recover after an unclean shutdown", and an EARLIER append is
+  never at risk because nothing rewrites it. Measured on the real workload
+  (24 h x 16 ch @ 512 Hz): 1.6x faster per block than mef_tools even with
+  `durability="full"`, because the encode parallelises. (3) `recover_session` (core/src/
+  recover.cpp, `python -m mef3io recover`) is the ONLY thing that may touch
+  the index or data — repair_session never does, which is what keeps it safe
+  on anything. Index-ahead-of-data drops entries; data-ahead-of-index
+  REBUILDS them from the RED block headers (CRC-checked). Dry run by
+  default. (4) Docs: `docs/long_recordings.md`, `docs/validation.md`,
+  `for_agents/INVARIANTS.md`.
+- **Durability is scoped, deliberately** (`core/src/durability.hpp`, shared by
+  writer.cpp and validate.cpp — they had drifted, and the path writing SAMPLES
+  was less careful than the one rewriting declarations). Three barriers are
+  load-bearing on APPEND and must not be removed for speed: fsync the `.tdat`
+  BEFORE writing the `.tidx` that points at those bytes (otherwise a power cut
+  leaves an index running past the real end of the data file — a state the
+  in-process rollback cannot reach, because the process is gone); and fsync the
+  `.tidx` and `.tmet` temp files before renaming them over the originals (a
+  rename is ORDERED, not durable, so otherwise it can publish a name over bytes
+  still in cache, and a short `.tmet` throws from the metadata loader and kills
+  the WHOLE session). Two things are deliberately NOT fsynced: a FRESH write
+  (nothing underneath to lose — a crash leaves an incomplete session either
+  way), and the DIRECTORY entry after a rename (losing the rename just keeps
+  the previous complete, consistent file, which is worth more than keeping the
+  last append). Cost on ext4, measured: fresh write unaffected (~80 MB/s); an
+  append pays ~3 fsyncs per channel, so a 128-channel append is ~5 s where the
+  fresh write is ~0.4 s. That is the price of not corrupting a clinical
+  archive; do not "optimise" it away without replacing the guarantee.
+- **NEVER `finalize_crcs` a `.tmet`, and never `s2.serialize` one you did not
+  build.** Both are write-side traps that mirror read-side gotchas above, and
+  the append fell into both for a long time (fixed 2026-09-21). (a) `.tmet` is
+  FIXED-length, so its body CRC must be bounded by `METADATA_FILE_BYTES`
+  (`finalize_metadata_crcs`), not taken to EOF — foreign writers pad past the
+  record, and hashing the padding writes a CRC the READER rejects, which throws
+  from the metadata loader and takes the WHOLE SESSION down. mef3io destroying a
+  file its own validator had just called clean. (b) Section 2 is 10752 B but
+  `TimeSeriesMetadataSection2` models only up to offset 6432, and `serialize`
+  zero-fills: a full re-serialize wipes meflib's protected region (6432, 2160 B)
+  and discretionary region (8592, 2160 B) — 4320 bytes of a foreign writer's
+  metadata — and re-NUL-terminates every text field, shortening one that filled
+  its field exactly. Edit the STORED image with `serialize_derived_fields`
+  instead (decrypt → edit → re-encrypt when the section is encrypted), which is
+  what the validator's repair path already did.
 - **Block ranges can OVERLAP on the sample grid.** Only writers that put every
   block start exactly on the grid (mef3io's own) tile the output cleanly;
   foreign recorders carry acquisition jitter + per-block us rounding, so a
@@ -129,6 +270,103 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   silent data race on the overlapped samples, not just a tie-break question.
   Partitioning up front also means a block a later one covers outright owns
   nothing, so it is not decoded at all (halves decode time on such geometry).
+- **Section-2 `maximum_*` fields are an ALLOCATION CONTRACT, not statistics.**
+  `0` is NOT the NO_ENTRY sentinel for any of them (`maximum_difference_bytes`
+  / `maximum_block_samples` → `0xFFFFFFFF`; the si8 ones → `-1`), so a reader
+  cannot tell unset from measured. CAREFUL WITH THE MECHANISM — and do NOT
+  conclude "no reader consumes this" from `reference_files/`. THAT IS ONE
+  MEFLIB BUILD. In the copy vendored here `RED_allocate_processing_struct` has
+  no call site at all (only the prototype meflib.h:1184 and the definition
+  meflib.c:6453) and the fields are merely initialised, rolled up and printed —
+  but the meflib build behind CyberPSG DOES allocate from section-2 sizes, and
+  that is where the crash was reproduced. That build is not available to us, so
+  the vendored source can prove a mechanism EXISTS and can never prove one does
+  not. Treat all six as load-bearing; prefer over-declaring (wastes memory) to
+  under-declaring (truncates a buffer). The two known mechanisms: (a)
+  `RED_allocate_processing_struct` skips the alloc on size 0 → NULL
+  `difference_buffer` → `RED_decode` writes through it, and the guard meflib
+  ships for this (`RED_check_RPS_allocation`, meflib.h:1186 / meflib.c:6534)
+  is NEVER CALLED — no error path at all; (b) `find_discontinuity_indices`
+  (meflib.c:3548) mallocs `number_of_discontinuities` entries then writes one
+  per FLAGGED block — the legacy `mef_tools` `0` is a straight heap overflow
+  (hence Error severity), though established by reading the C source, NOT by
+  reproducing a crash. (a) is the one with a post-mortem: an access violation
+  inside RED decoding was reproduced against a meflib-based reader, and an
+  in-memory-only patch of that single field decoded byte-identically to the
+  on-disk repair — which isolates the cause to it. Do not rank (b) above (a).
+  FULL MATRIX CONFIRMED (2026-09-21, `scripts/make_cyberpsg_check.py`): nine
+  sessions opened in CyberPSG, and ONLY 05 CRASHED. 05 is the deliberate
+  negative control carrying the 1.1.2 zeros, so the matrix is meaningful rather
+  than vacuous; 06 is BYTE-FOR-BYTE THE SAME SAMPLES with only the declarations
+  repaired and it decodes, which isolates the cause to metadata section 2 about
+  as tightly as it can be isolated. Everything else decoded: a fresh write (01),
+  one through the in-segment append path (02), a legacy `mef_tools` session
+  repaired by `repair_session` (04), encrypted (07), a `.tmet` carrying foreign
+  padding across an append (08 — the critical bug fixed this round), and a
+  session rebuilt by `recover_session` after an interrupted write (09).
+  MECHANISM (b) DID NOT FIRE. 03 is an untouched legacy session with real gaps
+  and `number_of_discontinuities = 0`, which by `meflib.c:3548` should overflow
+  a zero-length malloc — and it decoded fine. Do NOT read that as "(b) is not
+  real": the same rule applies in both directions as for the vendored source —
+  one build tolerating it proves that build does not take the path (CyberPSG may
+  simply never call `find_discontinuity_indices`), not that no build does. So
+  KEEP `times.discontinuities` at Error severity; the reasoning for it is
+  unchanged, it is simply still unreproduced. What this DOES settle is that (a)
+  is the mechanism behind the reported crash, and that mef3io's output, its
+  repairs and its recovery are all acceptable to that reader.
+  THE FIX IS CONFIRMED AGAINST THAT READER FAMILY (2026-09-17): a session
+  written by this version, and a legacy `mef_tools` session brought up to date
+  by `repair_session`, were both opened in CyberPSG and DECODED — traces drawn,
+  no access violation. That is the half that matters: the original failure let
+  `ReadSession` succeed and blew up later inside `RED_decode`, so "it opens" is
+  not evidence. The gap also landed in the right place and with the right
+  duration (3.0 s at 47-53% of a 49.875 s record), so block placement by
+  timestamp agrees there too — a third independent reader backing the
+  reconciliation below. Note this covers the repaired file, in which
+  `maximum_contiguous_block_bytes` was LOWERED from the legacy whole-file total
+  to the longest run; that was the only declaration made smaller rather than
+  larger, and it is the one now known to be safe in practice.
+  (Details of that investigation are held privately; do not restate them in
+  tracked files — this repo is public.)
+  pymef passes
+  neither (it sizes from `RED_MAX_DIFFERENCE_BYTES(maximum_block_samples)`),
+  which is why the oracle never saw any of this. Fixed in 1.1.3 (reported against 1.1.2, which left
+  `maximum_difference_bytes` and `maximum_contiguous_block_bytes` at 0 and set
+  `maximum_contiguous_blocks`/`_samples` to the channel totals). The writer now
+  measures all six: `maximum_difference_bytes` from each encoded block's RED
+  header (`RedBlockHeader::DIFFERENCE_BYTES_OFFSET`, read back rather than
+  threaded out of the encoder), the contiguous trio from runs delimited by the
+  `.tidx` discontinuity flag — the same flag a reader uses — via the
+  `ContiguousRun` accumulator in writer.cpp. Each maximum is tracked
+  independently: over-declaring only wastes a reader's allocation,
+  under-declaring truncates its buffer. `maximum_contiguous_*` is repaired in
+  BOTH directions — the declaration must state what the index holds. (It was
+  grow-only until 2026-09-17, on the reasoning that no reader in
+  reference_files consumes the trio so longest-run is mef3io's inference;
+  reverted because that left over-declaration unfixable — recorders in the
+  field over-declare these by orders of magnitude, and the wasted allocation
+  scales with channel count — and because it made mef3io disagree with an
+  independent third-party patcher, which lowers, on the same file.) On APPEND the contiguous trio is
+  recomputed exactly from the full `.tidx` (so appending repairs a segment
+  written by an older mef3io), but `maximum_difference_bytes` lives in `.tdat`
+  headers — folding old blocks in exactly would cost a seek per block and break
+  the O(new data) append. So the append takes it from the one source that costs
+  nothing: `SessionWriter` carries the exact running maximum in `ChannelState`
+  for every segment IT encoded, and passes it as `SegmentSpec::
+  known_difference_bytes`, which keeps a chunked write exact. Only a segment
+  REOPENED from disk (or written by anyone else) leaves that unknown, and there
+  the stored value is UNVERIFIABLE — it may be honest, or 0, or NO_ENTRY, or a
+  plausible-looking number that is simply wrong — so meflib's
+  `RED_MAX_DIFFERENCE_BYTES` = `5 × maximum_block_samples` is taken as a FLOOR,
+  which bounds every block whatever the stored value meant. Screening the
+  stored value against the blocks being APPENDED is NOT enough and was the bug:
+  it catches a stored 1, but a stored 3000 against a true 12488 rides through
+  whenever the new blocks are smaller. `5 × samples` is also exactly what the
+  third-party patcher writes in its DEFAULT `--diff-bytes bound` mode.
+  READ PATH NEVER CONSULTS THESE — mef3io sizes from each block's own header,
+  so zeros/sentinels/nonsense still read fine; `test_p12_sizing.py` pins both
+  halves. Cross-checked against an independent third-party patcher in exact
+  mode → "already consistent".
 - **RED encode**: first emitted byte is junk (meflib overwrites stats[255] then
   restores) → drop emitted[0], payload = emitted[1:] at offset 304; stored
   difference_bytes = generated+1. Lossless no-detrend/no-scale, pymef-readable.
@@ -150,6 +388,17 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   "Note" header with an empty body, silently dropping the text), so
   `write_records` rejects any type that is not 4 ASCII bytes up front, before
   opening a file. Unknown 4-char types still pass through with an empty body.
+- **`reference_files/` IS PRESENT in this repo** (gitignored):
+  `meflib-multiplatform/` (authoritative C), `pymef-develop/`, `mef_tools/`,
+  `mef3_dump-main/`. Settle every format question against it — do not reason
+  from memory, and do not trust a doc comment that cites it.
+- **Sign conventions are MIXED WITHIN ONE FILE.** For a pymef/mef_tools
+  session: `.tmet` universal-header times are NEGATED, `.tidx`/`.tdat`
+  universal-header times are NOT, and index block times ARE. So every time
+  comparison must go through `to_user_time` first. Worse, with a non-zero
+  `rto` the legacy stack stores a POSITIVE delta where meflib negates — the two
+  are indistinguishable from the bytes, so the validator's time checks stand
+  down entirely when `rto != 0` rather than risk rewriting a correct file.
 - **Oracle**: use `pymef` `read_ts_channels_sample([ch],[0,nsamp])` for decoded
   int32 (no gap NaN) and `read_ts_channels_uutc` for gap-filled. `mef3_dump` is
   NOT usable (reads the encryption sentinel byte unsigned). Manifest `nsamp` !=
@@ -169,15 +418,27 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   appends reuse the segment's precision. `Reader.segments(ch)` maps what data
   is where per segment. First appended block keeps discontinuity=true (readers
   are time-gridded so contiguous appends stay seamless).
-- **Off-grid block times: placement rule not reconciled with meflib.** With
-  jittered block timestamps, meflib/pymef `read_ts_channels_uutc` lays blocks
-  out contiguously by sample count within a continuous run (ignoring the
-  per-block timestamp until a discontinuity), while mef3io grids every block by
-  its own timestamp. Both are self-consistent and thread-invariant; they place
-  data differently on such files. Reproduce with `tests/test_p6_threads.py`'s
-  `_shift_block_times` + pymef. Decide deliberately before changing — real
-  production sessions are affected, and one segment-level error currently
-  fails the whole session (a per-segment/lenient mode is also open).
+- **Off-grid block times: RECONCILED — the old entry here was wrong.** It
+  claimed pymef `read_ts_channels_uutc` packs blocks contiguously by sample
+  count while mef3io grids by timestamp, and that the two are unreconciled on
+  real files. Not so. pymef takes `times_specified`: `read_ts_channels_uutc`
+  passes `True` (mef_session.py:1401) and places EVERY block by its own
+  timestamp — `decomp_data + ((block_start_time_offset - start_time)/1e6 * fs
+  + 0.5)`, pymef3_file.c:2250. The contiguous `sample_counter` packing is the
+  `else` branch (:2258), reached only by `read_ts_channels_sample`
+  (mef_session.py:1325, no 4th arg). Same rule as mef3io's, so on a real file
+  they AGREE — verified: jitter every block off-grid and both readers return
+  identical samples.
+  WHAT THE OLD REPRODUCTION ACTUALLY SHOWED: `tests/test_p6_threads.py`'s
+  `_shift_block_times` rewrites ONLY the `.tidx`. A block's start time is
+  stored TWICE — in the index entry and in its RED header (`.tdat` +40) — and
+  that helper desynchronises them. mef3io reads the index copy; pymef's uutc
+  path reads the RED-header copy. Two readers, two different copies of one
+  value, by construction. Nothing about placement philosophy.
+  THE REAL REMAINDER is that mef3io never cross-checks the two copies, so a
+  file whose copies disagree is read without complaint (open issue #11). The
+  thread-invariance tests that use the helper are still valid — they exercise
+  overlapping output ranges, which is all they claim to.
 - **Do NOT `pip install -e .` for C++ dev** — scikit-build-core's editable hook
   loads an install-time extension snapshot that shadows the dev_build symlink
   (meta-path beats sys.path). Keep mef3io uninstalled; use scripts/dev_build.sh.
@@ -207,6 +468,36 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   name not yet reserved. Then: benchmark vs legacy, cut mef_tools 3.0 as a
   compat re-export. Keep mef3io brand-neutral; brainmaze-mef3-server should
   depend on it (see docs/design.md).
+
+VERIFY BEFORE PUBLISHING: `scripts/verify_local.sh` (`--full-bench`,
+`--no-bench`) is the single entry point — builds, asserts the IN-TREE extension
+is the one under test (not an installed wheel), runs the C++ + Python suites,
+then the two gates that catch what round trips cannot, and finally the
+benchmark. It EXITS NON-ZERO if the oracle is missing rather than reporting a
+pass it cannot justify. The two gates: `tests/test_p15_oracle_acceptance.py`
+(bidirectional vs mef_tools/pymef/meflib, including the MIXED sequences where
+one stack modifies the other's session) and `tests/test_p16_header_parity.py` —
+a KNOWN-DIVERGENCE LEDGER that writes the same signal with both stacks and
+compares EVERY modelled header field; each difference must be zero or listed in
+`KNOWN_DIVERGENCES` with a written reason, anything else fails. That ledger is
+the test that would have caught `maximum_difference_bytes = 0`: it was invisible
+to every round trip (mef3io and pymef both read the files perfectly) because
+nothing compared the DECLARATIONS against the oracle's. It also documents four
+fields where mef3io is RIGHT and the legacy stack is wrong (the filter settings:
+-1.0 IS meflib's NO_ENTRY, meflib.h:431-437, while mef_tools writes made-up
+values).
+
+`scripts/make_cyberpsg_check.py` regenerates the CyberPSG/meflib check set
+(9 sessions + README into `~/mef3io_cyberpsg_check`): fresh write, append,
+legacy before/after repair, encrypted, padded-`.tmet`-then-appended,
+recovered-after-interrupted-write, plus TWO DELIBERATELY BROKEN CONTROLS —
+05 (the 1.1.2 zeros, mechanism (a)) and 03 (the legacy stack's own
+`number_of_discontinuities = 0`, mechanism (b), never yet reproduced). A
+matrix where everything passes proves nothing, which is why the controls are
+there. All parameters are constants at the top of the script and are written
+into the README; derived figures are read off the generated files, never
+hard-coded. Every session is verified through mef3io AND pymef before the
+script exits.
 
 Benchmarks: `benchmarks/mef_benchmark.py` (write/open/seq/parallel vs mef_tools
 & NWB-Zarr) and `benchmarks/compression_test.py` (file size / compression).

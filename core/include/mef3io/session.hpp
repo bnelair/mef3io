@@ -34,6 +34,7 @@ struct SegmentReader {
   int segment_number = 0;
   std::optional<TimeSeriesMetadata> metadata;      // loaded lazily
   std::vector<ui1> tidx_bytes;                      // loaded lazily (whole file)
+  std::uint64_t index_last_used = 0;                // for cache eviction
 };
 
 // A decode job: where a block lives (index into an owned buffer) and where its
@@ -106,6 +107,15 @@ struct ChannelInfo {
   std::string recording_location;
 };
 
+// One allocation-relevant declaration a segment leaves unset. Cheap enough to
+// collect at open time (the metadata is already parsed); a reader can surface
+// it as a warning without slowing anything down.
+struct DeclarationIssue {
+  std::string channel;
+  int segment_number = 0;
+  std::string field;
+};
+
 class Session {
  public:
   // Discover the session tree and load per-channel basic info (lazy on data).
@@ -140,6 +150,20 @@ class Session {
   BlockJobs collect_blocks(const std::string& channel, std::optional<si8> t0 = std::nullopt,
                            std::optional<si8> t1 = std::nullopt);
 
+  // Section-2 size declarations the session leaves unset, across every channel
+  // and segment. Free at this point: every segment's metadata was parsed when
+  // the session was opened. Nothing here affects mef3io's own reads — it sizes
+  // from each block's own header — but meflib-based readers allocate from
+  // these fields, so it is worth telling the user. `validate_session` is the
+  // thorough version; this only sees what is missing, not what is wrong.
+  std::vector<DeclarationIssue> declaration_issues() const;
+
+  /// Cap on cached block indices, in bytes (default 256 MB). 0 = unlimited.
+  /// Lowering it trades re-reads for resident memory; the indices are read
+  /// sequentially, so a re-read is cheap next to decoding.
+  void set_index_cache_bytes(std::size_t n) { index_budget_ = n; }
+  std::size_t index_cache_bytes() const;
+
   // Read records (annotations). channel == nullopt -> session-level records;
   // otherwise the given channel's records. Empty if none.
   std::vector<Record> read_records(std::optional<std::string> channel = std::nullopt);
@@ -150,10 +174,22 @@ class Session {
     std::vector<SegmentReader> segments;  // sorted by segment number
   };
 
+  std::uint64_t index_tick_ = 0;
+  std::size_t index_budget_ = 256u * 1024u * 1024u;
+
   void discover();
   void load_channel_basic_info(Channel& ch);
   TimeSeriesMetadata& segment_metadata(SegmentReader& seg);
   std::span<const ui1> segment_index(SegmentReader& seg);
+  /// Drop the least recently used block indices until the cache fits its
+  /// budget.
+  ///
+  /// The index is ~2% of the data, so a session of a few hundred gigabytes
+  /// holds several GB of it — and a reader that touches every channel used to
+  /// keep all of it resident for the life of the Session. Called only at the
+  /// END of a public operation, never while a caller holds a span into one of
+  /// these buffers.
+  void trim_index_cache();
 
   std::string mefd_path_;
   std::shared_ptr<const SessionSource> source_;

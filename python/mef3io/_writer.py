@@ -70,6 +70,32 @@ class Writer:
     metadata : mef3io.Metadata or dict, optional
         Session-wide subject/acquisition metadata written to every channel.
         Also settable later via :meth:`set_metadata` (before writing).
+    durability : {"fast", "full"}, optional
+        How hard an **append** works to survive an unclean shutdown.
+
+        ``"fast"`` (default) performs no flushes. These files are built by
+        appending for days to months, so the append is the hot path, and the
+        barriers cost roughly 2.5x on it. It matches what every MEF writer
+        before this one did — the reference C library flushes nothing.
+
+        What that costs: the **order** in which the ``.tdat``, ``.tidx`` and
+        ``.tmet`` updates reach the disk is not enforced, so a crash mid-append
+        can leave the index referencing data that never landed, blocks present
+        in ``.tdat`` that the index never mentioned, or a torn tail on either.
+        Every one of those is detected by :func:`mef3io.validate_session` and
+        repaired by :func:`mef3io.recover_session`, which rebuilds missing
+        index entries from the RED block headers. So the failure mode is *"run
+        recover after an unclean shutdown"*, not *"lose the recording"* — and
+        data already committed by an earlier append is never at risk.
+
+        ``"full"`` adds the barriers: the ``.tdat`` is flushed before the
+        ``.tidx`` that references it, and each header before it publishes what
+        was flushed. An append then becomes all-or-nothing across the three
+        files with no recovery step, at ~3 flushes per channel per append.
+        Worth it when an unclean shutdown must need no operator action.
+
+        A fresh write is unaffected either way — there is nothing underneath it
+        to lose.
 
     Examples
     --------
@@ -87,9 +113,17 @@ class Writer:
         block_length: Optional[int] = None,
         n_threads: int = 0,
         metadata=None,
+        durability: str = "fast",
     ):
         from . import _mef3io
 
+        # Validated FIRST: the SessionWriter constructor removes an existing
+        # session when overwrite=True, so checking afterwards could delete a
+        # good session and only then raise.
+        if durability not in ("full", "fast"):
+            raise ValueError(
+                f"durability must be 'full' or 'fast', not {durability!r}"
+            )
         self._path = str(path)
         self._impl = _mef3io.SessionWriter(str(path), overwrite, password1 or "", password2 or "")
         # A write changes the tree; drop any stale auto cache for this session.
@@ -101,6 +135,8 @@ class Writer:
         if block_length is not None:
             self._impl.set_block_length(int(block_length))
         self._impl.set_threads(int(n_threads))
+        self._impl.set_durable(durability == "full")
+        self._durability = durability
         if metadata is not None:
             self.set_metadata(metadata)
 

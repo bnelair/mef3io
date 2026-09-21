@@ -42,6 +42,13 @@ class Reader {
 
   /// Channel names present in the session.
   const std::vector<std::string>& channels() const { return session_.channels(); }
+
+  /// Section-2 size declarations this session leaves unset. Free to call —
+  /// the metadata was parsed at open. None of them affect these reads; they
+  /// matter to meflib-based readers, which allocate from them.
+  std::vector<DeclarationIssue> declaration_issues() const {
+    return session_.declaration_issues();
+  }
   /// Metadata for @p channel (fs, conversion factor, times, sample counts,
   /// subject metadata when accessible).
   const ChannelInfo& info(const std::string& channel) const {

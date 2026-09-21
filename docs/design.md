@@ -163,6 +163,21 @@ ABI shim (later) converts to codes. Bindings map to Python exceptions.
   validation fields, and encrypted record bodies.
 - Float fs fully supported (sf8 end-to-end); block length heuristic from fs
   kept but overridable (`mef_block_len`).
+- **Section-2 buffer sizing is a hard output requirement, not bookkeeping.**
+  meflib-based readers allocate from the `maximum_*` fields before decoding,
+  and `0` is not the NO_ENTRY sentinel for any of them, so every one is
+  measured from the blocks actually written: `maximum_difference_bytes` from
+  the encoded RED headers, the `maximum_contiguous_*` trio from runs delimited
+  by the same `.tidx` discontinuity flag a reader uses. Appends recompute the
+  contiguous trio from the full index (repairing segments written before this
+  was implemented). `maximum_difference_bytes` stays exact across a chunked
+  write, because the writer keeps the running maximum for the blocks it encoded
+  itself; for a segment reopened from disk, whose earlier blocks it cannot see
+  without a seek each, it takes meflib's `RED_MAX_DIFFERENCE_BYTES` as a floor
+  instead — an over-declaration only costs a reader memory, while
+  under-declaring truncates the buffer it decodes into. The read path never consults these fields — it
+  sizes from each block's own header — so older or foreign declarations stay
+  readable. See `docs/mef3_format.md` and `docs/legacy_comparison.md`.
 - Any write invalidates caches for the session (see §6).
 
 ### 4.6 Threading

@@ -14,7 +14,10 @@ code should prefer ``mef3io.Reader`` / ``mef3io.Writer``.
 """
 from __future__ import annotations
 
+import warnings
 from typing import Optional, Union
+
+from ._reader import SessionDeclarationWarning, _declaration_warning_text
 
 import numpy as np
 
@@ -30,8 +33,29 @@ class MefReader:
 
     __version__ = "mef3io"
 
-    def __init__(self, session_path: str, password2: Optional[str] = None):
+    def __init__(
+        self,
+        session_path: str,
+        password2: Optional[str] = None,
+        warn_declarations: bool = True,
+    ):
         self._r = _mef3io.Reader(str(session_path), password2 or "")
+        # The legacy drop-in is exactly the entry point people with legacy-
+        # written sessions use, so it must carry the same open-time warning as
+        # mef3io.Reader — otherwise the population most affected is the one
+        # population never told.
+        #
+        # It also needs the same opt-out. `mef_tools.io.MefReader` never
+        # warned, so a project that swaps in the drop-in and runs its suite
+        # with -W error turns working code into a hard failure — on a session
+        # whose data this very warning describes as intact.
+        issues = list(self._r.declaration_issues()) if warn_declarations else []
+        if issues:
+            warnings.warn(
+                _declaration_warning_text(issues, str(session_path)),
+                SessionDeclarationWarning,
+                stacklevel=2,
+            )
         self.bi = [self._basic_info(ch) for ch in self._r.channels]
 
     def _basic_info(self, channel: str) -> dict:
@@ -142,9 +166,18 @@ class MefWriter:
     __version__ = "mef3io"
 
     def __init__(self, session_path, overwrite=False, password1=None, password2=None,
-                 verbose=False, metadata=None):
+                 verbose=False, metadata=None, durability="fast"):
+        # Checked before constructing: SessionWriter removes an existing session
+        # when overwrite=True, so a late check could delete a good one first.
+        if durability not in ("full", "fast"):
+            raise ValueError(f"durability must be 'full' or 'fast', not {durability!r}")
         self._path = str(session_path)
         self._w = _mef3io.SessionWriter(self._path, overwrite, password1 or "", password2 or "")
+        # "fast" by default, matching mef3io.Writer and the legacy stack this
+        # class stands in for — meflib flushes nothing at all. See
+        # mef3io.Writer for what an unclean shutdown costs and how
+        # mef3io.recover_session puts it back.
+        self._w.set_durable(durability == "full")
         self.verbose = verbose
         self._data_units = "uV"
         self._mef_block_len = None

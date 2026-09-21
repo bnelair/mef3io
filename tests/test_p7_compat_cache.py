@@ -174,6 +174,23 @@ def test_cache_invalidated_by_fingerprint_change(tmp_path):
     cp.unlink(missing_ok=True)
 
 
+def test_cache_invalidated_by_same_size_same_mtime_metadata_rewrite(tmp_path):
+    path = _make_session(tmp_path)
+    cp = C.auto_cache_path(path)
+    mef3io.Reader(path, cache="auto")  # create snapshot
+    assert C.load_valid(cp, path) is not None
+
+    tmet = Path(glob.glob(path + "/ch1.timd/*/*.tmet")[0])
+    st = tmet.stat()
+    raw = bytearray(tmet.read_bytes())
+    raw[-1] ^= 0x01
+    tmet.write_bytes(raw)
+    os.utime(tmet, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+    assert C.load_valid(cp, path) is None
+    cp.unlink(missing_ok=True)
+
+
 def test_write_removes_auto_cache(tmp_path):
     path = _make_session(tmp_path)
     cp = C.auto_cache_path(path)

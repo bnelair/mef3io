@@ -19,6 +19,7 @@
 #include "mef3io/red.hpp"
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
+#include "mef3io/validate.hpp"
 
 using namespace mef3io;
 
@@ -192,6 +193,186 @@ TEST_CASE("In-segment append extends the last segment") {
   REQUIRE(map[0].start_sample == 0);
   REQUIRE(map[0].number_of_samples == 2000);
   REQUIRE(map[0].number_of_blocks == 2);
+  fsys::remove_all(dir);
+}
+
+TEST_CASE("Section-2 sizing declarations match the blocks on disk") {
+  namespace fsys = std::filesystem;
+  const auto dir = fsys::temp_directory_path() / "mef3io_sizing_test.mefd";
+  fsys::remove_all(dir);
+
+  const si8 start = 1577836800000000;
+  const sf8 fs = 250.0;
+  std::vector<si4> a(3000);
+  std::mt19937 rng(7);
+  std::uniform_int_distribution<si4> dist(-30000, 30000);
+  for (auto& v : a) v = dist(rng);
+  {
+    SessionWriter w(dir.string(), true);
+    w.write_int32("ch1", a, 1.0, start, fs);
+    // A gap, so the segment holds two contiguous runs rather than one.
+    const si8 t2 = start + static_cast<si8>(std::llround(3000 / fs * 1e6)) + 5000000;
+    w.write_int32("ch1", a, 1.0, t2, fs);
+  }
+
+  const auto seg = dir / "ch1.timd" / "ch1-000000.segd";
+  auto read_file = [](const fsys::path& p) {
+    std::ifstream f(p, std::ios::binary | std::ios::ate);
+    REQUIRE(f);
+    std::vector<ui1> buf(static_cast<std::size_t>(f.tellg()));
+    f.seekg(0);
+    f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+    return buf;
+  };
+
+  auto md = load_time_series_metadata(read_file(seg / "ch1-000000.tmet"), "");
+  const auto& s2 = md.section2;
+
+  // Recompute every declared maximum from the index and the RED block headers.
+  auto tidx = read_file(seg / "ch1-000000.tidx");
+  auto tdat = read_file(seg / "ch1-000000.tdat");
+  const std::size_t n_blocks =
+      (tidx.size() - fmt::UNIVERSAL_HEADER_BYTES) / fmt::TIME_SERIES_INDEX_BYTES;
+  REQUIRE(n_blocks > 1);
+
+  ui4 max_difference_bytes = 0, max_block_samples = 0;
+  si8 max_block_bytes = 0;
+  si8 run_blocks = 0, run_bytes = 0, run_samples = 0;
+  si8 max_run_blocks = 0, max_run_bytes = 0, max_run_samples = 0;
+  for (std::size_t i = 0; i < n_blocks; ++i) {
+    auto e = fmt::TimeSeriesIndex::parse(std::span<const ui1>(tidx).subspan(
+        fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES,
+        fmt::TIME_SERIES_INDEX_BYTES));
+    auto bh = fmt::RedBlockHeader::parse(std::span<const ui1>(tdat).subspan(
+        static_cast<std::size_t>(e.file_offset), fmt::RED_BLOCK_HEADER_BYTES));
+
+    max_difference_bytes = std::max(max_difference_bytes, bh.difference_bytes);
+    max_block_samples = std::max(max_block_samples, e.number_of_samples);
+    max_block_bytes = std::max<si8>(max_block_bytes, e.block_bytes);
+
+    if (e.red_block_flags & fmt::RedBlockHeader::DISCONTINUITY_MASK)
+      run_blocks = run_bytes = run_samples = 0;
+    ++run_blocks;
+    run_bytes += e.block_bytes;
+    run_samples += e.number_of_samples;
+    max_run_blocks = std::max(max_run_blocks, run_blocks);
+    max_run_bytes = std::max(max_run_bytes, run_bytes);
+    max_run_samples = std::max(max_run_samples, run_samples);
+  }
+
+  REQUIRE(s2.maximum_difference_bytes == max_difference_bytes);
+  REQUIRE(s2.maximum_block_samples == max_block_samples);
+  REQUIRE(s2.maximum_block_bytes == max_block_bytes);
+  REQUIRE(s2.maximum_contiguous_blocks == max_run_blocks);
+  REQUIRE(s2.maximum_contiguous_block_bytes == max_run_bytes);
+  REQUIRE(s2.maximum_contiguous_samples == max_run_samples);
+
+  // 0 is not the NO_ENTRY sentinel for any of these, so a reader cannot tell an
+  // unset field from a real measurement: none of them may be left at 0.
+  REQUIRE(s2.maximum_difference_bytes > 0);
+  REQUIRE(s2.maximum_difference_bytes != fmt::UI4_NO_ENTRY);
+  REQUIRE(s2.maximum_contiguous_block_bytes > 0);
+  // The gap splits the segment, so a contiguous run is shorter than the whole.
+  REQUIRE(s2.maximum_contiguous_samples < s2.number_of_samples);
+  // meflib sizes its difference buffer at 5 bytes/sample worst case.
+  REQUIRE(s2.maximum_difference_bytes <= 5 * s2.maximum_block_samples);
+
+  fsys::remove_all(dir);
+}
+
+TEST_CASE("Validator reports declaration defects and repairs only what is selected") {
+  namespace fsys = std::filesystem;
+  const auto dir = fsys::temp_directory_path() / "mef3io_validate_test.mefd";
+  fsys::remove_all(dir);
+
+  const si8 start = 1577836800000000;
+  const sf8 fs = 250.0;
+  std::vector<si4> a(3000);
+  std::mt19937 rng(11);
+  std::uniform_int_distribution<si4> dist(-30000, 30000);
+  for (auto& v : a) v = dist(rng);
+  {
+    SessionWriter w(dir.string(), true);
+    w.write_int32("ch1", a, 1.0, start, fs);
+  }
+
+  // A session mef3io just wrote must satisfy every check.
+  REQUIRE(validate_session(dir.string()).ok());
+  REQUIRE(validate_session(dir.string()).findings.empty());
+
+  const auto tmet = dir / "ch1.timd" / "ch1-000000.segd" / "ch1-000000.tmet";
+  auto patch_s2_ui4 = [&](int section_offset, ui4 value) {
+    std::vector<ui1> raw(fmt::METADATA_FILE_BYTES);
+    {
+      std::ifstream in(tmet, std::ios::binary);
+      REQUIRE(in);
+      in.read(reinterpret_cast<char*>(raw.data()), fmt::METADATA_FILE_BYTES);
+    }
+    byteio::write<ui4>(raw, fmt::METADATA_SECTION_2_OFFSET + section_offset, value);
+    byteio::write<ui4>(raw, 4,
+                       crc::calculate(std::span<const ui1>(raw).subspan(
+                           fmt::UNIVERSAL_HEADER_BYTES,
+                           fmt::METADATA_FILE_BYTES - fmt::UNIVERSAL_HEADER_BYTES)));
+    byteio::write<ui4>(raw, 0,
+                       crc::calculate(std::span<const ui1>(raw).subspan(
+                           4, fmt::UNIVERSAL_HEADER_BYTES - 4)));
+    std::ofstream out(tmet, std::ios::binary | std::ios::trunc);
+    REQUIRE(out);
+    out.write(reinterpret_cast<const char*>(raw.data()), fmt::METADATA_FILE_BYTES);
+  };
+
+  // Simulate a writer that never set the difference-buffer size (mef3io
+  // <= 1.1.2) and also left the block interval at 0 (legacy pymef).
+  patch_s2_ui4(6388, 0);  // maximum_difference_bytes
+  patch_s2_ui4(6392, 0);  // block_interval (low half of an si8; 0 either way)
+
+  auto report = validate_session(dir.string());
+  REQUIRE_FALSE(report.ok());
+  bool saw_difference_bytes = false;
+  for (const auto& f : report.findings)
+    if (f.check_id == "sizing.difference-bytes") {
+      saw_difference_bytes = true;
+      REQUIRE(f.severity == Severity::Error);
+      REQUIRE(f.repairable);
+      REQUIRE_FALSE(f.repaired);
+    }
+  REQUIRE(saw_difference_bytes);
+
+  // Repairs are never implicit.
+  REQUIRE_THROWS_AS(repair_session(dir.string(), RepairSelection{}), std::invalid_argument);
+  RepairSelection not_repairable;
+  not_repairable.check_ids = {"crc.metadata"};
+  REQUIRE_THROWS_AS(repair_session(dir.string(), not_repairable), std::invalid_argument);
+
+  // Repairing one check leaves the other finding outstanding.
+  RepairSelection one;
+  one.check_ids = {"sizing.difference-bytes"};
+  one.backup = false;
+  auto repaired = repair_session(dir.string(), one);
+  REQUIRE(repaired.segments_repaired == 1);
+
+  auto after = validate_session(dir.string());
+  for (const auto& f : after.findings) REQUIRE(f.check_id != "sizing.difference-bytes");
+  bool interval_still_open = false;
+  for (const auto& f : after.findings)
+    if (f.check_id == "times.block-interval") interval_still_open = true;
+  REQUIRE(interval_still_open);
+
+  // Opting in to the rest clears the session, and it still decodes.
+  RepairSelection rest;
+  rest.check_ids = after.repairable_check_ids();
+  rest.backup = false;
+  REQUIRE_FALSE(rest.check_ids.empty());
+  repair_session(dir.string(), rest);
+  REQUIRE(validate_session(dir.string()).ok());
+
+  Session ses(dir.string());
+  auto runs = ses.read_runs("ch1");
+  si8 total = 0;
+  for (const auto& r : runs) total += static_cast<si8>(r.samples.size());
+  REQUIRE(total == 3000);
+  REQUIRE(runs.front().samples.front() == a.front());
+
   fsys::remove_all(dir);
 }
 
@@ -409,4 +590,85 @@ TEST_CASE("Decoding is thread-count invariant when blocks overlap the sample gri
     }
   }
   fsys::remove_all(dir);
+}
+
+TEST_CASE("Report::ok is false when nothing was examined") {
+  // The C++ Report::ok has its own copy of this rule, and only the C ABI and
+  // the MATLAB binding consume it — the Python layer recomputes `ok` itself,
+  // so no Python test can reach this one. Deleting the guard here left both
+  // suites green while a filter that matched nothing reported a clean session.
+  namespace fsys = std::filesystem;
+  const auto dir = fsys::temp_directory_path() / "mef3io_report_ok_test.mefd";
+  fsys::remove_all(dir);
+
+  const si8 start = 1577836800000000;
+  std::vector<si4> a(2000);
+  std::mt19937 rng(3);
+  std::uniform_int_distribution<si4> dist(-1000, 1000);
+  for (auto& v : a) v = dist(rng);
+  {
+    SessionWriter w(dir.string(), true);
+    w.write_int32("ch1", a, 1.0, start, 250.0);
+  }
+
+  // The session itself is clean...
+  REQUIRE(validate_session(dir.string()).ok());
+
+  // ...but a channel filter that matches nothing examined no bytes at all, and
+  // "no findings" from "no work" must never read as a pass.
+  ValidateOptions opts;
+  opts.channels = {"no-such-channel"};
+  const auto report = validate_session(dir.string(), opts);
+  REQUIRE(report.segments_checked == 0);
+  REQUIRE(report.findings.empty());
+  REQUIRE_FALSE(report.ok());
+
+  fsys::remove_all(dir);
+}
+
+TEST_CASE("C ABI exposes durability and recovery for the MATLAB binding") {
+  // The MATLAB binding goes through the flat C ABI, so parity with Python has
+  // to be tested here — there is no MATLAB on CI. Covers the two entry points
+  // added for it: the durability knob and recovery.
+  namespace fsys = std::filesystem;
+  const auto dir = fsys::temp_directory_path() / "mef3io_c_api_durability.mefd";
+  fsys::remove_all(dir);
+
+  std::vector<si4> a(4000);
+  std::mt19937 rng(21);
+  std::uniform_int_distribution<si4> dist(-9000, 9000);
+  for (auto& v : a) v = dist(rng);
+
+  mef3io_writer* w = nullptr;
+  REQUIRE(mef3io_writer_open(dir.string().c_str(), 1, "", "", &w) == 0);
+  // Both settings must be accepted and must produce a readable session.
+  REQUIRE(mef3io_writer_set_durable(w, 0) == 0);       // "fast" — the default
+  REQUIRE(mef3io_writer_write_int32(w, "ch1", a.data(), nullptr, static_cast<int64_t>(a.size()),
+                                    0.5, 1577836800000000LL, 256.0, 0, nullptr) == 0);
+  REQUIRE(mef3io_writer_set_durable(w, 1) == 0);       // "full"
+  REQUIRE(mef3io_writer_write_int32(w, "ch1", a.data(), nullptr, static_cast<int64_t>(a.size()),
+                                    0.5, 1577836800000000LL + 15625000LL, 256.0, 0, nullptr) == 0);
+  mef3io_writer_close(w);
+
+  // A healthy session needs no recovery, and a dry run writes nothing.
+  char summary[4096] = {0};
+  int64_t segments = -1;
+  REQUIRE(mef3io_recover_session(dir.string().c_str(), 0, 1, "", summary, sizeof summary,
+                                 &segments) == 0);
+  REQUIRE(segments == 0);
+  REQUIRE(std::string(summary).find("segment(s) examined") != std::string::npos);
+  REQUIRE_FALSE(fsys::exists(dir.string() + ".recover-backup"));
+
+  // ...and the session still validates.
+  REQUIRE(validate_session(dir.string()).ok());
+
+  // Recovery refuses a tar archive rather than writing into one.
+  char tar_path[2048] = {0};
+  REQUIRE(mef3io_archive_session(dir.string().c_str(), "", 1, tar_path, sizeof tar_path) == 0);
+  const std::string tar = tar_path;
+  REQUIRE(mef3io_recover_session(tar.c_str(), 1, 1, "", summary, sizeof summary, &segments) != 0);
+  REQUIRE(std::string(mef3io_last_error()).find("tar") != std::string::npos);
+
+  fsys::remove_all(dir);
+  fsys::remove(tar);
 }
