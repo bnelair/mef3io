@@ -43,6 +43,33 @@ struct SessionMetadata {
   si4 gmt_offset = 0;                   // seconds
 };
 
+/// Everything an append derives by walking the whole `.tidx`, carried across
+/// calls so it does not have to walk it again.
+///
+/// A segment's declarations describe all of its blocks, so the append
+/// recomputed them from the full index every time — reading, CRC-ing, walking
+/// and rewriting the entire file. That is O(total blocks) per append, which is
+/// quadratic over a session, and these sessions run for days to months.
+///
+/// Holding the summary makes an append O(NEW data): entries are appended in
+/// place, the body CRC is extended over just the new bytes (the Koopman CRC is
+/// a rolling state with no final inversion, exactly as the `.tdat` path has
+/// always done), and the totals are folded in. `file_size` is checked against
+/// the file before the fast path is taken, so anything that changed the index
+/// behind our back falls back to the full walk.
+struct AppendIndexCache {
+  bool valid = false;         ///< false => walk the index and populate this
+  std::size_t file_size = 0;  ///< .tidx size this summary describes
+  std::size_t entries = 0;
+  si8 total_samples = 0;
+  si8 n_discontinuities = 0;
+  ui4 max_block_samples = 0;
+  si8 max_block_bytes = 0;
+  ui4 body_crc = 0;           ///< rolling CRC over every entry in the file
+  si8 run_blocks = 0, run_samples = 0, run_bytes = 0;      ///< open run
+  si8 max_blocks = 0, max_samples = 0, max_bytes = 0;      ///< longest run seen
+};
+
 struct SegmentSpec {
   std::string session_name;
   std::string channel_name;
@@ -91,8 +118,12 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
 /// `out_max_difference_bytes` (optional) receives the exact maximum
 /// `difference_bytes` over the blocks appended here — the NEW blocks only, not
 /// the segment's declared maximum.
+/// `cache` (optional) carries the index summary across appends. Pass the same
+/// object back on every append to the same segment and the index is never
+/// walked twice; pass nullptr, or a default-constructed one, for the full walk.
 si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec& spec,
                                const std::vector<BlockSpec>& blocks, int n_threads = 0,
-                               ui4* out_max_difference_bytes = nullptr);
+                               ui4* out_max_difference_bytes = nullptr,
+                               AppendIndexCache* cache = nullptr);
 
 }  // namespace mef3io

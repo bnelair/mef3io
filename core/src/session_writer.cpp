@@ -269,14 +269,17 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   if (append) {
     // fs / conversion-factor / start-time conflicts are validated against the
     // on-disk metadata inside append_time_series_segment.
-    append_time_series_segment(seg_dir, spec, blocks, n_threads_, &written_difference_bytes);
+    append_time_series_segment(seg_dir, spec, blocks, n_threads_, &written_difference_bytes,
+                               &st.index_cache);
   } else {
     fs::create_directories(seg_dir);
     write_time_series_segment(seg_dir, spec, blocks, n_threads_, &written_difference_bytes);
     // A fresh segment holds nothing but the blocks just encoded, so from here
-    // the running maximum is exact.
+    // the running maximum is exact — and the index summary from the previous
+    // segment describes a file this channel is no longer appending to.
     st.max_difference_bytes = 0;
     st.difference_bytes_exact = true;
+    st.index_cache = AppendIndexCache{};
   }
   st.max_difference_bytes = std::max(st.max_difference_bytes, written_difference_bytes);
 

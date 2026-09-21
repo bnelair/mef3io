@@ -95,3 +95,43 @@ The scripts prefer a local `mef_tools` checkout when run inside the original
 repo (it matches the golden fixtures); otherwise they use the pip-installed
 `mef-tools`. Build the `mef3io` extension first with `scripts/dev_build.sh` (dev
 tree) or install the package with `pip install mef3io`.
+
+## `append` — the long-recording workload
+
+The other scenarios write a session once. Real sessions are **extended block by
+block for days to months**, and that is a different workload: anything the
+append does in `O(total blocks)` becomes quadratic over the recording.
+
+```bash
+python benchmarks/mef_benchmark.py --backends mef_tools mef3io \
+       --append-chunks 32 --append-minutes 10 --append-channels 8
+```
+
+| column | meaning |
+|---|---|
+| `first` / `median` / `last` | time to append one block across all channels |
+| `growth` | `last / first`. **Near 1.00 is the property that matters**: append cost independent of how long the recording already is. Well above 1.00 keeps climbing for the life of the session. |
+| `duty` | median append time ÷ wall-clock duration of the data appended. Below 100 % the writer keeps up with a live acquisition. |
+| `.tidx` | largest block index on disk at the end |
+
+The first chunk *creates* the session, so it is excluded from `growth` — that
+would measure the create/append difference rather than scaling.
+
+`--append-threads` defaults to **1**. meflib and pymef are single-threaded, so
+single-core is the honest comparison; pass `0` to use every core.
+
+Expect mef3io to be **slower per append** than `mef_tools` and to **scale
+better**. It is paying for durability barriers that the legacy stack does not
+have at all (see [docs/long_recordings.md](../docs/long_recordings.md)), while
+keeping the append `O(new data)`.
+
+## Run this before publishing
+
+```bash
+scripts/verify_local.sh --full-bench
+```
+
+Builds, runs every suite, checks bidirectional compatibility and the header
+parity ledger against the legacy stack, then benchmarks. It fails loudly if the
+oracle (`mef-tools`, `pymef`) is not installed rather than reporting a pass it
+cannot justify.

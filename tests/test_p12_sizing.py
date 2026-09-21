@@ -850,3 +850,99 @@ def test_append_replaces_an_under_declared_difference_bytes(tmp_path):
     assert declared["maximum_difference_bytes"] > 1, "the under-declaration rode forward"
     assert declared["maximum_difference_bytes"] >= _real_stats(tmet)["maximum_difference_bytes"]
     assert mef3io.Validator(str(path)).validate().ok
+
+
+# --- the index cache: fast path must be indistinguishable from the slow one ---
+
+
+def _tree_bytes(path):
+    return {
+        str(f.relative_to(path)): f.read_bytes()
+        for f in sorted(Path(path).rglob("*"))
+        if f.is_file()
+    }
+
+
+@pytest.mark.parametrize("gap_us", [0, int(5e6)], ids=["contiguous", "with-gaps"])
+def test_append_index_cache_matches_the_full_walk(tmp_path, gap_us):
+    """Appending through ONE writer must produce the same bytes as reopening.
+
+    An append used to re-read, re-CRC, re-walk and rewrite the whole `.tidx`
+    every time — O(total blocks), so quadratic over a recording that runs for
+    days to months. It now keeps the index summary in memory and appends in
+    place, extending the body CRC over just the new entries.
+
+    That is only safe if the two paths agree exactly, so this writes the same
+    data twice: once through a single Writer (every append after the first
+    takes the cached path) and once through a fresh Writer per chunk (every
+    append takes the full walk). Byte-for-byte identical, or the cache is
+    wrong.
+    """
+    n, chunks = 1500, 6
+    rng = np.random.default_rng(9)
+    data = [rng.integers(-20000, 20000, n, dtype=np.int32) for _ in range(chunks)]
+
+    def times():
+        t = START
+        for i in range(chunks):
+            yield t
+            t += int(n / FS * 1e6) + gap_us
+
+    cached = str(tmp_path / "cached.mefd")
+    w = mef3io.Writer(cached)
+    for x, t in zip(data, times()):
+        w.write_int32("ch1", x, 0.5, t, FS)
+    w.close()
+
+    walked = str(tmp_path / "walked.mefd")
+    for x, t in zip(data, times()):
+        w = mef3io.Writer(walked)          # reopened: cache starts empty
+        w.write_int32("ch1", x, 0.5, t, FS)
+        w.close()
+
+    # Every file carries a random per-file UUID in its universal header, so two
+    # independently created sessions never match byte-for-byte. Compare what is
+    # DERIVED from the data: the whole body of each file, and the header fields
+    # the append computes.
+    a, b = _tree_bytes(Path(cached)), _tree_bytes(Path(walked))
+    assert sorted(a) == sorted(b)
+    UH_DERIVED = {
+        "start_time": (16, "<q"),
+        "end_time": (24, "<q"),
+        "number_of_entries": (32, "<q"),
+        "maximum_entry_size": (40, "<q"),
+    }
+    for name in a:
+        if name.endswith(".tmet"):
+            sa = _read_section2(Path(cached) / name)
+            sb = _read_section2(Path(walked) / name)
+            # `maximum_difference_bytes` legitimately differs between the two:
+            # a single Writer encoded every block and declares the EXACT
+            # maximum, while a reopened one cannot see the old blocks' RED
+            # headers and takes meflib's worst-case bound. Both are safe; the
+            # exact one is never larger. Everything else must match.
+            exact, bound = sa.pop("maximum_difference_bytes"), sb.pop(
+                "maximum_difference_bytes"
+            )
+            assert exact <= bound, f"{name}: the cached path over-declared"
+            assert sa == sb, name
+            continue
+        # .tidx entries and .tdat blocks must be identical byte for byte.
+        assert a[name][UH_BYTES:] == b[name][UH_BYTES:], f"{name} body differs"
+        for field, (off, fmt) in UH_DERIVED.items():
+            assert struct.unpack_from(fmt, a[name], off) == struct.unpack_from(
+                fmt, b[name], off
+            ), f"{name}: universal-header {field} differs"
+        # The body CRC is the point of the exercise: the cached path extends it
+        # incrementally, the walked path recomputes it over the whole body.
+        assert struct.unpack_from("<I", a[name], 4) == struct.unpack_from("<I", b[name], 4), (
+            f"{name}: body CRC differs — the incremental CRC disagrees with the full one"
+        )
+
+    # ...and both are correct by the validator's own reckoning.
+    assert mef3io.Validator(cached).validate().ok
+    assert mef3io.Validator(walked).validate().ok
+    with mef3io.Reader(cached) as r1, mef3io.Reader(walked) as r2:
+        np.testing.assert_array_equal(
+            np.nan_to_num(r1.read("ch1"), nan=-1.0), np.nan_to_num(r2.read("ch1"), nan=-1.0)
+        )

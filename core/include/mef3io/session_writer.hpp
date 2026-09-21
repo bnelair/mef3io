@@ -96,6 +96,11 @@ class SessionWriter {
     // meflib's worst-case bound instead. Reset whenever a new segment starts.
     ui4 max_difference_bytes = 0;
     bool difference_bytes_exact = false;
+    // Summary of the channel's current .tidx, so an append does not re-walk it.
+    // The first append after adopting a segment populates it; every later one
+    // reuses it, which is what keeps a months-long recording's appends O(new
+    // data) instead of O(session length). Reset whenever a new segment starts.
+    AppendIndexCache index_cache;
   };
 
   si8 block_length_for(sf8 fs) const;

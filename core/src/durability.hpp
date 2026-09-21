@@ -46,7 +46,13 @@ namespace fsys = std::filesystem;
 #else
   const int fd = ::open(path.c_str(), O_RDONLY);
   if (fd < 0) return false;
-  const bool ok = ::fsync(fd) == 0;
+  // fdatasync, not fsync. Both flush the data and any metadata needed to
+  // RETRIEVE it — crucially the file size, which is what grows on an append
+  // and what a reader needs to see the new bytes. fsync additionally forces
+  // out mtime/atime, which nothing here depends on and which costs an extra
+  // journal transaction per call. On a 64-channel append that is ~190 extra
+  // commits for timestamps nobody reads.
+  const bool ok = ::fdatasync(fd) == 0;
   return ::close(fd) == 0 && ok;
 #endif
 }

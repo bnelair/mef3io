@@ -156,6 +156,22 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   `METADATA_FILE_BYTES`, NOT taken to EOF — hashing the padding rejects intact
   metadata as "corrupted" and, since it throws in the ctor, kills the whole
   session (reported in 1.1.1: 1094 padded files, 0 actually corrupt).
+- **The MAIN use case is a session appended to for DAYS TO MONTHS** (5-20 min
+  blocks per channel). Two consequences, both load-bearing. (1) An append must
+  be O(NEW data), never O(total blocks) — section 2 describes ALL of a segment's
+  blocks, so the obvious implementation re-reads/CRCs/walks/rewrites the whole
+  `.tidx` every time, which is QUADRATIC over the recording (~14 MB `.tidx` per
+  channel at one month). `AppendIndexCache` (writer.hpp, held per channel in
+  `SessionWriter::ChannelState`) carries the index summary across appends, so
+  entries are appended IN PLACE and the body CRC is EXTENDED over just the new
+  bytes — the Koopman CRC is a rolling state with no final inversion, so
+  `crc(A||B) == crc(B, crc(A))`, which the `.tdat` path had always used and the
+  `.tidx` now does too. Measured: growth over 10 h went 1.77x -> 1.11x. The
+  FIRST append after opening a segment still walks it once (the existing blocks
+  are only described there), so keep ONE Writer open across an acquisition. The
+  fast and slow paths MUST produce identical bytes —
+  `test_append_index_cache_matches_the_full_walk` pins exactly that. (2) Docs:
+  `docs/long_recordings.md`.
 - **Durability is scoped, deliberately** (`core/src/durability.hpp`, shared by
   writer.cpp and validate.cpp — they had drifted, and the path writing SAMPLES
   was less careful than the one rewriting declarations). Three barriers are
@@ -378,6 +394,24 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   name not yet reserved. Then: benchmark vs legacy, cut mef_tools 3.0 as a
   compat re-export. Keep mef3io brand-neutral; brainmaze-mef3-server should
   depend on it (see docs/design.md).
+
+VERIFY BEFORE PUBLISHING: `scripts/verify_local.sh` (`--full-bench`,
+`--no-bench`) is the single entry point — builds, asserts the IN-TREE extension
+is the one under test (not an installed wheel), runs the C++ + Python suites,
+then the two gates that catch what round trips cannot, and finally the
+benchmark. It EXITS NON-ZERO if the oracle is missing rather than reporting a
+pass it cannot justify. The two gates: `tests/test_p15_oracle_acceptance.py`
+(bidirectional vs mef_tools/pymef/meflib, including the MIXED sequences where
+one stack modifies the other's session) and `tests/test_p16_header_parity.py` —
+a KNOWN-DIVERGENCE LEDGER that writes the same signal with both stacks and
+compares EVERY modelled header field; each difference must be zero or listed in
+`KNOWN_DIVERGENCES` with a written reason, anything else fails. That ledger is
+the test that would have caught `maximum_difference_bytes = 0`: it was invisible
+to every round trip (mef3io and pymef both read the files perfectly) because
+nothing compared the DECLARATIONS against the oracle's. It also documents four
+fields where mef3io is RIGHT and the legacy stack is wrong (the filter settings:
+-1.0 IS meflib's NO_ENTRY, meflib.h:431-437, while mef_tools writes made-up
+values).
 
 Benchmarks: `benchmarks/mef_benchmark.py` (write/open/seq/parallel vs mef_tools
 & NWB-Zarr) and `benchmarks/compression_test.py` (file size / compression).

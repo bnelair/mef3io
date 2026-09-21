@@ -209,6 +209,17 @@ ui4 red_max_difference_bytes(ui4 samples) {
 // truncates its buffer.
 class ContiguousRun {
  public:
+  ContiguousRun() = default;
+  /// Resume from a previously exported state, so an append can continue the
+  /// open run instead of re-walking the index to rediscover it.
+  ContiguousRun(si8 run_blocks, si8 run_samples, si8 run_bytes, si8 max_blocks, si8 max_samples,
+                si8 max_bytes)
+      : run_{run_blocks, run_samples, run_bytes}, max_{max_blocks, max_samples, max_bytes} {}
+
+  si8 open_blocks() const { return run_.blocks; }
+  si8 open_samples() const { return run_.samples; }
+  si8 open_bytes() const { return run_.block_bytes; }
+
   void add(bool discontinuity, si8 samples, si8 block_bytes) {
     if (discontinuity) run_ = {};
     run_.blocks += 1;
@@ -457,7 +468,7 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
 
 si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec& spec,
                                const std::vector<BlockSpec>& blocks, int n_threads,
-                               ui4* out_max_difference_bytes) {
+                               ui4* out_max_difference_bytes, AppendIndexCache* cache) {
   if (blocks.empty()) return 0;
   const std::string base = segment_base_name(spec);
   const std::string tmet_path = (fs::path(segment_dir) / (base + ".tmet")).string();
@@ -580,37 +591,107 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   // statistics that span the whole segment are recomputed from it here rather
   // than folded into whatever the old .tmet happened to declare. That also
   // repairs those fields on segments written before mef3io filled them in. ---
+  // --- Extend the .tidx. ---
+  //
+  // Two paths, producing byte-identical files (pinned by
+  // test_append_index_cache_matches_the_full_walk):
+  //
+  //   SLOW — read the whole index, walk every entry, rewrite the file. Needed
+  //   the first time this writer touches a segment, because the declarations
+  //   describe ALL of its blocks and the index is the only cheap record of the
+  //   ones already there. Also the fallback whenever the file is not the size
+  //   the cache remembers, i.e. anything changed it behind our back.
+  //
+  //   FAST — append the new entries in place, extend the body CRC over just
+  //   those bytes, and patch the 1024-byte header. O(new data), whatever the
+  //   session length. The CRC extends because Koopman-32 here is a plain
+  //   rolling state with no final inversion, so crc(A||B) == crc(B, crc(A));
+  //   the .tdat path has always relied on this.
+  //
+  // This matters because these sessions run for days to months. Rewriting the
+  // whole index on every append is O(total blocks), i.e. quadratic over the
+  // recording: at one month and 256 channels it is gigabytes of pointless I/O
+  // per append.
   ContiguousRun contiguous;
   ui4 index_max_block_samples = 0;
   si8 index_max_block_bytes = 0;
   si8 index_total_samples = 0;
   si8 index_n_discontinuities = 0;
   std::size_t index_entries = 0;
-  std::vector<ui1> new_tidx = read_whole_file(tidx_path);
-  // Keep the file exactly as found, for a byte-exact rollback. Reconstructing
-  // it by truncating the extended copy would fabricate any trailing padding as
-  // zeros, and padding is not necessarily zero.
-  const std::vector<ui1> original_tidx = new_tidx;
-  // Drop trailing bytes that do not form a whole entry before appending.
-  // Foreign writers pad past the last entry and the validator deliberately
-  // tolerates it (crc.index bounds its hash by the declared count) — but
-  // appending after the padding puts every new entry at a broken stride, and
-  // the reader then rejects the whole file with "index file body is not a
-  // whole number of entries". Reproduced: 16 bytes of padding plus one append
-  // made the session unreadable.
-  if (new_tidx.size() > fmt::UNIVERSAL_HEADER_BYTES) {
-    const std::size_t body = new_tidx.size() - fmt::UNIVERSAL_HEADER_BYTES;
-    new_tidx.resize(fmt::UNIVERSAL_HEADER_BYTES +
-                    (body - (body % fmt::TIME_SERIES_INDEX_BYTES)));
-  }
-  {
+  std::vector<ui1> new_entries(index.size() * fmt::TIME_SERIES_INDEX_BYTES);
+  for (std::size_t i = 0; i < index.size(); ++i)
+    index[i].serialize(std::span<ui1>(new_entries).subspan(i * fmt::TIME_SERIES_INDEX_BYTES,
+                                                           fmt::TIME_SERIES_INDEX_BYTES));
+
+  const std::uintmax_t tidx_size_on_disk = fs::file_size(tidx_path);
+  const bool use_cache = cache && cache->valid &&
+                         cache->file_size == static_cast<std::size_t>(tidx_size_on_disk);
+
+  // Rollback state: the bytes to put back if a later step fails. On the fast
+  // path only the header and the file length change, so that is all we keep.
+  std::vector<ui1> original_tidx;      // slow path: the file, verbatim
+  std::vector<ui1> original_tidx_uh;   // fast path: just the header
+  const std::size_t original_tidx_size = static_cast<std::size_t>(tidx_size_on_disk);
+  std::vector<ui1> new_tidx;           // slow path only: the whole new file
+  std::vector<ui1> new_tidx_uh;        // fast path only: the patched header
+  ui4 tidx_body_crc = 0;
+
+  if (use_cache) {
+    index_entries = cache->entries + index.size();
+    index_total_samples = cache->total_samples;
+    index_n_discontinuities = cache->n_discontinuities;
+    index_max_block_samples = cache->max_block_samples;
+    index_max_block_bytes = cache->max_block_bytes;
+    contiguous = ContiguousRun(cache->run_blocks, cache->run_samples, cache->run_bytes,
+                               cache->max_blocks, cache->max_samples, cache->max_bytes);
+    for (const auto& e : index) {
+      const bool discontinuity =
+          (e.red_block_flags & fmt::RedBlockHeader::DISCONTINUITY_MASK) != 0;
+      contiguous.add(discontinuity, e.number_of_samples, e.block_bytes);
+      index_max_block_samples = std::max(index_max_block_samples, e.number_of_samples);
+      index_max_block_bytes = std::max<si8>(index_max_block_bytes, e.block_bytes);
+      index_total_samples += e.number_of_samples;
+      if (discontinuity) ++index_n_discontinuities;
+    }
+    tidx_body_crc = crc::calculate(new_entries, cache->body_crc);
+
+    original_tidx_uh.assign(fmt::UNIVERSAL_HEADER_BYTES, 0);
+    {
+      std::ifstream in(tidx_path, std::ios::binary);
+      if (!in || !in.read(reinterpret_cast<char*>(original_tidx_uh.data()),
+                          fmt::UNIVERSAL_HEADER_BYTES))
+        throw IoError("short read: " + tidx_path);
+    }
+    new_tidx_uh = original_tidx_uh;
+    auto uh = fmt::UniversalHeader::parse(new_tidx_uh);
+    uh.end_time = end_disk;
+    uh.number_of_entries = static_cast<si8>(index_entries);
+    uh.serialize(new_tidx_uh);
+    byteio::write<ui4>(new_tidx_uh, 4, tidx_body_crc);
+    byteio::write<ui4>(new_tidx_uh, 0,
+                       crc::calculate(std::span<const ui1>(new_tidx_uh)
+                                          .subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4)));
+  } else {
+    new_tidx = read_whole_file(tidx_path);
+    // Keep the file exactly as found, for a byte-exact rollback. Reconstructing
+    // it by truncating the extended copy would fabricate any trailing padding as
+    // zeros, and padding is not necessarily zero.
+    original_tidx = new_tidx;
+    // Drop trailing bytes that do not form a whole entry before appending.
+    // Foreign writers pad past the last entry and the validator deliberately
+    // tolerates it (crc.index bounds its hash by the declared count) — but
+    // appending after the padding puts every new entry at a broken stride, and
+    // the reader then rejects the whole file with "index file body is not a
+    // whole number of entries". Reproduced: 16 bytes of padding plus one append
+    // made the session unreadable.
+    if (new_tidx.size() > fmt::UNIVERSAL_HEADER_BYTES) {
+      const std::size_t body = new_tidx.size() - fmt::UNIVERSAL_HEADER_BYTES;
+      new_tidx.resize(fmt::UNIVERSAL_HEADER_BYTES +
+                      (body - (body % fmt::TIME_SERIES_INDEX_BYTES)));
+    }
     auto uh = fmt::UniversalHeader::parse(new_tidx);
     uh.end_time = end_disk;
-    std::vector<ui1> entry(fmt::TIME_SERIES_INDEX_BYTES);
-    for (const auto& e : index) {
-      e.serialize(entry);
-      new_tidx.insert(new_tidx.end(), entry.begin(), entry.end());
-    }
+    new_tidx.insert(new_tidx.end(), new_entries.begin(), new_entries.end());
 
     std::span<const ui1> entries =
         std::span<const ui1>(new_tidx).subspan(fmt::UNIVERSAL_HEADER_BYTES);
@@ -624,6 +705,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     uh.number_of_entries = static_cast<si8>(n_entries);
     uh.serialize(new_tidx);
     finalize_crcs(new_tidx);
+    tidx_body_crc = byteio::read<ui4>(new_tidx, 4);
     for (std::size_t i = 0; i < n_entries; ++i) {
       auto e = fmt::TimeSeriesIndex::parse(
           entries.subspan(i * fmt::TIME_SERIES_INDEX_BYTES, fmt::TIME_SERIES_INDEX_BYTES));
@@ -829,12 +911,30 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     // had already been modified. Rolling back a file that was never touched is
     // harmless; failing to roll back one that was is not.
     wrote_tidx = true;
-    write_file(tidx_path, new_tidx);
+    if (use_cache) {
+      // Append the entries, make them durable, and only THEN patch the header
+      // that declares them. The header is what a reader counts, so publishing
+      // it before the entries are on disk is the one ordering that could leave
+      // the index describing bytes that are not there.
+      {
+        std::ofstream app(tidx_path, std::ios::binary | std::ios::app);
+        if (!app) throw IoError("cannot open for append: " + tidx_path);
+        app.write(reinterpret_cast<const char*>(new_entries.data()),
+                  static_cast<std::streamsize>(new_entries.size()));
+        if (!app) throw IoError("append failed: " + tidx_path);
+        finish_stream(app, tidx_path);
+      }
+      fsync_file_or_throw(tidx_path);
+      overwrite_file_prefix(tidx_path, new_tidx_uh);
+    } else {
+      write_file(tidx_path, new_tidx);
+    }
     patched_tdat_header = true;
     overwrite_file_prefix(tdat_path, new_tdat_uh);
     wrote_tmet = true;
     write_file(tmet_path, new_tmet);
   } catch (...) {
+    if (cache) cache->valid = false;  // the file may no longer match the summary
     std::string rollback_error;
     auto note_rollback = [&](const std::string& what) {
       if (rollback_error.empty()) rollback_error = what;
@@ -861,8 +961,21 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     };
     if (wrote_tmet)
       restore(tmet_path, tmet, "tmet", [&] { write_file(tmet_path, tmet); });
-    if (wrote_tidx)
-      restore(tidx_path, original_tidx, "tidx", [&] { write_file(tidx_path, original_tidx); });
+    if (wrote_tidx) {
+      if (use_cache) {
+        // Put the length and the header back; nothing else was touched.
+        try {
+          std::error_code ec;
+          fs::resize_file(tidx_path, static_cast<std::uintmax_t>(original_tidx_size), ec);
+          if (ec) note_rollback("tidx truncate rollback failed: " + ec.message());
+          else overwrite_file_prefix(tidx_path, original_tidx_uh);
+        } catch (const std::exception& e) {
+          note_rollback(std::string("tidx rollback failed: ") + e.what());
+        }
+      } else {
+        restore(tidx_path, original_tidx, "tidx", [&] { write_file(tidx_path, original_tidx); });
+      }
+    }
     if (patched_tdat_header) {
       // Only the 1024-byte header was patched in place; compare just that.
       try {
@@ -889,6 +1002,25 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   }
 
   if (out_max_difference_bytes) *out_max_difference_bytes = max_difference_bytes;
+  if (cache) {
+    // Everything reached disk, so the summary now describes the file. Recorded
+    // unconditionally — including after a slow path — so the NEXT append can
+    // take the fast one.
+    cache->valid = true;
+    cache->file_size = use_cache ? original_tidx_size + new_entries.size() : new_tidx.size();
+    cache->entries = index_entries;
+    cache->total_samples = index_total_samples;
+    cache->n_discontinuities = index_n_discontinuities;
+    cache->max_block_samples = index_max_block_samples;
+    cache->max_block_bytes = index_max_block_bytes;
+    cache->body_crc = tidx_body_crc;
+    cache->run_blocks = contiguous.open_blocks();
+    cache->run_samples = contiguous.open_samples();
+    cache->run_bytes = contiguous.open_bytes();
+    cache->max_blocks = contiguous.blocks();
+    cache->max_samples = contiguous.samples();
+    cache->max_bytes = contiguous.block_bytes();
+  }
   return appended_samples;
 }
 

@@ -62,6 +62,7 @@ nav:
       - C++ and C ABI: cpp.md
       - Session metadata: metadata.md
       - Validation & repair: validation.md
+      - Long recordings: long_recordings.md
   - API reference:
       - Python: api/python.md
       - MATLAB: api/matlab.md

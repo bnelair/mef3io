@@ -77,6 +77,16 @@ class Config:
     outdir: str = ""                    # default: scratch/<auto>
     keep_files: bool = False
     seed: int = 12345
+    # --- append scenario: the long-recording workload ---
+    # An acquisition extends a session block by block for days to months. It is
+    # a different workload from `write`, and the one where an O(total blocks)
+    # append turns quadratic over the recording.
+    append_chunks: int = 24             # 0 disables the scenario
+    append_minutes: float = 10.0        # data appended per chunk, per channel
+    append_channels: int = 8
+    append_threads: int = 1             # mef3io encode threads; 1 = single-core,
+                                        # which is the fair comparison against
+                                        # meflib/pymef (single-threaded). 0 = all.
 
     @property
     def n_samples(self) -> int:
@@ -440,12 +450,137 @@ def run(cfg: Config) -> dict:
             shutil.rmtree(path, ignore_errors=True)
 
     _print_summary(cfg, results)
-    payload = {"config": asdict(cfg), "results": results}
+
+    appended = {}
+    if cfg.append_chunks:
+        print(f"\n--- append scenario: {cfg.append_chunks} chunks of "
+              f"{cfg.append_minutes:g} min x {cfg.append_channels} ch ---")
+        appended = bench_append(cfg, out)
+        _print_append(cfg, appended)
+
+    payload = {"config": asdict(cfg), "results": results, "append": appended}
     (out / "results.json").write_text(json.dumps(payload, indent=2))
     _write_csv(out / "results.csv", results)
     print(f"\nResults written to {out/'results.json'} and {out/'results.csv'}")
 
     return results
+
+
+def bench_append(cfg: Config, outdir: Path) -> dict:
+    """The long-recording workload: a session extended block by block.
+
+    This is how these files are actually produced — an acquisition appends a
+    5-20 minute block per channel, for days to months. It is a different
+    workload from `write`, and the one where the cost of getting the append
+    wrong compounds: anything O(total blocks) per append is quadratic over the
+    recording.
+
+    Reported per backend: the time for the FIRST append, the MEDIAN, the LAST,
+    and last/first as a growth factor. A growth factor near 1.0 means the
+    append cost does not depend on how long the recording already is, which is
+    the property that matters at month scale. Anything well above 1.0 will keep
+    climbing for the life of the session.
+    """
+    import mef3io
+
+    chunk_samples = int(cfg.fs * cfg.append_minutes * 60)
+    rng = np.random.default_rng(cfg.seed)
+    chunk = (rng.normal(0, 3000, chunk_samples)).astype(np.int32)
+    out = {}
+
+    for backend in cfg.backends:
+        if backend not in ("mef3io", "mef_tools"):
+            continue
+        path = str(outdir / f"append_{backend}.mefd")
+        shutil.rmtree(path, ignore_errors=True)
+        times = []
+        try:
+            t0_uutc = 1577836800000000
+            step = int(chunk_samples / cfg.fs * 1e6)
+
+            if backend == "mef3io":
+                w = mef3io.Writer(path, n_threads=cfg.append_threads)
+                for i in range(cfg.append_chunks):
+                    t0 = time.perf_counter()
+                    for c in range(cfg.append_channels):
+                        w.write_int32(channel_name(c), chunk, 10.0 ** -cfg.precision,
+                                      t0_uutc + i * step, cfg.fs)
+                    times.append(time.perf_counter() - t0)
+                w.close()
+            else:
+                from mef_tools.io import MefWriter
+
+                w = MefWriter(path, overwrite=True)
+                for i in range(cfg.append_chunks):
+                    t0 = time.perf_counter()
+                    for c in range(cfg.append_channels):
+                        # reload_metadata=False is the legacy stack's own
+                        # fast-append switch; without it every append re-reads
+                        # the whole session's metadata.
+                        w.write_data(chunk, channel_name(c), t0_uutc + i * step, cfg.fs,
+                                     precision=cfg.precision, reload_metadata=False)
+                    times.append(time.perf_counter() - t0)
+                del w
+
+            biggest_index = max(
+                (f.stat().st_size for f in Path(path).rglob("*.tidx")), default=0
+            )
+            # The FIRST chunk creates the session; it is a write, not an append.
+            # Growth must compare appends with appends, or it measures the
+            # create/append difference instead of how cost scales with length.
+            appends = times[1:] or times
+            out[backend] = {
+                "append_first_s": appends[0],
+                "append_median_s": float(np.median(appends)),
+                "append_last_s": appends[-1],
+                "append_growth": appends[-1] / appends[0] if appends[0] else float("nan"),
+                "create_s": times[0],
+                "append_total_s": float(np.sum(times)),
+                "largest_tidx_bytes": biggest_index,
+                "data_seconds_per_append": cfg.append_minutes * 60 * cfg.append_channels,
+            }
+            # Duty cycle: fraction of real time spent committing it. < 1.0 means
+            # the writer keeps up with a live acquisition.
+            out[backend]["duty_cycle"] = (
+                out[backend]["append_median_s"] / (cfg.append_minutes * 60)
+            )
+        except Exception as e:
+            out[backend] = {"error": f"{type(e).__name__}: {e}"}
+        finally:
+            if not cfg.keep_files:
+                shutil.rmtree(path, ignore_errors=True)
+    return out
+
+
+def _print_append(cfg: Config, appended: dict):
+    if not appended:
+        return
+    print()
+    print("=" * 88)
+    print(f"APPEND — {cfg.append_chunks} x {cfg.append_minutes:g} min x "
+          f"{cfg.append_channels} ch @ {cfg.fs:g} Hz "
+          f"(mef3io threads={cfg.append_threads})")
+    cols = [("append_first_s", "first s", "{:.3f}"), ("append_median_s", "median s", "{:.3f}"),
+            ("append_last_s", "last s", "{:.3f}"), ("append_growth", "growth", "{:.2f}x"),
+            ("duty_cycle", "duty", "{:.1%}"), ("largest_tidx_bytes", ".tidx", None)]
+    header = f"{'backend':12}" + "".join(f"{c[1]:>12}" for c in cols)
+    print(header)
+    print("-" * len(header))
+    for backend, r in appended.items():
+        if "error" in r:
+            print(f"{backend:12}  ERROR: {r['error']}")
+            continue
+        row = f"{backend:12}"
+        for key, _, fmt in cols:
+            v = r.get(key)
+            cell = "-" if v is None else (human_bytes(v) if fmt is None else fmt.format(v))
+            row += f"{cell:>12}"
+        print(row)
+    print("growth = last/first. Near 1.00 means append cost is independent of how")
+    print("long the recording already is — the property that matters at month scale.")
+    print("duty  = median append time / wall-clock duration of the data appended;")
+    print("        below 100% the writer keeps up with a live acquisition.")
+    print("=" * 88)
 
 
 def _print_summary(cfg: Config, results: dict):
@@ -515,6 +650,15 @@ def parse_args() -> Config:
     p.add_argument("--outdir", default=d.outdir)
     p.add_argument("--keep-files", action="store_true")
     p.add_argument("--seed", type=int, default=d.seed)
+    p.add_argument("--append-chunks", type=int, default=d.append_chunks,
+                   help="blocks appended in the append scenario (0 disables it)")
+    p.add_argument("--append-minutes", type=float, default=d.append_minutes,
+                   help="minutes of data per appended block, per channel")
+    p.add_argument("--append-channels", type=int, default=d.append_channels)
+    p.add_argument("--append-threads", type=int, default=d.append_threads,
+                   help="mef3io encode threads during append; 1 (default) is the "
+                        "single-core comparison against single-threaded meflib, "
+                        "0 uses every core")
     p.add_argument("--quick", action="store_true",
                    help="tiny smoke config (0.05h, 4ch) overriding size args")
     a = p.parse_args()
@@ -525,9 +669,12 @@ def parse_args() -> Config:
         dl_reads=a.dl_reads, seq_max_segments=a.seq_max_segments, seq_threads=a.seq_threads,
         nwb_dtype=a.nwb_dtype, mef_block_samples=a.mef_block_samples,
         backends=list(a.backends), outdir=a.outdir, keep_files=a.keep_files, seed=a.seed,
+        append_chunks=a.append_chunks, append_minutes=a.append_minutes,
+        append_channels=a.append_channels, append_threads=a.append_threads,
     )
     if a.quick:
         cfg.hours, cfg.channels, cfg.segment_minutes, cfg.dl_reads = 0.05, 4, 0.5, 32
+        cfg.append_chunks, cfg.append_minutes, cfg.append_channels = 6, 0.5, 2
     if not cfg.outdir:
         scratch = os.environ.get("TMPDIR", "/tmp")
         cfg.outdir = str(Path(scratch) / "mef_benchmark")
