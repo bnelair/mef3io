@@ -222,10 +222,15 @@ assert(exist(fullfile(sessionDir, 'matlab_bad_dur.mefd'), 'dir') ~= 7, ...
     'a rejected Durability must not create a session');
 
 % Tar archives are read-only, so recovery must refuse one rather than write.
+% Archive built HERE rather than reusing `tarPath` from the tar block above:
+% that one is deleted at its end (line ~167), so depending on it made this
+% assertion fail on a file the suite had already removed.
+recTarPath = mef3io.archiveSession(dp);
 gotError = false;
-try mef3io.recoverSession(tarPath, Apply=true); catch, gotError = true; end
+try mef3io.recoverSession(recTarPath, Apply=true); catch, gotError = true; end
 assert(gotError, 'recoverSession must refuse a tar archive');
-assert(exist(tarPath, 'file') == 2, 'the archive must be left alone');
+assert(exist(recTarPath, 'file') == 2, 'the archive must be left alone');
+delete(recTarPath);
 
 fprintf('test_mef3io: all assertions passed (%s)\n', sessionDir);
 end

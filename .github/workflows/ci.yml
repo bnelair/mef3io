@@ -7,6 +7,16 @@ on:
   workflow_dispatch:
 
 jobs:
+  matlab-lint:
+    # There is no MATLAB in CI (the .m suites run only in the release job), so
+    # a typo in them is otherwise invisible until a release is attempted. This
+    # static check catches the two kinds that have actually broken one.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static checks on the MATLAB scripts
+        run: python3 scripts/lint_matlab_tests.py
+
   cpp-tests:
     runs-on: ubuntu-latest
     steps:
