@@ -37,8 +37,20 @@ class Reader {
   /// @param mefd_path  path to the `.mefd` session directory.
   /// @param password   level-1 or level-2 password; empty if unencrypted.
   /// @param n_threads  RED decode threads: 0 = hardware concurrency, 1 = serial.
-  Reader(const std::string& mefd_path, std::string password = "", int n_threads = 0)
-      : session_(mefd_path, std::move(password)), n_threads_(n_threads) {}
+  /// @param strict  true (the default) lets a segment-level failure fail the
+  ///                 whole session. false contains it: the segment is skipped,
+  ///                 its time span reads back as a gap like any other missing
+  ///                 data, and it is listed in problems(). Strict stays the
+  ///                 default deliberately — an unreported CRC failure is how
+  ///                 corrupt scaling reaches an analysis unnoticed.
+  Reader(const std::string& mefd_path, std::string password = "", int n_threads = 0,
+         bool strict = true)
+      : session_(mefd_path, std::move(password), strict), n_threads_(n_threads) {}
+
+  /// Segments that could not be read. Always empty in strict mode, where such
+  /// a segment throws instead. Non-empty means parts of this session read back
+  /// as gaps that are NOT gaps in the recording.
+  const std::vector<SegmentProblem>& problems() const { return session_.problems(); }
 
   /// Set the default decode thread count (0 = all cores, 1 = serial).
   void set_threads(int n) { n_threads_ = n; }

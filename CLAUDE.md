@@ -506,6 +506,29 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   compat re-export. Keep mef3io brand-neutral; brainmaze-mef3-server should
   depend on it (see docs/design.md).
 
+Per-segment isolation (#12): a Session/Reader opened `strict=False` CONTAINS a
+segment-level failure instead of letting it fail the whole session — the
+segment is skipped, its span reads back as a gap, and it lands in
+`problems()`. Strict is the DEFAULT everywhere and must stay so: a skipped
+segment's samples are NaN, indistinguishable in the array from a real
+recording gap, so silence is how missing data reaches an analysis. The seam is
+`Session::with_segment(channel, seg, fn)` — it no-ops for an already-failed
+segment (so a bad file is not retried per call), rethrows when strict, and
+records a `SegmentProblem` when not. EVERY caller must ROLL BACK what `fn`
+appended before it threw (`out.resize(mark)`; collect_blocks restores buffers,
+jobs AND mismatches; read_runs also drops `current`, which points into the
+vector it resizes) — a half-written segment is worse than a skipped one. Note
+`continue` inside those lambdas means the inner loop; use `return` for "this
+segment contributes nothing". `info.n_segments` counts READABLE segments so it
+cannot out-count `segment_map`. Surfaced as Python `Reader(strict=False)` /
+`Reader.problems` / `UnreadableSegmentWarning`, C ABI
+`mef3io_reader_open_ex` + `mef3io_reader_n_problems`/`_problem` (the original
+`mef3io_reader_open` keeps its signature), MEX `reader_problems`, MATLAB
+`Reader(path, pwd, nThreads, false)` / `r.problems()` / `mef3io:unreadableSegment`.
+`test_api_parity.m`'s map must list any new method or the release MATLAB job
+fails. Tests: `tests/test_p20_segment_isolation.py`, block in
+`matlab/test_mef3io.m`.
+
 VERIFY BEFORE PUBLISHING: `scripts/verify_local.sh` (`--full-bench`,
 `--no-bench`) is the single entry point — builds, asserts the IN-TREE extension
 is the one under test (not an installed wheel), runs the C++ + Python suites,

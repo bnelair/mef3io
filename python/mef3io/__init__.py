@@ -30,7 +30,12 @@ def have_cpp_backend() -> bool:
 
 
 from ._archive import archive_session, extract_session  # noqa: E402
-from ._reader import BlockCopyWarning, Reader, SessionDeclarationWarning  # noqa: E402
+from ._reader import (  # noqa: E402
+    BlockCopyWarning,
+    Reader,
+    SessionDeclarationWarning,
+    UnreadableSegmentWarning,
+)
 from ._writer import Writer  # noqa: E402
 from .metadata import Acquisition, Metadata, Subject  # noqa: E402
 from .validate import (  # noqa: E402
@@ -71,6 +76,7 @@ __all__ = [
     "RecoveryReport", "RecoveredSegment",
     "BlockCopyWarning",
     "SessionDeclarationWarning",
+    "UnreadableSegmentWarning",
     "MefError", "FormatError", "CrcError", "PasswordError", "IoError",
     "WriteConflictError",
     "have_cpp_backend", "__version__",

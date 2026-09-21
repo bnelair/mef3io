@@ -29,6 +29,21 @@ class SessionDeclarationWarning(UserWarning):
     """
 
 
+class UnreadableSegmentWarning(UserWarning):
+    """Part of this session could not be read and is being skipped.
+
+    Only ever raised by a Reader opened ``strict=False``. The skipped segments'
+    time spans read back as NaN — indistinguishable, in the returned array,
+    from a genuine recording gap. That is the hazard lenient mode trades for
+    availability, so it is never silent: see :attr:`Reader.problems` for the
+    segment paths and the reason each one failed.
+
+    Strict is the default. An unreported CRC failure is how corrupt scaling
+    reaches an analysis unnoticed; lenient mode exists to salvage the intact
+    99% of an archive, not to relax the checks.
+    """
+
+
 class BlockCopyWarning(UserWarning):
     """A block's two stored copies of its start time or sample count disagree.
 
@@ -48,6 +63,18 @@ class BlockCopyWarning(UserWarning):
 
         warnings.filterwarnings("ignore", category=mef3io.BlockCopyWarning)
     """
+
+
+def _unreadable_warning_text(problems: list, path: str) -> str:
+    chans = sorted({p["channel"] for p in problems})
+    first = problems[0]
+    return (
+        f"{path}: {len(problems)} segment(s) could not be read and were SKIPPED "
+        f"across channel(s) {', '.join(chans)}; their time spans read back as NaN, "
+        f"which is indistinguishable from a real recording gap. "
+        f"First: {first['segment']} — {first['reason']}. "
+        "Full list in Reader.problems. Open with strict=True to fail instead."
+    )
 
 
 def _block_copy_warning_text(mismatches: list, path: str) -> str:
@@ -142,11 +169,13 @@ class Reader:
         n_threads: int = 0,
         cache=None,
         warn_declarations: bool = True,
+        strict: bool = True,
     ):
         self._path = str(path)
         self._password = password or ""
         self._backend_name = backend
         self._n_threads = n_threads
+        self._strict = bool(strict)
         self._impl = None  # constructed lazily so a warm start stays cheap
 
         # Warm start: serve channel metadata from a valid cache snapshot, and
@@ -174,6 +203,15 @@ class Reader:
                     _cache.build_snapshot(self._path, self._infos, self._declaration_issues),
                 )
 
+        if not self._strict and self._impl is not None:
+            problems = self.problems
+            if problems:
+                warnings.warn(
+                    _unreadable_warning_text(problems, self._path),
+                    UnreadableSegmentWarning,
+                    stacklevel=2,
+                )
+
         if warn_declarations and self._declaration_issues:
             warnings.warn(
                 _declaration_warning_text(self._declaration_issues, self._path),
@@ -186,6 +224,24 @@ class Reader:
         # the call would also swallow one raised *inside* it, and a backend with
         # a typo would then report every session as clean.
         fn = getattr(self._impl, "declaration_issues", None)
+        return list(fn()) if fn is not None else []
+
+    @property
+    def problems(self) -> list:
+        """Segments that could not be read, when opened ``strict=False``.
+
+        A list of ``{"channel", "segment_number", "segment", "reason"}`` dicts,
+        empty when everything loaded. **Always empty in strict mode**, where an
+        unreadable segment raises instead of being skipped.
+
+        Check it before trusting a read from a lenient Reader: a skipped
+        segment's samples come back as NaN, exactly like a genuine gap, so the
+        array alone cannot tell you data is missing.
+        """
+        impl = self._impl
+        if impl is None:
+            return []
+        fn = getattr(impl, "problems", None)
         return list(fn()) if fn is not None else []
 
     @property
@@ -211,7 +267,9 @@ class Reader:
             if self._backend_name == "cpp":
                 from . import _mef3io
 
-                self._impl = _mef3io.Reader(self._path, self._password, self._n_threads)
+                self._impl = _mef3io.Reader(
+                    self._path, self._password, self._n_threads, self._strict
+                )
             elif self._backend_name == "pure":
                 from .pure import Reader as PureReader
 

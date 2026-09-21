@@ -595,9 +595,22 @@ NB_MODULE(_mef3io, m) {
   auto opt_time = [](nb::object o) { return opt_si8(o, "t0/t1"); };
 
   nb::class_<mef3io::Reader>(m, "Reader")
-      .def(nb::init<const std::string&, std::string, int>(), nb::arg("path"),
-           nb::arg("password") = "", nb::arg("n_threads") = 0)
+      .def(nb::init<const std::string&, std::string, int, bool>(), nb::arg("path"),
+           nb::arg("password") = "", nb::arg("n_threads") = 0, nb::arg("strict") = true)
       .def("set_threads", &mef3io::Reader::set_threads)
+      .def("problems",
+           [](mef3io::Reader& r) {
+             nb::list out;
+             for (const auto& p : r.problems()) {
+               nb::dict e;
+               e["channel"] = p.channel;
+               e["segment_number"] = p.segment_number;
+               e["segment"] = p.segment;
+               e["reason"] = p.reason;
+               out.append(e);
+             }
+             return out;
+           })
       .def_prop_ro("channels", &mef3io::Reader::channels)
       .def(
           "declaration_issues",
