@@ -2,6 +2,7 @@
 channel's last segment in place (legacy mef_tools semantics), stay readable by
 the pymef/mef_tools oracle, and the segment map must locate data across gaps."""
 import glob
+import os
 import sys
 import warnings
 from pathlib import Path
@@ -273,6 +274,11 @@ def test_compat_writer_appends_in_segment(tmp_path):
     assert np.allclose(legacy, np.round(np.concatenate([a, a]), 3))
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX permission bits: on Windows chmod only toggles the read-only "
+    "attribute, so before and after are both 0o666 and this asserts nothing",
+)
 def test_append_preserves_file_mode(tmp_path):
     """Appending must not widen a restricted file.
 
