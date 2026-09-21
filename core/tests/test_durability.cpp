@@ -11,6 +11,7 @@
 // These tests are deliberately about the PRIMITIVE, not about a session. A
 // round trip cannot see this: the bytes land either way on an orderly shutdown.
 #include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -24,8 +25,9 @@ using namespace mef3io;
 namespace {
 
 fs::path scratch(const char* name) {
-  const fs::path p = fs::temp_directory_path() / (std::string("mef3io_dur_") + name);
-  fs::remove_all(p);
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+  const fs::path p = fs::temp_directory_path() /
+                     (std::string("mef3io_dur_") + name + "_" + std::to_string(nonce));
   fs::create_directories(p);
   return p;
 }
