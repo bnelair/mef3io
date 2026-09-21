@@ -104,8 +104,13 @@ TEST_CASE("replace_file publishes over an existing target", "[durability]") {
 
   REQUIRE_NOTHROW(detail::replace_file(tmp, target));
   REQUIRE_FALSE(fs::exists(tmp));
-  std::ifstream f(target, std::ios::binary);
-  std::string got((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  std::string got;
+  {
+    // Scoped: Windows refuses to delete a file that is still open, so an
+    // ifstream left alive here makes the cleanup below throw.
+    std::ifstream f(target, std::ios::binary);
+    got.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  }
   REQUIRE(got == "new");
 
   fs::remove_all(dir);
