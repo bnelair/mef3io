@@ -46,13 +46,27 @@ namespace fsys = std::filesystem;
 #else
   const int fd = ::open(path.c_str(), O_RDONLY);
   if (fd < 0) return false;
+  bool ok;
+#if defined(__APPLE__)
+  // macOS has no fdatasync, and its fsync() only pushes the data to the drive
+  // — the drive's own write cache can still lose it on a power cut. F_FULLFSYNC
+  // is the call that actually forces the platter, and it is what the contract
+  // in the docs promises. Some filesystems (and network mounts) do not support
+  // it and return ENOTSUP, so fall back to fsync there rather than failing a
+  // write outright: a weaker flush beats refusing to write at all, and it is
+  // still no worse than what the reference implementation does, which is
+  // nothing.
+  ok = ::fcntl(fd, F_FULLFSYNC) != -1;
+  if (!ok) ok = ::fsync(fd) == 0;
+#else
   // fdatasync, not fsync. Both flush the data and any metadata needed to
   // RETRIEVE it — crucially the file size, which is what grows on an append
   // and what a reader needs to see the new bytes. fsync additionally forces
   // out mtime/atime, which nothing here depends on and which costs an extra
   // journal transaction per call. On a 64-channel append that is ~190 extra
   // commits for timestamps nobody reads.
-  const bool ok = ::fdatasync(fd) == 0;
+  ok = ::fdatasync(fd) == 0;
+#endif
   return ::close(fd) == 0 && ok;
 #endif
 }

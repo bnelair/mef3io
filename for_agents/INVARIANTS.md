@@ -130,7 +130,21 @@ It builds, asserts the **in-tree** extension is under test rather than an
 installed wheel, runs both suites and all the gates, and **exits non-zero if the
 oracle is not installed** rather than reporting a pass it cannot justify.
 
-## 8. Reproduce before believing
+## 8. Platform-specific syscalls must be guarded — and CI is the only proof
+
+`fdatasync` does not exist on macOS, and swapping `fsync` for it broke every
+macOS build for four commits before anyone looked. Worse, the obvious repair —
+plain `fsync` — would have *silently weakened* the guarantee the docs promise,
+because on macOS `fsync` does not force the drive's own write cache;
+`fcntl(fd, F_FULLFSYNC)` does, with a fallback to `fsync` when a filesystem
+returns ENOTSUP.
+
+Two rules. Guard anything POSIX-adjacent per platform rather than assuming
+Linux. And **do not push a syscall change and walk away** — the matrix
+(ubuntu/macos/windows) is the only thing that can tell you, and it takes
+minutes.
+
+## 9. Reproduce before believing
 
 Every finding in the two review rounds was reproduced before being acted on, and
 several confident-sounding ones dissolved under it. Agent output is a lead, not
