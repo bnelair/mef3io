@@ -23,6 +23,16 @@ errs toward silence. Passing it does not mean the suite runs — only the releas
 job proves that — but failing it means it certainly will not.
 
     python scripts/lint_matlab_tests.py
+
+THE ONE AMBIGUITY WORTH KNOWING. `name(...)` is both a call and an index in
+MATLAB, and nothing local to the text tells them apart. MATLAB itself resolves
+it by scope — a variable shadows a function — so this follows the same rule:
+`name(...)` INDEXES when `name` is assigned somewhere in the file, and CALLS
+otherwise. That is what lets the use-after-delete check see `x(1)`, and it is
+why the never-assigned check stays silent on `badName(1)`: an unassigned
+`name(` is indistinguishable from a call to any of the thousands of toolbox
+functions this script does not enumerate, and guessing there would cost a false
+positive on every one of them.
 """
 from __future__ import annotations
 
@@ -48,22 +58,25 @@ KNOWN = set(
     num2str str2double cellfun arrayfun structfun
     error warning class nargin nargout varargin varargout
     meta which help methods properties
+    mef3io mef3io_mex
     tic toc NaN Inf Nan pause datestr datetime now clock
     ispc ismac isunix computer mexext mex system getenv setenv
-    fileread fopen fclose fwrite fread fprintf exist addpath genpath
-    ones eye numel ndims fieldnames isrow iscolumn iscell iscellstr
+    fileread fopen fclose fwrite fread addpath genpath
+    eye ndims fieldnames isrow iscolumn iscell iscellstr
     lower upper strfind regexp validatestring inputname deal
-    mef3io mef3io_mex
     """.split()
 )
+
+OPEN, CLOSE = "([{", ")]}"
 
 
 def strip_code(line: str) -> str:
     """Drop comments and string literals, keeping only executable text.
 
-    MATLAB overloads `'` for both string delimiter and transpose. A quote that
-    directly follows an identifier, a closing bracket or a dot is a transpose;
-    anything else opens a string. `"` is unambiguously a string.
+    MATLAB overloads `'` for both string delimiter and transpose. A transpose
+    binds tight (`x'`, `)'`, `]'`); with whitespace before it the quote opens a
+    string, which is how `['ldd ' f(a) ' | grep']` concatenates. `"` is
+    unambiguously a string.
     """
     out: list[str] = []
     i, n, in_str, delim = 0, len(line), False, ""
@@ -87,10 +100,8 @@ def strip_code(line: str) -> str:
             i += 1
             continue
         if c == "'":
-            # A transpose binds tight: `x'`, `)'`, `]'`. With whitespace before
-            # it the quote opens a string -- which is how `['ldd ' f(a) ' | x']`
-            # concatenates. `prev` is "" at the start of a line; test it
-            # explicitly, since "" is a substring of everything.
+            # `prev` is "" at the start of a line, where a quote can only open a
+            # string. Test it explicitly: "" is a substring of everything.
             prev = out[-1] if out else ""
             if prev and (prev.isalnum() or prev in "_)]}."):
                 out.append("'")         # transpose
@@ -104,33 +115,81 @@ def strip_code(line: str) -> str:
     return "".join(out)
 
 
-def names(code: str):
-    """Identifiers used as variables: not after a dot, not a call target."""
-    for m in re.finditer(r"(?<![\w.])([A-Za-z]\w*)\b(\s*\()?(\s*=(?!=))?", code):
-        if m.group(2):
-            continue                     # name( -> a function call
-        if m.group(3):
-            continue                     # name= -> assignment target or Name=value arg
-        yield m.start(1), m.group(1)
+def logical_lines(src: list[str]):
+    """Yield (line_number, code) with `...` continuations joined.
 
-
-def assign_targets(code: str):
-    """Names this line assigns: `x = ...`, `for x = ...`, and `[~, n] = f(...)`.
-
-    The multi-output form matters: `[~, nSeg] = mef3io.recoverSession(...)` is
-    the only place some names are ever bound, and missing it would report them
-    as never assigned.
+    The statement is the unit that matters: a `Name=value` argument is told
+    from a real assignment by bracket depth, and depth only means anything once
+    a statement split across lines is back together. The line number reported
+    is the first line of the statement.
     """
+    buf, first = "", 0
+    for i, raw in enumerate(src, 1):
+        code = strip_code(raw)
+        if not first:
+            first = i
+        cont = code.rstrip().endswith("...")
+        if cont:
+            code = code.rstrip()[:-3]
+        buf += code + " "
+        if not cont:
+            yield first, buf
+            buf, first = "", 0
+    if buf.strip():
+        yield first, buf
+
+
+def depth_at(code: str) -> list[int]:
+    """Bracket depth at each character position."""
+    depth, out = 0, []
+    for c in code:
+        if c in OPEN:
+            out.append(depth)
+            depth += 1
+        elif c in CLOSE:
+            depth = max(0, depth - 1)
+            out.append(depth)
+        else:
+            out.append(depth)
+    return out
+
+
+def assign_targets(code: str) -> set[str]:
+    """Names this statement assigns.
+
+    Only at bracket depth 0, which is what separates a real assignment from a
+    `Name=value` argument: `w = Writer(p, Overwrite=true)` assigns `w`, not
+    `Overwrite`. Covers `x = ...`, `for x = ...` and `[~, n] = f(...)`.
+    """
+    found: set[str] = set()
+    depth = depth_at(code)
+
     m = re.match(r"\s*\[([^\]]*)\]\s*=(?!=)", code)
     if m:
-        for part in m.group(1).split(","):
-            part = part.strip()
-            if re.fullmatch(r"[A-Za-z]\w*", part):
-                yield part
+        found |= {p.strip() for p in m.group(1).split(",")
+                  if re.fullmatch(r"[A-Za-z]\w*", p.strip())}
+
     for m in re.finditer(r"(?:^|[\s\[,;])([A-Za-z]\w*)\s*=(?!=)", code):
-        yield m.group(1)
+        if depth[m.start(1)] == 0:
+            found.add(m.group(1))
+
     for m in re.finditer(r"for\s+([A-Za-z]\w*)\s*=", code):
-        yield m.group(1)
+        found.add(m.group(1))
+    return found
+
+
+def names(code: str):
+    """Yield (name, call_syntax) for each identifier used as a value.
+
+    Skips names after a dot (field access, package-qualified calls) and the
+    left side of `name=` (an assignment target or a Name=value argument).
+    `call_syntax` is True for `name(`, which the caller resolves the way MATLAB
+    does — see the module docstring.
+    """
+    for m in re.finditer(r"(?<![\w.])([A-Za-z]\w*)\b(\s*\()?(\s*=(?!=))?", code):
+        if m.group(3):
+            continue
+        yield m.group(1), bool(m.group(2))
 
 
 def scan(path: Path) -> list[str]:
@@ -140,11 +199,12 @@ def scan(path: Path) -> list[str]:
     assigned: set[str] = set()
     live_deleted: set[str] = set()
 
+    statements = list(logical_lines(src))
+
     # Names bound by a signature rather than by an assignment: the parameters
     # and outputs of EVERY function in the file (local subfunctions included),
     # and the parameters of anonymous functions.
-    for line in src:
-        code = strip_code(line)
+    for _, code in statements:
         fn = re.match(
             r"\s*function\s+(?:\[([^\]]*)\]\s*=\s*|([\w.]+)\s*=\s*)?([\w.]+)\s*\((.*?)\)",
             code,
@@ -157,39 +217,40 @@ def scan(path: Path) -> list[str]:
             assigned |= {a.strip() for a in anon.group(1).split(",")
                          if re.fullmatch(r"[A-Za-z]\w*", a.strip())}
 
-    # Pass 1: every name assigned anywhere, for the "never assigned" check.
-    # Two passes, because MATLAB has no declarations and a name may be assigned
-    # further down inside a branch this linter does not model.
+    # Pass 1: every name assigned anywhere. Two passes, because MATLAB has no
+    # declarations and a name may be assigned further down inside a branch this
+    # linter does not model. It also resolves `name(...)`: a name assigned
+    # somewhere in the file is a variable, so `name(` indexes it.
     ever_assigned: set[str] = set(assigned)
-    for line in src:
-        code = strip_code(line)
-        ever_assigned.update(assign_targets(code))
+    for _, code in statements:
+        ever_assigned |= assign_targets(code)
 
     # Pass 2: sequential state, for the use-after-delete check.
-    for i, line in enumerate(src, 1):
-        code = strip_code(line)
+    for lineno, code in statements:
         if not code.strip():
             continue
-        for _, name in names(code):
-            if name in known:
+        targets = assign_targets(code)
+        for name, call_syntax in names(code):
+            if name in known or name in targets:
                 continue
-            if name in set(assign_targets(code)):
-                continue  # this is the assignment target
             if re.search(rf"\bdelete\(\s*{re.escape(name)}\s*\)", code):
                 continue  # this is the delete itself
             if name not in ever_assigned:
+                if call_syntax:
+                    continue  # a call to a function this script does not list
                 # Not assigned anywhere and not a name we know: almost always a
                 # typo, or a parameter name borrowed from another function.
                 problems.append(
-                    f"{path.name}:{i}: '{name}' is used but never assigned in this file "
+                    f"{path.name}:{lineno}: '{name}' is used but never assigned in this file "
                     f"(typo, or a parameter name from another function?)"
                 )
             elif name in live_deleted:
+                # `name` IS a variable here, so `name(` indexes it, not a call.
                 problems.append(
-                    f"{path.name}:{i}: '{name}' is used after delete({name}) with no "
+                    f"{path.name}:{lineno}: '{name}' is used after delete({name}) with no "
                     f"reassignment — it may refer to a file that no longer exists"
                 )
-        for target in assign_targets(code):
+        for target in targets:
             assigned.add(target)
             live_deleted.discard(target)
         for m in re.finditer(r"\bdelete\(\s*([A-Za-z]\w*)\s*\)", code):
