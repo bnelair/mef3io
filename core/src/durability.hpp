@@ -17,6 +17,7 @@
 #define NOMINMAX
 #include <windows.h>
 #else
+#include <cerrno>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -57,7 +58,14 @@ namespace fsys = std::filesystem;
   // still no worse than what the reference implementation does, which is
   // nothing.
   ok = ::fcntl(fd, F_FULLFSYNC) != -1;
-  if (!ok) ok = ::fsync(fd) == 0;
+  if (!ok && (errno == ENOTSUP || errno == EOPNOTSUPP || errno == EINVAL)) {
+    // The filesystem or mount does not implement a full flush (common on
+    // network mounts and some disk images). Falling back is right there.
+    ok = ::fsync(fd) == 0;
+  }
+  // Any OTHER failure is a real I/O error and must stay a failure: silently
+  // downgrading it would report a write as durable when the flush did not
+  // happen, which is the one thing this function exists to prevent.
 #else
   // fdatasync, not fsync. Both flush the data and any metadata needed to
   // RETRIEVE it — crucially the file size, which is what grows on an append
@@ -91,6 +99,25 @@ inline void fsync_directory(const fsys::path& dir) {
   ::close(fd);
 #else
   (void)dir;
+#endif
+}
+
+/// Replace `target` with `tmp` atomically, on every platform.
+///
+/// `std::filesystem::rename` is specified to overwrite, but the guarantee is
+/// thin on Windows and the codebase has always used MoveFileEx there. Recovery
+/// and the writer both publish files by rename, so they share this.
+inline void replace_file(const fsys::path& tmp, const fsys::path& target) {
+#ifdef _WIN32
+  if (MoveFileExW(tmp.wstring().c_str(), target.wstring().c_str(),
+                  MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    return;
+  const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
+  throw IoError("cannot replace " + target.string() + ": " + ec.message());
+#else
+  std::error_code ec;
+  fsys::rename(tmp, target, ec);
+  if (ec) throw IoError("cannot replace " + target.string() + ": " + ec.message());
 #endif
 }
 

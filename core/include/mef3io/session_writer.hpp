@@ -73,14 +73,24 @@ class SessionWriter {
   void set_units(const std::string& u) { units_ = u; }
   void set_threads(int n) { n_threads_ = n; }
 
-  /// Flush appends to stable storage (default true).
+  /// Flush appends to stable storage. **Default false.**
   ///
-  /// false trades the crash guarantee for speed: writes stay ATOMIC, so no file
-  /// is ever torn, but the ordering between `.tdat` and `.tidx` is no longer
-  /// enforced, so a power cut can leave the index referencing data that never
-  /// landed. `validate()` detects that and `recover_session()` repairs it.
-  /// Appropriate on battery-backed storage, or where a lost tail is cheaper
-  /// than the barriers. This is the durability meflib offers, which is none.
+  /// These files are built by appending for days to months, so the append is
+  /// the hot path and the barriers cost ~2.5x on it. The default therefore
+  /// favours throughput, matching what every MEF writer before this one did —
+  /// meflib performs no flushing at all.
+  ///
+  /// What that costs on an unclean shutdown: the ORDER in which the `.tdat`,
+  /// `.tidx` and `.tmet` updates reach the disk is no longer enforced, so a
+  /// crash can leave the index referencing data that never landed, or blocks
+  /// present in `.tdat` that the index never got to mention, or a torn tail on
+  /// either. Every one of those is DETECTED by `validate()` and REPAIRED by
+  /// `recover_session()`, which rebuilds missing index entries from the RED
+  /// block headers — so the failure mode is "run recover after an unclean
+  /// shutdown", not "lose the recording".
+  ///
+  /// Set true for the strict contract: each append becomes all-or-nothing
+  /// across the three files, at the cost of ~3 flushes per channel per append.
   void set_durable(bool d) { durable_ = d; }
   bool durable() const { return durable_; }
 
@@ -130,7 +140,7 @@ class SessionWriter {
   SessionMetadata metadata_;
   si8 block_length_override_ = 0;
   int n_threads_ = 0;
-  bool durable_ = true;
+  bool durable_ = false;
   std::map<std::string, ChannelState> channels_;
 };
 

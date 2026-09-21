@@ -158,3 +158,114 @@ def test_recovery_refuses_a_tar_archive(tmp_path):
     archive = mef3io.archive_session(str(path))
     with pytest.raises(RuntimeError, match="tar"):
         mef3io.recover_session(archive, apply=True)
+
+
+def test_fast_is_the_default_and_full_is_opt_in(tmp_path):
+    """The default changed to "fast" deliberately (2026-09-21).
+
+    These files are built by appending for days to months, so the append is the
+    hot path and the barriers cost ~2.5x on it. Pinned because flipping it back
+    silently would be a performance regression nobody would attribute, and
+    flipping it the other way silently would weaken a documented guarantee.
+    """
+    import inspect
+
+    assert inspect.signature(mef3io.Writer.__init__).parameters["durability"].default == "fast"
+    from mef3io.compat import MefWriter
+
+    assert inspect.signature(MefWriter.__init__).parameters["durability"].default == "fast"
+
+    # Both settings must produce a session that reads back identically — the
+    # knob buys crash behaviour, not different output.
+    rng = np.random.default_rng(17)
+    x = rng.integers(-9000, 9000, 3000, dtype=np.int32)
+    got = {}
+    for durability in ("fast", "full"):
+        path = tmp_path / f"{durability}.mefd"
+        w = mef3io.Writer(str(path), durability=durability)
+        w.write_int32("ch1", x, 0.5, START, FS)
+        w.write_int32("ch1", x, 0.5, START + int(3000 / FS * 1e6), FS)   # append
+        w.close()
+        assert mef3io.Validator(str(path)).validate().ok
+        with mef3io.Reader(str(path)) as r:
+            got[durability] = r.read("ch1")
+    np.testing.assert_array_equal(got["fast"], got["full"])
+
+
+def test_an_unknown_durability_does_not_destroy_the_session_first(tmp_path):
+    """`overwrite=True` removes the existing session in the constructor.
+
+    Validating the option afterwards meant a typo could delete a good session
+    and only then raise, which is the worst possible order for a mistake that
+    is purely a typo.
+    """
+    path = tmp_path / "s.mefd"
+    w = mef3io.Writer(str(path))
+    w.write_int32("ch1", np.arange(2000, dtype=np.int32), 0.5, START, FS)
+    w.close()
+    before = sorted(p.name for p in Path(path).rglob("*") if p.is_file())
+    assert before
+
+    with pytest.raises(ValueError, match="durability"):
+        mef3io.Writer(str(path), overwrite=True, durability="sometimes")
+    assert sorted(p.name for p in Path(path).rglob("*") if p.is_file()) == before, (
+        "the session was destroyed before the option was validated"
+    )
+
+    from mef3io.compat import MefWriter
+
+    with pytest.raises(ValueError, match="durability"):
+        MefWriter(str(path), overwrite=True, durability="sometimes")
+    assert sorted(p.name for p in Path(path).rglob("*") if p.is_file()) == before
+
+
+def test_recovery_refuses_an_index_that_fails_its_own_crc(tmp_path):
+    """Recovery DECIDES what to keep from the index, then truncates.
+
+    Declaration repair never touches the index, so it can afford to work on one
+    it has not verified. Recovery cannot: a corrupted offset produces the same
+    shape as an interrupted append, and acting on it would drop real blocks or
+    truncate real samples.
+    """
+    path, tidx, tdat = _session(tmp_path)
+    raw = bytearray(tidx.read_bytes())
+    # Corrupt an entry and leave the body CRC stale — the index no longer
+    # describes itself.
+    struct.pack_into("<q", raw, UH + 0, 999_999_999)      # first entry file_offset
+    tidx.write_bytes(bytes(raw))
+    before = {f: f.read_bytes() for f in Path(path).rglob("*") if f.is_file()}
+
+    report = mef3io.recover_session(str(path), apply=True)
+    assert report.skipped, "a segment whose index fails its CRC must be reported"
+    assert any("CRC" in s for s in report.skipped), report.summary()
+    assert not report.segments, "nothing should have been recovered from it"
+    for f, data in before.items():
+        assert f.read_bytes() == data, f"{f.name} was modified despite the bad CRC"
+
+
+def test_recovery_reports_a_stale_universal_header_count(tmp_path):
+    """A crash between publishing the .tidx header and patching the .tdat one
+    leaves every block aligned but the declarations stale.
+
+    Looking only at block alignment reported "nothing to do" and the CLI then
+    skipped the repair — while meflib clamps the block count down to that
+    header, so the segment reads SHORT.
+    """
+    path, tidx, tdat = _session(tmp_path)
+    raw = bytearray(tdat.read_bytes()[:UH])
+    real = struct.unpack_from("<q", raw, 32)[0]
+    struct.pack_into("<q", raw, 32, real - 2)            # stale .tdat entry count
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH])))
+    with open(tdat, "r+b") as fh:
+        fh.write(bytes(raw))
+
+    dry = mef3io.recover_session(str(path))
+    assert dry.segments, "a stale header count must be surfaced, not passed over"
+    assert "stale" in dry.segments[0].action, dry.summary()
+
+    mef3io.recover_session(str(path), apply=True)
+    ids = mef3io.Validator(str(path)).validate().repairable_check_ids
+    if ids:
+        mef3io.repair_session(str(path), ids)
+    assert mef3io.Validator(str(path)).validate().ok
+    assert struct.unpack_from("<q", tdat.read_bytes(), 32)[0] == real

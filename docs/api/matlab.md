@@ -33,3 +33,29 @@ call the same C++ core.
 | `Writer.write_annotations` | `Writer.writeAnnotations` |
 | `mef3io.archive_session` | `mef3io.archiveSession` |
 | `mef3io.extract_session` | `mef3io.extractSession` |
+| `mef3io.recover_session` | `mef3io.recoverSession` |
+
+## Durability and recovery
+
+`mef3io.Writer` takes `Durability` (`'fast'`, the default, or `'full'`),
+matching the Python `durability=` argument. These files are built by appending
+for days to months, so the append is the hot path; `'fast'` performs no flushes,
+as every MEF writer before this one did.
+
+`mef3io.recoverSession` is the counterpart — it makes a session's block index
+and data agree again after an unclean shutdown, rebuilding missing index
+entries from the RED block headers. Dry run unless `Apply=true`.
+
+```matlab
+w = mef3io.Writer(p, Overwrite=true, Durability='fast');   % the default
+w.writeInt32('ch1', counts, 0.1, t0, 512);
+delete(w)
+
+summary = mef3io.recoverSession(p);                        % dry run
+summary = mef3io.recoverSession(p, Apply=true);
+```
+
+!!! note "Still Python-only"
+    `Validator` / `validate_session` / `repair_session` have no MATLAB surface
+    yet (see issue #18). Reading, writing, appending, archiving, extracting and
+    recovering are at parity.

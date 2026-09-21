@@ -625,3 +625,50 @@ TEST_CASE("Report::ok is false when nothing was examined") {
 
   fsys::remove_all(dir);
 }
+
+TEST_CASE("C ABI exposes durability and recovery for the MATLAB binding") {
+  // The MATLAB binding goes through the flat C ABI, so parity with Python has
+  // to be tested here — there is no MATLAB on CI. Covers the two entry points
+  // added for it: the durability knob and recovery.
+  namespace fsys = std::filesystem;
+  const auto dir = fsys::temp_directory_path() / "mef3io_c_api_durability.mefd";
+  fsys::remove_all(dir);
+
+  std::vector<si4> a(4000);
+  std::mt19937 rng(21);
+  std::uniform_int_distribution<si4> dist(-9000, 9000);
+  for (auto& v : a) v = dist(rng);
+
+  mef3io_writer* w = nullptr;
+  REQUIRE(mef3io_writer_open(dir.string().c_str(), 1, "", "", &w) == 0);
+  // Both settings must be accepted and must produce a readable session.
+  REQUIRE(mef3io_writer_set_durable(w, 0) == 0);       // "fast" — the default
+  REQUIRE(mef3io_writer_write_int32(w, "ch1", a.data(), nullptr, static_cast<int64_t>(a.size()),
+                                    0.5, 1577836800000000LL, 256.0, 0, nullptr) == 0);
+  REQUIRE(mef3io_writer_set_durable(w, 1) == 0);       // "full"
+  REQUIRE(mef3io_writer_write_int32(w, "ch1", a.data(), nullptr, static_cast<int64_t>(a.size()),
+                                    0.5, 1577836800000000LL + 15625000LL, 256.0, 0, nullptr) == 0);
+  mef3io_writer_close(w);
+
+  // A healthy session needs no recovery, and a dry run writes nothing.
+  char summary[4096] = {0};
+  int64_t segments = -1;
+  REQUIRE(mef3io_recover_session(dir.string().c_str(), 0, 1, "", summary, sizeof summary,
+                                 &segments) == 0);
+  REQUIRE(segments == 0);
+  REQUIRE(std::string(summary).find("segment(s) examined") != std::string::npos);
+  REQUIRE_FALSE(fsys::exists(dir.string() + ".recover-backup"));
+
+  // ...and the session still validates.
+  REQUIRE(validate_session(dir.string()).ok());
+
+  // Recovery refuses a tar archive rather than writing into one.
+  char tar_path[2048] = {0};
+  REQUIRE(mef3io_archive_session(dir.string().c_str(), "", 1, tar_path, sizeof tar_path) == 0);
+  const std::string tar = tar_path;
+  REQUIRE(mef3io_recover_session(tar.c_str(), 1, 1, "", summary, sizeof summary, &segments) != 0);
+  REQUIRE(std::string(mef3io_last_error()).find("tar") != std::string::npos);
+
+  fsys::remove_all(dir);
+  fsys::remove(tar);
+}

@@ -69,25 +69,11 @@ void finish_stream(std::ofstream& f, const std::string& path) {
   if (!f) throw IoError("close failed, data may not have reached disk: " + path);
 }
 
-void replace_file(const fs::path& tmp, const fs::path& target) {
-#ifdef _WIN32
-  if (MoveFileExW(tmp.wstring().c_str(), target.wstring().c_str(),
-                  MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-    return;
-  const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
-  throw IoError("cannot replace " + target.string() + ": " + ec.message());
-#else
-  std::error_code ec;
-  fs::rename(tmp, target, ec);
-  if (!ec) return;
-  throw IoError("cannot replace " + target.string() + ": " + ec.message());
-#endif
-}
-
 // File-identity and durability helpers are shared with the validator's repair
 // path (durability.hpp): the append writes the SAMPLES, so it must be at
 // least as careful as the path that rewrites 16 KB of declarations.
 using detail::copy_file_identity;
+using detail::replace_file;
 using detail::fsync_directory;
 using detail::fsync_file_or_throw;
 
@@ -134,7 +120,8 @@ void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
   }
 }
 
-void overwrite_file_prefix(const std::string& path, std::span<const ui1> bytes) {
+void overwrite_file_prefix(const std::string& path, std::span<const ui1> bytes,
+                           bool durable = false) {
   std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
   if (!f) throw IoError("cannot open for header update: " + path);
   f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
@@ -142,9 +129,14 @@ void overwrite_file_prefix(const std::string& path, std::span<const ui1> bytes) 
   if (!f) throw IoError("header update failed: " + path);
   f.close();
   if (!f) throw IoError("close failed, header may not have reached disk: " + path);
-  // Best effort: the body is unchanged and the caller rolls back on failure,
-  // so a flush that cannot be performed is not a reason to fail the write.
-  (void)detail::fsync_file(path);
+  // The universal header is what PUBLISHES the entries flushed just before it.
+  // Leaving this best-effort meant the body could be durable while the count
+  // naming it was not, so a crash could leave .tmet claiming more blocks than
+  // the .tidx header admits — and meflib clamps the block count down to that
+  // header, so the segment would read short. When the caller asked for
+  // durability, this barrier is part of it.
+  if (durable) detail::fsync_file_or_throw(path);
+  else (void)detail::fsync_file(path);
 }
 
 std::array<ui1, 16> random_uuid() {
@@ -957,9 +949,9 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
       finish_stream(app, tidx_path);
     }
     if (spec.durable) fsync_file_or_throw(tidx_path);
-    overwrite_file_prefix(tidx_path, new_tidx_uh);
+    overwrite_file_prefix(tidx_path, new_tidx_uh, spec.durable);
     patched_tdat_header = true;
-    overwrite_file_prefix(tdat_path, new_tdat_uh);
+    overwrite_file_prefix(tdat_path, new_tdat_uh, spec.durable);
     wrote_tmet = true;
     write_file(tmet_path, new_tmet, spec.durable);
   } catch (...) {

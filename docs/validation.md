@@ -24,7 +24,7 @@ print(report.summary())
 ```
 mef3io validation report — subject.mefd
 =======================================
-254 segment(s) checked, 15 check(s) run, 254 error(s), 508 warning(s)
+254 segment(s) checked, 18 check(s) run, 254 error(s), 508 warning(s)
 
 sizing.difference-bytes  [error]  254 segment(s)
     Difference buffer size is declared

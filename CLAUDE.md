@@ -209,10 +209,17 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   month-long index. `test_an_append_never_rewrites_the_index_or_the_data`
   pins it for BOTH durability settings, self-calibrating against actual
   file growth. (2) `durability="fast"` (`Writer(durability=)`) drops the
-  barriers: writes stay ATOMIC so nothing is torn, but cross-file ORDERING
-  goes, so a crash can leave the index referencing data that never landed —
-  detectable and fixed by `recover_session`. fast + all cores is 1.26x
-  meflib; full + 1 thread is 0.49x. (3) `recover_session` (core/src/
+  barriers. NOTE this is the DEFAULT (changed 2026-09-21) and it is NOT an
+  "atomic writes" story: `.tdat` and `.tidx` are extended IN PLACE, so without
+  barriers a crash can leave a torn tail on either, an index referencing data
+  that never landed, or blocks the index never mentioned. Only `.tmet` is
+  published by rename. Every one of those is detectable (`index.block-offsets`,
+  `index.data-coverage`, the body CRCs, `header.entry-count`) and fixed by
+  `recover_session`, which is what makes the default defensible — the failure
+  mode is "run recover after an unclean shutdown", and an EARLIER append is
+  never at risk because nothing rewrites it. Measured on the real workload
+  (24 h x 16 ch @ 512 Hz): 1.6x faster per block than mef_tools even with
+  `durability="full"`, because the encode parallelises. (3) `recover_session` (core/src/
   recover.cpp, `python -m mef3io recover`) is the ONLY thing that may touch
   the index or data — repair_session never does, which is what keeps it safe
   on anything. Index-ahead-of-data drops entries; data-ahead-of-index

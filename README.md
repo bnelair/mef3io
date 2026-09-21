@@ -161,7 +161,7 @@ matlab/      MEX gateway over the C ABI (core/include/mef3io/c_api.h),
              +mef3io Reader/Writer classes, build_mex.m, test_mef3io.m
 examples/    runnable scripts: write/read, int32, append, segment map,
              annotations, encryption, legacy drop-in, replicability checks
-tests/       golden fixture generator + P1–P13 pytest suites (pymef oracle)
+tests/       golden fixture generator + P1–P18 pytest suites (pymef oracle)
 benchmarks/  bindings + legacy/NWB-Zarr comparison scripts
 docs/        MkDocs site source (guides, format reference, legacy comparison)
 scripts/     dev_build.sh (dev build + extension symlink)

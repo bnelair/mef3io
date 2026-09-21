@@ -56,7 +56,7 @@ void write_all(const fsys::path& target, std::span<const ui1> bytes) {
     // Recovery runs once, on a session that is already damaged. Pay for the
     // barrier: a crash DURING recovery must not compound the problem.
     detail::fsync_file_or_throw(tmp.string());
-    fsys::rename(tmp, target);
+    detail::replace_file(tmp, target);
   } catch (...) {
     fsys::remove(tmp, ignored);
     throw;
@@ -173,6 +173,38 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
         continue;
       }
 
+      // Recovery DECIDES what to keep from these bytes, and then truncates —
+      // unlike declaration repair, which never touches the index or the data.
+      // So the index has to verify first. A CRC mismatch means the block table
+      // itself is damaged, and "interrupted append" is then a guess: the same
+      // pattern is produced by a corrupted offset, and acting on it would drop
+      // real blocks or truncate real samples.
+      {
+        const ui4 stored_header = byteio::read<ui4>(index_bytes, 0);
+        const ui4 stored_body = byteio::read<ui4>(index_bytes, 4);
+        const ui4 real_header = crc::calculate(std::span<const ui1>(index_bytes)
+                                                   .subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4));
+        const std::size_t body_len = index_bytes.size() - fmt::UNIVERSAL_HEADER_BYTES;
+        // Bound by whole entries: a torn trailing fragment is exactly what an
+        // interrupted write leaves, and it must not make the whole index look
+        // corrupt. The fragment is dropped further down.
+        const std::size_t whole = body_len - (body_len % fmt::TIME_SERIES_INDEX_BYTES);
+        const ui4 real_body = crc::calculate(
+            std::span<const ui1>(index_bytes).subspan(fmt::UNIVERSAL_HEADER_BYTES, whole));
+        const ui4 real_body_to_eof = crc::calculate(
+            std::span<const ui1>(index_bytes).subspan(fmt::UNIVERSAL_HEADER_BYTES));
+        const bool header_ok =
+            stored_header == real_header || stored_header == fmt::CRC_NO_ENTRY;
+        const bool body_ok = stored_body == real_body || stored_body == real_body_to_eof ||
+                             stored_body == fmt::CRC_NO_ENTRY;
+        if (!header_ok || !body_ok) {
+          report.skipped.push_back(
+              description + ": the block index does not pass its own CRC, so it cannot be used "
+                            "to decide what the data file should contain; nothing was changed");
+          continue;
+        }
+      }
+
       const std::size_t entry_bytes = index_bytes.size() - fmt::UNIVERSAL_HEADER_BYTES;
       const std::size_t n_entries = entry_bytes / fmt::TIME_SERIES_INDEX_BYTES;
       std::span<const ui1> entries =
@@ -228,7 +260,26 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
       }
       const si8 tail = static_cast<si8>(data_size) - static_cast<si8>(offset);
 
-      if (dropped == 0 && recovered == 0 && tail == 0) continue;  // segment is fine
+      // The blocks can line up perfectly and the segment still be mid-update: a
+      // crash after the .tidx header was published but before the .tdat header
+      // was patched leaves the .tdat declaring the OLD count. meflib clamps the
+      // block count down to that field, so the segment reads short — and
+      // looking only at block alignment would report "nothing to do" and skip
+      // the repair that fixes it.
+      si8 stale_headers = 0;
+      const si8 index_count = byteio::read<si8>(index_bytes, 32);
+      std::vector<ui1> data_head;
+      try {
+        data_head = read_range(data_in, 0, fmt::UNIVERSAL_HEADER_BYTES);
+      } catch (const std::exception&) { /* handled by the size check above */ }
+      const si8 data_count = data_head.size() >= fmt::UNIVERSAL_HEADER_BYTES
+                                 ? byteio::read<si8>(data_head, 32)
+                                 : 0;
+      if (index_count != static_cast<si8>(keep.size())) ++stale_headers;
+      if (data_count != static_cast<si8>(keep.size())) ++stale_headers;
+
+      if (dropped == 0 && recovered == 0 && tail == 0 && stale_headers == 0)
+        continue;  // segment is fine
 
       RecoveredSegment out;
       out.channel = channel;
@@ -254,6 +305,14 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
                 " trailing byte(s) that do not form a whole block";
       }
       if (index_ahead && !dropped) what += " (index stops short of the data)";
+      if (stale_headers) {
+        if (!what.empty()) what += "; ";
+        what += "the universal header entry count was stale in " +
+                std::to_string(stale_headers) + " file(s) (index " + std::to_string(index_count) +
+                ", data " + std::to_string(data_count) + ", really " +
+                std::to_string(keep.size()) + ") — a reader clamps the block count down to it "
+                "and would read the segment short";
+      }
       out.action = what;
       report.segments.push_back(std::move(out));
 

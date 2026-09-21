@@ -166,9 +166,18 @@ class MefWriter:
     __version__ = "mef3io"
 
     def __init__(self, session_path, overwrite=False, password1=None, password2=None,
-                 verbose=False, metadata=None):
+                 verbose=False, metadata=None, durability="fast"):
+        # Checked before constructing: SessionWriter removes an existing session
+        # when overwrite=True, so a late check could delete a good one first.
+        if durability not in ("full", "fast"):
+            raise ValueError(f"durability must be 'full' or 'fast', not {durability!r}")
         self._path = str(session_path)
         self._w = _mef3io.SessionWriter(self._path, overwrite, password1 or "", password2 or "")
+        # "fast" by default, matching mef3io.Writer and the legacy stack this
+        # class stands in for — meflib flushes nothing at all. See
+        # mef3io.Writer for what an unclean shutdown costs and how
+        # mef3io.recover_session puts it back.
+        self._w.set_durable(durability == "full")
         self.verbose = verbose
         self._data_units = "uV"
         self._mef_block_len = None

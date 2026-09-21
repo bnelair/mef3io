@@ -80,20 +80,39 @@ With 5–20 minute blocks there is one to two orders of magnitude of headroom.
 
 ### The `durability` knob
 
-When the barriers are not the right trade — battery-backed storage, a batch
-conversion you would simply re-run, an acquisition where a lost tail is cheaper
-than the latency — turn them off:
+**`durability="fast"` is the default.** These files are built by appending for
+days to months, so the append is the hot path, and the barriers cost ~2.5x on
+it. It matches what every MEF writer before this one did — the reference C
+library flushes nothing at all.
 
 ```python
-w = mef3io.Writer(path, durability="fast", n_threads=0)
+w = mef3io.Writer(path)                          # fast: the default
+w = mef3io.Writer(path, durability="full")       # add the barriers
 ```
 
-Writes stay **atomic** (temp file plus rename), so no file is ever torn and the
-session is never half-written. What is given up is the ORDERING between files,
-so a crash can leave the index referencing `.tdat` bytes that never landed.
-That state is detectable (`index.block-offsets`, `index.data-coverage`) and
-repairable (`recover_session`, below), which is what makes the trade a
-reasonable one to offer rather than a footgun.
+Be precise about what fast gives up. The `.tdat` and `.tidx` are extended **in
+place** (rewriting either whole would be `O(session)`), so this is *not* a
+temp-and-rename story for them: without the barriers, a crash mid-append can
+leave a torn tail on either file, an index referencing data that never landed,
+or blocks in `.tdat` the index never got to mention. Only the `.tmet` is
+published by atomic rename.
+
+What makes that an acceptable trade rather than a footgun is that **every one
+of those states is detectable and repairable**:
+
+| state after a crash | detected by | repaired by |
+|---|---|---|
+| index references bytes that never landed | `index.block-offsets` | `recover_session` drops the entries |
+| blocks in `.tdat` the index never mentioned | `index.data-coverage` | `recover_session` rebuilds them from the RED headers |
+| torn tail on either file | the body CRCs | `recover_session` drops the fragment |
+| stale universal-header counts | `header.entry-count` | `recover_session`, then `repair_session` |
+
+So the failure mode is **"run `recover` after an unclean shutdown"**, not "lose
+the recording" — and data committed by an *earlier* append is never at risk,
+because nothing rewrites it.
+
+Choose `durability="full"` when an unclean shutdown must need no operator
+action at all. It makes each append all-or-nothing across the three files.
 
 Measured, 8 channels × 10-minute blocks, against the legacy stack:
 
