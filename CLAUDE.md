@@ -174,6 +174,18 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   archive/extract stream in 1 MB chunks — keep it that way. Measure with
   `/proc/self/io` `rchar`, which counts bytes read exactly and does not flake
   the way RSS does; `tests/test_p17_large_files.py` pins the read paths.
+  (f) `Session` CACHES each segment's `.tidx`, and the index is ~2% of the
+  data, so an unbounded cache is O(session) — several GB resident on a
+  few-hundred-GB recording. Capped via `set_index_cache_bytes` (default
+  256 MB) with LRU eviction, done ONLY at the end of a public call:
+  `segment_index` hands out a SPAN into those bytes, so evicting mid-read is
+  a use-after-free. (g) Benchmark the real shape with
+  `benchmarks/long_session_benchmark.py` (24 h x 16 ch @ 512 Hz, 10-min
+  appends, windowed reads): watch GROWTH (must stay ~1.00), write/read
+  AMPLIFICATION and duty cycle. It validates + dry-run recovers at the end
+  and exits non-zero on either failure. Measured there: 1.6x faster per
+  block than mef_tools, in a file 1.8x smaller, growth 1.00x — WITH the
+  durability barriers the legacy stack does not have.
 - **The MAIN use case is a session appended to for DAYS TO MONTHS** (5-20 min
   blocks per channel). Two consequences, both load-bearing. (1) An append must
   be O(NEW data), never O(total blocks) — section 2 describes ALL of a segment's
