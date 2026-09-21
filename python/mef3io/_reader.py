@@ -157,6 +157,12 @@ class Reader:
         return list(self._declaration_issues)
 
     def _ensure_impl(self):
+        if getattr(self, "_closed", False):
+            raise ValueError(
+                "this Reader is closed; open a new one "
+                "(close() releases the backend's file handles, so reusing it "
+                "would silently reopen the session)"
+            )
         if self._impl is None:
             if self._backend_name == "cpp":
                 from . import _mef3io
@@ -177,9 +183,16 @@ class Reader:
         self.close()
 
     def close(self) -> None:
-        """Release the backend. Optional (cleanup is automatic); present for
-        API parity and context-manager use."""
+        """Release the backend and its file handles.
+
+        After this the reader is CLOSED: a further read raises rather than
+        quietly reopening the session. A caller who closed to release handles —
+        before archiving the directory, or to stay under an fd limit — got them
+        back without notice, which is the opposite of what they asked for.
+        Closing twice is harmless.
+        """
         self._impl = None
+        self._closed = True
 
     @property
     def channels(self) -> list[str]:

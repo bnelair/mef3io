@@ -95,6 +95,19 @@ void write_file_atomic(const std::string& path, std::span<const ui1> bytes) {
   const fs::path target(path);
   const fs::path tmp = target.parent_path() / (target.filename().string() + ".mef3io-tmp");
   std::error_code ignored;
+  // Durability is only worth paying for when this write REPLACES something.
+  // Creating a segment's files for the first time risks nothing: a crash
+  // part-way leaves an incomplete session either way, and there is no good
+  // copy underneath to lose. Replacing — which is what every append does to
+  // the .tmet and .tidx — is different: the rename is ordered but not durable,
+  // so without a flush a power cut can publish the new name over the old
+  // bytes with the new ones still in cache, leaving a short .tmet that throws
+  // from the metadata loader and takes the whole session down.
+  //
+  // Scoping it this way matters: a 128-channel session writes ~400 files, and
+  // fsyncing every one of them on a fresh write cost roughly 3x the wall clock
+  // for no guarantee anyone had.
+  const bool replacing = fs::exists(target, ignored);
   fs::remove(tmp, ignored);
   try {
     std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
@@ -103,17 +116,21 @@ void write_file_atomic(const std::string& path, std::span<const ui1> bytes) {
     if (!f) throw IoError("write failed: " + tmp.string());
     finish_stream(f, tmp.string());
     copy_file_identity(target, tmp);
-    // A rename is ORDERED, not durable. Without this a power cut can leave the
-    // rename visible and the bytes behind it missing — and a short .tmet throws
-    // from the metadata loader, taking the whole session down. The repair path
-    // has always done this; the append, which writes the samples, did not.
-    fsync_file_or_throw(tmp.string());
+    // Flush the CONTENT before the rename, but do not flush the directory
+    // entry after it. The asymmetry is deliberate. Flushing the content is
+    // what stops the rename publishing a file whose bytes are still in cache —
+    // a short .tmet that throws from the metadata loader and takes the whole
+    // session down. Flushing the directory would only make the rename itself
+    // survive a crash, and losing it is harmless: the old file is still there,
+    // still complete, still consistent. Keeping a consistent previous state is
+    // worth more than keeping the last append, and it halves the number of
+    // fsyncs an append pays across a many-channel session.
+    if (replacing) fsync_file_or_throw(tmp.string());
     replace_file(tmp, target);
   } catch (...) {
     fs::remove(tmp, ignored);
     throw;
   }
-  fsync_directory(target.parent_path());
 }
 
 void overwrite_file_prefix(const std::string& path, std::span<const ui1> bytes) {
@@ -539,16 +556,23 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   // old header declared — see the note at the .tdat header patch. ---
   std::vector<ui1> tdat_uh(fmt::UNIVERSAL_HEADER_BYTES);
   ui4 tdat_body_crc = 0;
+  bool tdat_body_crc_known = true;
   {
     std::ifstream in(tdat_path, std::ios::binary);
     if (!in) throw IoError("cannot open for read: " + tdat_path);
     if (!in.read(reinterpret_cast<char*>(tdat_uh.data()), fmt::UNIVERSAL_HEADER_BYTES))
       throw IoError("short read: " + tdat_path);
     in.close();
+    // CRC_NO_ENTRY (0) means "never computed" — meflib legitimately ships it
+    // for a piecemeal writer (meflib.c:9319-9321 computes the body CRC only on
+    // a whole-file write). Seeding a running CRC from it would turn an honest
+    // "not computed" into a confidently WRONG value, so the sentinel is
+    // carried through unchanged instead: still unverifiable, but not a lie.
     tdat_body_crc = byteio::read<ui4>(tdat_uh, 4);
-    for (std::size_t i = 0; i < nb; ++i) {
-      tdat_body_crc = crc::calculate(encoded[i], tdat_body_crc);
-    }
+    tdat_body_crc_known = tdat_body_crc != fmt::CRC_NO_ENTRY;
+    if (tdat_body_crc_known)
+      for (std::size_t i = 0; i < nb; ++i)
+        tdat_body_crc = crc::calculate(encoded[i], tdat_body_crc);
   }
 
   // --- Build the new .tidx in memory. The full entry list is the only place
@@ -638,7 +662,8 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     uh.number_of_entries = static_cast<si8>(index_entries);
     uh.maximum_entry_size = index_max_block_bytes;
     uh.serialize(new_tdat_uh);
-    byteio::write<ui4>(new_tdat_uh, 4, tdat_body_crc);
+    byteio::write<ui4>(new_tdat_uh, 4,
+                       tdat_body_crc_known ? tdat_body_crc : fmt::CRC_NO_ENTRY);
     const ui4 header_crc = crc::calculate(
         std::span<const ui1>(new_tdat_uh).subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4));
     byteio::write<ui4>(new_tdat_uh, 0, header_crc);
@@ -729,8 +754,16 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
       const sf8 new_lo = static_cast<sf8>(new_min) * ufact;
       const sf8 hi = ufact >= 0.0 ? new_hi : new_lo;
       const sf8 lo = ufact >= 0.0 ? new_lo : new_hi;
-      s2.maximum_native_sample_value = std::max(s2.maximum_native_sample_value, hi);
-      s2.minimum_native_sample_value = std::min(s2.minimum_native_sample_value, lo);
+      // meflib's NO_ENTRY for these two is a NaN, which "must be tested with
+      // isnan()" (meflib.h:443/445) — and std::max(NaN, x) returns NaN, so an
+      // unset extreme would stay unset forever even though the append knows a
+      // real value. Take ours outright when the stored one is not a number.
+      s2.maximum_native_sample_value = std::isnan(s2.maximum_native_sample_value)
+                                           ? hi
+                                           : std::max(s2.maximum_native_sample_value, hi);
+      s2.minimum_native_sample_value = std::isnan(s2.minimum_native_sample_value)
+                                           ? lo
+                                           : std::min(s2.minimum_native_sample_value, lo);
     }
 
     // Edit the STORED section-2 image in place instead of re-serializing the
@@ -806,23 +839,41 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     auto note_rollback = [&](const std::string& what) {
       if (rollback_error.empty()) rollback_error = what;
     };
-    if (wrote_tmet) {
+    // A rollback that fails on a file the failure never reached is not a
+    // rollback failure. The wrote_* flags are set BEFORE each call, so on an
+    // environmental failure — a read-only directory, a full disk — the flag is
+    // set, the write never happened, and the rollback rewrite then fails for
+    // exactly the same reason. Escalating that told the operator their
+    // clinical archive may be inconsistent when it was byte-identical. So:
+    // compare first, and only report a failure that left the file changed.
+    auto restore = [&](const std::string& path, const std::vector<ui1>& original,
+                       const char* label, auto&& write_back) {
       try {
-        write_file(tmet_path, tmet);
-      } catch (const std::exception& e) {
-        note_rollback(std::string("tmet rollback failed: ") + e.what());
+        if (read_whole_file(path) == original) return;  // never modified
+      } catch (const std::exception&) {
+        // Cannot read it back to compare — fall through and try the restore.
       }
-    }
-    if (wrote_tidx) {
       try {
-        write_file(tidx_path, original_tidx);
+        write_back();
       } catch (const std::exception& e) {
-        note_rollback(std::string("tidx rollback failed: ") + e.what());
+        note_rollback(std::string(label) + " rollback failed: " + e.what());
       }
-    }
+    };
+    if (wrote_tmet)
+      restore(tmet_path, tmet, "tmet", [&] { write_file(tmet_path, tmet); });
+    if (wrote_tidx)
+      restore(tidx_path, original_tidx, "tidx", [&] { write_file(tidx_path, original_tidx); });
     if (patched_tdat_header) {
+      // Only the 1024-byte header was patched in place; compare just that.
       try {
-        overwrite_file_prefix(tdat_path, tdat_uh);
+        std::ifstream in(tdat_path, std::ios::binary);
+        std::vector<ui1> head(fmt::UNIVERSAL_HEADER_BYTES);
+        if (in && in.read(reinterpret_cast<char*>(head.data()), fmt::UNIVERSAL_HEADER_BYTES) &&
+            head == tdat_uh) {
+          // untouched
+        } else {
+          overwrite_file_prefix(tdat_path, tdat_uh);
+        }
       } catch (const std::exception& e) {
         note_rollback(std::string("tdat header rollback failed: ") + e.what());
       }

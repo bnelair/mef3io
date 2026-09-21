@@ -45,12 +45,28 @@ from .validate import (  # noqa: E402
     validate_session,
 )
 
+# The core exception types, so a caller can tell "wrong password" from
+# "corrupt file" without matching on message text. All of them subclass
+# RuntimeError, which is what every release so far raised, so existing
+# `except RuntimeError` keeps working unchanged.
+if _HAVE_CPP:
+    MefError = _mef3io.MefError
+    FormatError = _mef3io.FormatError
+    CrcError = _mef3io.CrcError
+    PasswordError = _mef3io.PasswordError
+    IoError = _mef3io.IoError
+    WriteConflictError = _mef3io.WriteConflictError
+else:  # pragma: no cover - only without the extension
+    MefError = FormatError = CrcError = PasswordError = IoError = WriteConflictError = RuntimeError
+
 __all__ = [
     "Reader", "Writer", "Metadata", "Subject", "Acquisition",
     "MefReader", "MefWriter", "archive_session", "extract_session",
     "Validator", "Check", "Finding", "Report", "SkippedSegment",
     "available_checks", "describe_check",
     "validate_session", "repair_session", "SessionDeclarationWarning",
+    "MefError", "FormatError", "CrcError", "PasswordError", "IoError",
+    "WriteConflictError",
     "have_cpp_backend", "__version__",
 ]
 

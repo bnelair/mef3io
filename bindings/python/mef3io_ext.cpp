@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "mef3io/crc.hpp"
+#include "mef3io/errors.hpp"
 #include "mef3io/crypto.hpp"
 #include "mef3io/metadata.hpp"
 #include "mef3io/reader.hpp"
@@ -110,13 +111,45 @@ NB_MODULE(_mef3io, m) {
   m.attr("__mef_version_major__") = mef3io::fmt::MEF_VERSION_MAJOR;
   m.attr("__mef_version_minor__") = mef3io::fmt::MEF_VERSION_MINOR;
 
-  m.def("archive_session", &mef3io::archive_session, nb::arg("session_dir"),
-        nb::arg("tar_path") = "", nb::arg("overwrite") = false,
-        "Pack a session directory into a single uncompressed tar archive and "
-        "return the archive path.");
-  m.def("extract_session", &mef3io::extract_session, nb::arg("tar_path"),
-        nb::arg("dest_dir") = "", nb::arg("overwrite") = false,
-        "Unpack a session archive back into a directory and return its path.");
+  // Distinct Python types for the core exceptions. Every one of these derives
+  // from MefError : std::runtime_error, so without this they all reached
+  // Python as a bare RuntimeError and a caller could only tell "wrong
+  // password" from "corrupt file" by matching on the message text. Registered
+  // most-derived FIRST: nanobind tries translators in reverse registration
+  // order, so the base must be registered before its subclasses for the
+  // subclasses to win.
+  // Rooted at RuntimeError, NOT at Exception: every release so far surfaced
+  // these as a bare RuntimeError, so code in the field catches that. Making
+  // MefError a subclass of it means existing `except RuntimeError` keeps
+  // working unchanged while new code can catch the specific type.
+  static nb::exception<mef3io::MefError> mef_error(m, "MefError", PyExc_RuntimeError);
+  static nb::exception<mef3io::FormatError> format_error(m, "FormatError", mef_error.ptr());
+  static nb::exception<mef3io::CrcError> crc_error(m, "CrcError", mef_error.ptr());
+  static nb::exception<mef3io::PasswordError> password_error(m, "PasswordError", mef_error.ptr());
+  static nb::exception<mef3io::IoError> io_error(m, "IoError", mef_error.ptr());
+  static nb::exception<mef3io::WriteConflictError> write_conflict_error(
+      m, "WriteConflictError", mef_error.ptr());
+
+  // Both move the whole session through the filesystem — seconds on a large
+  // one — and touch no Python object while doing it, so they release the GIL
+  // rather than freezing every other thread in the process.
+  m.def(
+      "archive_session",
+      [](const std::string& session_dir, const std::string& tar_path, bool overwrite) {
+        nb::gil_scoped_release rel;
+        return mef3io::archive_session(session_dir, tar_path, overwrite);
+      },
+      nb::arg("session_dir"), nb::arg("tar_path") = "", nb::arg("overwrite") = false,
+      "Pack a session directory into a single uncompressed tar archive and "
+      "return the archive path.");
+  m.def(
+      "extract_session",
+      [](const std::string& tar_path, const std::string& dest_dir, bool overwrite) {
+        nb::gil_scoped_release rel;
+        return mef3io::extract_session(tar_path, dest_dir, overwrite);
+      },
+      nb::arg("tar_path"), nb::arg("dest_dir") = "", nb::arg("overwrite") = false,
+      "Unpack a session archive back into a directory and return its path.");
 
   // --- validation / repair (dicts in, dicts out; mef3io.validate wraps them) ---
   m.def(
@@ -371,7 +404,16 @@ NB_MODULE(_mef3io, m) {
       .def(
           "read_runs",
           [](mef3io::Session& s, const std::string& channel, nb::object t0, nb::object t1) {
-            auto runs = s.read_runs(channel, opt_si8(t0, "t0"), opt_si8(t1, "t1"));
+            // Convert the Python timestamps BEFORE releasing, then decode
+            // without the GIL: this is a full parallel decode and was holding
+            // the interpreter for its entire duration.
+            const auto a = opt_si8(t0, "t0");
+            const auto b = opt_si8(t1, "t1");
+            std::vector<mef3io::DataRun> runs;
+            {
+              nb::gil_scoped_release rel;
+              runs = s.read_runs(channel, a, b);
+            }
             nb::list out;
             for (auto& r : runs) {
               nb::dict d;

@@ -131,6 +131,47 @@ class Report:
     checks_run: tuple[str, ...] = ()
     checks_repaired: tuple[str, ...] = ()
     path: str = ""
+    #: What this run did NOT look at. A report can only speak for the work it
+    #: actually did, and every one of these narrows it: `channels`/`segments`
+    #: leave whole parts of the session unexamined, and `measured_difference_
+    #: bytes=False` (the `--fast` path) judges only a clearly-unset
+    #: `maximum_difference_bytes`, so a wrong-but-plausible one — the value
+    #: that crashes a meflib reader — is taken at its word. Without these,
+    #: `summary()` printed an unqualified all-clear for a run that had checked
+    #: one channel in fast mode.
+    channels: tuple[str, ...] = ()
+    segments: tuple[int, ...] = ()
+    measured_difference_bytes: bool = True
+
+    @property
+    def is_narrowed(self) -> bool:
+        """True when this run cannot speak for the whole session."""
+        return bool(
+            self.channels
+            or self.segments
+            or not self.measured_difference_bytes
+            or len(self.checks_run) < len(available_checks())
+        )
+
+    def scope_caveat(self) -> str:
+        """One sentence naming what this run did not cover, or "" if it covered
+        everything."""
+        parts = []
+        if len(self.checks_run) < len(available_checks()):
+            missing = len(available_checks()) - len(self.checks_run)
+            parts.append(f"{missing} of {len(available_checks())} check(s) were not run")
+        if self.channels:
+            parts.append(f"only channel(s) {', '.join(self.channels)} were examined")
+        if self.segments:
+            parts.append(
+                "only segment(s) " + ", ".join(str(s) for s in self.segments) + " were examined"
+            )
+        if not self.measured_difference_bytes:
+            parts.append(
+                "maximum_difference_bytes was bounded rather than measured (--fast), so a "
+                "wrong-but-plausible value would not have been seen"
+            )
+        return "; ".join(parts)
 
     @property
     def ok(self) -> bool:
@@ -249,13 +290,16 @@ class Report:
             return "\n".join(lines)
         if not self.findings and not self.skipped:
             lines.append("")
-            if len(self.checks_run) < len(available_checks()):
-                # A filtered run cannot speak for the checks it did not run.
-                not_run = len(available_checks()) - len(self.checks_run)
+            # An all-clear may only be as wide as the run that produced it. Any
+            # narrowing at all — a check filter, a channel or segment filter, or
+            # --fast, which bounds maximum_difference_bytes instead of measuring
+            # it — makes the unqualified sentence false, and it is printed under
+            # a heading naming the whole session.
+            caveat = self.scope_caveat()
+            if caveat:
                 lines.append(
-                    f"No problems found by the {len(self.checks_run)} check(s) selected. "
-                    f"{not_run} check(s) were NOT run — this is not a clean bill of health "
-                    f"for the session."
+                    f"No problems found by the checks that ran — but {caveat}. "
+                    f"This is NOT a clean bill of health for the session."
                 )
             else:
                 lines.append("No problems found — every declaration matches the data on disk.")
@@ -289,14 +333,21 @@ class Report:
         if fixable:
             lines.append("")
             lines.append("Still repairable. To fix, pass the ids explicitly:")
-            lines.append(f"    mef3io.repair_session(path, {fixable!r})")
+            if self.path.lower().rstrip("/\\").endswith(".tar"):
+                # A tar session is read in place and never written in place, so
+                # the obvious next command would always fail. Say what to do.
+                lines.append("    session = mef3io.extract_session(path)   # archives are read-only")
+                lines.append(f"    mef3io.repair_session(session, {fixable!r})")
+            else:
+                lines.append(f"    mef3io.repair_session(path, {fixable!r})")
         return "\n".join(lines)
 
     def __str__(self) -> str:  # pragma: no cover - convenience
         return self.summary()
 
 
-def _to_report(raw: dict, path: str) -> Report:
+def _to_report(raw: dict, path: str, *, channels=(), segments=(),
+               measured_difference_bytes: bool = True) -> Report:
     finding_fields = {f.name for f in dataclasses.fields(Finding)}
     skipped_fields = {f.name for f in dataclasses.fields(SkippedSegment)}
     return Report(
@@ -313,6 +364,9 @@ def _to_report(raw: dict, path: str) -> Report:
         checks_run=tuple(raw["checks_run"]),
         checks_repaired=tuple(raw["checks_repaired"]),
         path=path,
+        channels=tuple(channels or ()),
+        segments=tuple(segments or ()),
+        measured_difference_bytes=bool(measured_difference_bytes),
     )
 
 
@@ -427,7 +481,13 @@ class Validator:
             segments=self.segments,
             exact_difference_bytes=self.exact_difference_bytes,
         )
-        return _to_report(raw, self.path)
+        return _to_report(
+            raw,
+            self.path,
+            channels=self.channels,
+            segments=self.segments,
+            measured_difference_bytes=self.exact_difference_bytes,
+        )
 
     def check(self, check_id: str) -> Report:
         """Run one named check. Never modifies the session."""
@@ -509,7 +569,13 @@ def repair_session(
         exact_difference_bytes=v.exact_difference_bytes,
         backup=bool(backup),
     )
-    return _to_report(raw, v.path)
+    return _to_report(
+        raw,
+        v.path,
+        channels=v.channels,
+        segments=v.segments,
+        measured_difference_bytes=v.exact_difference_bytes,
+    )
 
 
 # --- command line ----------------------------------------------------------
@@ -592,6 +658,14 @@ def _main(argv: Sequence[str] | None = None, repair: bool = False) -> int:
         if args.password:
             parser.error("pass --password or --password-env, not both")
         password = os.environ.get(args.password_env)
+        if password == "":
+            # Set-but-empty is almost always a shell quoting slip. Left alone it
+            # degrades into "the password is missing or incorrect" on every
+            # segment, which sends the operator looking for the wrong problem.
+            parser.error(
+                f"environment variable {args.password_env} is set but empty; "
+                f"unset it to validate without a password"
+            )
         if password is None:
             parser.error(f"environment variable {args.password_env} is not set")
     opts = dict(

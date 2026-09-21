@@ -644,18 +644,28 @@ const std::vector<CheckImpl>& check_impls() {
                         t.first_start_uutc},
                        {"data end_time", to_user_time(s.tdat_uh_parsed.end_time, t.rto), t.end_uutc},
                    };
+                   // Name EVERY mismatching header. The repair rewrites all
+                   // three files whichever one fired, so reporting only the
+                   // first understated what the fix would touch.
+                   int n_bad = 0;
                    for (const auto& it : items) {
                      if (it.stored != fmt::UUTC_NO_ENTRY &&
                          std::abs(it.stored - it.expected) <= slack)
                        continue;
-                     hit = true;
-                     f.field = it.name;
-                     f.stored = declared_si8(it.stored);
-                     f.expected = num(it.expected);
-                     f.message = "universal-header time does not cover the blocks on disk "
-                                 "(absolute uUTC)";
-                     return;
+                     if (n_bad++ == 0) {
+                       hit = true;
+                       f.field = it.name;
+                       f.stored = declared_si8(it.stored);
+                       f.expected = num(it.expected);
+                     } else {
+                       f.field += ", ";
+                       f.field += it.name;
+                     }
                    }
+                   if (hit)
+                     f.message = "universal-header time does not cover the blocks on disk "
+                                 "(absolute uUTC); the repair rewrites the start and end time "
+                                 "in all three of .tmet, .tidx and .tdat";
                  },
                  [](const SegmentTruth& t, RepairBuffer& r) {
                    // Written back in meflib's negated form, as mef3io's writer does.
@@ -776,23 +786,33 @@ const std::vector<CheckImpl>& check_impls() {
                        {"data number_of_entries", s.tdat_uh_parsed.number_of_entries, t.n_blocks,
                         true},
                    };
+                   int n_bad = 0;
+                   bool truncates = false;
                    for (const auto& it : items) {
                      if (it.stored == it.expected) continue;
-                     hit = true;
-                     f.field = it.name;
-                     f.stored = declared_si8(it.stored);
-                     f.expected = num(it.expected);
-                     const bool truncates = it.clamps && it.stored < it.expected;
-                     if (truncates) {
-                       f.severity = Severity::Error;
-                       f.message =
-                           "universal-header entry count is SMALLER than the file holds; meflib "
-                           "clamps the block count down to it, so a reader returns a short "
-                           "segment and the blocks past it are silently dropped";
+                     truncates = truncates || (it.clamps && it.stored < it.expected);
+                     if (n_bad++ == 0) {
+                       hit = true;
+                       f.field = it.name;
+                       f.stored = declared_si8(it.stored);
+                       f.expected = num(it.expected);
                      } else {
-                       f.message = "universal-header entry count disagrees with the file contents";
+                       f.field += ", ";
+                       f.field += it.name;
                      }
-                     return;
+                   }
+                   if (!hit) return;
+                   // Any truncating item sets the severity for the finding: a
+                   // short read is the dangerous outcome whichever file causes
+                   // it, and the repair rewrites all three either way.
+                   if (truncates) {
+                     f.severity = Severity::Error;
+                     f.message =
+                         "universal-header entry count is SMALLER than the file holds; meflib "
+                         "clamps the block count down to it, so a reader returns a short "
+                         "segment and the blocks past it are silently dropped";
+                   } else {
+                     f.message = "universal-header entry count disagrees with the file contents";
                    }
                  },
                  [](const SegmentTruth& t, RepairBuffer& r) {
@@ -1343,6 +1363,14 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       active.push_back(&impl);
       report.checks_run.push_back(impl.info.id);
     }
+  // The integrity checks run on EVERY pass, whatever `check_ids` selects —
+  // narrowing a run must not switch off the gate that stops a repair deriving
+  // truth from bytes that failed their CRC. They therefore belong in
+  // `checks_run`, which is documented as "the ids, in the order they ran":
+  // without this a narrowed report carried crc.* findings for checks it said
+  // had not run.
+  for (const char* id : {"crc.metadata", "crc.index"})
+    if (!selected(opts.check_ids, id)) report.checks_run.insert(report.checks_run.begin(), id);
 
   std::set<std::string> to_repair;
   if (repair) {
@@ -1591,6 +1619,28 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
         std::copy(enc.begin(), enc.end(), s2_image.begin());
       }
       buffer.tmet_uh.serialize(file);
+      // If the file arrived with no body CRC at all — meflib's CRC_NO_ENTRY,
+      // which a streaming writer legitimately leaves — then computing one now
+      // turns "nobody ever verified these bytes" into "CRC verified", and the
+      // warning that said so disappears from every later report. Recomputing
+      // is unavoidable once section 2 changes; losing the audit trail is not.
+      if (byteio::read<ui4>(state.tmet_bytes, 4) == fmt::CRC_NO_ENTRY) {
+        Finding note;
+        note.check_id = "crc.metadata";
+        note.severity = Severity::Warning;
+        note.repairable = false;
+        note.channel = files.channel;
+        note.segment_number = files.segment_number;
+        note.path = files.description;
+        note.field = "body_CRC";
+        note.stored = "NO_ENTRY";
+        note.expected = "computed during this repair";
+        note.message =
+            "this segment carried no body CRC, so its metadata was never verified; the repair "
+            "has now computed one over bytes nothing had checked — the file will read as "
+            "verified from here on, but this pass is the only record that it was not";
+        staged.push_back(std::move(note));
+      }
       const ui4 body_crc = crc::calculate(std::span<const ui1>(file).subspan(
           fmt::UNIVERSAL_HEADER_BYTES,
           fmt::METADATA_FILE_BYTES - fmt::UNIVERSAL_HEADER_BYTES));
@@ -1637,7 +1687,10 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
         // Only name a backup that exists. Sending an operator to a directory
         // that was never created, mid-incident, is worse than saying nothing.
         if (repair->backup)
-          reason += "; restore from " + backup_root_for(path).string();
+          reason += "; restore from " + backup_root_for(path).string() +
+                    " (the PRISTINE original — a backup is taken once and never "
+                    "overwritten, so restoring it also undoes any earlier successful "
+                    "repair of this segment)";
         else
           reason += "; no backup was taken (backup=false)";
       }

@@ -171,15 +171,40 @@ def test_clean_session_has_no_findings(tmp_path):
     assert "No problems found" in report.summary()
 
 
-def test_validator_has_no_way_to_write():
+def test_validator_has_no_way_to_write(tmp_path):
     """A checker checks. Writing lives in repair_session(), under its own name.
 
     Pinned as a test and not just a convention: the point of the split is that
     an operator cannot reach a mutation from an object they opened to inspect,
     so re-attaching one to Validator must fail here rather than in the field.
     """
+    # The WHOLE surface, not a blocklist of four names. A blocklist is
+    # defeated by spelling: `repair_session`, `rewrite`, `heal`, `correct` and
+    # a `repair=True` keyword on validate() would all have passed it, which
+    # makes the "test-pinned" claim in CLAUDE.md untrue.
     public = {n for n in dir(mef3io.Validator) if not n.startswith("_")}
-    assert not (public & {"repair", "fix", "write", "apply"}), public
+    assert public == {"available_checks", "check", "describe_check", "validate"}, public
+
+    # Instance attributes too — a write could be attached to either.
+    path = Path(tmp_path) / "s.mefd"
+    _write(path)
+    instance = {n for n in vars(mef3io.Validator(str(path))) if not n.startswith("_")}
+    assert instance == {
+        "channels",
+        "exact_difference_bytes",
+        "password",
+        "path",
+        "segments",
+    }, instance
+
+    # ...and no write can be smuggled in through a parameter either.
+    import inspect
+
+    assert set(inspect.signature(mef3io.Validator.validate).parameters) == {
+        "self",
+        "check_ids",
+    }
+    assert set(inspect.signature(mef3io.Validator.check).parameters) == {"self", "check_id"}
     assert callable(mef3io.repair_session)
 
 
@@ -1489,7 +1514,8 @@ def test_summary_never_states_something_untrue(tmp_path):
     _patch_s2(_tmet(path), "maximum_difference_bytes", 0)
     text = mef3io.Validator(str(path)).validate(["header.entry-count"]).summary()
     assert "every declaration matches" not in text, text
-    assert "NOT run" in text, text
+    assert "not a clean bill of health" in text.lower(), text
+    assert "were not run" in text, text
     # ...while a full clean run still may.
     clean = tmp_path / "clean.mefd"
     _write(clean)
@@ -2130,3 +2156,73 @@ def test_the_worst_case_bound_never_returns_the_no_entry_sentinel(tmp_path):
     assert "sizing.difference-bytes" not in _ids(again), (
         f"repair did not converge, wrote {written}: {again.summary()}"
     )
+
+
+def test_a_fast_run_does_not_claim_a_clean_bill_of_health(tmp_path):
+    """`--fast` bounds `maximum_difference_bytes` instead of measuring it.
+
+    It therefore only judges a CLEARLY UNSET value; a wrong-but-plausible one —
+    exactly the value that truncates a meflib reader's buffer — is taken at its
+    word. The summary used to print the unqualified all-clear and the CLI
+    exited 0, telling the operator the opposite of the truth about the one
+    field this whole registry exists for.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+    real = _read_s2(tmet, "maximum_difference_bytes")
+    _patch_s2(tmet, "maximum_difference_bytes", 1)  # non-zero, absurdly small
+    assert real > 1
+
+    full = mef3io.Validator(str(path)).validate()
+    assert "sizing.difference-bytes" in _ids(full), "the full run must catch it"
+
+    fast = mef3io.Validator(str(path), exact_difference_bytes=False).validate()
+    assert not fast.findings, "fast mode cannot see it — that is the premise"
+    text = fast.summary()
+    assert "every declaration matches" not in text, text
+    assert "bounded rather than measured" in text, text
+    assert fast.is_narrowed
+
+
+def test_a_channel_filtered_run_does_not_claim_the_session_is_clean(tmp_path):
+    """The heading names the SESSION, so an unqualified all-clear under a
+    channel filter reads as a statement about all of it."""
+    path = tmp_path / "s.mefd"
+    _write(path, channels=("ch1", "ch2"))
+    _patch_s2(_tmet(path, "ch2"), "maximum_difference_bytes", 0)
+
+    report = mef3io.Validator(str(path), channels=["ch1"]).validate()
+    assert not report.findings, "ch1 really is clean"
+    text = report.summary()
+    assert "every declaration matches" not in text, text
+    assert "only channel(s) ch1" in text, text
+    assert report.is_narrowed
+
+
+def test_a_repair_records_that_it_computed_a_crc_nobody_had_verified(tmp_path):
+    """Recomputing is unavoidable; losing the audit trail is not.
+
+    A segment that arrives with `CRC_NO_ENTRY` was never verified by anyone.
+    Once a repair rewrites section 2 it must compute a real CRC, and from then
+    on the file reads as "verified" — so this pass is the only chance to record
+    that the bytes it certified had never been checked.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = Path(_tmet(path))
+    _patch_s2(tmet, "block_interval", 0)          # something to repair
+    raw = bytearray(tmet.read_bytes())
+    struct.pack_into("<I", raw, 4, 0)             # body_CRC = CRC_NO_ENTRY
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
+    tmet.write_bytes(bytes(raw))
+
+    report = mef3io.repair_session(str(path), ["times.block-interval"])
+
+    notes = [
+        f
+        for f in report.findings
+        if f.check_id == "crc.metadata" and "never verified" in f.message
+    ]
+    assert notes, report.summary()
+    assert struct.unpack_from("<I", tmet.read_bytes(), 4)[0] != 0, "a CRC was computed"

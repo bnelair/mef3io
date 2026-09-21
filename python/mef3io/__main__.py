@@ -29,9 +29,12 @@ def _usage() -> str:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
-    if not args or args[0] in ("-h", "--help"):
-        print(_usage())
-        return 0 if args else 2
+    if args and args[0] in ("-h", "--help"):
+        print(_usage())          # asked for: stdout, success
+        return 0
+    if not args:
+        print(_usage(), file=sys.stderr)   # an error: stderr, non-zero
+        return 2
     command, rest = args[0], args[1:]
     if command not in COMMANDS:
         print(f"unknown command: {command}\n", file=sys.stderr)

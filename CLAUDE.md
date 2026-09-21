@@ -156,6 +156,24 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   `METADATA_FILE_BYTES`, NOT taken to EOF — hashing the padding rejects intact
   metadata as "corrupted" and, since it throws in the ctor, kills the whole
   session (reported in 1.1.1: 1094 padded files, 0 actually corrupt).
+- **Durability is scoped, deliberately** (`core/src/durability.hpp`, shared by
+  writer.cpp and validate.cpp — they had drifted, and the path writing SAMPLES
+  was less careful than the one rewriting declarations). Three barriers are
+  load-bearing on APPEND and must not be removed for speed: fsync the `.tdat`
+  BEFORE writing the `.tidx` that points at those bytes (otherwise a power cut
+  leaves an index running past the real end of the data file — a state the
+  in-process rollback cannot reach, because the process is gone); and fsync the
+  `.tidx` and `.tmet` temp files before renaming them over the originals (a
+  rename is ORDERED, not durable, so otherwise it can publish a name over bytes
+  still in cache, and a short `.tmet` throws from the metadata loader and kills
+  the WHOLE session). Two things are deliberately NOT fsynced: a FRESH write
+  (nothing underneath to lose — a crash leaves an incomplete session either
+  way), and the DIRECTORY entry after a rename (losing the rename just keeps
+  the previous complete, consistent file, which is worth more than keeping the
+  last append). Cost on ext4, measured: fresh write unaffected (~80 MB/s); an
+  append pays ~3 fsyncs per channel, so a 128-channel append is ~5 s where the
+  fresh write is ~0.4 s. That is the price of not corrupting a clinical
+  archive; do not "optimise" it away without replacing the guarantee.
 - **NEVER `finalize_crcs` a `.tmet`, and never `s2.serialize` one you did not
   build.** Both are write-side traps that mirror read-side gotchas above, and
   the append fell into both for a long time (fixed 2026-09-21). (a) `.tmet` is

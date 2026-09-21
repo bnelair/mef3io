@@ -213,3 +213,59 @@ def test_tmet_corruption_inside_the_record_still_raises(tmp_path):
 
     with pytest.raises(RuntimeError, match="body CRC"):
         mef3io.Reader(path)
+
+
+# --- exception types ---------------------------------------------------------
+
+
+def test_core_errors_have_distinct_types_that_stay_runtime_errors(tmp_path):
+    """Callers can tell the failures apart — without breaking old code.
+
+    Every core exception derives from `MefError : std::runtime_error` and used
+    to reach Python as a bare `RuntimeError`, so "wrong password" and "corrupt
+    file" were distinguishable only by matching message text. They now have
+    distinct types, rooted at `RuntimeError` so that every `except
+    RuntimeError` already in the field keeps working.
+    """
+    import mef3io
+
+    for name in ("MefError", "FormatError", "CrcError", "PasswordError",
+                 "IoError", "WriteConflictError"):
+        exc = getattr(mef3io, name)
+        assert issubclass(exc, RuntimeError), f"{name} would break `except RuntimeError`"
+        if name != "MefError":
+            assert issubclass(exc, mef3io.MefError), name
+
+    # A missing session is an IO failure...
+    with pytest.raises(mef3io.IoError):
+        mef3io.Reader(str(tmp_path / "nope.mefd"))
+
+    # ...and a wrong password is not.
+    path = tmp_path / "enc.mefd"
+    w = mef3io.Writer(str(path), password1="lvl1", password2="lvl2")
+    w.write_int32("ch1", np.arange(500, dtype=np.int32), 0.5, 1577836800000000, 250.0)
+    w.close()
+    with pytest.raises(mef3io.PasswordError):
+        mef3io.Reader(str(path), password="wrong").read("ch1")
+    # Still catchable the old way.
+    with pytest.raises(RuntimeError):
+        mef3io.Reader(str(path), password="wrong").read("ch1")
+
+
+def test_a_closed_reader_does_not_silently_reopen(tmp_path):
+    """`close()` releases the backend's file handles; using the reader again
+    used to construct a fresh one, handing back the handles the caller had
+    just asked to release."""
+    import mef3io
+
+    path = tmp_path / "s.mefd"
+    w = mef3io.Writer(str(path))
+    w.write_int32("ch1", np.arange(2000, dtype=np.int32), 0.5, 1577836800000000, 250.0)
+    w.close()
+
+    reader = mef3io.Reader(str(path))
+    assert len(reader.read("ch1")) == 2000
+    reader.close()
+    with pytest.raises(ValueError, match="closed"):
+        reader.read("ch1")
+    reader.close()  # idempotent
