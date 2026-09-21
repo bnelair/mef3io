@@ -252,3 +252,37 @@ def test_the_block_index_cache_is_bounded_and_eviction_is_safe(tmp_path):
     session.set_index_cache_bytes(0)
     for c in range(8):
         assert len(session.read_runs(f"ch{c}", START, START + 720_000_000)) == len(truth[c])
+
+
+def test_block_time_arithmetic_is_not_done_in_32_bits(tmp_path):
+    """Block span must be computed in floating point, not `ui4` arithmetic.
+
+    `TimeSeriesIndex::number_of_samples` is a `ui4`, so an expression like
+    `number_of_samples * 1000000 / fs` WOULD wrap for a long block — 153,600
+    samples at 256 Hz would come out as ~12.8 s instead of 600 s, and a request
+    wholly inside the block would be silently excluded, returning nothing for
+    data that is present.
+
+    It does not wrap today, because the literal is `1e6` (a double), which
+    promotes the `ui4` before the multiply. That is a one-character distance
+    from being wrong, so it is pinned rather than left to inspection: a request
+    deep inside a single long block must find it.
+    """
+    path = tmp_path / "s.mefd"
+    n = 153_600                                   # 600 s at 256 Hz, one block
+    w = mef3io.Writer(str(path), block_length=n)
+    w.write_int32("ch1", np.arange(n, dtype=np.int32), 1.0, START, FS)
+    w.close()
+
+    # 400-410 s into the block: far past the ~12.8 s a wrapped span would give.
+    t0 = START + int(400e6)
+    with mef3io.Reader(str(path)) as r:
+        got = r.read("ch1", t0, t0 + int(10e6))
+    live = int(np.sum(np.isfinite(got)))
+    assert live > 2000, (
+        f"a window 400 s into a 600 s block returned {live} samples — the block span "
+        f"looks like it was computed in 32-bit arithmetic"
+    )
+
+    runs = m.Session(str(path), "").read_runs("ch1", t0, t0 + int(10e6))
+    assert sum(len(x["samples"]) for x in runs) > 0, "read_runs excluded the block"
