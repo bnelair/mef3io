@@ -259,6 +259,7 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   spec.password_1 = password_1_;
   spec.password_2 = password_2_;
   spec.metadata = metadata_;
+  spec.durable = durable_;
 
   // Only pass on a maximum this writer measured itself. A segment adopted from
   // disk leaves the flag false, so the append bounds the blocks it cannot see

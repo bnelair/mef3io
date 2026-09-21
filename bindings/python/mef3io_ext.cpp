@@ -14,6 +14,7 @@
 #include "mef3io/crypto.hpp"
 #include "mef3io/metadata.hpp"
 #include "mef3io/reader.hpp"
+#include "mef3io/recover.hpp"
 #include "mef3io/red.hpp"
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
@@ -150,6 +151,43 @@ NB_MODULE(_mef3io, m) {
       },
       nb::arg("tar_path"), nb::arg("dest_dir") = "", nb::arg("overwrite") = false,
       "Unpack a session archive back into a directory and return its path.");
+
+  m.def(
+      "recover_session",
+      [](const std::string& path, bool apply, bool backup, const std::string& password) {
+        mef3io::RecoveryReport r;
+        {
+          nb::gil_scoped_release rel;
+          r = mef3io::recover_session(path, apply, backup, password);
+        }
+        nb::list segs;
+        for (const auto& s : r.segments) {
+          nb::dict d;
+          d["channel"] = s.channel;
+          d["segment"] = s.segment_number;
+          d["path"] = s.path;
+          d["blocks_before"] = s.blocks_before;
+          d["blocks_after"] = s.blocks_after;
+          d["blocks_recovered"] = s.blocks_recovered;
+          d["blocks_dropped"] = s.blocks_dropped;
+          d["tdat_bytes_dropped"] = s.tdat_bytes_dropped;
+          d["action"] = s.action;
+          segs.append(d);
+        }
+        nb::list skipped;
+        for (const auto& s : r.skipped) skipped.append(s);
+        nb::dict out;
+        out["segments"] = segs;
+        out["skipped"] = skipped;
+        out["segments_examined"] = r.segments_examined;
+        out["applied"] = r.applied;
+        out["backup_root"] = r.backup_root;
+        return out;
+      },
+      nb::arg("path"), nb::arg("apply") = false, nb::arg("backup") = true,
+      nb::arg("password") = "",
+      "Make each segment's block index and data agree after an interrupted "
+      "write. Dry run unless apply=True.");
 
   // --- validation / repair (dicts in, dicts out; mef3io.validate wraps them) ---
   m.def(
@@ -441,6 +479,7 @@ NB_MODULE(_mef3io, m) {
       .def("set_block_length", &mef3io::SessionWriter::set_block_length)
       .def("set_units", &mef3io::SessionWriter::set_units)
       .def("set_threads", &mef3io::SessionWriter::set_threads)
+          .def("set_durable", &mef3io::SessionWriter::set_durable, nb::arg("durable"))
       .def(
           "set_metadata",
           [](mef3io::SessionWriter& w, nb::dict d) {

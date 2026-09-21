@@ -78,6 +78,83 @@ whether a writer keeps up with a live acquisition:
 
 With 5–20 minute blocks there is one to two orders of magnitude of headroom.
 
+### The `durability` knob
+
+When the barriers are not the right trade — battery-backed storage, a batch
+conversion you would simply re-run, an acquisition where a lost tail is cheaper
+than the latency — turn them off:
+
+```python
+w = mef3io.Writer(path, durability="fast", n_threads=0)
+```
+
+Writes stay **atomic** (temp file plus rename), so no file is ever torn and the
+session is never half-written. What is given up is the ORDERING between files,
+so a crash can leave the index referencing `.tdat` bytes that never landed.
+That state is detectable (`index.block-offsets`, `index.data-coverage`) and
+repairable (`recover_session`, below), which is what makes the trade a
+reasonable one to offer rather than a footgun.
+
+Measured, 8 channels × 10-minute blocks, against the legacy stack:
+
+| | per append | vs meflib |
+|---|---|---|
+| mef_tools / meflib (single-threaded, no barriers) | 289 ms | 1.00× |
+| mef3io `durability="full"`, 1 thread | 586 ms | 0.49× |
+| mef3io `durability="full"`, all cores | 354 ms | 0.82× |
+| mef3io `durability="fast"`, 1 thread | 399 ms | 0.73× |
+| **mef3io `durability="fast"`, all cores** | **229 ms** | **1.26×** |
+
+The encode dominates, and mef3io parallelises it where meflib cannot — so
+`durability="fast"` with threads is *faster* than the reference implementation
+while still never tearing a file.
+
+## Recovering from an interrupted write
+
+```bash
+python -m mef3io recover SESSION.mefd            # dry run, writes nothing
+python -m mef3io recover SESSION.mefd --apply
+```
+
+An interrupted append leaves one of two shapes, and they are **not** treated the
+same, because one has lost data and the other has not:
+
+- **Index ahead of data** — entries reference bytes that never landed. Those
+  samples do not exist, so the entries are dropped.
+- **Data ahead of index** — blocks reached `.tdat` but the index was not
+  extended. Those samples *do* exist, so they are **recovered**: a RED block
+  header carries the sample count, byte count, start time and discontinuity
+  flag, which is everything an index entry needs. Only blocks whose CRC
+  verifies are indexed — a torn tail is not a block.
+
+Recovery is deliberately separate from `repair_session`. Repair only ever
+rewrites declarations, which is what makes it safe to run on anything; recovery
+may change the index, so it is a dry run by default and backs up what it
+changes first. The CLI re-derives the declarations afterwards for you.
+
+!!! warning "It backs up what changes, not the file"
+    The `.tdat` may be tens of gigabytes — and that is **one channel**. Recovery
+    saves the `.tidx`, the `.tdat`'s 1024-byte header, and any dropped
+    sub-block fragment. Copying the data file to undo a header patch would make
+    the tool unusable on exactly the sessions it is for.
+
+## Large files are the point
+
+About 30 GB is **one channel**, so a session runs to hundreds of gigabytes or
+terabytes. Nothing on a read path may touch a whole `.tdat`:
+
+- a windowed read selects its index entries first, then issues **one** read of
+  exactly the byte extent they span;
+- validation reads the 1024-byte universal header and the file's *size*, never
+  the body;
+- recovery streams — the size, plus a 304-byte RED header and the single block
+  it describes, at a handful of offsets;
+- `tar` archive and extract stream in 1 MB chunks.
+
+`tests/test_p17_large_files.py` pins this with `/proc/self/io`, counting the
+bytes actually read. A one-minute window out of a ten-hour channel reads
+**0.57 %** of the file; before that gate existed, `read_runs` read 100 %.
+
 ## Accuracy at length
 
 Long sessions are also where declarations drift, because every append rewrites

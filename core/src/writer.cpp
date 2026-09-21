@@ -91,7 +91,8 @@ using detail::copy_file_identity;
 using detail::fsync_directory;
 using detail::fsync_file_or_throw;
 
-void write_file_atomic(const std::string& path, std::span<const ui1> bytes) {
+void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
+                       bool durable = true) {
   const fs::path target(path);
   const fs::path tmp = target.parent_path() / (target.filename().string() + ".mef3io-tmp");
   std::error_code ignored;
@@ -125,7 +126,7 @@ void write_file_atomic(const std::string& path, std::span<const ui1> bytes) {
     // still complete, still consistent. Keeping a consistent previous state is
     // worth more than keeping the last append, and it halves the number of
     // fsyncs an append pays across a many-channel session.
-    if (replacing) fsync_file_or_throw(tmp.string());
+    if (replacing && durable) fsync_file_or_throw(tmp.string());
     replace_file(tmp, target);
   } catch (...) {
     fs::remove(tmp, ignored);
@@ -153,8 +154,9 @@ std::array<ui1, 16> random_uuid() {
   return u;
 }
 
-void write_file(const std::string& path, const std::vector<ui1>& bytes) {
-  write_file_atomic(path, bytes);
+void write_file(const std::string& path, const std::vector<ui1>& bytes,
+                bool durable = true) {
+  write_file_atomic(path, bytes, durable);
 }
 
 // Same, for `.tmet` — a FIXED-length record. The body CRC must be bounded by
@@ -903,7 +905,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     // otherwise leaves an index whose entries run past the real end of .tdat —
     // a state the in-process rollback cannot repair, because the process is
     // gone. Ordering the samples before the references is the whole guarantee.
-    fsync_file_or_throw(tdat_path);
+    if (spec.durable) fsync_file_or_throw(tdat_path);
 
     // Each flag is set BEFORE the call that might fail. These writes can throw
     // partway — overwrite_file_prefix patches bytes in place and only then
@@ -924,15 +926,15 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
         if (!app) throw IoError("append failed: " + tidx_path);
         finish_stream(app, tidx_path);
       }
-      fsync_file_or_throw(tidx_path);
+      if (spec.durable) fsync_file_or_throw(tidx_path);
       overwrite_file_prefix(tidx_path, new_tidx_uh);
     } else {
-      write_file(tidx_path, new_tidx);
+      write_file(tidx_path, new_tidx, spec.durable);
     }
     patched_tdat_header = true;
     overwrite_file_prefix(tdat_path, new_tdat_uh);
     wrote_tmet = true;
-    write_file(tmet_path, new_tmet);
+    write_file(tmet_path, new_tmet, spec.durable);
   } catch (...) {
     if (cache) cache->valid = false;  // the file may no longer match the summary
     std::string rollback_error;

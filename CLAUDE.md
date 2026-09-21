@@ -156,6 +156,24 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   `METADATA_FILE_BYTES`, NOT taken to EOF — hashing the padding rejects intact
   metadata as "corrupted" and, since it throws in the ctor, kills the whole
   session (reported in 1.1.1: 1094 padded files, 0 actually corrupt).
+- **NEVER READ OR COPY A `.tdat` WHOLE. ~30 GB is ONE CHANNEL**, so a session
+  runs to hundreds of GB or TBs. This is the single easiest way to make the
+  library unusable on the files it exists for, and it has been reintroduced
+  more than once. The rules: (a) a READ takes the byte extent the request needs
+  — select the index entries first, compute min/max offset, then ONE
+  `source_->read_range`, and check that extent against `file_size` so a damaged
+  index fails loudly instead of reading wild (`collect_blocks` and `read_runs`
+  both do this; `read_runs` did NOT until 2026-09-21 and pulled the whole file
+  in for a one-minute window — 83.5 MB read for 0.47 MB of data). (b) VALIDATE
+  never reads the body: `SegmentState` keeps `tdat_uh` (1024 B) and
+  `tdat_size` only. (c) RECOVERY streams — it needs the SIZE plus a 304-byte
+  RED header (and the one block it describes) at a few offsets. (d) BACK UP
+  WHAT CHANGES, NOT THE FILE: the repair path saves the `.tdat`'s 1024-byte
+  header, and recovery saves the header plus the sub-block fragment it drops.
+  Copying 30 GB to undo 200 bytes is not a backup, it is an outage. (e) `tar`
+  archive/extract stream in 1 MB chunks — keep it that way. Measure with
+  `/proc/self/io` `rchar`, which counts bytes read exactly and does not flake
+  the way RSS does; `tests/test_p17_large_files.py` pins the read paths.
 - **The MAIN use case is a session appended to for DAYS TO MONTHS** (5-20 min
   blocks per channel). Two consequences, both load-bearing. (1) An append must
   be O(NEW data), never O(total blocks) — section 2 describes ALL of a segment's

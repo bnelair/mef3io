@@ -41,6 +41,7 @@ from .validate import (  # noqa: E402
     Validator,
     available_checks,
     describe_check,
+    recover_session,
     repair_session,
     validate_session,
 )
@@ -64,7 +65,8 @@ __all__ = [
     "MefReader", "MefWriter", "archive_session", "extract_session",
     "Validator", "Check", "Finding", "Report", "SkippedSegment",
     "available_checks", "describe_check",
-    "validate_session", "repair_session", "SessionDeclarationWarning",
+    "validate_session", "repair_session", "recover_session",
+    "SessionDeclarationWarning",
     "MefError", "FormatError", "CrcError", "PasswordError", "IoError",
     "WriteConflictError",
     "have_cpp_backend", "__version__",

@@ -6,6 +6,12 @@ neither can be reached by accident from the other::
     python -m mef3io validate SESSION.mefd
     python -m mef3io repair SESSION.mefd --check sizing.difference-bytes
     python -m mef3io validate --list-checks
+    python -m mef3io recover SESSION.mefd            # dry run
+    python -m mef3io recover SESSION.mefd --apply
+
+``recover`` is the only one that may touch the block index or the data file,
+and only after an interrupted write. It is a dry run unless ``--apply`` is
+given.
 """
 from __future__ import annotations
 
@@ -15,6 +21,7 @@ from typing import Sequence
 COMMANDS = {
     "validate": "check a session's declarations against its data (never writes)",
     "repair": "rewrite only the declarations for the checks you name",
+    "recover": "after an interrupted write, make the index and data agree again",
 }
 
 
@@ -44,6 +51,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .validate import _main
 
         return _main(rest, repair=command == "repair")
+    if command == "recover":
+        from .validate import _recover_main
+
+        return _recover_main(rest)
     raise AssertionError(f"unhandled command {command}")  # pragma: no cover
 
 

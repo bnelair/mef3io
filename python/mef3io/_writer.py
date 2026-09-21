@@ -87,6 +87,7 @@ class Writer:
         block_length: Optional[int] = None,
         n_threads: int = 0,
         metadata=None,
+        durability: str = "full",
     ):
         from . import _mef3io
 
@@ -101,6 +102,12 @@ class Writer:
         if block_length is not None:
             self._impl.set_block_length(int(block_length))
         self._impl.set_threads(int(n_threads))
+        if durability not in ("full", "fast"):
+            raise ValueError(
+                f"durability must be 'full' or 'fast', not {durability!r}"
+            )
+        self._impl.set_durable(durability == "full")
+        self._durability = durability
         if metadata is not None:
             self.set_metadata(metadata)
 

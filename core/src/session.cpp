@@ -172,33 +172,57 @@ std::vector<DataRun> Session::read_runs(const std::string& channel, std::optiona
 
     auto idx = segment_index(seg);
     const std::size_t n_entries = index_entry_count(idx, source_->describe(seg.tidx_path));
-    auto tdat = source_->read_all(seg.tdat_path);
 
     crypto::AccessKeys keys = crypto::validate_password(
         password_, md.universal_header.level_1_password_validation_field,
         md.universal_header.level_2_password_validation_field);
 
+    // Select the blocks the window actually needs FIRST, then read exactly the
+    // byte extent they span — never the whole .tdat. A segment of a long
+    // recording is tens of gigabytes, and reading it whole to serve a
+    // one-minute request allocates the entire file. This mirrors what
+    // collect_blocks already does for the windowed read path.
+    std::vector<fmt::TimeSeriesIndex> hits;
     for (std::size_t i = 0; i < n_entries; ++i) {
-      auto entry_bytes =
+      auto e = fmt::TimeSeriesIndex::parse(
           idx.subspan(fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES,
-                      fmt::TIME_SERIES_INDEX_BYTES);
-      auto e = fmt::TimeSeriesIndex::parse(entry_bytes);
+                      fmt::TIME_SERIES_INDEX_BYTES));
       if (e.file_offset < 0 || e.number_of_samples == 0) continue;
-
-      si8 block_start = to_user_time(e.start_time, rto);
-      si8 block_end = block_start + static_cast<si8>(std::llround(e.number_of_samples * 1e6 / fs));
+      const si8 block_start = to_user_time(e.start_time, rto);
+      const si8 block_end =
+          block_start + static_cast<si8>(std::llround(e.number_of_samples * 1e6 / fs));
       if (block_end <= t0 || block_start >= t1) continue;  // outside requested range
+      hits.push_back(e);
+    }
+    if (hits.empty()) continue;
 
-      if (static_cast<std::size_t>(e.file_offset) + e.block_bytes > tdat.size())
-        throw FormatError("index points past end of .tdat");
-      std::span<const ui1> block(tdat.data() + e.file_offset, e.block_bytes);
+    // Do not assume the index is sorted: take the true extent, and check it
+    // against the real file size so a damaged index fails loudly rather than
+    // reading wild.
+    std::size_t range_begin = static_cast<std::size_t>(hits.front().file_offset);
+    std::size_t range_end = range_begin;
+    for (const auto& e : hits) {
+      const std::size_t off = static_cast<std::size_t>(e.file_offset);
+      range_begin = std::min(range_begin, off);
+      range_end = std::max(range_end, off + e.block_bytes);
+    }
+    const std::size_t tdat_size = static_cast<std::size_t>(source_->file_size(seg.tdat_path));
+    if (range_end > tdat_size)
+      throw FormatError("index points past end of .tdat: " + source_->describe(seg.tdat_path));
+    const std::vector<ui1> tdat = source_->read_range(seg.tdat_path, range_begin,
+                                                      range_end - range_begin);
+
+    for (const auto& e : hits) {
+      std::span<const ui1> block(tdat.data() + (static_cast<std::size_t>(e.file_offset) -
+                                                range_begin),
+                                 e.block_bytes);
       auto decoded = red::decode_block(block, keys);
 
       // Start a new run on discontinuity or a sample-index gap.
       bool contiguous = current != nullptr && !decoded.discontinuity &&
                         e.start_sample == expected_next_sample;
       if (!contiguous) {
-        runs.push_back(DataRun{block_start, e.start_sample, {}});
+        runs.push_back(DataRun{to_user_time(e.start_time, rto), e.start_sample, {}});
         current = &runs.back();
       }
       current->samples.insert(current->samples.end(), decoded.samples.begin(),

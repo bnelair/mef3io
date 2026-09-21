@@ -73,6 +73,17 @@ class SessionWriter {
   void set_units(const std::string& u) { units_ = u; }
   void set_threads(int n) { n_threads_ = n; }
 
+  /// Flush appends to stable storage (default true).
+  ///
+  /// false trades the crash guarantee for speed: writes stay ATOMIC, so no file
+  /// is ever torn, but the ordering between `.tdat` and `.tidx` is no longer
+  /// enforced, so a power cut can leave the index referencing data that never
+  /// landed. `validate()` detects that and `recover_session()` repairs it.
+  /// Appropriate on battery-backed storage, or where a lost tail is cheaper
+  /// than the barriers. This is the durability meflib offers, which is none.
+  void set_durable(bool d) { durable_ = d; }
+  bool durable() const { return durable_; }
+
   // Session-wide subject/descriptive metadata written into every channel's
   // section 2 (descriptive/acquisition) and section 3 (subject) on write.
   // Set before writing; ignored for channels already on disk.
@@ -119,6 +130,7 @@ class SessionWriter {
   SessionMetadata metadata_;
   si8 block_length_override_ = 0;
   int n_threads_ = 0;
+  bool durable_ = true;
   std::map<std::string, ChannelState> channels_;
 };
 

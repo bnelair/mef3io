@@ -93,6 +93,21 @@ struct SegmentSpec {
   /// it must be a true maximum, since a reader allocates its difference buffer
   /// from the result and an under-declaration truncates that buffer.
   ui4 known_difference_bytes = 0;
+  /// Flush to stable storage at the points that keep a segment self-consistent.
+  ///
+  /// true (default) — the `.tdat` body is flushed BEFORE the `.tidx` that
+  /// references it, and the `.tidx`/`.tmet` replacements are flushed before the
+  /// rename. A power cut then leaves the segment consistent, with the last
+  /// append either fully present or fully absent.
+  ///
+  /// false — no flushes. Writes are still ATOMIC (temp file + rename), so no
+  /// file is ever torn and the session is never half-written; what is lost is
+  /// the ORDERING guarantee between files, so a crash can leave the index
+  /// referencing `.tdat` bytes that never landed. That is detectable
+  /// (`index.block-offsets`, `index.data-coverage`) and repairable
+  /// (`recover_session`), which is what makes the trade a reasonable one to
+  /// offer. It is the durability meflib gives — which is none.
+  bool durable = true;
 };
 
 // Write the three files for one segment into `segment_dir` (which must exist).

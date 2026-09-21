@@ -54,6 +54,9 @@ __all__ = [
     "available_checks",
     "validate_session",
     "repair_session",
+    "recover_session",
+    "RecoveryReport",
+    "RecoveredSegment",
 ]
 
 def _backend():
@@ -578,7 +581,181 @@ def repair_session(
     )
 
 
+@dataclasses.dataclass(frozen=True)
+class RecoveredSegment:
+    """One segment that an interrupted write left inconsistent."""
+
+    channel: str = ""
+    segment: int = 0
+    path: str = ""
+    blocks_before: int = 0
+    blocks_after: int = 0
+    blocks_recovered: int = 0
+    blocks_dropped: int = 0
+    tdat_bytes_dropped: int = 0
+    action: str = ""
+
+    def __str__(self) -> str:  # pragma: no cover - convenience
+        return f"{self.path}: {self.action}"
+
+
+@dataclasses.dataclass(frozen=True)
+class RecoveryReport:
+    """What `recover_session` found, and did or would do."""
+
+    segments: tuple[RecoveredSegment, ...] = ()
+    skipped: tuple[str, ...] = ()
+    segments_examined: int = 0
+    applied: bool = False
+    backup_root: str = ""
+
+    @property
+    def nothing_to_do(self) -> bool:
+        return not self.segments and not self.skipped
+
+    def summary(self) -> str:
+        lines = [
+            f"{self.segments_examined} segment(s) examined, "
+            f"{len(self.segments)} needing recovery"
+            + ("" if self.applied else "  (DRY RUN — nothing was written)")
+        ]
+        for s in self.segments:
+            lines.append(f"    {s.path}: {s.action}")
+        for s in self.skipped:
+            lines.append(f"    skipped {s}")
+        if self.applied and self.backup_root:
+            lines.append(f"  originals backed up under {self.backup_root}")
+        if self.segments and not self.applied:
+            lines.append("")
+            lines.append("To apply:  mef3io.recover_session(path, apply=True)")
+        if self.segments and self.applied:
+            lines.append("")
+            lines.append(
+                "Now re-derive the declarations from the repaired index:\n"
+                "    mef3io.repair_session(path, "
+                "mef3io.Validator(path).validate().repairable_check_ids)"
+            )
+        return "\n".join(lines)
+
+
+def recover_session(
+    path: str,
+    apply: bool = False,
+    backup: bool = True,
+    password: str = "",
+) -> RecoveryReport:
+    """Make each segment's block index and data agree after an interrupted write.
+
+    This is **not** :func:`repair_session`, which only ever rewrites
+    declarations and is safe to run on anything. Recovery may truncate the
+    index, rebuild index entries from the data file, and drop a trailing
+    fragment — so it is a dry run unless you ask for it, and it backs up what it
+    changes first.
+
+    An interrupted append leaves one of two shapes, and they are handled
+    differently because one has lost data and the other has not:
+
+    * **index ahead of data** — entries reference bytes that never landed.
+      Those samples do not exist, so the entries are dropped.
+    * **data ahead of index** — blocks reached ``.tdat`` but the index was not
+      extended. Those samples *do* exist, so they are **recovered**: a RED block
+      header carries the sample count, byte count, start time and discontinuity
+      flag, which is everything an index entry needs. Only blocks whose CRC
+      verifies are indexed; a torn tail is not a block.
+
+    With the default ``durability="full"`` an append cannot leave either state.
+    They are reachable with ``durability="fast"``, which is what makes that
+    trade a reasonable one to offer.
+
+    Parameters
+    ----------
+    path : str
+        ``.mefd`` session directory. Tar archives are refused.
+    apply : bool, default False
+        False reports what it would do and writes nothing.
+    backup : bool, default True
+        Save what changes to ``<session>.recover-backup/`` first. Only the
+        ``.tidx``, the ``.tdat``'s 1024-byte header and any dropped fragment —
+        never the whole data file, which may be tens of gigabytes.
+    password : str, optional
+        Only needed for encrypted sessions.
+
+    Returns
+    -------
+    RecoveryReport
+
+    Notes
+    -----
+    Declarations are not updated here. Run :func:`repair_session` afterwards —
+    ``python -m mef3io recover`` does it for you.
+    """
+    raw = _backend().recover_session(str(path), bool(apply), bool(backup), password or "")
+    fields = {f.name for f in dataclasses.fields(RecoveredSegment)}
+    return RecoveryReport(
+        segments=tuple(
+            RecoveredSegment(**{k: v for k, v in s.items() if k in fields})
+            for s in raw["segments"]
+        ),
+        skipped=tuple(raw["skipped"]),
+        segments_examined=raw["segments_examined"],
+        applied=raw["applied"],
+        backup_root=raw["backup_root"],
+    )
+
+
 # --- command line ----------------------------------------------------------
+
+
+def _recover_main(argv) -> int:
+    """`python -m mef3io recover` — see recover_session()."""
+    import argparse
+
+    p = argparse.ArgumentParser(
+        prog="python -m mef3io recover",
+        description=(
+            "Make each segment's block index and data agree after an interrupted "
+            "write. Dry run unless --apply. Unlike 'repair', this may change the "
+            "block index and drop an incomplete trailing block."
+        ),
+    )
+    p.add_argument("path", help="session .mefd directory")
+    p.add_argument("--apply", action="store_true", help="actually write (default: dry run)")
+    p.add_argument("--no-backup", action="store_true",
+                   help="do not save what changes to <session>.recover-backup/")
+    p.add_argument("--password", default="", help="for encrypted sessions")
+    p.add_argument("--no-repair", action="store_true",
+                   help="skip re-deriving the declarations afterwards")
+    args = p.parse_args(list(argv))
+
+    try:
+        report = recover_session(
+            args.path, apply=args.apply, backup=not args.no_backup, password=args.password
+        )
+    except (ValueError, RuntimeError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(report.summary())
+
+    # A recovered index means the declarations derived from it are now stale.
+    # Doing it here keeps the two operations separate in the API but joined in
+    # the workflow, which is what an operator actually wants.
+    if report.applied and report.segments and not args.no_repair:
+        outstanding = Validator(args.path, password=args.password).validate()
+        ids = outstanding.repairable_check_ids
+        if ids:
+            print()
+            print(f"re-deriving declarations from the recovered index: {', '.join(ids)}")
+            repair_session(args.path, ids, password=args.password)
+        final = Validator(args.path, password=args.password).validate()
+        print()
+        print(final.summary())
+        return 0 if final.ok else 1
+
+    if report.skipped:
+        return 1
+    return 0
+
 
 
 def _build_parser(repair: bool) -> "argparse.ArgumentParser":
