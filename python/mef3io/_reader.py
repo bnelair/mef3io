@@ -29,6 +29,50 @@ class SessionDeclarationWarning(UserWarning):
     """
 
 
+class BlockCopyWarning(UserWarning):
+    """A block's two stored copies of its start time or sample count disagree.
+
+    Every RED block records its start time and sample count TWICE — once in the
+    `.tidx` entry and once in the block's own header inside the `.tdat`.
+    Nothing in the format keeps them in step. mef3io places data by the HEADER,
+    which is the copy the per-block CRC protects and the copy meflib and pymef
+    read, so a file whose copies have drifted apart still reads the same as it
+    does under the legacy stack.
+
+    This warning means the file itself is internally inconsistent — it does not
+    mean the read is wrong. It fires only on such a file: on anything mef3io or
+    the legacy stack wrote, the copies are identical and nothing is emitted.
+
+    The structured detail is in the ``block_copy_mismatches`` key returned by
+    :meth:`Reader.read_raw`. Silence it like any warning::
+
+        warnings.filterwarnings("ignore", category=mef3io.BlockCopyWarning)
+    """
+
+
+def _block_copy_warning_text(mismatches: list, path: str) -> str:
+    times = sum(1 for m in mismatches
+                if m["index_start_uutc"] != m["header_start_uutc"])
+    counts = sum(1 for m in mismatches
+                 if m["index_number_of_samples"] != m["header_number_of_samples"])
+    parts = []
+    if times:
+        parts.append(f"{times} block(s) disagree on start time")
+    if counts:
+        parts.append(f"{counts} block(s) disagree on sample count")
+    first = mismatches[0]
+    return (
+        f"{path}: the block index and the RED block headers disagree — "
+        + " and ".join(parts)
+        + f". First: {first['segment']} block {first['block_index']} "
+        f"(index t={first['index_start_uutc']} n={first['index_number_of_samples']}, "
+        f"header t={first['header_start_uutc']} n={first['header_number_of_samples']}). "
+        "The header is authoritative and was used, which is what meflib/pymef do "
+        "too, so this read matches theirs; the FILE is inconsistent. "
+        "Inspect with Reader.read_raw()['block_copy_mismatches']."
+    )
+
+
 def _declaration_warning_text(issues: list, path: str) -> str:
     fields: dict[str, int] = {}
     channels = set()
@@ -315,8 +359,17 @@ class Reader:
         """
         impl = self._ensure_impl()
         if n_threads is None:
-            return impl.read_raw(channel, t0, t1)
-        return impl.read_raw(channel, t0, t1, int(n_threads))
+            out = impl.read_raw(channel, t0, t1)
+        else:
+            out = impl.read_raw(channel, t0, t1, int(n_threads))
+        mismatches = out.get("block_copy_mismatches") or []
+        if mismatches:
+            warnings.warn(
+                _block_copy_warning_text(mismatches, self._path),
+                BlockCopyWarning,
+                stacklevel=2,
+            )
+        return out
 
     def segments(self, channel: str) -> list[dict]:
         """Per-segment map of a channel — what data is where.

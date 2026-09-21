@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "mef3io/byteio.hpp"
 #include "mef3io/errors.hpp"
 #include "mef3io/red.hpp"
 #include "mef3io/validate.hpp"
@@ -322,14 +323,35 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
     std::size_t buf_index = out.buffers.size();
     out.buffers.push_back(
         source_->read_range(seg.tdat_path, range_begin, range_end - range_begin));
-    for (const auto& e : hits) {
+    const std::vector<ui1>& buf = out.buffers[buf_index];
+    for (std::size_t hi = 0; hi < hits.size(); ++hi) {
+      const auto& e = hits[hi];
       BlockJob job;
       job.buffer_index = buf_index;
       job.offset = static_cast<std::size_t>(e.file_offset) - range_begin;
       job.block_bytes = e.block_bytes;
-      job.start_uutc = to_user_time(e.start_time, rto);
-      job.number_of_samples = e.number_of_samples;
+      job.index_start_uutc = to_user_time(e.start_time, rto);
+      job.index_number_of_samples = e.number_of_samples;
       job.keys = keys;
+
+      // The RED block header is the authority for WHERE this block's samples
+      // go and HOW MANY there are; the index only chose the byte range. Both
+      // values are read straight out of the bytes just fetched — two field
+      // reads at fixed offsets, not RedBlockHeader::parse, which would copy
+      // the 256-byte statistics table for every block on the read path.
+      if (job.offset + static_cast<std::size_t>(fmt::RED_BLOCK_HEADER_BYTES) > buf.size())
+        throw FormatError("block is smaller than a RED header: " +
+                          source_->describe(seg.tdat_path));
+      const std::span<const ui1> hdr(buf.data() + job.offset, fmt::RED_BLOCK_HEADER_BYTES);
+      job.start_uutc = to_user_time(byteio::read<si8>(hdr, 40), rto);
+      job.number_of_samples = byteio::read<ui4>(hdr, 32);
+
+      if (job.start_uutc != job.index_start_uutc ||
+          job.number_of_samples != job.index_number_of_samples) {
+        out.mismatches.push_back(BlockCopyMismatch{
+            source_->describe(seg.tdat_path), hi, job.index_start_uutc, job.start_uutc,
+            job.index_number_of_samples, job.number_of_samples});
+      }
       out.jobs.push_back(job);
     }
   }

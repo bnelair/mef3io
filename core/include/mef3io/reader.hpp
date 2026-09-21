@@ -21,6 +21,11 @@ struct RawData {
   si8 start_uutc = 0;
   sf8 sampling_frequency = 0.0;
   sf8 units_conversion_factor = 1.0;
+  /// Blocks read here whose `.tidx` entry and RED block header disagree about
+  /// start time or sample count. Empty for every well-formed session; a
+  /// non-empty list means the file is internally inconsistent and the header
+  /// copy was used. See BlockCopyMismatch.
+  std::vector<BlockCopyMismatch> block_copy_mismatches;
 };
 
 /// High-level MEF 3.0 reader: windowed reads on a uniform sample grid with

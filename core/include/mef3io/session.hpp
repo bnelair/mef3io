@@ -43,9 +43,44 @@ struct BlockJob {
   std::size_t buffer_index = 0;
   std::size_t offset = 0;
   std::size_t block_bytes = 0;
+  /// Where the block goes and how much of it there is — taken from the RED
+  /// BLOCK HEADER, not the index. See BlockCopyMismatch for why.
   si8 start_uutc = 0;
   ui4 number_of_samples = 0;
+  /// The `.tidx` entry's copies of the same two values, kept for comparison.
+  si8 index_start_uutc = 0;
+  ui4 index_number_of_samples = 0;
   crypto::AccessKeys keys;
+};
+
+/// A block whose two stored copies of a value disagree.
+///
+/// A block's start time and sample count each exist TWICE: in the `.tidx`
+/// entry and in the RED block header at the head of the block itself. Nothing
+/// in the format keeps them in step, and the two are not equally trustworthy:
+///
+///   * the header copy is covered by the per-block CRC, which is verified on
+///     every decode; the index copy is covered only by the `.tidx` body CRC,
+///     which the read path does not check at all;
+///   * the header copy is the one meflib and pymef place data by
+///     (`pymef3_file.c`, the `times_specified` path), so following it is
+///     parity by construction rather than by agreement.
+///
+/// mef3io therefore places by the header and uses the index only to SELECT
+/// blocks — which is what meflib does too. On every file mef3io or the legacy
+/// stack has ever written the copies are identical, so this changes nothing;
+/// it only decides what happens on a file where they have drifted apart, and
+/// there it reports rather than silently picking one.
+struct BlockCopyMismatch {
+  std::string segment;            ///< human-readable segment location
+  std::size_t block_index = 0;    ///< position within the segment's index
+  si8 index_start_uutc = 0;
+  si8 header_start_uutc = 0;
+  ui4 index_number_of_samples = 0;
+  ui4 header_number_of_samples = 0;
+
+  bool times_differ() const { return index_start_uutc != header_start_uutc; }
+  bool counts_differ() const { return index_number_of_samples != header_number_of_samples; }
 };
 
 struct BlockJobs {
@@ -53,6 +88,9 @@ struct BlockJobs {
   std::vector<BlockJob> jobs;
   sf8 sampling_frequency = 0.0;
   sf8 units_conversion_factor = 1.0;
+  /// Blocks whose index entry and RED header disagree. Empty for every
+  /// well-formed file; non-empty means the file is internally inconsistent.
+  std::vector<BlockCopyMismatch> mismatches;
 };
 
 // One RED block's index entry with absolute (user) times resolved.

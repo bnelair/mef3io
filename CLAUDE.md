@@ -457,10 +457,25 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   that helper desynchronises them. mef3io reads the index copy; pymef's uutc
   path reads the RED-header copy. Two readers, two different copies of one
   value, by construction. Nothing about placement philosophy.
-  THE REAL REMAINDER is that mef3io never cross-checks the two copies, so a
-  file whose copies disagree is read without complaint (open issue #11). The
-  thread-invariance tests that use the helper are still valid — they exercise
-  overlapping output ranges, which is all they claim to.
+  RESOLVED 2026-09-21 (#11 + #13). **The RED BLOCK HEADER is now the authority
+  for where a block's samples go and how many there are; the `.tidx` only
+  SELECTS blocks** — which is exactly what meflib does. Both values are stored
+  twice (index entry, and block header at `.tdat` +40 / +32) and nothing in the
+  format keeps them in step, but the copies are not equally trustworthy: the
+  header is covered by the per-block CRC that the decoder verifies, the index
+  only by the `.tidx` body CRC, which the read path never checks. Read in
+  `collect_blocks` as two field reads at fixed offsets — NOT
+  `RedBlockHeader::parse`, which copies the 256-byte statistics table per
+  block. Disagreements are collected into `BlockJobs::mismatches` →
+  `RawData::block_copy_mismatches` → `read_raw()["block_copy_mismatches"]` and
+  a Python `BlockCopyWarning`; `read()` applies the same placement rule but
+  returns a bare array, so inspect via `read_raw` or the Validator.
+  Verified: 0 differing samples vs pymef on a jittered self-consistent file,
+  and an index count that understates a block used to turn 5000 real samples
+  into NaN and now loses none. `_shift_block_times` moves BOTH copies and
+  re-seals the block CRC; moving only the index made an INCONSISTENT file, not
+  a jittered one, which is what made the two libraries look like they disagreed
+  about layout. Tests: `tests/test_p19_block_copies.py`.
 - **Do NOT `pip install -e .` for C++ dev** — scikit-build-core's editable hook
   loads an install-time extension snapshot that shadows the dev_build symlink
   (meta-path beats sys.path). Keep mef3io uninstalled; use scripts/dev_build.sh.
