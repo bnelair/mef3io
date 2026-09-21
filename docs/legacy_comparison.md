@@ -143,3 +143,34 @@ from an unset field. Sessions written by that version decode correctly in
 mef3io and pymef but can crash a meflib-based reader; appending to such a
 segment with a current version repairs the declarations in place, and rewriting
 the session fixes them outright.
+
+## Confirmed against a meflib-based reader
+
+The whole point of the section-2 work is a defect neither mef3io nor pymef can
+see — both size their buffers from each block's own header rather than from the
+declarations — so it can only be confirmed by the C library.
+
+On 2026-09-21 the nine-session set from `scripts/make_cyberpsg_check.py` was
+opened in CyberPSG and the traces drawn. **Only the deliberate negative control
+crashed.**
+
+| session | result |
+|---|---|
+| fresh write by this version | decoded |
+| written then extended via the append path | decoded |
+| legacy `mef_tools` session, untouched | decoded |
+| the same legacy session after `repair_session` | decoded |
+| **the 1.1.2 declarations (`maximum_difference_bytes = 0`)** | **crashed** |
+| **the same samples with only the declarations repaired** | **decoded** |
+| encrypted | decoded |
+| `.tmet` with foreign padding, then appended | decoded |
+| rebuilt by `recover_session` after an interrupted write | decoded |
+
+The last two rows of that pair are the argument: identical samples, identical
+blocks, only the declarations differ. That isolates the cause to metadata
+section 2 about as tightly as it can be isolated, and it confirms that the
+fix, the repair path and the recovery path all produce output that reader
+accepts.
+
+"It opens" was never the test — the original failure let `ReadSession` succeed
+and blew up later inside `RED_decode`, so the traces have to be drawn.

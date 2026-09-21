@@ -287,6 +287,26 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   inside RED decoding was reproduced against a meflib-based reader, and an
   in-memory-only patch of that single field decoded byte-identically to the
   on-disk repair — which isolates the cause to it. Do not rank (b) above (a).
+  FULL MATRIX CONFIRMED (2026-09-21, `scripts/make_cyberpsg_check.py`): nine
+  sessions opened in CyberPSG, and ONLY 05 CRASHED. 05 is the deliberate
+  negative control carrying the 1.1.2 zeros, so the matrix is meaningful rather
+  than vacuous; 06 is BYTE-FOR-BYTE THE SAME SAMPLES with only the declarations
+  repaired and it decodes, which isolates the cause to metadata section 2 about
+  as tightly as it can be isolated. Everything else decoded: a fresh write (01),
+  one through the in-segment append path (02), a legacy `mef_tools` session
+  repaired by `repair_session` (04), encrypted (07), a `.tmet` carrying foreign
+  padding across an append (08 — the critical bug fixed this round), and a
+  session rebuilt by `recover_session` after an interrupted write (09).
+  MECHANISM (b) DID NOT FIRE. 03 is an untouched legacy session with real gaps
+  and `number_of_discontinuities = 0`, which by `meflib.c:3548` should overflow
+  a zero-length malloc — and it decoded fine. Do NOT read that as "(b) is not
+  real": the same rule applies in both directions as for the vendored source —
+  one build tolerating it proves that build does not take the path (CyberPSG may
+  simply never call `find_discontinuity_indices`), not that no build does. So
+  KEEP `times.discontinuities` at Error severity; the reasoning for it is
+  unchanged, it is simply still unreproduced. What this DOES settle is that (a)
+  is the mechanism behind the reported crash, and that mef3io's output, its
+  repairs and its recovery are all acceptable to that reader.
   THE FIX IS CONFIRMED AGAINST THAT READER FAMILY (2026-09-17): a session
   written by this version, and a legacy `mef_tools` session brought up to date
   by `repair_session`, were both opened in CyberPSG and DECODED — traces drawn,

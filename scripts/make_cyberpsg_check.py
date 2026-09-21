@@ -13,6 +13,18 @@ metadata section 2 — so only a meflib-based reader can confirm the fix.
 Every session is verified through both mef3io and pymef before the script
 exits, and the parameters used are written into the README next to the files so
 a future run can be compared against an earlier one.
+
+RESULT, 2026-09-21, CyberPSG: **only 05 crashed** — the deliberate negative
+control carrying the 1.1.2 declarations. 06 is byte-for-byte the same samples
+with only the declarations repaired and it decoded, which isolates the cause to
+metadata section 2. Everything else decoded, including 08 (foreign `.tmet`
+padding across an append) and 09 (rebuilt by `recover_session`).
+
+03 also decoded, so mechanism (b) — `number_of_discontinuities = 0` against
+real gaps, which `meflib.c:3548` says should overflow a zero-length malloc —
+did NOT fire in that build. That is not evidence it is unreal; that build may
+simply never call `find_discontinuity_indices`. `times.discontinuities` stays
+at Error severity.
 """
 from __future__ import annotations
 
