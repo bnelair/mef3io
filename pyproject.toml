@@ -70,9 +70,16 @@ skip = "*-musllinux* *_i686 *-win32 cp314t-*"
 archs = ["auto64"]
 build-frontend = "build"
 test-requires = ["pytest", "numpy"]
-# Golden-file tests need the legacy stack (pymef); run the codec/self tests that
-# don't require it in the wheel smoke test.
-test-command = "python -c \"import mef3io, numpy as np; print(mef3io.__version__, mef3io.have_cpp_backend())\""
+# Run the oracle-free suites against the INSTALLED wheel. This used to be an
+# import check, which is how a Windows defect in the durability path shipped:
+# FlushFileBuffers needs a GENERIC_WRITE handle, so every flush there failed,
+# and nothing on any Windows job had ever executed a write. These five modules
+# need no pymef (so they run on every arch, including the ones it has no wheels
+# for) and between them cover the codec, headers, tar, robustness, and the
+# durability/recovery paths that broke. `tests/conftest.py` only prepends the
+# source tree when a locally built extension is present, so here it correctly
+# falls through to the wheel under test.
+test-command = "python -m pytest {project}/tests/test_p1_headers.py {project}/tests/test_p9_robustness.py {project}/tests/test_p11_tar.py {project}/tests/test_p17_large_files.py {project}/tests/test_p18_recovery.py -q"
 
 [tool.cibuildwheel.macos]
 archs = ["arm64", "x86_64"]
