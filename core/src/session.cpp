@@ -100,6 +100,7 @@ TimeSeriesMetadata& Session::segment_metadata(SegmentReader& seg) {
 
 std::span<const ui1> Session::segment_index(SegmentReader& seg) {
   if (seg.tidx_bytes.empty()) seg.tidx_bytes = source_->read_all(seg.tidx_path);
+  seg.index_last_used = ++index_tick_;
   return seg.tidx_bytes;
 }
 
@@ -230,6 +231,10 @@ std::vector<DataRun> Session::read_runs(const std::string& channel, std::optiona
       expected_next_sample = e.start_sample + e.number_of_samples;
     }
   }
+  // Safe point: the operation is finished, so nothing holds a span into a
+  // cached index. The index is ~2% of the data, so an unbounded cache grows
+  // to several GB on a session of a few hundred gigabytes.
+  trim_index_cache();
   return runs;
 }
 
@@ -328,7 +333,46 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
       out.jobs.push_back(job);
     }
   }
+  // Safe point: the operation is finished, so nothing holds a span into a
+  // cached index. The index is ~2% of the data, so an unbounded cache grows
+  // to several GB on a session of a few hundred gigabytes.
+  trim_index_cache();
   return out;
+}
+
+std::size_t Session::index_cache_bytes() const {
+  std::size_t total = 0;
+  for (const auto& name : channel_names_)
+    for (const auto& seg : channels_.at(name).segments) total += seg.tidx_bytes.capacity();
+  return total;
+}
+
+void Session::trim_index_cache() {
+  if (index_budget_ == 0) return;
+  std::size_t total = index_cache_bytes();
+  if (total <= index_budget_) return;
+
+  // Oldest first. Only called once a public operation has finished, so no
+  // caller is holding a span into any of these buffers — evicting one while it
+  // was in use would be a use-after-free, which is why this is never done
+  // mid-read.
+  struct Victim {
+    std::uint64_t used;
+    SegmentReader* seg;
+  };
+  std::vector<Victim> victims;
+  for (const auto& name : channel_names_)
+    for (auto& seg : channels_.at(name).segments)
+      if (!seg.tidx_bytes.empty()) victims.push_back({seg.index_last_used, &seg});
+  std::sort(victims.begin(), victims.end(),
+            [](const Victim& a, const Victim& b) { return a.used < b.used; });
+
+  for (const auto& v : victims) {
+    if (total <= index_budget_) break;
+    total -= v.seg->tidx_bytes.capacity();
+    std::vector<ui1>().swap(v.seg->tidx_bytes);  // actually release the memory
+    v.seg->index_last_used = 0;
+  }
 }
 
 std::vector<DeclarationIssue> Session::declaration_issues() const {
@@ -365,6 +409,10 @@ std::vector<SegmentInfo> Session::segment_map(const std::string& channel) {
     si.number_of_blocks = md.section2.number_of_blocks;
     out.push_back(std::move(si));
   }
+  // Safe point: the operation is finished, so nothing holds a span into a
+  // cached index. The index is ~2% of the data, so an unbounded cache grows
+  // to several GB on a session of a few hundred gigabytes.
+  trim_index_cache();
   return out;
 }
 
@@ -395,6 +443,10 @@ std::vector<BlockIndexEntry> Session::read_index(const std::string& channel) {
       out.push_back(b);
     }
   }
+  // Safe point: the operation is finished, so nothing holds a span into a
+  // cached index. The index is ~2% of the data, so an unbounded cache grows
+  // to several GB on a session of a few hundred gigabytes.
+  trim_index_cache();
   return out;
 }
 

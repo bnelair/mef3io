@@ -135,3 +135,54 @@ Builds, runs every suite, checks bidirectional compatibility and the header
 parity ledger against the legacy stack, then benchmarks. It fails loudly if the
 oracle (`mef-tools`, `pymef`) is not installed rather than reporting a pass it
 cannot justify.
+
+## `long_session_benchmark.py` — the real workload
+
+The other benchmarks write a session once. This one runs the shape these files
+actually have: **24 h × 16 channels @ 512 Hz**, written in 10-minute blocks
+across all channels, then read back in 5–20 minute windows across all channels.
+~708 M samples, a few GB on disk, 144 appends.
+
+Not a unit test — it takes minutes and writes gigabytes. Run it before a
+release, or after touching the append path, the index, or anything that could
+turn per-append work into per-session work.
+
+```bash
+python benchmarks/long_session_benchmark.py --plan      # what it would do
+python benchmarks/long_session_benchmark.py
+python benchmarks/long_session_benchmark.py --with-mef-tools
+python benchmarks/long_session_benchmark.py --hours 2 --quick-read   # short run
+```
+
+### The numbers that matter
+
+| metric | meaning |
+|---|---|
+| **growth** | last-quarter median ÷ first-quarter median append time. **Near 1.00 is the whole point**: append cost independent of how long the recording already is. Anything above keeps climbing for the life of the session. |
+| **write amplification** | bytes written ÷ bytes the session gained. Near 1.0 means nothing is being rewritten; a whole-file rewrite shows up here rather than merely as "slower". |
+| **read amplification** | bytes read ÷ session size, for the windowed read phase. A windowed read must touch a fraction of the file — at 30 GB per channel, reading everything is fatal. |
+| **duty cycle** | append time ÷ wall-clock duration of the data appended. Below 100 % the writer keeps up with a live acquisition. |
+
+It also validates the session and runs `recover_session` as a dry run at the
+end, and **exits non-zero if either fails** — a fast run that produced an
+inconsistent session is not a fast run.
+
+### Measured (12-core laptop, ext4, default `durability="full"`)
+
+24 h × 16 ch @ 512 Hz, 10-minute blocks:
+
+| | mef3io | mef_tools (legacy) |
+|---|---|---|
+| write wall clock | **109 s** | 174 s |
+| on disk | **1.0 GB** (1.54 B/sample) | 1.8 GB |
+| per-block append | **763 ms** | 1230 ms |
+| growth | **1.00×** | 1.07× |
+| duty cycle | 0.13 % | 0.20 % |
+| write amplification | 1.04× | 1.02× |
+
+Read phase: 40 windows × 16 channels, median **89 ms**, p95 144 ms,
+62.7 Msamples/s, **read amplification 0.338×**. Validation of the whole session
+3.0 s; recovery dry run instant, nothing to do.
+
+mef3io is **1.6× faster per block with full durability barriers the legacy
+stack does not have at all**, in a file **1.8× smaller**, with flat growth.

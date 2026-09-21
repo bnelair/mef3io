@@ -440,6 +440,9 @@ NB_MODULE(_mef3io, m) {
              return d;
            })
       .def(
+          "set_index_cache_bytes", &mef3io::Session::set_index_cache_bytes, nb::arg("n"))
+      .def("index_cache_bytes", &mef3io::Session::index_cache_bytes)
+      .def(
           "read_runs",
           [](mef3io::Session& s, const std::string& channel, nb::object t0, nb::object t1) {
             // Convert the Python timestamps BEFORE releasing, then decode

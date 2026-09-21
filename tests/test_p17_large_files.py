@@ -202,3 +202,53 @@ def test_an_append_never_rewrites_the_index_or_the_data(tmp_path, durability):
     )
     # Reading the index once on a reopen is expected; reading the DATA never is.
     assert read_bytes < data_size * 0.5, f"{durability}: the .tdat was read back"
+
+
+def test_the_block_index_cache_is_bounded_and_eviction_is_safe(tmp_path):
+    """The index is ~2% of the data, so an unbounded cache is O(session).
+
+    A reader that touches every channel of a few-hundred-gigabyte session used
+    to keep several GB of block index resident for the life of the `Session`,
+    and never release it. The cache is now capped and evicts least-recently-used
+    segments — but only at the END of an operation, because a caller holds a
+    span into those bytes while it is reading, and evicting one mid-read would
+    be a use-after-free.
+
+    So this checks both halves: the bound is honoured, and reads stay correct
+    across eviction.
+    """
+    path = tmp_path / "s.mefd"
+    rng = np.random.default_rng(11)
+    block = (np.sin(np.arange(int(FS * 120)) / 40) * 500).astype(np.int32)
+    w = mef3io.Writer(str(path), block_length=128)   # small blocks => fat index
+    for i in range(6):
+        for c in range(8):
+            w.write_int32(f"ch{c}", block, 0.1, START + i * 120_000_000, FS)
+    w.close()
+
+    index_total = sum(f.stat().st_size for f in Path(path).rglob("*.tidx"))
+    assert index_total > 100_000, "fixture index too small to exercise eviction"
+
+    session = m.Session(str(path), "")
+    truth = {}
+    for c in range(8):
+        truth[c] = session.read_runs(f"ch{c}", START, START + 720_000_000)
+
+    # A budget far below the total forces eviction on every pass.
+    session.set_index_cache_bytes(index_total // 8)
+    for _ in range(3):
+        for c in range(8):
+            got = session.read_runs(f"ch{c}", START, START + 720_000_000)
+            assert len(got) == len(truth[c]), f"ch{c}: run count changed under eviction"
+            for a, b in zip(got, truth[c]):
+                np.testing.assert_array_equal(a["samples"], b["samples"])
+                assert a["start_uutc"] == b["start_uutc"]
+        assert session.index_cache_bytes() <= index_total // 8, (
+            f"cache is {session.index_cache_bytes()} bytes against a "
+            f"{index_total // 8}-byte budget"
+        )
+
+    # 0 means unlimited, which must still work.
+    session.set_index_cache_bytes(0)
+    for c in range(8):
+        assert len(session.read_runs(f"ch{c}", START, START + 720_000_000)) == len(truth[c])

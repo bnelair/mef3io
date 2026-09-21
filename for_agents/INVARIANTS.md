@@ -33,6 +33,25 @@ reintroduced more than once.
 Measure with `/proc/self/io` `rchar` — it counts bytes read exactly and does not
 flake the way RSS does. Pinned by `tests/test_p17_large_files.py`.
 
+### The audit, and what it found
+
+Done properly once (2026-09-21) across the whole library. Clean: offsets are
+`si8`/`size_t` everywhere with no narrowing; `tar` archive and extract stream in
+1 MB chunks; the warm-start cache hashes only bounded prefixes (16 KB of
+`.tmet`, 1 KB of `.tidx`) and never touches `.tdat`; validation keeps only the
+1024-byte universal header plus the file size; the repair path backs up the
+`.tdat` header rather than the file.
+
+Two things were **not** clean and are now fixed: `read_runs` read the whole
+`.tdat` for any window, and `Session` cached every segment's block index
+forever. The index is **~2 % of the data**, so a session of a few hundred
+gigabytes held several GB of it resident. It is now capped
+(`Session::set_index_cache_bytes`, default 256 MB) with least-recently-used
+eviction — done only at the END of an operation, because a caller holds a span
+into those bytes while reading and evicting one mid-read is a use-after-free.
+`tests/test_p17_large_files.py` checks both the bound and that reads stay
+correct across eviction.
+
 ## 2. An append must be O(new data), never O(total blocks)
 
 Section 2 describes **all** of a segment's blocks, so the obvious
