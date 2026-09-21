@@ -318,12 +318,38 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
       auto e = fmt::TimeSeriesIndex::parse(
           idx.subspan(fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES,
                       fmt::TIME_SERIES_INDEX_BYTES));
-      if (e.file_offset < 0 || e.number_of_samples == 0) continue;
+      // Selection is the ONE thing the index must be trusted for: finding a
+      // block without it means scanning the whole .tdat, and one channel of a
+      // long recording is tens of gigabytes. So reject an entry only on its
+      // BYTE RANGE, which is the part nothing else can supply. A real block
+      // starts at or after the universal header and is at least a RED header
+      // long; anything else is index padding, which foreign writers do leave
+      // behind (NO_ENTRY offsets and zero-filled tails alike).
+      if (e.file_offset < static_cast<si8>(fmt::UNIVERSAL_HEADER_BYTES) ||
+          e.block_bytes < static_cast<ui4>(fmt::RED_BLOCK_HEADER_BYTES))
+        continue;
       si8 bstart = to_user_time(e.start_time, rto);
+      if (e.number_of_samples == 0) {
+        // A usable byte range with a zero sample count is a DAMAGED entry, not
+        // an empty block. Dropping it here would discard real samples on the
+        // index's word alone, before the header — the copy that is actually
+        // CRC-protected — could contradict it. Keep it and let the header
+        // decide; the disagreement is reported like any other.
+        hits.push_back(e);
+        continue;
+      }
       si8 bend = bstart + static_cast<si8>(std::llround(e.number_of_samples * 1e6 / fs));
       if (bend <= t0 || bstart >= t1) continue;
       hits.push_back(e);
     }
+    // KNOWN LIMIT: a WINDOWED read still tests the window against the index's
+    // time and count, because a block has to be fetched before its header can
+    // be read and fetching every block to check is the whole-file read this
+    // design exists to avoid. So on a file whose index times are wrong, a
+    // windowed read can still miss a block the index misplaced. It is reported
+    // whenever such a block IS fetched, which is what tells a caller the index
+    // is untrustworthy; a full pass (`Validator`, or a read with no window) is
+    // the way to see all of it.
     if (hits.empty()) return;  // `return` from the per-segment lambda, not `continue`
 
     // Needed blocks are normally contiguous in the file, so read one byte

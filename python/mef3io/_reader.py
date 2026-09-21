@@ -414,6 +414,14 @@ class Reader:
             data), ``start_uutc``, ``sampling_frequency``,
             ``units_conversion_factor``. Physical units are
             ``samples * units_conversion_factor`` where ``valid``.
+            ``block_copy_mismatches`` (list of dict) lists any block whose
+            `.tidx` entry disagreed with its RED block header, each with
+            ``segment``, ``block_index``, ``index_start_uutc``,
+            ``header_start_uutc``, ``index_number_of_samples`` and
+            ``header_number_of_samples``. Empty for a well-formed session;
+            non-empty raises :class:`BlockCopyWarning` as well, and means the
+            FILE is inconsistent — the header copy was used, which is what
+            meflib and pymef do, so the read still matches theirs.
         """
         impl = self._ensure_impl()
         if n_threads is None:

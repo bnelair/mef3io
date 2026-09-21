@@ -143,6 +143,47 @@ def test_an_index_that_misstates_the_sample_count_loses_nothing(tmp_path, factor
     assert mm[0]["index_start_uutc"] == mm[0]["header_start_uutc"]
 
 
+def test_an_index_entry_claiming_zero_samples_does_not_discard_the_block(tmp_path):
+    """The selection scan used to drop `number_of_samples == 0` outright, so a
+    damaged entry over a perfectly valid byte range discarded real samples
+    before the CRC-protected header could contradict it — and reported
+    nothing, because the block was never fetched."""
+    path = tmp_path / "s.mefd"
+    data = _write(path)
+    target = 3
+
+    def fn(raw, dat, i, off, boff, bbytes):
+        if i == target:
+            raw[off + 24:off + 28] = (0).to_bytes(4, "little")
+    _edit(path, fn)
+
+    with pytest.warns(mef3io.BlockCopyWarning, match="sample count"):
+        out = mef3io.Reader(str(path)).read_raw("ch1")
+    assert np.asarray(out["valid"]).astype(bool).all(), "the block was discarded"
+    assert np.array_equal(np.asarray(out["samples"]), data)
+    assert [x["block_index"] for x in out["block_copy_mismatches"]] == [target]
+
+
+def test_index_padding_is_still_ignored(tmp_path):
+    """The looser sample-count rule must not start pulling in padding: a real
+    block begins at or after the universal header and is at least a RED header
+    long, and foreign writers do leave zero-filled and NO_ENTRY tails behind."""
+    path = tmp_path / "s.mefd"
+    data = _write(path)
+    tidx, _ = _files(path)
+    raw = bytearray(tidx.read_bytes())
+    raw += bytes(ENT)                                    # zero-filled entry
+    pad = bytearray(ENT)
+    pad[0:8] = (-1).to_bytes(8, "little", signed=True)   # NO_ENTRY offset
+    raw += pad
+    tidx.write_bytes(bytes(raw))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        out = mef3io.Reader(str(path)).read_raw("ch1")
+    assert np.array_equal(np.asarray(out["samples"]), data)
+
+
 # --- #11: the start times disagree -------------------------------------------
 
 def test_an_index_whose_times_drifted_is_reported_and_the_header_wins(tmp_path):
