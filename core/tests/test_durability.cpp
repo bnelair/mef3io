@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <system_error>
 
 #include "../src/durability.hpp"
 
@@ -24,13 +25,30 @@ using namespace mef3io;
 
 namespace {
 
-fs::path scratch(const char* name) {
-  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
-  const fs::path p = fs::temp_directory_path() /
-                     (std::string("mef3io_dur_") + name + "_" + std::to_string(nonce));
-  fs::create_directories(p);
-  return p;
-}
+/// A temp directory that cleans itself up, even when an assertion throws.
+///
+/// The nonce keeps concurrent runs from sharing a path — CI builds three
+/// platforms and ctest may repeat. The DESTRUCTOR matters just as much: a
+/// REQUIRE that fires unwinds past the rest of the test body, so a manual
+/// remove_all at the end leaks a directory on exactly the runs being debugged.
+struct Scratch {
+  fs::path dir;
+
+  explicit Scratch(const char* name) {
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    dir = fs::temp_directory_path() /
+          (std::string("mef3io_dur_") + name + "_" + std::to_string(nonce));
+    fs::create_directories(dir);
+  }
+  ~Scratch() {
+    std::error_code ec;
+    fs::remove_all(dir, ec);  // best effort: a test must not fail in cleanup
+  }
+  Scratch(const Scratch&) = delete;
+  Scratch& operator=(const Scratch&) = delete;
+
+  fs::path operator/(const char* leaf) const { return dir / leaf; }
+};
 
 void write_file(const fs::path& p, const std::string& body) {
   std::ofstream f(p, std::ios::binary);
@@ -42,7 +60,7 @@ void write_file(const fs::path& p, const std::string& body) {
 }  // namespace
 
 TEST_CASE("fsync_file flushes an ordinary file", "[durability]") {
-  const auto dir = scratch("flush");
+  const Scratch dir("flush");
   const auto p = dir / "data.bin";
   write_file(p, std::string(4096, 'x'));
 
@@ -52,14 +70,13 @@ TEST_CASE("fsync_file flushes an ordinary file", "[durability]") {
   REQUIRE(detail::fsync_file(p.string(), &why));
   REQUIRE(why.empty());
 
-  fs::remove_all(dir);
 }
 
 TEST_CASE("fsync_file flushes a file that is still open for append", "[durability]") {
   // The writer's real shape: the .tdat stream is closed, then flushed, while
   // other handles may still be around. Opening the file for flushing must not
   // be refused by sharing rules (the Windows path passes FILE_SHARE_*).
-  const auto dir = scratch("append");
+  const Scratch dir("append");
   const auto p = dir / "data.bin";
   write_file(p, "header");
   {
@@ -71,19 +88,17 @@ TEST_CASE("fsync_file flushes a file that is still open for append", "[durabilit
     REQUIRE(why.empty());
   }
   REQUIRE(fs::file_size(p) == 10);
-  fs::remove_all(dir);
 }
 
 TEST_CASE("fsync_file_or_throw succeeds quietly on a real file", "[durability]") {
-  const auto dir = scratch("orthrow");
+  const Scratch dir("orthrow");
   const auto p = dir / "data.bin";
   write_file(p, "payload");
   REQUIRE_NOTHROW(detail::fsync_file_or_throw(p.string()));
-  fs::remove_all(dir);
 }
 
 TEST_CASE("a missing file is a reported failure, not a silent one", "[durability]") {
-  const auto dir = scratch("missing");
+  const Scratch dir("missing");
   const auto p = (dir / "absent.bin").string();
 
   std::string why;
@@ -94,11 +109,10 @@ TEST_CASE("a missing file is a reported failure, not a silent one", "[durability
   REQUIRE_FALSE(why.empty());
 
   REQUIRE_THROWS_AS(detail::fsync_file_or_throw(p), IoError);
-  fs::remove_all(dir);
 }
 
 TEST_CASE("replace_file publishes over an existing target", "[durability]") {
-  const auto dir = scratch("replace");
+  const Scratch dir("replace");
   const auto target = dir / "live.bin";
   const auto tmp = dir / "live.bin.tmp";
   write_file(target, "old");
@@ -115,5 +129,4 @@ TEST_CASE("replace_file publishes over an existing target", "[durability]") {
   }
   REQUIRE(got == "new");
 
-  fs::remove_all(dir);
 }
