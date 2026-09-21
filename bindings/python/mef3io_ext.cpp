@@ -452,14 +452,28 @@ NB_MODULE(_mef3io, m) {
                          double ufact, nb::object start, double fs, nb::object valid,
                          bool new_segment) {
             std::span<const mef3io::si4> s(data.data(), data.size());
+            // Copy the mask rather than pointing into the cast result. nb::cast
+            // converts (convert=true), so a mask that is not already contiguous
+            // uint8 — a bool array, float64, int64, a stride-2 slice — is
+            // materialised into a NEW array owned only by the local `v`. `v`
+            // dies at the end of this scope, so a span into it dangles, and the
+            // writer then reads freed memory and lays the gaps out wrong with
+            // no error at all. The copy is one byte per sample and happens once
+            // per call, against an encode that is orders of magnitude dearer.
             std::vector<mef3io::ui1> vbuf;
             std::span<const mef3io::ui1> vspan;
             if (!valid.is_none()) {
               auto v = nb::cast<nb::ndarray<const mef3io::ui1, nb::ndim<1>, nb::c_contig>>(valid);
-              vspan = std::span<const mef3io::ui1>(v.data(), v.size());
+              vbuf.assign(v.data(), v.data() + v.size());
+              vspan = std::span<const mef3io::ui1>(vbuf);
             }
-            mef3io::WriteSummary r =
-                w.write_int32(ch, s, ufact, to_si8(start, "start_uutc"), fs, vspan, new_segment);
+            const mef3io::si8 start_us = to_si8(start, "start_uutc");
+            mef3io::WriteSummary r;
+            {
+              // Match write_float: the encode is long and touches no Python.
+              nb::gil_scoped_release rel;
+              r = w.write_int32(ch, s, ufact, start_us, fs, vspan, new_segment);
+            }
             return summary_dict(r);
           },
           nb::arg("channel"), nb::arg("data"), nb::arg("ufact"), nb::arg("start_uutc"),

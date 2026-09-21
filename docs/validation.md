@@ -153,11 +153,12 @@ declarations a reader allocates from, then the time fields. Ids are stable API.
 | `sizing.block-maxima` | error | yes | `maximum_block_bytes` / `maximum_block_samples` |
 | `sizing.difference-bytes` | error | yes | `maximum_difference_bytes` vs the RED block headers |
 | `sizing.contiguous` | warning | yes | The `maximum_contiguous_*` trio vs the longest run. **Error when under-declared** (truncates a reader's run buffer; `0` is not the sentinel); warning when over-declared (wastes memory). Repaired in both directions |
+| `times.sampling-frequency` | error | no | `sampling_frequency` is finite, positive and small enough to derive times from. Every time expectation divides by it, so an unusable value stands the time checks down. Not repairable: the true rate is not recoverable from the file |
 | `times.segment-bounds` | error | yes | Universal-header start/end vs the blocks |
 | `times.recording-duration` | warning | yes | `recording_duration` vs the segment's span |
 | `times.block-interval` | warning | yes | `block_interval` vs the block geometry |
 | `times.discontinuities` | error | yes | `number_of_discontinuities` vs the index flags |
-| `header.entry-count` | warning | yes | `number_of_entries` in each file |
+| `header.entry-count` | warning | yes | `number_of_entries` in each file. **Error when under-declared** on `.tidx`/`.tdat`: meflib clamps the block count down to it (meflib.c:5983-5984, :6005-6006), so a reader silently returns a short segment |
 | `header.max-entry-size` | info | yes | `maximum_entry_size` in each file (`.tdat` value informational) |
 
 `Validator.available_checks()` returns the same table at runtime, with each

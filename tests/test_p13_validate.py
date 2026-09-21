@@ -1801,3 +1801,86 @@ def test_unverified_index_crc_is_reported_like_metadata(tmp_path):
     # ...and it must not disarm the rest of the registry.
     assert len(report.checks_run) == len(mef3io.available_checks())
     assert not report.skipped, report.summary()
+
+
+def test_under_declared_entry_count_is_an_error_not_a_warning(tmp_path):
+    """meflib clamps `number_of_blocks` DOWN to the universal-header count.
+
+    meflib.c:5983-5984 (`.tdat`) and :6005-6006 (`.tidx`). So a count smaller
+    than the file holds makes a reader return a SHORT segment — the samples are
+    intact on disk and are silently dropped. Rating that a warning let
+    `Report.ok` stay True on a session pymef then read 5500 samples short of.
+    Over-declaring stays a warning: it wastes work rather than losing data.
+    """
+    pymef = pytest.importorskip("pymef.mef_session", reason="oracle not installed")
+    path = tmp_path / "s.mefd"
+    x = _write(path, gap_us=0, n=8000)
+    n = len(x) * 2
+
+    session = pymef.MefSession(str(path), "")
+    try:
+        before = int(np.sum(np.isfinite(np.asarray(session.read_ts_channels_sample("ch1", [0, n])))))
+    finally:
+        session.close()
+
+    tidx = Path(_tmet(path)).with_suffix(".tidx")
+    for target in (tidx, tidx.with_suffix(".tdat")):
+        raw = bytearray(target.read_bytes())
+        struct.pack_into("<q", raw, 32, 1)  # number_of_entries
+        struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
+        target.write_bytes(bytes(raw))
+
+    report = mef3io.Validator(str(path)).validate()
+    hits = [f for f in report.findings if f.check_id == "header.entry-count"]
+    assert hits, report.summary()
+    assert hits[0].severity == "error", "an under-declared count truncates a reader"
+    assert not report.ok, "the validator must not call this session healthy"
+
+    session = pymef.MefSession(str(path), "")
+    try:
+        after = int(np.sum(np.isfinite(np.asarray(session.read_ts_channels_sample("ch1", [0, n])))))
+    finally:
+        session.close()
+    assert after < before, "the corruption must really lose samples"
+
+    # And the repair puts every sample back.
+    mef3io.repair_session(str(path), ["header.entry-count"])
+    session = pymef.MefSession(str(path), "")
+    try:
+        healed = int(np.sum(np.isfinite(np.asarray(session.read_ts_channels_sample("ch1", [0, n])))))
+    finally:
+        session.close()
+    assert healed == before
+
+
+def test_unusable_sampling_frequency_is_reported_and_stands_the_time_checks_down(tmp_path):
+    """Every time expectation divides by `sampling_frequency`.
+
+    Nothing validated it. A single bit flip leaves it denormal-but-positive, so
+    `samples * 1e6 / fs` left si8 range — std::llround of an out-of-range double
+    is undefined — and the time checks then reported errors whose `stored` and
+    `expected` were IDENTICAL, while offering a repair that would overwrite the
+    only correct record of the segment's times with nonsense.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = Path(_tmet(path))
+
+    raw = bytearray(tmet.read_bytes())
+    offset = next(o for o in range(S2, S2 + 7000, 8)
+                  if abs(struct.unpack_from("<d", raw, o)[0] - FS) < 1e-9)
+    raw[offset + 7] ^= 0x40                       # 256.0 -> ~1.4e-306
+    struct.pack_into("<I", raw, 4, m.crc32(bytes(raw[UH_BYTES:METADATA_FILE_BYTES])))
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
+    tmet.write_bytes(bytes(raw))
+
+    report = mef3io.Validator(str(path)).validate()
+    assert "times.sampling-frequency" in _ids(report), report.summary()
+    assert not report.ok
+    # The time checks must stand down rather than invent expectations...
+    assert not ({"times.segment-bounds", "times.recording-duration",
+                 "times.block-interval"} & _ids(report)), report.summary()
+    # ...and nothing may be reported whose stored value equals its expectation.
+    assert not [f for f in report.findings if f.stored == f.expected], report.summary()
+    # It is not repairable: the true rate is not recoverable from the file.
+    assert "times.sampling-frequency" not in report.repairable_check_ids

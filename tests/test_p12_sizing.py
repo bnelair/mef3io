@@ -372,6 +372,91 @@ def test_reopened_append_bounds_an_unverifiable_declaration(tmp_path):
     ]
 
 
+def test_append_preserves_tmet_trailing_padding_and_stays_readable(tmp_path):
+    """`.tmet` is a FIXED-length record and foreign writers pad past its end.
+
+    The reader and the validator both bound the body CRC by METADATA_FILE_BYTES;
+    the append used to hash to EOF, writing a CRC the reader rejects. Because
+    that throws from the metadata loader it took the WHOLE SESSION down, not
+    just the segment — mef3io destroying a file its own validator calls clean.
+    """
+    path = str(tmp_path / "s.mefd")
+    x = _write(path, gap_us=0)
+    tmet = _segments(path)[0]
+    with open(tmet, "ab") as fh:
+        fh.write(b"\x7e" * 32)
+    assert mef3io.Validator(path).validate().ok, "the padding must be tolerated on read"
+
+    w = mef3io.Writer(path)
+    w.write_int32("ch1", x, 0.5, START + int(3 * 4000 / FS * 1e6), FS)
+    w.close()
+
+    with mef3io.Reader(path) as r:          # threw "tmet body CRC mismatch" before
+        assert len(r.read("ch1")) > 0
+    assert mef3io.Validator(path).validate().ok
+
+
+def test_append_preserves_unmodelled_section2_regions(tmp_path):
+    """Section 2 is 10752 B; this struct models fields only up to offset 6432.
+
+    meflib puts a 2160-byte protected region at 6432 and a 2160-byte
+    discretionary region at 8592. Re-serializing the whole section over a blank
+    buffer destroyed all 4320 bytes of a foreign writer's metadata on every
+    append. Only the eleven derived declarations may move.
+    """
+    path = str(tmp_path / "s.mefd")
+    x = _write(path, gap_us=0)
+    tmet = _segments(path)[0]
+    PROT, DISC = S2 + 6432, S2 + 8592
+
+    raw = bytearray(tmet.read_bytes())
+    raw[PROT:PROT + 4] = b"\xab" * 4
+    raw[DISC:DISC + 4] = b"\xcd" * 4
+    struct.pack_into("<I", raw, 4, m.crc32(bytes(raw[UH_BYTES:METADATA_FILE_BYTES])))
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
+    tmet.write_bytes(bytes(raw))
+
+    w = mef3io.Writer(path)
+    w.write_int32("ch1", x, 0.5, START + int(3 * 4000 / FS * 1e6), FS)
+    w.close()
+
+    after = tmet.read_bytes()
+    assert after[PROT:PROT + 4] == b"\xab" * 4, "protected region was zeroed"
+    assert after[DISC:DISC + 4] == b"\xcd" * 4, "discretionary region was zeroed"
+
+
+def test_append_never_lowers_a_larger_stored_difference_bytes(tmp_path):
+    """`known_difference_bytes` means "this writer encoded every block here".
+
+    That stops being true the moment anything else touches the segment — a
+    second writer on the same session, or another process. The remembered
+    maximum is then stale and SMALLER than the truth, and writing it truncates
+    the buffer a meflib reader decodes into. The declaration must never move
+    down.
+    """
+    path = str(tmp_path / "s.mefd")
+    rng = np.random.default_rng(0)
+    flat = np.zeros(2000, dtype=np.int32)                      # tiny difference_bytes
+    noisy = rng.normal(0, 30000, 2000).astype(np.int32)        # large difference_bytes
+
+    a = mef3io.Writer(path)                                    # creates the segment
+    a.write_int32("ch1", flat, 0.5, START, FS)
+    tmet = _segments(path)[0]
+
+    b = mef3io.Writer(path)                                    # separate writer, adopted
+    b.write_int32("ch1", noisy, 0.5, START + int(2000 / FS * 1e6), FS)
+    b.close()
+    raised = _read_section2(tmet)["maximum_difference_bytes"]
+
+    a.write_int32("ch1", flat, 0.5, START + int(4000 / FS * 1e6), FS)
+    a.close()
+
+    stored = _read_section2(tmet)["maximum_difference_bytes"]
+    real = _real_stats(tmet)["maximum_difference_bytes"]
+    assert stored >= raised, "a stale remembered maximum lowered the declaration"
+    assert stored >= real, f"under-declared by {real - stored} bytes"
+
+
 # --- reading stays independent of the fields ---------------------------------
 
 

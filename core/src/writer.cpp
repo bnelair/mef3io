@@ -143,6 +143,23 @@ void write_file(const std::string& path, const std::vector<ui1>& bytes) {
   write_file_atomic(path, bytes);
 }
 
+// Same, for `.tmet` — a FIXED-length record. The body CRC must be bounded by
+// METADATA_FILE_BYTES rather than taken to EOF: foreign writers append trailing
+// bytes past the end of the record, and the reader (metadata.cpp) and the
+// validator both bound their hash the same way. Hashing the padding writes a
+// CRC that the reader then rejects, and because that throws from the metadata
+// loader it kills the whole session, not just the segment.
+void finalize_metadata_crcs(std::vector<ui1>& file) {
+  const std::size_t body = static_cast<std::size_t>(fmt::METADATA_FILE_BYTES) -
+                           static_cast<std::size_t>(fmt::UNIVERSAL_HEADER_BYTES);
+  ui4 body_crc =
+      crc::calculate(std::span<const ui1>(file).subspan(fmt::UNIVERSAL_HEADER_BYTES, body));
+  byteio::write<ui4>(file, 4, body_crc);
+  ui4 header_crc =
+      crc::calculate(std::span<const ui1>(file).subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4));
+  byteio::write<ui4>(file, 0, header_crc);
+}
+
 // Fill body then header CRC of a universal-header-prefixed file image in place.
 void finalize_crcs(std::vector<ui1>& file) {
   ui4 body_crc = crc::calculate(std::span<const ui1>(file).subspan(fmt::UNIVERSAL_HEADER_BYTES));
@@ -408,7 +425,9 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     }
     std::copy(s2buf.begin(), s2buf.end(), file.begin() + fmt::METADATA_SECTION_2_OFFSET);
     std::copy(s3buf.begin(), s3buf.end(), file.begin() + fmt::METADATA_SECTION_3_OFFSET);
-    finalize_crcs(file);
+    // Equivalent here (this image is exactly METADATA_FILE_BYTES), but stated
+    // explicitly so the fixed-length rule holds for every .tmet we write.
+    finalize_metadata_crcs(file);
     write_file((fs::path(segment_dir) / (base + ".tmet")).string(), file);
   }
 
@@ -681,17 +700,21 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     // their exact maximum and passes it in `known_difference_bytes`. Then no
     // bound is needed — the declaration stays exact across a chunked write,
     // which is the ordinary way a session is built.
-    ui4 declared_difference_bytes;
-    if (spec.known_difference_bytes != 0) {
-      declared_difference_bytes = std::max(spec.known_difference_bytes, max_difference_bytes);
-    } else {
-      const ui4 bound = red_max_difference_bytes(index_max_block_samples);
-      const bool stored_is_usable =
-          stored_difference_bytes != 0 && stored_difference_bytes != fmt::UI4_NO_ENTRY;
-      declared_difference_bytes = std::max(max_difference_bytes, bound);
-      if (stored_is_usable)
-        declared_difference_bytes = std::max(declared_difference_bytes, stored_difference_bytes);
-    }
+    ui4 declared_difference_bytes = std::max(max_difference_bytes, spec.known_difference_bytes);
+    if (spec.known_difference_bytes == 0)
+      declared_difference_bytes =
+          std::max(declared_difference_bytes, red_max_difference_bytes(index_max_block_samples));
+    // NEVER move this field downwards, on either path. `known_difference_bytes`
+    // means "every block in this segment was encoded by the caller", which is
+    // true of a chunked write but stops being true the moment anything else
+    // touches the segment — a second writer open on the same session, or
+    // another process. The caller's maximum is then stale and LOWER than the
+    // truth, and writing it truncates the buffer a meflib reader decodes into.
+    // Folding the stored value in costs nothing when it is already correct (the
+    // max() is a no-op on an ordinary chunked write, so the declaration stays
+    // exact) and makes the descent unrepresentable.
+    if (stored_difference_bytes != 0 && stored_difference_bytes != fmt::UI4_NO_ENTRY)
+      declared_difference_bytes = std::max(declared_difference_bytes, stored_difference_bytes);
     s2.maximum_difference_bytes = declared_difference_bytes;
     // These are in NATIVE units (counts * units_conversion_factor), not raw
     // counts - see pymef3_file.c:972-978, which also swaps the pair when the
@@ -707,19 +730,38 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
       s2.minimum_native_sample_value = std::min(s2.minimum_native_sample_value, lo);
     }
 
-    std::vector<ui1> s2buf(fmt::TIME_SERIES_METADATA_SECTION_2_BYTES);
-    s2.serialize(s2buf);
+    // Edit the STORED section-2 image in place instead of re-serializing the
+    // struct over a blank buffer. Section 2 is 10752 bytes; this struct models
+    // the fields up to offset 6432 and nothing beyond, so a full serialize
+    // zeroes meflib's protected region (6432, 2160 B) and discretionary region
+    // (8592, 2160 B) — 4320 bytes of a foreign writer's metadata destroyed on
+    // every append — and rewrites every text field NUL-terminated, shortening
+    // one that filled its field exactly. `serialize_derived_fields` touches
+    // only the eleven declarations an append actually changes. The validator's
+    // repair path already does exactly this (validate.cpp); the append did not.
+    std::vector<ui1> s2buf(new_tmet.begin() + fmt::METADATA_SECTION_2_OFFSET,
+                           new_tmet.begin() + fmt::METADATA_SECTION_2_OFFSET +
+                               fmt::TIME_SERIES_METADATA_SECTION_2_BYTES);
     if (encrypt) {
       if (!keys.level1_key) throw PasswordError("level-1 key required to re-encrypt section 2");
-      auto e2 = crypto::aes128_ecb_encrypt(s2buf, *keys.level1_key);
+      auto plain = crypto::aes128_ecb_decrypt(s2buf, *keys.level1_key);
+      s2.serialize_derived_fields(plain);
+      auto e2 = crypto::aes128_ecb_encrypt(plain, *keys.level1_key);
       std::copy(e2.begin(), e2.end(), s2buf.begin());
+    } else {
+      s2.serialize_derived_fields(s2buf);
     }
     std::copy(s2buf.begin(), s2buf.end(), new_tmet.begin() + fmt::METADATA_SECTION_2_OFFSET);
 
     fmt::UniversalHeader uh = md.universal_header;
     uh.end_time = end_disk;
     uh.serialize(new_tmet);
-    finalize_crcs(new_tmet);
+    // NOT finalize_crcs: .tmet is a FIXED-length record and foreign writers
+    // append trailing bytes past its end. Hashing to EOF writes a body CRC the
+    // reader — which bounds its hash by METADATA_FILE_BYTES — will reject,
+    // taking the whole session down from the metadata loader's constructor.
+    // The same trap the reader and the validator already avoid.
+    finalize_metadata_crcs(new_tmet);
   }
 
   bool appended_tdat = false;

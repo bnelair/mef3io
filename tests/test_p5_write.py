@@ -127,3 +127,42 @@ def test_new_segment_appends(tmp_path):
     got = np.asarray(r.get_data("ch1"), dtype=np.float64)
     assert len(got) == 4000
     assert not np.isnan(got).any()  # contiguous in time -> no gap
+
+
+@pytest.mark.parametrize(
+    "make_mask",
+    [
+        pytest.param(lambda v: v, id="contiguous-uint8"),
+        pytest.param(lambda v: v.astype(bool), id="bool"),
+        pytest.param(lambda v: v.astype(np.float64), id="float64"),
+        pytest.param(lambda v: v.astype(np.int64), id="int64"),
+        pytest.param(lambda v: np.repeat(v, 2)[::2], id="non-contiguous"),
+    ],
+)
+def test_valid_mask_is_honoured_for_every_dtype(tmp_path, make_mask):
+    """The `valid` mask must not be read back out of freed memory.
+
+    `nb::cast` converts, so a mask that is not already contiguous uint8 is
+    materialised into a NEW array owned only by the local ndarray handle. A
+    span into it dangled the moment that handle went out of scope, and the
+    writer then laid the gaps out from whatever happened to be there — wrong
+    data on disk, no error, no warning. Only a contiguous uint8 mask, which
+    needs no conversion, came through correctly.
+    """
+    import mef3io
+
+    n, fs, start = 2000, 250.0, 1_600_000_000_000_000
+    data = np.arange(n, dtype=np.int32)
+    base = np.ones(n, dtype=np.uint8)
+    base[800:1200] = 0
+
+    path = tmp_path / "s.mefd"
+    w = m.SessionWriter(str(path), True, "", "")
+    w.write_int32("ch1", data, 0.5, start, fs, make_mask(base), False)
+    del w
+
+    with mef3io.Reader(str(path)) as r:
+        got = r.read("ch1")
+    invalid = np.where(~np.isfinite(got))[0]
+    assert len(invalid) == 400, f"expected 400 gap samples, got {len(invalid)}"
+    assert (int(invalid.min()), int(invalid.max())) == (800, 1199)

@@ -70,7 +70,7 @@ core/tests/test_tar.cpp, tests/test_p11_tar.py, tar block in
 matlab/test_mef3io.m.
 
 Validator/repair (`core/{include,src}/…/validate.{hpp,cpp}`, `python/mef3io/
-validate.py`, `python/mef3io/__main__.py`): a REGISTRY of 17 checks comparing a
+validate.py`, `python/mef3io/__main__.py`): a REGISTRY of 18 checks comparing a
 session's declarations against its data, run in a fixed order (integrity →
 structure → sizing → times → headers). Adding a check = ONE entry with
 `detect` + optional `repair` lambdas; ordering/filtering/reporting/bindings/CLI
@@ -156,6 +156,21 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   `METADATA_FILE_BYTES`, NOT taken to EOF — hashing the padding rejects intact
   metadata as "corrupted" and, since it throws in the ctor, kills the whole
   session (reported in 1.1.1: 1094 padded files, 0 actually corrupt).
+- **NEVER `finalize_crcs` a `.tmet`, and never `s2.serialize` one you did not
+  build.** Both are write-side traps that mirror read-side gotchas above, and
+  the append fell into both for a long time (fixed 2026-09-21). (a) `.tmet` is
+  FIXED-length, so its body CRC must be bounded by `METADATA_FILE_BYTES`
+  (`finalize_metadata_crcs`), not taken to EOF — foreign writers pad past the
+  record, and hashing the padding writes a CRC the READER rejects, which throws
+  from the metadata loader and takes the WHOLE SESSION down. mef3io destroying a
+  file its own validator had just called clean. (b) Section 2 is 10752 B but
+  `TimeSeriesMetadataSection2` models only up to offset 6432, and `serialize`
+  zero-fills: a full re-serialize wipes meflib's protected region (6432, 2160 B)
+  and discretionary region (8592, 2160 B) — 4320 bytes of a foreign writer's
+  metadata — and re-NUL-terminates every text field, shortening one that filled
+  its field exactly. Edit the STORED image with `serialize_derived_fields`
+  instead (decrypt → edit → re-encrypt when the section is encrypted), which is
+  what the validator's repair path already did.
 - **Block ranges can OVERLAP on the sample grid.** Only writers that put every
   block start exactly on the grid (mef3io's own) tile the output cleanly;
   foreign recorders carry acquisition jitter + per-block us rounding, so a

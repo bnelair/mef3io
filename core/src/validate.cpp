@@ -135,6 +135,16 @@ struct SegmentTruth {
   bool times_known = true;  // false => an entry carried UUTC_NO_ENTRY
   bool rto_known = true;    // false => section 3 unreadable; rto is UNKNOWN, not 0
   bool times_comparable = true;  // false => rto non-zero or unknown; conventions ambiguous
+  // False => sampling_frequency is not a usable number, so end_uutc /
+  // recording_duration / block_interval could not be derived at all. Nothing
+  // in the registry validates fs itself, and every time expectation divides by
+  // it: a denormal-but-positive value makes `n * 1e6 / fs` exceed si8 range,
+  // where std::llround is undefined and in practice yields LLONG_MIN. That
+  // poisons the comparisons (a negative slack fails `|stored-expected| <=
+  // slack` even when the difference is zero, so the report shows an error with
+  // stored == expected) and, if repaired, overwrites the one correct record of
+  // the segment's times with nonsense.
+  bool times_derivable = false;
   bool difference_bytes_suspect = false;  // a block header exceeded the worst case
   bool offsets_sane = true;
   std::string offset_problem;
@@ -559,6 +569,30 @@ const std::vector<CheckImpl>& check_impls() {
                    return true;
                  }});
 
+    v.push_back({{"times.sampling-frequency", "Sampling frequency is a usable number",
+                  "Every time expectation in this registry is derived by dividing a sample "
+                  "count by sampling_frequency, and nothing else validates it. A value that is "
+                  "not finite and positive — or one so small that samples/fs leaves si8 range — "
+                  "makes those expectations meaningless, so the time checks stand down and "
+                  "report nothing at all. This says so out loud instead. Not repairable: the "
+                  "true rate is not recoverable from the file (the block start times imply one, "
+                  "but a segment with a single block or a damaged index implies nothing), and "
+                  "guessing it would rewrite the segment's whole time base.",
+                  Severity::Error, false},
+                 [](const SegmentState& s, const SegmentTruth& t, Finding& f, bool& hit) {
+                   if (!t.has_blocks) return;
+                   const sf8 fs = s.md.section2.sampling_frequency;
+                   if (t.times_derivable) return;
+                   hit = true;
+                   f.field = "sampling_frequency";
+                   f.stored = std::isfinite(fs) ? num(static_cast<si8>(fs)) : "not-a-number";
+                   f.expected = "a finite positive rate";
+                   f.message =
+                       "sampling_frequency is unusable, so the segment's times cannot be "
+                       "checked; every time-derived declaration is unverified";
+                 },
+                 {}});
+
     v.push_back({{"times.segment-bounds", "Universal-header times bracket the data",
                   "Every file of a segment carries the segment's start and end time. A reader "
                   "that seeks by time skips a segment whose declared range does not cover its "
@@ -573,7 +607,8 @@ const std::vector<CheckImpl>& check_impls() {
                  [](const SegmentState& s, const SegmentTruth& t, Finding& f, bool& hit) {
                    const sf8 fs_hz = s.md.section2.sampling_frequency;
                    if (!(fs_hz > 0.0)) return;  // times cannot be derived without fs
-                   if (!t.has_blocks || !t.times_known || !t.times_comparable) return;
+                   if (!t.has_blocks || !t.times_known || !t.times_comparable || !t.times_derivable)
+                     return;
                    const si8 slack = static_cast<si8>(std::llround(1e6 / fs_hz)) + 1;
                    struct Item {
                      const char* name;
@@ -624,7 +659,8 @@ const std::vector<CheckImpl>& check_impls() {
                  [](const SegmentState& s, const SegmentTruth& t, Finding& f, bool& hit) {
                    const sf8 fs_hz = s.md.section2.sampling_frequency;
                    if (!(fs_hz > 0.0)) return;
-                   if (!t.has_blocks || !t.times_known || !t.times_comparable) return;
+                   if (!t.has_blocks || !t.times_known || !t.times_comparable || !t.times_derivable)
+                     return;
                    const si8 slack = static_cast<si8>(std::llround(1e6 / fs_hz)) + 1;
                    const si8 stored = s.md.section2.recording_duration;
                    // Both sentinels, not just SI8_NO_ENTRY: declared_si8 renders
@@ -652,6 +688,7 @@ const std::vector<CheckImpl>& check_impls() {
                   "it at 0. Only a clearly unset or badly wrong value is reported.",
                   Severity::Warning, true},
                  [](const SegmentState& s, const SegmentTruth& t, Finding& f, bool& hit) {
+                   if (!t.times_derivable) return;  // sampling_frequency is unusable
                    if (t.block_interval <= 0) return;  // cannot derive an expectation
                    const si8 stored = s.md.section2.block_interval;
                    const bool unset = stored <= 0 || stored == fmt::SI8_NO_ENTRY;
@@ -698,17 +735,28 @@ const std::vector<CheckImpl>& check_impls() {
 
     v.push_back({{"header.entry-count", "Universal headers declare the right entry count",
                   "number_of_entries is how many records each file holds: 1 for .tmet, one per "
-                  "block for .tidx and .tdat. Readers iterate on it.",
+                  "block for .tidx and .tdat. Readers iterate on it. Severity depends on the "
+                  "DIRECTION, because the two are not equally dangerous. UNDER-declaring is an "
+                  "ERROR: meflib clamps number_of_blocks DOWN to this field (meflib.c:5983-5984 "
+                  "for .tdat, :6005-6006 for .tidx), so the blocks past the count are dropped "
+                  "and the segment reads SHORT with no error anywhere — the samples are intact "
+                  "on disk and a reader silently returns fewer of them. Over-declaring is a "
+                  "warning here (mef3io sizes from the file itself), though meflib iterates "
+                  "number_of_entries index entries over an array it allocated from the file "
+                  "length (meflib.c:4928-4933, :5776-5779), so it is not harmless there either.",
                   Severity::Warning, true},
                  [](const SegmentState& s, const SegmentTruth& t, Finding& f, bool& hit) {
                    struct Item {
                      const char* name;
                      si8 stored, expected;
+                     bool clamps;  // meflib clamps number_of_blocks down to this one
                    };
                    const Item items[] = {
-                       {"metadata number_of_entries", s.md.universal_header.number_of_entries, 1},
-                       {"index number_of_entries", s.tidx_uh.number_of_entries, t.n_blocks},
-                       {"data number_of_entries", s.tdat_uh_parsed.number_of_entries, t.n_blocks},
+                       {"metadata number_of_entries", s.md.universal_header.number_of_entries, 1,
+                        false},
+                       {"index number_of_entries", s.tidx_uh.number_of_entries, t.n_blocks, true},
+                       {"data number_of_entries", s.tdat_uh_parsed.number_of_entries, t.n_blocks,
+                        true},
                    };
                    for (const auto& it : items) {
                      if (it.stored == it.expected) continue;
@@ -716,7 +764,16 @@ const std::vector<CheckImpl>& check_impls() {
                      f.field = it.name;
                      f.stored = declared_si8(it.stored);
                      f.expected = num(it.expected);
-                     f.message = "universal-header entry count disagrees with the file contents";
+                     const bool truncates = it.clamps && it.stored < it.expected;
+                     if (truncates) {
+                       f.severity = Severity::Error;
+                       f.message =
+                           "universal-header entry count is SMALLER than the file holds; meflib "
+                           "clamps the block count down to it, so a reader returns a short "
+                           "segment and the blocks past it are silently dropped";
+                     } else {
+                       f.message = "universal-header entry count disagrees with the file contents";
+                     }
                      return;
                    }
                  },
@@ -984,8 +1041,18 @@ SegmentTruth derive_truth(const SessionSource& src, const SegmentState& s,
     t.max_difference_bytes = red_max_difference_bytes(t.max_block_samples);
 
   const sf8 fs_hz = s.md.section2.sampling_frequency;
-  if (fs_hz > 0.0) {
-    const si8 last_duration = static_cast<si8>(std::llround(last_samples * 1e6 / fs_hz));
+  // Convert a sample count to microseconds, refusing anything that is not a
+  // finite si8. `samples * 1e6 / fs` is the only place fs is trusted, and an
+  // out-of-range double passed to std::llround is undefined behaviour.
+  const auto to_us = [&](sf8 samples, si8& out) {
+    const sf8 v = samples * 1e6 / fs_hz;
+    if (!std::isfinite(v) || std::fabs(v) > 9.0e18) return false;
+    out = static_cast<si8>(std::llround(v));
+    return true;
+  };
+  si8 last_duration = 0, block_interval = 0;
+  if (std::isfinite(fs_hz) && fs_hz > 0.0 && to_us(static_cast<sf8>(last_samples), last_duration)) {
+    t.times_derivable = true;
     t.end_uutc = last_start_uutc + last_duration;
     // meflib defines recording_duration as the span of the segment including
     // gaps (meflib.c: ABS(latest_end) - ABS(earliest_start)). The legacy pymef
@@ -1004,7 +1071,7 @@ SegmentTruth derive_truth(const SessionSource& src, const SegmentState& s,
         declared_block_samples == fmt::UI4_NO_ENTRY
             ? t.max_block_samples
             : std::max(declared_block_samples, t.max_block_samples);
-    t.block_interval = static_cast<si8>(std::llround(nominal_samples * 1e6 / fs_hz));
+    if (to_us(static_cast<sf8>(nominal_samples), block_interval)) t.block_interval = block_interval;
   }
   return t;
 }
