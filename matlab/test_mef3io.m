@@ -177,44 +177,55 @@ assert(strcmp(r.metadata.subject.id, 'S2'));
 delete(r);
 
 % --- durability + recovery -------------------------------------------------
-% Durability='fast' is the DEFAULT, so this is the ordinary write path, not an
-% exotic one. Both settings must produce a session that reads back identically.
-for durability = {'fast', 'full'}
-    dp = fullfile(sessionDir, ['dur_' durability{1} '.mefd']);
-    w = mef3io.Writer(dp, Overwrite=true, Durability=durability{1});
-    w.writeInt32('ch1', int32(1:2000), 0.5, startUutc, 256);
+% Durability='fast' is the DEFAULT, so this is the ordinary write path. Both
+% settings must produce a session that reads back identically: the knob buys
+% crash behaviour, not different output.
+durCounts = int32(mod(0:1999, 100))';
+durStep = int64(round(2000 / fs * 1e6));
+for k = 1:2
+    if k == 1, durability = 'fast'; else, durability = 'full'; end
+    dp = fullfile(sessionDir, ['matlab_dur_' durability '.mefd']);
+    w = mef3io.Writer(dp, Overwrite=true, Durability=durability);
+    w.writeInt32('ch1', durCounts, 0.5, start, fs);
     delete(w);
-    w = mef3io.Writer(dp, Durability=durability{1});      % reopened: appends
-    w.writeInt32('ch1', int32(1:2000), 0.5, startUutc + int64(2000/256*1e6), 256);
+    w = mef3io.Writer(dp, Durability=durability);        % reopened: appends
+    w.writeInt32('ch1', durCounts, 0.5, start + durStep, fs);
     delete(w);
+
     r = mef3io.Reader(dp);
     got = r.read('ch1');
     delete(r);
-    assert(numel(got) == 4000, 'durability=%s: expected 4000 samples', durability{1});
+    assert(numel(got) == 4000, ...
+        'durability=%s: expected 4000 samples, got %d', durability, numel(got));
 
-    % A healthy session needs no recovery, and a dry run must never write.
-    before = dir(fullfile(dp, '**', '*'));
+    % A healthy session needs no recovery, and a dry run must change nothing.
     summary = mef3io.recoverSession(dp);
-    after = dir(fullfile(dp, '**', '*'));
-    assert(numel(before) == numel(after), 'recoverSession dry run changed the tree');
     assert(ischar(summary) && ~isempty(summary), 'recoverSession returned no summary');
     [~, nSeg] = mef3io.recoverSession(dp, Apply=true);
     assert(nSeg == 0, 'a healthy session should need no recovery, got %d', nSeg);
+
+    r = mef3io.Reader(dp);                               % still reads the same
+    assert(isequaln(r.read('ch1'), got), 'recoverSession altered a healthy session');
+    delete(r);
 end
 
-% An invalid Durability must be rejected by the argument validator.
+% An unknown Durability must be rejected, and must not have written anything.
 gotError = false;
 try
-    mef3io.Writer(fullfile(sessionDir, 'bad.mefd'), Overwrite=true, Durability='sometimes');
+    mef3io.Writer(fullfile(sessionDir, 'matlab_bad_dur.mefd'), Overwrite=true, ...
+                  Durability='sometimes');
 catch
     gotError = true;
 end
 assert(gotError, 'Durability must reject an unknown value');
+assert(exist(fullfile(sessionDir, 'matlab_bad_dur.mefd'), 'dir') ~= 7, ...
+    'a rejected Durability must not create a session');
 
-% Tar archives are read-only, so recovery must refuse one.
+% Tar archives are read-only, so recovery must refuse one rather than write.
 gotError = false;
 try mef3io.recoverSession(tarPath, Apply=true); catch, gotError = true; end
 assert(gotError, 'recoverSession must refuse a tar archive');
+assert(exist(tarPath, 'file') == 2, 'the archive must be left alone');
 
 fprintf('test_mef3io: all assertions passed (%s)\n', sessionDir);
 end
