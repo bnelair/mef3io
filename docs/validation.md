@@ -332,3 +332,30 @@ guarantee at all — which includes the reference C library.
 
 If you run `durability="fast"` in production, run `recover` as a routine step
 after any unclean shutdown rather than only when something looks wrong.
+
+## The CyberPSG / meflib check set
+
+The defect this validator exists for is **invisible to mef3io and to pymef** —
+both size their buffers from each block's own header rather than from metadata
+section 2 — so neither can confirm a fix. Only a meflib-based reader can.
+
+```bash
+python scripts/make_cyberpsg_check.py            # -> ~/mef3io_cyberpsg_check
+python scripts/make_cyberpsg_check.py --out /tmp/check --seconds 120
+```
+
+Nine small sessions covering every way mef3io can produce or touch a session —
+a fresh write, an append, a legacy `mef_tools` session before and after
+`repair_session`, an encrypted one, one whose `.tmet` carries foreign padding
+across an append, one rebuilt by `recover_session` — plus **two deliberately
+broken controls**, because a matrix where everything passes proves nothing.
+
+Every session is read back through both mef3io and pymef and validated before
+the script exits, and the parameters (rate, channels, duration, gap position,
+conversion factor, passwords, seeds) are written into a README beside the files
+so one run can be compared against another. The 03-vs-04 declaration diff is
+read off the generated files rather than hard-coded, so it stays true at any
+`--seconds`.
+
+Run it and open the files in the target reader whenever the writer, the append
+path or the declarations change.

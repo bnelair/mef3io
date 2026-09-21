@@ -460,5 +460,17 @@ fields where mef3io is RIGHT and the legacy stack is wrong (the filter settings:
 -1.0 IS meflib's NO_ENTRY, meflib.h:431-437, while mef_tools writes made-up
 values).
 
+`scripts/make_cyberpsg_check.py` regenerates the CyberPSG/meflib check set
+(9 sessions + README into `~/mef3io_cyberpsg_check`): fresh write, append,
+legacy before/after repair, encrypted, padded-`.tmet`-then-appended,
+recovered-after-interrupted-write, plus TWO DELIBERATELY BROKEN CONTROLS —
+05 (the 1.1.2 zeros, mechanism (a)) and 03 (the legacy stack's own
+`number_of_discontinuities = 0`, mechanism (b), never yet reproduced). A
+matrix where everything passes proves nothing, which is why the controls are
+there. All parameters are constants at the top of the script and are written
+into the README; derived figures are read off the generated files, never
+hard-coded. Every session is verified through mef3io AND pymef before the
+script exits.
+
 Benchmarks: `benchmarks/mef_benchmark.py` (write/open/seq/parallel vs mef_tools
 & NWB-Zarr) and `benchmarks/compression_test.py` (file size / compression).
