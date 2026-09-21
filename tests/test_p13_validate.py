@@ -1458,8 +1458,13 @@ def test_a_failed_write_is_not_reported_as_repaired(tmp_path):
     # The operator has to be told which files did move, or the segment is
     # unrecoverable without diffing it by hand.
     reasons = " ".join(s.reason for s in report.skipped)
-    assert "ALREADY MODIFIED" in reasons, reasons
+    assert "MAY ALREADY BE MODIFIED" in reasons, reasons
     assert ".tmet" in reasons, reasons
+    # The file whose write FAILED must be named too. It is recorded before the
+    # attempt, because an in-place header patch can have written bytes and then
+    # failed to flush, and a path pushed only on success is missing from the
+    # one list the operator restores from.
+    assert ".tidx" in reasons, reasons
     # And the finding is still offered as repairable, rather than filtered out
     # by `repaired` as it was before.
     assert "header.entry-count" in report.repairable_check_ids
@@ -1607,11 +1612,15 @@ def test_a_repair_that_declines_is_reported_as_outstanding(tmp_path):
     tmet = _tmet(path)
     tidx = Path(tmet).with_suffix(".tidx")
 
-    # Every block's sample count at NO_ENTRY: nothing can be measured and even
-    # meflib's worst-case bound (5 x samples) comes out as 0.
+    # Every block's sample count at a real 0 — NOT at NO_ENTRY. NO_ENTRY would
+    # clear `index_counts_known` and the repair would never be called at all,
+    # so the test would pass on the repair GATE and assert nothing about the
+    # decline. With a real 0 the index stays trustworthy, the repair runs, and
+    # even meflib's worst-case bound (5 x samples) comes out as 0 — which it
+    # must refuse to write.
     raw = bytearray(tidx.read_bytes())
     for i in range((len(raw) - UH_BYTES) // 56):
-        struct.pack_into("<I", raw, UH_BYTES + i * 56 + 24, 0xFFFFFFFF)
+        struct.pack_into("<I", raw, UH_BYTES + i * 56 + 24, 0)
     struct.pack_into("<I", raw, 4, m.crc32(bytes(raw[UH_BYTES:])))
     struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
     tidx.write_bytes(bytes(raw))
@@ -1884,3 +1893,240 @@ def test_unusable_sampling_frequency_is_reported_and_stands_the_time_checks_down
     assert not [f for f in report.findings if f.stored == f.expected], report.summary()
     # It is not repairable: the true rate is not recoverable from the file.
     assert "times.sampling-frequency" not in report.repairable_check_ids
+
+
+# --- contracts that mutation testing found unpinned ----------------------------
+#
+# Each test below corresponds to a deliberate mutation of the production code
+# that the suite did NOT catch. A safety contract stated only in a comment is
+# not a contract; these turn each one into a failing test.
+
+
+def test_block_maxima_reports_an_under_declared_sample_count(tmp_path):
+    """`sizing.block-maxima` guards two fields; only the bytes half was tested.
+
+    Mutating away the `maximum_block_samples` comparison left the whole suite
+    green, so half of an Error-severity check had no coverage. Under-declaring
+    it truncates a reader's per-block buffer exactly as the bytes half does.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+    real = _read_s2(tmet, "maximum_block_samples")
+    _patch_s2(tmet, "maximum_block_samples", 1)
+
+    report = mef3io.Validator(str(path)).validate()
+    hits = [f for f in report.findings if f.check_id == "sizing.block-maxima"]
+    assert hits, report.summary()
+    assert hits[0].field == "maximum_block_samples"
+    assert not report.ok
+
+    mef3io.repair_session(str(path), ["sizing.block-maxima"])
+    assert _read_s2(tmet, "maximum_block_samples") == real
+    assert mef3io.Validator(str(path)).validate().ok
+
+
+def test_block_count_reports_both_directions(tmp_path):
+    """Under-declaring `number_of_blocks` is the direction meflib does not
+    protect against: it clamps the field DOWN and loops over it, so blocks past
+    the count are silently dropped. The table only corrupted it upwards."""
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+    real = _read_s2(tmet, "number_of_blocks")
+    assert real > 1
+
+    for value in (real - 1, real + 1):
+        _patch_s2(tmet, "number_of_blocks", value)
+        report = mef3io.Validator(str(path)).validate()
+        assert "index.block-count" in _ids(report), f"{value}: {report.summary()}"
+        mef3io.repair_session(str(path), ["index.block-count"])
+        assert _read_s2(tmet, "number_of_blocks") == real
+        assert mef3io.Validator(str(path)).validate().ok
+
+
+def test_sample_count_reports_an_over_declared_total(tmp_path):
+    """`index.sample-count` was only ever corrupted downwards."""
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+    real = _read_s2(tmet, "number_of_samples")
+    _patch_s2(tmet, "number_of_samples", real + 1000)
+
+    report = mef3io.Validator(str(path)).validate()
+    assert "index.sample-count" in _ids(report), report.summary()
+    mef3io.repair_session(str(path), ["index.sample-count"])
+    assert _read_s2(tmet, "number_of_samples") == real
+
+
+def test_block_interval_is_not_lowered_on_a_short_segment(tmp_path):
+    """The expectation is the NOMINAL block, not the largest block present.
+
+    A segment whose blocks are all shorter than the writer's nominal block — a
+    brief recording, a segment closed early — would otherwise yield an
+    expectation below the correct value, and the repair would LOWER a correct
+    declaration. Dropping the `std::max` with the declared value left the suite
+    green.
+    """
+    path = tmp_path / "short.mefd"
+    w = mef3io.Writer(str(path))
+    w.write_int32("ch1", np.arange(500, dtype=np.int32), 0.5, START, FS)
+    w.close()
+    tmet = _tmet(path)
+
+    # Declare a nominal block much larger than any block actually present.
+    nominal, interval = 2560, 10_000_000
+    _patch_s2(tmet, "maximum_block_samples", nominal)
+    _patch_s2(tmet, "block_interval", interval)
+
+    report = mef3io.Validator(str(path)).validate()
+    assert "times.block-interval" not in _ids(report), (
+        "a nominal block_interval must not be reported merely because every "
+        f"block on disk is shorter: {report.summary()}"
+    )
+    mef3io.repair_session(str(path), ["sizing.block-maxima"])
+    assert _read_s2(tmet, "block_interval") == interval, "a correct interval was lowered"
+
+
+def test_segment_bounds_slack_is_one_sample_period_not_more(tmp_path):
+    """The check documents "one sample period of slack".
+
+    Widening it by four orders of magnitude left the suite green, because the
+    only fixture shifts a time by 60 s. A shift of a few sample periods must be
+    reported, or the tolerance means nothing.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+    one_period = round(1e6 / FS)
+    stored_end = struct.unpack_from("<q", Path(tmet).read_bytes(), UH_FIELDS["end_time"][0])[0]
+    # Times are stored NEGATED, so increasing the stored value moves the
+    # declared end EARLIER — towards failing to cover the blocks.
+    assert stored_end < 0, "fixture should carry meflib's negated convention"
+
+    # A rounding-sized error is inside the documented tolerance: stay silent.
+    _patch_uh(tmet, "end_time", stored_end + 1)
+    assert "times.segment-bounds" not in _ids(mef3io.Validator(str(path)).validate())
+
+    # Several sample periods is not: it must be reported.
+    _patch_uh(tmet, "end_time", stored_end + 5 * one_period)
+    report = mef3io.Validator(str(path)).validate()
+    assert "times.segment-bounds" in _ids(report), (
+        f"a {5 * one_period} us error must not fit inside a one-sample-period "
+        f"tolerance: {report.summary()}"
+    )
+
+
+def test_open_time_warning_covers_the_si8_no_entry_sentinel(tmp_path):
+    """The warning scans for unset sizes; the fixture only ever wrote 0.
+
+    Narrowing the si8 test from `<= 0` to `== 0` left it green, so the -1
+    (SI8_NO_ENTRY) half — which is what a foreign writer actually leaves — was
+    unchecked.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path)
+    for tmet in sorted(Path(path).rglob("*.tmet")):
+        _patch_s2(tmet, "maximum_contiguous_block_bytes", -1)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with mef3io.Reader(str(path)) as reader:
+            issues = reader.declaration_issues
+    assert issues, "an SI8_NO_ENTRY declaration is unset and must be reported"
+    assert any("maximum_contiguous_block_bytes" in str(w.message) for w in caught), (
+        [str(w.message) for w in caught]
+    )
+
+
+def test_repair_preserves_file_mode(tmp_path):
+    """The .tmet holds metadata section 3 — subject name, id, recording location.
+
+    The repair writes a temp file under the process umask and renames it over
+    the original, so without carrying the mode across it silently widens access
+    to exactly the file holding the subject identifiers. Removing the
+    permissions copy left the whole suite green: 0600 became 0664.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = Path(_tmet(path))
+    _patch_s2(tmet, "block_interval", 0)
+    os.chmod(tmet, 0o600)
+
+    mef3io.repair_session(str(path), ["times.block-interval"])
+
+    assert oct(tmet.stat().st_mode & 0o777) == "0o600", (
+        "the repair widened access to the file holding the subject fields"
+    )
+
+
+def test_a_narrowed_run_cannot_disable_the_integrity_gate(tmp_path):
+    """`check_ids` must never switch off the CRC gate.
+
+    The gate deliberately iterates the whole registry rather than the selected
+    checks, so that narrowing a run cannot let a repair derive its truth from
+    bytes that failed their CRC. Iterating only the selected checks instead left
+    the suite green while a repair rewrote `number_of_samples` from a corrupted
+    index — data-destroying, and reachable through the C++ and extension APIs
+    even though the Python wrapper hardcodes an empty `check_ids`.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path)
+    tmet = _tmet(path)
+    tidx = Path(tmet).with_suffix(".tidx")
+    before = _read_s2(tmet, "number_of_samples")
+
+    # Corrupt an index entry WITHOUT repairing the body CRC: the block table is
+    # now untrustworthy, and only crc.index can tell.
+    raw = bytearray(tidx.read_bytes())
+    struct.pack_into("<I", raw, UH_BYTES + 24, 7)  # first entry number_of_samples
+    tidx.write_bytes(bytes(raw))
+
+    report = m.repair_session(
+        str(path), ["index.sample-count"], check_ids=["index.sample-count"]
+    )
+    assert report["segments_repaired"] == 0, (
+        "a narrowed run repaired from an index whose CRC does not verify"
+    )
+    assert _read_s2(tmet, "number_of_samples") == before, "the total was rewritten"
+
+
+def test_the_worst_case_bound_never_returns_the_no_entry_sentinel(tmp_path):
+    """`red_max_difference_bytes` saturates BELOW UI4_NO_ENTRY, never to it.
+
+    The overflow guard used to return the sentinel itself — which is exactly
+    the value `maximum_difference_bytes` uses for "never set". Writing it hands
+    a reader the defect the bound exists to remove (it cannot tell it from
+    unset, and taking it at face value means allocating 4 GiB), and the repair
+    never converges, because the value it just wrote re-triggers the `unset`
+    branch. Reachable from one `.tidx` entry whose sample count is enormous but
+    is not itself NO_ENTRY, which nothing else bounds.
+    """
+    path = tmp_path / "s.mefd"
+    _write(path, gap_us=0)
+    tmet = _tmet(path)
+    tidx = Path(tmet).with_suffix(".tidx")
+
+    huge = 0xFFFFFFFF // 5 + 10  # big enough to overflow the x5 bound
+    raw = bytearray(tidx.read_bytes())
+    struct.pack_into("<I", raw, UH_BYTES + 24, huge)
+    struct.pack_into("<I", raw, 4, m.crc32(bytes(raw[UH_BYTES:])))
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
+    tidx.write_bytes(bytes(raw))
+    _patch_s2(tmet, "maximum_difference_bytes", 0)
+
+    # Fast mode takes the bound rather than measuring, which is the path that
+    # overflowed.
+    report = _repair(
+        mef3io.Validator(str(path), exact_difference_bytes=False),
+        ["sizing.difference-bytes"],
+    )
+    written = _read_s2(tmet, "maximum_difference_bytes")
+    assert written != 0xFFFFFFFF, "the bound wrote the NO_ENTRY sentinel as a size"
+    assert written != 0, "the bound wrote the NULL-buffer value"
+
+    # And it converges: a second pass must not re-report the same field.
+    again = mef3io.Validator(str(path), exact_difference_bytes=False).validate()
+    assert "sizing.difference-bytes" not in _ids(again), (
+        f"repair did not converge, wrote {written}: {again.summary()}"
+    )

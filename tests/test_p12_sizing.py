@@ -213,6 +213,34 @@ def test_difference_bytes_within_meflib_worst_case(tmp_path):
     assert stored["maximum_difference_bytes"] <= 5 * stored["maximum_block_samples"]
 
 
+def test_single_call_write_declares_every_field_exactly(tmp_path):
+    """The fresh-segment writer, on its own, with no append in the way.
+
+    `_write` makes two `write_int32` calls per channel, so the second takes the
+    APPEND path — whose worst-case floor masks whatever the fresh-segment
+    writer put in `maximum_difference_bytes`. Zeroing that field in
+    `write_time_series_segment` left every test in this file green, including
+    the two that promise "every field carries a real measurement" and "every
+    allocation field is set and safe". This exercises the single-call path.
+    """
+    path = str(tmp_path / "one.mefd")
+    rng = np.random.default_rng(4)
+    x = rng.normal(0, 3000, 4000).astype(np.int32)
+    w = mef3io.Writer(path)
+    w.write_int32("ch1", x, 0.5, START, FS)          # exactly one call
+    w.close()
+
+    tmet = _segments(path)[0]
+    stored, real = _read_section2(tmet), _real_stats(tmet)
+    for name in SIZING_FIELDS:
+        assert stored[name] not in (0, UI4_NO_ENTRY, SI8_NO_ENTRY), f"{name} unset"
+        assert stored[name] == real[name], (
+            f"{name} declared {stored[name]}, on disk {real[name]} — the "
+            f"single-call path must be exact, with no bound involved"
+        )
+    assert mef3io.Validator(path).validate().ok
+
+
 # --- appends -----------------------------------------------------------------
 
 

@@ -591,3 +591,37 @@ TEST_CASE("Decoding is thread-count invariant when blocks overlap the sample gri
   }
   fsys::remove_all(dir);
 }
+
+TEST_CASE("Report::ok is false when nothing was examined") {
+  // The C++ Report::ok has its own copy of this rule, and only the C ABI and
+  // the MATLAB binding consume it — the Python layer recomputes `ok` itself,
+  // so no Python test can reach this one. Deleting the guard here left both
+  // suites green while a filter that matched nothing reported a clean session.
+  namespace fsys = std::filesystem;
+  const auto dir = fsys::temp_directory_path() / "mef3io_report_ok_test.mefd";
+  fsys::remove_all(dir);
+
+  const si8 start = 1577836800000000;
+  std::vector<si4> a(2000);
+  std::mt19937 rng(3);
+  std::uniform_int_distribution<si4> dist(-1000, 1000);
+  for (auto& v : a) v = dist(rng);
+  {
+    SessionWriter w(dir.string(), true);
+    w.write_int32("ch1", a, 1.0, start, 250.0);
+  }
+
+  // The session itself is clean...
+  REQUIRE(validate_session(dir.string()).ok());
+
+  // ...but a channel filter that matches nothing examined no bytes at all, and
+  // "no findings" from "no work" must never read as a pass.
+  ValidateOptions opts;
+  opts.channels = {"no-such-channel"};
+  const auto report = validate_session(dir.string(), opts);
+  REQUIRE(report.segments_checked == 0);
+  REQUIRE(report.findings.empty());
+  REQUIRE_FALSE(report.ok());
+
+  fsys::remove_all(dir);
+}

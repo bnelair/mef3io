@@ -1,6 +1,8 @@
 // mef3io — low-level time-series segment writer.
 #include "mef3io/writer.hpp"
 
+#include "durability.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -82,26 +84,12 @@ void replace_file(const fs::path& tmp, const fs::path& target) {
 #endif
 }
 
-// Carry an existing target's permissions (and, where the platform has them,
-// owner and group) onto the replacement. A temp file is created under the
-// process umask, so without this, rewriting a 0600 .tmet during an append
-// would widen it — and that file carries metadata section 3, the subject
-// fields. Mirrors copy_file_identity in validate.cpp; worth consolidating into
-// a shared internal header once this branch has landed.
-void carry_file_identity(const fs::path& from, const fs::path& to) {
-  std::error_code ec;
-  const auto st = fs::status(from, ec);
-  if (ec) return;  // target does not exist yet: nothing to carry
-  fs::permissions(to, st.permissions(), fs::perm_options::replace, ec);
-#ifndef _WIN32
-  struct stat s {};
-  if (::stat(from.string().c_str(), &s) == 0) {
-    // Best effort: an unprivileged process cannot chown, and that is not a
-    // reason to fail a write it has already computed.
-    if (::chown(to.string().c_str(), s.st_uid, s.st_gid) != 0) { /* ignored */ }
-  }
-#endif
-}
+// File-identity and durability helpers are shared with the validator's repair
+// path (durability.hpp): the append writes the SAMPLES, so it must be at
+// least as careful as the path that rewrites 16 KB of declarations.
+using detail::copy_file_identity;
+using detail::fsync_directory;
+using detail::fsync_file_or_throw;
 
 void write_file_atomic(const std::string& path, std::span<const ui1> bytes) {
   const fs::path target(path);
@@ -114,12 +102,18 @@ void write_file_atomic(const std::string& path, std::span<const ui1> bytes) {
     f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     if (!f) throw IoError("write failed: " + tmp.string());
     finish_stream(f, tmp.string());
-    carry_file_identity(target, tmp);
+    copy_file_identity(target, tmp);
+    // A rename is ORDERED, not durable. Without this a power cut can leave the
+    // rename visible and the bytes behind it missing — and a short .tmet throws
+    // from the metadata loader, taking the whole session down. The repair path
+    // has always done this; the append, which writes the samples, did not.
+    fsync_file_or_throw(tmp.string());
     replace_file(tmp, target);
   } catch (...) {
     fs::remove(tmp, ignored);
     throw;
   }
+  fsync_directory(target.parent_path());
 }
 
 void overwrite_file_prefix(const std::string& path, std::span<const ui1> bytes) {
@@ -130,6 +124,9 @@ void overwrite_file_prefix(const std::string& path, std::span<const ui1> bytes) 
   if (!f) throw IoError("header update failed: " + path);
   f.close();
   if (!f) throw IoError("close failed, header may not have reached disk: " + path);
+  // Best effort: the body is unchanged and the caller rolls back on failure,
+  // so a flush that cannot be performed is not a reason to fail the write.
+  (void)detail::fsync_file(path);
 }
 
 std::array<ui1, 16> random_uuid() {
@@ -178,9 +175,15 @@ ui4 block_difference_bytes(std::span<const ui1> encoded) {
 // meflib's worst case for the RED codec, RED_MAX_DIFFERENCE_BYTES(x): a full
 // si4 plus one keysample flag byte per sample. Used only to bound blocks whose
 // real difference_bytes we would otherwise have to re-read from .tdat.
+//
+// Saturates BELOW the sentinel, never to it: UI4_NO_ENTRY is what this field
+// uses for "never set", so an overflow that returned it would write the exact
+// unset value the bound exists to avoid. Mirrors the copy in validate.cpp.
 ui4 red_max_difference_bytes(ui4 samples) {
+  // Strictly BELOW the sentinel: UI4_NO_ENTRY / 5 * 5 is 0xFFFFFFFF exactly,
+  // so saturating at the product would still hand back the sentinel.
   constexpr ui4 kMaxSamples = fmt::UI4_NO_ENTRY / 5u;
-  return samples >= kMaxSamples ? fmt::UI4_NO_ENTRY : samples * 5u;
+  return samples >= kMaxSamples ? fmt::UI4_NO_ENTRY - 1u : samples * 5u;
 }
 
 // Longest run of blocks uninterrupted by a discontinuity flag, which is how a
@@ -780,6 +783,12 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
       if (!app) throw IoError("append failed: " + tdat_path);
       finish_stream(app, tdat_path);
     }
+    // Barrier. The .tidx written next POINTS AT these bytes, so they have to be
+    // durable before anything references them: a power cut between the two
+    // otherwise leaves an index whose entries run past the real end of .tdat —
+    // a state the in-process rollback cannot repair, because the process is
+    // gone. Ordering the samples before the references is the whole guarantee.
+    fsync_file_or_throw(tdat_path);
 
     // Each flag is set BEFORE the call that might fail. These writes can throw
     // partway — overwrite_file_prefix patches bytes in place and only then

@@ -2,6 +2,8 @@
 // contract; this file holds the check registry and the repair mechanics.
 #include "mef3io/validate.hpp"
 
+#include "durability.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -85,9 +87,20 @@ si8 to_disk_time(si8 absolute, si8 rto) {
 
 // meflib's RED_MAX_DIFFERENCE_BYTES(x): a full si4 plus one keysample flag
 // byte per sample. The worst case a reader can safely allocate from.
+//
+// Saturates BELOW the sentinel, never to it. UI4_NO_ENTRY (0xFFFFFFFF) is
+// exactly the value that means "never set" for maximum_difference_bytes, so
+// returning it from the overflow guard would hand the caller the very defect
+// this bound exists to remove: a reader cannot tell it from unset, a repair
+// that writes it never converges (the value it just wrote re-triggers the
+// `unset` branch), and a reader that does take it at face value tries to
+// allocate 4 GiB per channel. Reachable from one .tidx entry whose sample
+// count is huge but not itself NO_ENTRY.
 ui4 red_max_difference_bytes(ui4 samples) {
+  // Strictly BELOW the sentinel: UI4_NO_ENTRY / 5 * 5 is 0xFFFFFFFF exactly,
+  // so saturating at the product would still hand back the sentinel.
   constexpr ui4 kMaxSamples = fmt::UI4_NO_ENTRY / 5u;
-  return samples >= kMaxSamples ? fmt::UI4_NO_ENTRY : samples * 5u;
+  return samples >= kMaxSamples ? fmt::UI4_NO_ENTRY - 1u : samples * 5u;
 }
 
 // --- one segment, as found on disk -------------------------------------------
@@ -368,8 +381,13 @@ const std::vector<CheckImpl>& check_impls() {
                  {}});
 
     v.push_back({{"index.block-count", "Declared block count matches the index",
-                  "number_of_samples aside, a reader loops over number_of_blocks entries; "
-                  "declaring more than the index holds walks off the end of the block table.",
+                  "number_of_blocks must equal what the .tidx holds. The dangerous direction is "
+                  "UNDER-declaring: meflib clamps this field DOWN to the universal-header entry "
+                  "count and then loops over it (meflib.c:5983-5984, :6005-6006), so blocks past "
+                  "the count are silently dropped and the segment reads short. Over-declaring is "
+                  "caught by the same clamp in the vendored build rather than walking off the "
+                  "block table, but it still misdescribes the file; both are repaired from the "
+                  "index, which is the authority.",
                   Severity::Error, true},
                  [](const SegmentState& s, const SegmentTruth& t, Finding& f, bool& hit) {
                    if (s.md.section2.number_of_blocks == t.n_blocks) return;
@@ -1055,7 +1073,12 @@ SegmentTruth derive_truth(const SessionSource& src, const SegmentState& s,
     t.times_derivable = true;
     t.end_uutc = last_start_uutc + last_duration;
     // meflib defines recording_duration as the span of the segment including
-    // gaps (meflib.c: ABS(latest_end) - ABS(earliest_start)). The legacy pymef
+    // gaps. meflib computes ABS(latest_end) - ABS(earliest_start) + 1
+    // (meflib.c:5479, :6160) for the CHANNEL/SESSION rollup only — it never
+    // derives a segment's own recording_duration, leaving it at NO_ENTRY
+    // (meflib.c:4556), so this expectation is mef3io's inference. The +1, and
+    // start- versus end-of-last-sample, both fall inside the one sample period
+    // of slack the comparison already allows. The legacy pymef
     // writer instead stores number_of_samples / fs, which omits the gaps.
     t.recording_duration = t.end_uutc - t.first_start_uutc;
     // NOMINAL, not "the largest block that happens to be present". A segment
@@ -1082,67 +1105,12 @@ SegmentTruth derive_truth(const SessionSource& src, const SegmentState& s,
 // failed flush, and most of a write sits in the buffer until then — so testing
 // the stream straight after write() only tests that the buffer accepted the
 // bytes, not that they reached the disk. An ENOSPC here must not be silent.
-// Flush a file's contents all the way to stable storage. A rename is ORDERED,
-// not durable: without this, a power cut can leave the rename visible and the
-// data behind it missing — and a short .tmet throws from the metadata loader,
-// which takes the whole session down, not just that segment.
-[[nodiscard]] bool fsync_file(const std::string& path) {
-#ifdef _WIN32
-  HANDLE h = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (h == INVALID_HANDLE_VALUE) return false;
-  const bool ok = FlushFileBuffers(h) != 0;
-  CloseHandle(h);
-  return ok;
-#else
-  const int fd = ::open(path.c_str(), O_RDONLY);
-  if (fd < 0) return false;
-  const bool ok = ::fsync(fd) == 0;
-  return ::close(fd) == 0 && ok;
-#endif
-}
-
-// Flush, and fail loudly if the flush did not happen. Used where the whole
-// point of the call is durability: silently renaming an unflushed file over a
-// good one would give back exactly the guarantee the caller was promised and
-// did not get.
-void fsync_file_or_throw(const std::string& path) {
-  if (!fsync_file(path))
-    throw IoError("could not flush to disk, the write is not durable: " + path);
-}
-
-// A rename is only durable once the DIRECTORY entry is flushed too. Windows
-// exposes no directory handle to flush and does not need one.
-void fsync_directory(const fsys::path& dir) {
-#ifndef _WIN32
-  const int fd = ::open(dir.string().c_str(), O_RDONLY);
-  if (fd < 0) return;
-  ::fsync(fd);
-  ::close(fd);
-#else
-  (void)dir;
-#endif
-}
-
-// Carry the target's permissions — and, where the platform has them, owner and
-// group — onto the replacement. A fresh temp file is created under the process
-// umask, so without this a repair silently widens access to a .tmet, which is
-// the file holding metadata section 3: subject_name, subject_id, recording
-// location. Run as root over a user-owned tree it would also change ownership,
-// after which the original user's next acquisition write fails.
-void copy_file_identity(const fsys::path& from, const fsys::path& to) {
-  std::error_code ec;
-  const auto st = fsys::status(from, ec);
-  if (!ec) fsys::permissions(to, st.permissions(), fsys::perm_options::replace, ec);
-#ifndef _WIN32
-  struct stat s {};
-  if (::stat(from.string().c_str(), &s) == 0) {
-    // Best effort: an unprivileged process cannot chown, and that is not a
-    // reason to fail a repair it has already computed.
-    if (::chown(to.string().c_str(), s.st_uid, s.st_gid) != 0) { /* ignored */ }
-  }
-#endif
-}
+// Durability and file-identity helpers now live in durability.hpp, shared
+// with the writer so the append and the repair have ONE contract.
+using detail::copy_file_identity;
+using detail::fsync_directory;
+using detail::fsync_file;
+using detail::fsync_file_or_throw;
 
 void finish_stream(std::ofstream& f, const std::string& path) {
   f.flush();
@@ -1174,24 +1142,29 @@ void write_all_atomic(const std::string& path, std::span<const ui1> bytes) {
   const fsys::path target(path);
   const fsys::path tmp =
       target.parent_path() / (target.filename().string() + ".mef3io-repair-tmp");
-  {
-    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-    if (!f) throw IoError("cannot open for write: " + tmp.string());
-    f.write(reinterpret_cast<const char*>(bytes.data()),
-            static_cast<std::streamsize>(bytes.size()));
-    if (!f) throw IoError("write failed: " + tmp.string());
-    finish_stream(f, tmp.string());
-  }
+  // EVERY failure path removes the temp, not just a failed rename. The temp is
+  // a sibling, so it lands INSIDE the .segd directory: a half-written file
+  // named like a metadata file, left in a clinical session indefinitely, and
+  // `archive_session` packs it into the .mefd.tar as if it were data. The
+  // writer's own write_file_atomic already guards its whole body this way.
+  try {
+    {
+      std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+      if (!f) throw IoError("cannot open for write: " + tmp.string());
+      f.write(reinterpret_cast<const char*>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size()));
+      if (!f) throw IoError("write failed: " + tmp.string());
+      finish_stream(f, tmp.string());
+    }
   // The target still exists here, so its mode/owner can be carried across
   // before it is replaced. Then flush the data before the rename, and the
   // directory entry after it.
-  copy_file_identity(target, tmp);
-  // Flush before the rename, and fail loudly if the flush did not happen:
-  // renaming an unflushed file over a good one hands back a durability
-  // guarantee the caller did not get. replace_file is the portable swap
-  // (MoveFileEx + WRITE_THROUGH on Windows).
-  fsync_file_or_throw(tmp.string());
-  try {
+    copy_file_identity(target, tmp);
+    // Flush before the rename, and fail loudly if the flush did not happen:
+    // renaming an unflushed file over a good one hands back a durability
+    // guarantee the caller did not get. replace_file is the portable swap
+    // (MoveFileEx + WRITE_THROUGH on Windows).
+    fsync_file_or_throw(tmp.string());
     replace_file(tmp, target);
   } catch (...) {
     std::error_code ignored;
@@ -1625,16 +1598,24 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       const ui4 header_crc = crc::calculate(
           std::span<const ui1>(file).subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4));
       byteio::write<ui4>(file, 0, header_crc);
-      write_all_atomic(tmet_path, file);
+      // Recorded BEFORE the write, not after. A failure part-way through
+      // leaves bytes on disk — overwrite_universal_header patches in place and
+      // only then flushes, and 1024 bytes is smaller than a typical stream
+      // buffer, so a failed flush has already modified the file — and a path
+      // pushed afterwards is missing from exactly the list an operator uses to
+      // decide what to restore. Naming a file that turned out untouched costs
+      // nothing; omitting one that was modified sends them to restore the
+      // wrong set. Same reasoning as the append's wrote_* flags.
       files_written.push_back(files.tmet_rel);
+      write_all_atomic(tmet_path, file);
     }
     if (buffer.tidx_dirty) {
-      overwrite_universal_header(tidx_path, buffer.tidx_uh);
       files_written.push_back(files.tidx_rel);
+      overwrite_universal_header(tidx_path, buffer.tidx_uh);
     }
     if (buffer.tdat_dirty) {
-      overwrite_universal_header(tdat_path, buffer.tdat_uh);
       files_written.push_back(files.tdat_rel);
+      overwrite_universal_header(tdat_path, buffer.tdat_uh);
     }
     // Everything reached disk: only now is a finding a repair.
     for (const auto i : pending_repair) staged[i].repaired = true;
@@ -1649,8 +1630,10 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       if (!files_written.empty()) {
         std::string list;
         for (const auto& f : files_written) list += (list.empty() ? "" : ", ") + f;
-        reason += " — ALREADY MODIFIED before the failure: " + list +
-                  " (this segment's files no longer agree)";
+        reason += " — MAY ALREADY BE MODIFIED: " + list +
+                  " (the last of these is the one that failed, and a failed "
+                  "in-place header patch can still have written bytes; treat "
+                  "this segment's files as no longer agreeing)";
         // Only name a backup that exists. Sending an operator to a directory
         // that was never created, mid-incident, is worse than saying nothing.
         if (repair->backup)
