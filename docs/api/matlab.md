@@ -28,12 +28,37 @@ call the same C++ core.
 | `Reader.segments` | `Reader.segments` |
 | `Reader.toc` | `Reader.toc` |
 | `Reader.records` | `Reader.records` |
+| `Reader.problems` | `Reader.problems` |
 | `Writer.write` | `Writer.write` |
 | `Writer.write_int32` | `Writer.writeInt32` |
 | `Writer.write_annotations` | `Writer.writeAnnotations` |
 | `mef3io.archive_session` | `mef3io.archiveSession` |
 | `mef3io.extract_session` | `mef3io.extractSession` |
 | `mef3io.recover_session` | `mef3io.recoverSession` |
+
+## Unreadable segments
+
+Both bindings default to **strict**: one segment that cannot be read fails the
+whole session. That is deliberate — a skipped segment's samples come back as
+NaN, and nothing in the returned array distinguishes that from a real recording
+gap, so silently continuing is how missing data reaches an analysis unnoticed.
+
+To salvage the intact remainder of a damaged archive, open lenient and check
+what was skipped:
+
+```matlab
+r = mef3io.Reader(path, '', 0, false);   % path, password, nThreads, strict
+p = r.problems();                        % channel, segment, path, reason
+```
+
+```python
+r = mef3io.Reader(path, strict=False)
+r.problems                               # same fields
+```
+
+Opening lenient raises `mef3io:unreadableSegment` in MATLAB and
+`UnreadableSegmentWarning` in Python whenever anything was skipped. Both are
+empty and silent on a healthy session.
 
 ## Durability and recovery
 

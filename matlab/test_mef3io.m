@@ -232,5 +232,50 @@ assert(gotError, 'recoverSession must refuse a tar archive');
 assert(exist(recTarPath, 'file') == 2, 'the archive must be left alone');
 delete(recTarPath);
 
+% --- per-segment isolation: one bad file must not fail the whole session ----
+% Strict (the default) still fails loudly; lenient skips the damaged segment,
+% reports it, and returns the intact one. Mirrors tests/test_p20 in Python.
+isoPath = fullfile(sessionDir, 'matlab_iso.mefd');
+isoCounts = int32(mod(0:1999, 100))';
+w = mef3io.Writer(isoPath, Overwrite=true);
+w.writeInt32('ch1', isoCounts, 0.5, start, fs);
+w.writeInt32('ch1', isoCounts, 0.5, start + int64(1e7), fs, NewSegment=true);
+delete(w);
+
+r = mef3io.Reader(isoPath);
+assert(numel(r.segments('ch1')) == 2, 'expected two segments');
+assert(isempty(r.problems()), 'a healthy session has no problems');
+delete(r);
+
+% Corrupt the SECOND segment's metadata body, past the universal header.
+segDirs = dir(fullfile(isoPath, 'ch1.timd', '*.segd'));
+assert(numel(segDirs) == 2, 'expected two .segd directories');
+badMeta = dir(fullfile(segDirs(2).folder, segDirs(2).name, '*.tmet'));
+badMetaPath = fullfile(badMeta(1).folder, badMeta(1).name);
+fid = fopen(badMetaPath, 'r+');
+assert(fid > 0, 'could not open the .tmet for corruption');
+fseek(fid, 2000, 'bof');
+origByte = fread(fid, 1, 'uint8');                     % flip it, do not set it:
+fseek(fid, 2000, 'bof');                               % writing a fixed value
+fwrite(fid, bitxor(uint8(origByte), uint8(255)), 'uint8');  % that already matched
+fclose(fid);                                           % would corrupt nothing
+
+gotError = false;                                      % strict: fail loudly
+try mef3io.Reader(isoPath); catch, gotError = true; end
+assert(gotError, 'a corrupt segment must fail a strict Reader');
+
+warnState = warning('off', 'mef3io:unreadableSegment');
+r = mef3io.Reader(isoPath, '', 0, false);              % lenient: contain it
+warning(warnState);
+probs = r.problems();
+assert(numel(probs) == 1, 'expected exactly one skipped segment');
+assert(strcmp(probs(1).channel, 'ch1'));
+assert(probs(1).segment == 1, 'the SECOND segment (number 1) is the bad one');
+assert(~isempty(probs(1).reason), 'a skipped segment must say why');
+assert(numel(r.segments('ch1')) == 1, 'only the intact segment remains');
+isoGot = r.read('ch1');
+assert(sum(~isnan(isoGot)) == 2000, 'the intact segment must still read');
+delete(r);
+
 fprintf('test_mef3io: all assertions passed (%s)\n', sessionDir);
 end

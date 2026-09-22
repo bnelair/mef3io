@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "mef3io/byteio.hpp"
 #include "mef3io/errors.hpp"
 #include "mef3io/red.hpp"
 #include "mef3io/validate.hpp"
@@ -48,9 +49,9 @@ std::size_t index_entry_count(std::span<const ui1> idx, const std::string& path)
 
 }  // namespace
 
-Session::Session(const std::string& mefd_path, std::string password)
+Session::Session(const std::string& mefd_path, std::string password, bool strict)
     : mefd_path_(mefd_path), source_(open_session_source(mefd_path)),
-      password_(std::move(password)) {
+      password_(std::move(password)), strict_(strict) {
   discover();
 }
 
@@ -83,7 +84,7 @@ void Session::discover() {
                 return a.segment_number < b.segment_number;
               });
 
-    load_channel_basic_info(ch);
+    load_channel_basic_info(ch.info.name, ch);
     channel_names_.push_back(ch.info.name);
     channels_.emplace(ch.info.name, std::move(ch));
   }
@@ -104,11 +105,14 @@ std::span<const ui1> Session::segment_index(SegmentReader& seg) {
   return seg.tidx_bytes;
 }
 
-void Session::load_channel_basic_info(Channel& ch) {
+void Session::load_channel_basic_info(const std::string& name, Channel& ch) {
   ChannelInfo& info = ch.info;
-  info.n_segments = static_cast<int>(ch.segments.size());
   bool first = true;
+  int readable = 0;
   for (auto& seg : ch.segments) {
+    // Nothing below can throw once the metadata is in hand, so containing the
+    // whole body cannot leave `info` half-updated by a segment that failed.
+    const bool ok = with_segment(name, seg, [&] {
     auto& md = segment_metadata(seg);
     si8 rto = md.section3_available ? md.section3.recording_time_offset : 0;
     if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
@@ -143,7 +147,12 @@ void Session::load_channel_basic_info(Channel& ch) {
       info.end_time = std::max(info.end_time, seg_end);
     }
     info.number_of_samples += md.section2.number_of_samples;
+    });
+    if (ok) ++readable;
   }
+  // Count what can actually be read: segment_map lists only these, and a count
+  // that disagreed with it would make the map look truncated.
+  info.n_segments = readable;
 }
 
 const ChannelInfo& Session::channel_info(const std::string& name) const {
@@ -167,6 +176,8 @@ std::vector<DataRun> Session::read_runs(const std::string& channel, std::optiona
   si8 expected_next_sample = -1;
 
   for (auto& seg : ch.segments) {
+    const std::size_t mark = runs.size();
+    if (!with_segment(channel, seg, [&] {
     auto& md = segment_metadata(seg);
     si8 rto = md.section3_available ? md.section3.recording_time_offset : 0;
     if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
@@ -195,7 +206,7 @@ std::vector<DataRun> Session::read_runs(const std::string& channel, std::optiona
       if (block_end <= t0 || block_start >= t1) continue;  // outside requested range
       hits.push_back(e);
     }
-    if (hits.empty()) continue;
+    if (hits.empty()) return;  // `return` from the per-segment lambda, not `continue`
 
     // Do not assume the index is sorted: take the true extent, and check it
     // against the real file size so a damaged index fails loudly rather than
@@ -229,6 +240,14 @@ std::vector<DataRun> Session::read_runs(const std::string& channel, std::optiona
       current->samples.insert(current->samples.end(), decoded.samples.begin(),
                               decoded.samples.end());
       expected_next_sample = e.start_sample + e.number_of_samples;
+    }
+    })) {
+      runs.resize(mark);
+      // `current` pointed into `runs` and the resize may have moved it. Drop
+      // it: the next segment must start a new run anyway, because the one that
+      // failed leaves a gap where its samples should have been.
+      current = nullptr;
+      expected_next_sample = -1;
     }
   }
   // Safe point: the operation is finished, so nothing holds a span into a
@@ -279,6 +298,9 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
   const sf8 fs = ch.info.sampling_frequency;
 
   for (auto& seg : ch.segments) {
+    const std::size_t mark_buf = out.buffers.size(), mark_job = out.jobs.size(),
+                      mark_mm = out.mismatches.size();
+    if (!with_segment(channel, seg, [&] {
     auto& md = segment_metadata(seg);
     si8 rto = md.section3_available ? md.section3.recording_time_offset : 0;
     if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
@@ -296,13 +318,39 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
       auto e = fmt::TimeSeriesIndex::parse(
           idx.subspan(fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES,
                       fmt::TIME_SERIES_INDEX_BYTES));
-      if (e.file_offset < 0 || e.number_of_samples == 0) continue;
+      // Selection is the ONE thing the index must be trusted for: finding a
+      // block without it means scanning the whole .tdat, and one channel of a
+      // long recording is tens of gigabytes. So reject an entry only on its
+      // BYTE RANGE, which is the part nothing else can supply. A real block
+      // starts at or after the universal header and is at least a RED header
+      // long; anything else is index padding, which foreign writers do leave
+      // behind (NO_ENTRY offsets and zero-filled tails alike).
+      if (e.file_offset < static_cast<si8>(fmt::UNIVERSAL_HEADER_BYTES) ||
+          e.block_bytes < static_cast<ui4>(fmt::RED_BLOCK_HEADER_BYTES))
+        continue;
       si8 bstart = to_user_time(e.start_time, rto);
+      if (e.number_of_samples == 0) {
+        // A usable byte range with a zero sample count is a DAMAGED entry, not
+        // an empty block. Dropping it here would discard real samples on the
+        // index's word alone, before the header — the copy that is actually
+        // CRC-protected — could contradict it. Keep it and let the header
+        // decide; the disagreement is reported like any other.
+        hits.push_back(e);
+        continue;
+      }
       si8 bend = bstart + static_cast<si8>(std::llround(e.number_of_samples * 1e6 / fs));
       if (bend <= t0 || bstart >= t1) continue;
       hits.push_back(e);
     }
-    if (hits.empty()) continue;
+    // KNOWN LIMIT: a WINDOWED read still tests the window against the index's
+    // time and count, because a block has to be fetched before its header can
+    // be read and fetching every block to check is the whole-file read this
+    // design exists to avoid. So on a file whose index times are wrong, a
+    // windowed read can still miss a block the index misplaced. It is reported
+    // whenever such a block IS fetched, which is what tells a caller the index
+    // is untrustworthy; a full pass (`Validator`, or a read with no window) is
+    // the way to see all of it.
+    if (hits.empty()) return;  // `return` from the per-segment lambda, not `continue`
 
     // Needed blocks are normally contiguous in the file, so read one byte
     // range covering them rather than the whole (huge) .tdat — but do NOT
@@ -322,15 +370,43 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
     std::size_t buf_index = out.buffers.size();
     out.buffers.push_back(
         source_->read_range(seg.tdat_path, range_begin, range_end - range_begin));
-    for (const auto& e : hits) {
+    const std::vector<ui1>& buf = out.buffers[buf_index];
+    for (std::size_t hi = 0; hi < hits.size(); ++hi) {
+      const auto& e = hits[hi];
       BlockJob job;
       job.buffer_index = buf_index;
       job.offset = static_cast<std::size_t>(e.file_offset) - range_begin;
       job.block_bytes = e.block_bytes;
-      job.start_uutc = to_user_time(e.start_time, rto);
-      job.number_of_samples = e.number_of_samples;
+      job.index_start_uutc = to_user_time(e.start_time, rto);
+      job.index_number_of_samples = e.number_of_samples;
       job.keys = keys;
+
+      // The RED block header is the authority for WHERE this block's samples
+      // go and HOW MANY there are; the index only chose the byte range. Both
+      // values are read straight out of the bytes just fetched — two field
+      // reads at fixed offsets, not RedBlockHeader::parse, which would copy
+      // the 256-byte statistics table for every block on the read path.
+      if (job.offset + static_cast<std::size_t>(fmt::RED_BLOCK_HEADER_BYTES) > buf.size())
+        throw FormatError("block is smaller than a RED header: " +
+                          source_->describe(seg.tdat_path));
+      const std::span<const ui1> hdr(buf.data() + job.offset, fmt::RED_BLOCK_HEADER_BYTES);
+      job.start_uutc = to_user_time(byteio::read<si8>(hdr, 40), rto);
+      job.number_of_samples = byteio::read<ui4>(hdr, 32);
+
+      if (job.start_uutc != job.index_start_uutc ||
+          job.number_of_samples != job.index_number_of_samples) {
+        out.mismatches.push_back(BlockCopyMismatch{
+            source_->describe(seg.tdat_path), hi, job.index_start_uutc, job.start_uutc,
+            job.index_number_of_samples, job.number_of_samples});
+      }
       out.jobs.push_back(job);
+    }
+    })) {
+      // Partial output from a segment that threw is worse than none: the
+      // samples it did place would sit next to a gap it never finished.
+      out.buffers.resize(mark_buf);
+      out.jobs.resize(mark_job);
+      out.mismatches.resize(mark_mm);
     }
   }
   // Safe point: the operation is finished, so nothing holds a span into a
@@ -396,6 +472,8 @@ std::vector<SegmentInfo> Session::segment_map(const std::string& channel) {
   std::vector<SegmentInfo> out;
   out.reserve(ch.segments.size());
   for (auto& seg : ch.segments) {
+    const std::size_t mark = out.size();
+    if (!with_segment(channel, seg, [&] {
     auto& md = segment_metadata(seg);
     si8 rto = md.section3_available ? md.section3.recording_time_offset : 0;
     if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
@@ -408,6 +486,8 @@ std::vector<SegmentInfo> Session::segment_map(const std::string& channel) {
     si.number_of_samples = md.section2.number_of_samples;
     si.number_of_blocks = md.section2.number_of_blocks;
     out.push_back(std::move(si));
+    }))
+      out.resize(mark);  // a segment that threw part-way contributes nothing
   }
   // Safe point: the operation is finished, so nothing holds a span into a
   // cached index. The index is ~2% of the data, so an unbounded cache grows
@@ -423,6 +503,8 @@ std::vector<BlockIndexEntry> Session::read_index(const std::string& channel) {
 
   std::vector<BlockIndexEntry> out;
   for (auto& seg : ch.segments) {
+    const std::size_t mark = out.size();
+    if (!with_segment(channel, seg, [&] {
     auto& md = segment_metadata(seg);
     si8 rto = md.section3_available ? md.section3.recording_time_offset : 0;
     if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
@@ -442,6 +524,8 @@ std::vector<BlockIndexEntry> Session::read_index(const std::string& channel) {
       b.discontinuity = (e.red_block_flags & fmt::RedBlockHeader::DISCONTINUITY_MASK) != 0;
       out.push_back(b);
     }
+    }))
+      out.resize(mark);
   }
   // Safe point: the operation is finished, so nothing holds a span into a
   // cached index. The index is ~2% of the data, so an unbounded cache grows

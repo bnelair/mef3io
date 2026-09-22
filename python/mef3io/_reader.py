@@ -29,6 +29,77 @@ class SessionDeclarationWarning(UserWarning):
     """
 
 
+class UnreadableSegmentWarning(UserWarning):
+    """Part of this session could not be read and is being skipped.
+
+    Only ever raised by a Reader opened ``strict=False``. The skipped segments'
+    time spans read back as NaN — indistinguishable, in the returned array,
+    from a genuine recording gap. That is the hazard lenient mode trades for
+    availability, so it is never silent: see :attr:`Reader.problems` for the
+    segment paths and the reason each one failed.
+
+    Strict is the default. An unreported CRC failure is how corrupt scaling
+    reaches an analysis unnoticed; lenient mode exists to salvage the intact
+    99% of an archive, not to relax the checks.
+    """
+
+
+class BlockCopyWarning(UserWarning):
+    """A block's two stored copies of its start time or sample count disagree.
+
+    Every RED block records its start time and sample count TWICE — once in the
+    `.tidx` entry and once in the block's own header inside the `.tdat`.
+    Nothing in the format keeps them in step. mef3io places data by the HEADER,
+    which is the copy the per-block CRC protects and the copy meflib and pymef
+    read, so a file whose copies have drifted apart still reads the same as it
+    does under the legacy stack.
+
+    This warning means the file itself is internally inconsistent — it does not
+    mean the read is wrong. It fires only on such a file: on anything mef3io or
+    the legacy stack wrote, the copies are identical and nothing is emitted.
+
+    The structured detail is in the ``block_copy_mismatches`` key returned by
+    :meth:`Reader.read_raw`. Silence it like any warning::
+
+        warnings.filterwarnings("ignore", category=mef3io.BlockCopyWarning)
+    """
+
+
+def _unreadable_warning_text(problems: list, path: str) -> str:
+    chans = sorted({p["channel"] for p in problems})
+    first = problems[0]
+    return (
+        f"{path}: {len(problems)} segment(s) could not be read and were SKIPPED "
+        f"across channel(s) {', '.join(chans)}; their time spans read back as NaN, "
+        f"which is indistinguishable from a real recording gap. "
+        f"First: {first['segment']} — {first['reason']}. "
+        "Full list in Reader.problems. Open with strict=True to fail instead."
+    )
+
+
+def _block_copy_warning_text(mismatches: list, path: str) -> str:
+    times = sum(1 for m in mismatches
+                if m["index_start_uutc"] != m["header_start_uutc"])
+    counts = sum(1 for m in mismatches
+                 if m["index_number_of_samples"] != m["header_number_of_samples"])
+    parts = []
+    if times:
+        parts.append(f"{times} block(s) disagree on start time")
+    if counts:
+        parts.append(f"{counts} block(s) disagree on sample count")
+    first = mismatches[0]
+    return (
+        f"{path}: the block index and the RED block headers disagree — "
+        + " and ".join(parts)
+        + f". First: {first['segment']} block {first['block_index']} "
+        f"(index t={first['index_start_uutc']} n={first['index_number_of_samples']}, "
+        f"header t={first['header_start_uutc']} n={first['header_number_of_samples']}). "
+        "The header is authoritative and was used, which is what meflib/pymef do "
+        "too, so this read matches theirs; the FILE is inconsistent. "
+        "Inspect with Reader.read_raw()['block_copy_mismatches']."
+    )
+
+
 def _declaration_warning_text(issues: list, path: str) -> str:
     fields: dict[str, int] = {}
     channels = set()
@@ -98,11 +169,13 @@ class Reader:
         n_threads: int = 0,
         cache=None,
         warn_declarations: bool = True,
+        strict: bool = True,
     ):
         self._path = str(path)
         self._password = password or ""
         self._backend_name = backend
         self._n_threads = n_threads
+        self._strict = bool(strict)
         self._impl = None  # constructed lazily so a warm start stays cheap
 
         # Warm start: serve channel metadata from a valid cache snapshot, and
@@ -130,6 +203,15 @@ class Reader:
                     _cache.build_snapshot(self._path, self._infos, self._declaration_issues),
                 )
 
+        if not self._strict and self._impl is not None:
+            problems = self.problems
+            if problems:
+                warnings.warn(
+                    _unreadable_warning_text(problems, self._path),
+                    UnreadableSegmentWarning,
+                    stacklevel=2,
+                )
+
         if warn_declarations and self._declaration_issues:
             warnings.warn(
                 _declaration_warning_text(self._declaration_issues, self._path),
@@ -142,6 +224,24 @@ class Reader:
         # the call would also swallow one raised *inside* it, and a backend with
         # a typo would then report every session as clean.
         fn = getattr(self._impl, "declaration_issues", None)
+        return list(fn()) if fn is not None else []
+
+    @property
+    def problems(self) -> list:
+        """Segments that could not be read, when opened ``strict=False``.
+
+        A list of ``{"channel", "segment_number", "segment", "reason"}`` dicts,
+        empty when everything loaded. **Always empty in strict mode**, where an
+        unreadable segment raises instead of being skipped.
+
+        Check it before trusting a read from a lenient Reader: a skipped
+        segment's samples come back as NaN, exactly like a genuine gap, so the
+        array alone cannot tell you data is missing.
+        """
+        impl = self._impl
+        if impl is None:
+            return []
+        fn = getattr(impl, "problems", None)
         return list(fn()) if fn is not None else []
 
     @property
@@ -167,7 +267,9 @@ class Reader:
             if self._backend_name == "cpp":
                 from . import _mef3io
 
-                self._impl = _mef3io.Reader(self._path, self._password, self._n_threads)
+                self._impl = _mef3io.Reader(
+                    self._path, self._password, self._n_threads, self._strict
+                )
             elif self._backend_name == "pure":
                 from .pure import Reader as PureReader
 
@@ -312,11 +414,28 @@ class Reader:
             data), ``start_uutc``, ``sampling_frequency``,
             ``units_conversion_factor``. Physical units are
             ``samples * units_conversion_factor`` where ``valid``.
+            ``block_copy_mismatches`` (list of dict) lists any block whose
+            `.tidx` entry disagreed with its RED block header, each with
+            ``segment``, ``block_index``, ``index_start_uutc``,
+            ``header_start_uutc``, ``index_number_of_samples`` and
+            ``header_number_of_samples``. Empty for a well-formed session;
+            non-empty raises :class:`BlockCopyWarning` as well, and means the
+            FILE is inconsistent — the header copy was used, which is what
+            meflib and pymef do, so the read still matches theirs.
         """
         impl = self._ensure_impl()
         if n_threads is None:
-            return impl.read_raw(channel, t0, t1)
-        return impl.read_raw(channel, t0, t1, int(n_threads))
+            out = impl.read_raw(channel, t0, t1)
+        else:
+            out = impl.read_raw(channel, t0, t1, int(n_threads))
+        mismatches = out.get("block_copy_mismatches") or []
+        if mismatches:
+            warnings.warn(
+                _block_copy_warning_text(mismatches, self._path),
+                BlockCopyWarning,
+                stacklevel=2,
+            )
+        return out
 
     def segments(self, channel: str) -> list[dict]:
         """Per-segment map of a channel — what data is where.
