@@ -89,10 +89,24 @@ def write_mef(signal: np.ndarray, path: str, fs: float, precision: int):
             w.write(channel_name(i), col, BASE_UUTC, fs, precision=precision)
 
 
+
+def blosc_zstd_kwargs() -> dict:
+    """Blosc/zstd level 3 with byte shuffle — the same codec either way — in the
+    form the installed hdmf-zarr accepts: zarr v3 codecs under zarr >= 3
+    (`compressors=`), a numcodecs codec before that (`compressor=`)."""
+    import zarr
+
+    if int(zarr.__version__.split(".")[0]) >= 3:
+        from zarr.codecs import BloscCodec
+
+        return {"compressors": BloscCodec(cname="zstd", clevel=3, shuffle="shuffle")}
+    import numcodecs
+
+    return {"compressor": numcodecs.Blosc(cname="zstd", clevel=3, shuffle=numcodecs.Blosc.SHUFFLE)}
+
 def write_nwb(signal: np.ndarray, path: str, fs: float, segment_samples: int):
     from datetime import datetime, timezone
 
-    import numcodecs
     from hdmf_zarr.backend import ZarrDataIO
     from hdmf_zarr.nwb import NWBZarrIO
     from pynwb import NWBFile
@@ -109,7 +123,7 @@ def write_nwb(signal: np.ndarray, path: str, fs: float, segment_samples: int):
     wrapped = ZarrDataIO(
         data=signal,
         chunks=(segment_samples, 1),
-        compressor=numcodecs.Blosc(cname="zstd", clevel=3, shuffle=numcodecs.Blosc.SHUFFLE),
+        **blosc_zstd_kwargs(),
     )
     es = ElectricalSeries("eeg", wrapped, region, starting_time=0.0, rate=fs)
     nwb.add_acquisition(es)

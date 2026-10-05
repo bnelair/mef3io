@@ -190,10 +190,24 @@ def write_mef3io(cfg: Config, path: str):
             del col
 
 
+
+def blosc_zstd_kwargs() -> dict:
+    """Blosc/zstd level 3 with byte shuffle — the same codec either way — in the
+    form the installed hdmf-zarr accepts: zarr v3 codecs under zarr >= 3
+    (`compressors=`), a numcodecs codec before that (`compressor=`)."""
+    import zarr
+
+    if int(zarr.__version__.split(".")[0]) >= 3:
+        from zarr.codecs import BloscCodec
+
+        return {"compressors": BloscCodec(cname="zstd", clevel=3, shuffle="shuffle")}
+    import numcodecs
+
+    return {"compressor": numcodecs.Blosc(cname="zstd", clevel=3, shuffle=numcodecs.Blosc.SHUFFLE)}
+
 def write_nwb_zarr(cfg: Config, path: str):
     from datetime import datetime, timezone
 
-    import numcodecs
     from hdmf.data_utils import GenericDataChunkIterator
     from hdmf_zarr.backend import ZarrDataIO
     from hdmf_zarr.nwb import NWBZarrIO
@@ -232,7 +246,7 @@ def write_nwb_zarr(cfg: Config, path: str):
 
     wrapped = ZarrDataIO(
         data=SignalIterator(cfg),
-        compressor=numcodecs.Blosc(cname="zstd", clevel=3, shuffle=numcodecs.Blosc.SHUFFLE),
+        **blosc_zstd_kwargs(),
     )
     es = ElectricalSeries("eeg", wrapped, region, starting_time=0.0, rate=cfg.fs)
     nwb.add_acquisition(es)
