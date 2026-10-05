@@ -171,14 +171,33 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
 
   // ---- reader ----------------------------------------------------------
   if (cmd == "reader_open") {
-    need_args(nrhs, 4, "reader_open");
+    // The 5th argument (strict) is optional so an older caller still works.
+    if (nrhs < 4) need_args(nrhs, 4, "reader_open");
     std::string path = get_string(prhs[1], "path");
     std::string password = get_string(prhs[2], "password");
     int n_threads = static_cast<int>(get_scalar(prhs[3], "n_threads"));
+    int strict = nrhs >= 5 ? static_cast<int>(get_scalar(prhs[4], "strict")) : 1;
     mef3io_reader* r = nullptr;
-    check(mef3io_reader_open(path.c_str(), password.c_str(), n_threads, &r));
+    check(mef3io_reader_open_ex(path.c_str(), password.c_str(), n_threads, strict, &r));
     track(g_readers, reinterpret_cast<std::uint64_t>(r));
     plhs[0] = make_handle(r);
+    return;
+  }
+  if (cmd == "reader_problems") {
+    need_args(nrhs, 2, "reader_problems");
+    mef3io_reader* r = get_reader(prhs[1]);
+    int32_t n = 0;
+    check(mef3io_reader_n_problems(r, &n));
+    const char* fields[] = {"channel", "segment", "path", "reason"};
+    plhs[0] = mxCreateStructMatrix(n > 0 ? 1 : 0, n > 0 ? static_cast<mwSize>(n) : 0, 4, fields);
+    for (int32_t i = 0; i < n; ++i) {
+      mef3io_segment_problem p{};
+      check(mef3io_reader_problem(r, i, &p));
+      mxSetField(plhs[0], i, "channel", mxCreateString(p.channel));
+      mxSetField(plhs[0], i, "segment", mxCreateDoubleScalar(p.segment_number));
+      mxSetField(plhs[0], i, "path", mxCreateString(p.segment));
+      mxSetField(plhs[0], i, "reason", mxCreateString(p.reason));
+    }
     return;
   }
   if (cmd == "reader_close") {

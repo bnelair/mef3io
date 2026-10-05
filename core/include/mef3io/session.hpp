@@ -35,6 +35,22 @@ struct SegmentReader {
   std::optional<TimeSeriesMetadata> metadata;      // loaded lazily
   std::vector<ui1> tidx_bytes;                      // loaded lazily (whole file)
   std::uint64_t index_last_used = 0;                // for cache eviction
+  /// Why this segment could not be read, in lenient mode. Empty means fine.
+  /// Set once: a segment that failed is not retried on every later call.
+  std::string load_error;
+};
+
+/// One segment that could not be read, and why.
+///
+/// Reported rather than thrown only when the Session was opened lenient. The
+/// segment's time span then reads back as a gap, exactly like any other
+/// missing data — which is why the list matters: silently returning NaN where
+/// data should be is its own hazard.
+struct SegmentProblem {
+  std::string channel;
+  int segment_number = 0;
+  std::string segment;   ///< human-readable segment location
+  std::string reason;    ///< the exception that was contained
 };
 
 // A decode job: where a block lives (index into an owned buffer) and where its
@@ -43,9 +59,44 @@ struct BlockJob {
   std::size_t buffer_index = 0;
   std::size_t offset = 0;
   std::size_t block_bytes = 0;
+  /// Where the block goes and how much of it there is — taken from the RED
+  /// BLOCK HEADER, not the index. See BlockCopyMismatch for why.
   si8 start_uutc = 0;
   ui4 number_of_samples = 0;
+  /// The `.tidx` entry's copies of the same two values, kept for comparison.
+  si8 index_start_uutc = 0;
+  ui4 index_number_of_samples = 0;
   crypto::AccessKeys keys;
+};
+
+/// A block whose two stored copies of a value disagree.
+///
+/// A block's start time and sample count each exist TWICE: in the `.tidx`
+/// entry and in the RED block header at the head of the block itself. Nothing
+/// in the format keeps them in step, and the two are not equally trustworthy:
+///
+///   * the header copy is covered by the per-block CRC, which is verified on
+///     every decode; the index copy is covered only by the `.tidx` body CRC,
+///     which the read path does not check at all;
+///   * the header copy is the one meflib and pymef place data by
+///     (`pymef3_file.c`, the `times_specified` path), so following it is
+///     parity by construction rather than by agreement.
+///
+/// mef3io therefore places by the header and uses the index only to SELECT
+/// blocks — which is what meflib does too. On every file mef3io or the legacy
+/// stack has ever written the copies are identical, so this changes nothing;
+/// it only decides what happens on a file where they have drifted apart, and
+/// there it reports rather than silently picking one.
+struct BlockCopyMismatch {
+  std::string segment;            ///< human-readable segment location
+  std::size_t block_index = 0;    ///< position within the segment's index
+  si8 index_start_uutc = 0;
+  si8 header_start_uutc = 0;
+  ui4 index_number_of_samples = 0;
+  ui4 header_number_of_samples = 0;
+
+  bool times_differ() const { return index_start_uutc != header_start_uutc; }
+  bool counts_differ() const { return index_number_of_samples != header_number_of_samples; }
 };
 
 struct BlockJobs {
@@ -53,6 +104,9 @@ struct BlockJobs {
   std::vector<BlockJob> jobs;
   sf8 sampling_frequency = 0.0;
   sf8 units_conversion_factor = 1.0;
+  /// Blocks whose index entry and RED header disagree. Empty for every
+  /// well-formed file; non-empty means the file is internally inconsistent.
+  std::vector<BlockCopyMismatch> mismatches;
 };
 
 // One RED block's index entry with absolute (user) times resolved.
@@ -121,7 +175,17 @@ class Session {
   // Discover the session tree and load per-channel basic info (lazy on data).
   // `mefd_path` is either a .mefd directory or an uncompressed tar archive of
   // one (e.g. name.mefd.tar) — tar sessions are read without extraction.
-  Session(const std::string& mefd_path, std::string password = "");
+  /// @param strict  true (the default) propagates a segment-level failure, so
+  ///                 one damaged file fails the whole session — the safe
+  ///                 behaviour when an unreported CRC failure would otherwise
+  ///                 reach an analysis unnoticed. false contains the failure to
+  ///                 the segment, leaves its span reading back as a gap, and
+  ///                 records it in problems().
+  Session(const std::string& mefd_path, std::string password = "", bool strict = true);
+
+  /// Segments that failed to load, in lenient mode. Always empty when strict.
+  const std::vector<SegmentProblem>& problems() const { return problems_; }
+  bool strict() const { return strict_; }
 
   const std::vector<std::string>& channels() const { return channel_names_; }
   const ChannelInfo& channel_info(const std::string& name) const;
@@ -178,8 +242,32 @@ class Session {
   std::size_t index_budget_ = 256u * 1024u * 1024u;
 
   void discover();
-  void load_channel_basic_info(Channel& ch);
+  void load_channel_basic_info(const std::string& name, Channel& ch);
   TimeSeriesMetadata& segment_metadata(SegmentReader& seg);
+  /// Run `fn` for one segment, containing its failure when lenient.
+  ///
+  /// Returns false when the segment is unusable — already known bad, or `fn`
+  /// threw and the failure was contained. Strict mode never contains anything,
+  /// so the exception propagates as before. The caller is responsible for
+  /// rolling back anything `fn` appended before it threw; a half-written
+  /// segment is worse than a skipped one.
+  template <class F>
+  bool with_segment(const std::string& channel, SegmentReader& seg, F&& fn) {
+    if (!seg.load_error.empty()) return false;
+    if (strict_) {
+      fn();
+      return true;
+    }
+    try {
+      fn();
+      return true;
+    } catch (const std::exception& e) {
+      seg.load_error = e.what();
+      problems_.push_back(SegmentProblem{channel, seg.segment_number,
+                                         source_->describe(seg.tmet_path), e.what()});
+      return false;
+    }
+  }
   std::span<const ui1> segment_index(SegmentReader& seg);
   /// Drop the least recently used block indices until the cache fits its
   /// budget.
@@ -196,6 +284,8 @@ class Session {
   std::string password_;
   std::vector<std::string> channel_names_;
   std::map<std::string, Channel> channels_;
+  bool strict_ = true;
+  std::vector<SegmentProblem> problems_;
 };
 
 }  // namespace mef3io

@@ -48,7 +48,30 @@ const char* mef3io_last_error(void);
  * read in place, without extraction. */
 int mef3io_reader_open(const char* mefd_path, const char* password, int n_threads,
                        mef3io_reader** out);
+/* As above, but `strict` 0 CONTAINS a segment-level failure instead of failing
+ * the open: the unreadable segment is skipped, its time span reads back as a
+ * gap like any other missing data, and it is listed by mef3io_reader_problem.
+ * `strict` non-zero behaves exactly like mef3io_reader_open.
+ *
+ * Strict is the default everywhere because a skipped segment is indistinguish-
+ * able, in the returned samples, from a real recording gap. Lenient mode is for
+ * salvaging the intact remainder of a damaged archive, and a caller that uses
+ * it should read the problem list before trusting the data. */
+int mef3io_reader_open_ex(const char* mefd_path, const char* password, int n_threads,
+                          int strict, mef3io_reader** out);
 void mef3io_reader_close(mef3io_reader* r);
+
+typedef struct {
+  char channel[256];
+  int32_t segment_number;
+  char segment[1024];  /* human-readable segment location */
+  char reason[512];    /* why it could not be read */
+} mef3io_segment_problem;
+
+/* Segments skipped because they could not be read. Always 0 for a reader
+ * opened strict, where such a segment fails the open instead. */
+int mef3io_reader_n_problems(mef3io_reader* r, int32_t* out);
+int mef3io_reader_problem(mef3io_reader* r, int32_t index, mef3io_segment_problem* out);
 
 int mef3io_reader_n_channels(mef3io_reader* r, int32_t* out);
 int mef3io_reader_channel_name(mef3io_reader* r, int32_t index, char* buf, size_t buf_bytes);

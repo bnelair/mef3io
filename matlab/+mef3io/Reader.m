@@ -3,6 +3,7 @@ classdef Reader < handle
     %
     %   r = mef3io.Reader(path)                 % unencrypted
     %   r = mef3io.Reader(path, password)       % level-1 or level-2 password
+    %   r = mef3io.Reader(path, '', 0, false)   % lenient: skip unreadable segments
     %
     % `path` is a .mefd session directory or an uncompressed tar archive of
     % one (name.mefd.tar, from mef3io.archiveSession) — read in place,
@@ -16,6 +17,13 @@ classdef Reader < handle
     %   segs = r.segments('ch1')                % what data is where, per segment
     %   blocks = r.toc('ch1')                   % block-level table of contents
     %   anns = r.records('ch1')                 % annotations ([] -> session level)
+    %   p = r.problems()                        % segments skipped (lenient only)
+    %
+    % STRICT is the default: one unreadable segment fails the whole session,
+    % because a skipped segment's samples come back as NaN and nothing in the
+    % returned array distinguishes that from a real recording gap. Pass
+    % strict=false to salvage the intact remainder of a damaged archive, and
+    % check problems() before trusting the data.
     %
     % Times are uUTC: microseconds since the Unix epoch (int64 or double).
 
@@ -24,13 +32,35 @@ classdef Reader < handle
     end
 
     methods
-        function obj = Reader(path, password, nThreads)
+        function obj = Reader(path, password, nThreads, strict)
             arguments
                 path (1, :) char
                 password (1, :) char = ''
                 nThreads (1, 1) double = 0
+                strict (1, 1) logical = true
             end
-            obj.h = mef3io_mex('reader_open', path, password, nThreads);
+            obj.h = mef3io_mex('reader_open', path, password, nThreads, double(strict));
+            if ~strict
+                p = mef3io_mex('reader_problems', obj.h);
+                if ~isempty(p)
+                    warning('mef3io:unreadableSegment', ...
+                        ['%s: %d segment(s) could not be read and were SKIPPED; their ' ...
+                         'time spans read back as NaN, which is indistinguishable from ' ...
+                         'a real recording gap. First: %s - %s. Full list in problems().'], ...
+                        path, numel(p), p(1).path, p(1).reason);
+                end
+            end
+        end
+
+        function p = problems(obj)
+            %PROBLEMS Segments that could not be read, when opened lenient.
+            %   p = r.problems()
+            %
+            % Struct array with fields channel, segment, path, reason. Always
+            % empty for a Reader opened strict (the default), where such a
+            % segment raises instead of being skipped. Mirrors Python's
+            % Reader.problems.
+            p = mef3io_mex('reader_problems', obj.h);
         end
 
         function delete(obj)

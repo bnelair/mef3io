@@ -333,6 +333,97 @@ guarantee at all — which includes the reference C library.
 If you run `durability="fast"` in production, run `recover` as a routine step
 after any unclean shutdown rather than only when something looks wrong.
 
+## When a file is damaged: what a read does about it
+
+Validation and repair are for declarations that are *wrong*. This section is
+about the two things a **read** does when the data itself is inconsistent or
+unreadable.
+
+### Why a block's numbers exist twice
+
+A channel's signal is not stored as one long array. It is cut into **blocks**
+of a few thousand samples, each compressed on its own, written end to end into
+the segment's `.tdat`. To read a time window, a reader has to know which blocks
+cover it and where each block's samples belong on the timeline.
+
+Two files carry that:
+
+| | what it holds | how it is protected |
+|---|---|---|
+| `.tidx`, the index | one row per block: **where** it sits in `.tdat`, **when** it starts, **how many samples** it holds | one checksum over the whole file, which the read path does not verify |
+| `.tdat`, the data | the blocks. Each opens with a header repeating **when** it starts and **how many samples** it holds | a checksum **per block**, verified on every decompression |
+
+A block's start time and sample count are therefore written **twice**, and the
+format has no rule keeping the copies in step.
+
+**mef3io places data by the block header** — the copy that is actually checked,
+and the copy meflib (so pymef, mef_tools and CyberPSG) reads. The index is used
+only to decide which blocks to fetch. On any file mef3io or the legacy stack
+wrote the two copies are identical and none of this is visible.
+
+When they are not identical, the file is damaged, and mef3io says so rather
+than quietly picking one:
+
+```python
+out = reader.read_raw("ch1")
+for m in out["block_copy_mismatches"]:
+    print(m["segment"], m["block_index"],
+          m["index_start_uutc"], m["header_start_uutc"],
+          m["index_number_of_samples"], m["header_number_of_samples"])
+```
+
+A `BlockCopyWarning` is raised as well. **This does not mean the read is
+wrong** — it matches what meflib would return. It means the file is internally
+inconsistent and worth looking at.
+
+!!! note "Why this is worth caring about"
+    mef3io used to trust the index for both numbers. An index row that
+    understated its block caused the extra samples to be dropped, and they came
+    back as `NaN` — which is exactly what a real gap in the recording looks
+    like. Nothing distinguished "nothing was recorded here" from "this was
+    thrown away". Measured on a 60 000-sample session, halving one row's count
+    lost 5000 samples silently.
+
+`read()` applies the same placement rule but returns a bare array, so it has
+nowhere to put the list — use `read_raw()` to inspect.
+
+### When a whole segment cannot be read
+
+A session is a tree: session → channel → segment, and each segment has its own
+metadata, index and data files. Opening a session reads every segment's
+metadata, and by default **one unreadable file fails the whole session**.
+
+That default is deliberate, but it is brutal on archives. A real report against
+1.1.1: 12 bad metadata files out of 1190 segments made all 1190 unreadable,
+locking out 98,128 already-exported analysis windows, with 99% of the recording
+perfectly intact.
+
+To salvage the rest:
+
+```python
+r = mef3io.Reader("subject.mefd", strict=False)
+for p in r.problems:
+    print(p["channel"], p["segment_number"], p["segment"], p["reason"])
+x = r.read("ch1")        # the intact segments; the skipped one reads as NaN
+```
+
+```matlab
+r = mef3io.Reader(path, '', 0, false);   % path, password, nThreads, strict
+p = r.problems();                         % channel, segment, path, reason
+```
+
+!!! warning "Check `problems` before you trust the data"
+    A skipped segment's span comes back as `NaN`, indistinguishable in the
+    array from a genuine recording gap. That is why strict is the default and
+    why lenient mode warns on open (`UnreadableSegmentWarning`, or
+    `mef3io:unreadableSegment` in MATLAB). It exists to recover the intact part
+    of a damaged archive, not to relax the checks — if you skip the check, an
+    analysis can run over a recording with a hole in it and never know.
+
+Both modes are identical, and silent, on a healthy session. After salvaging,
+`recover_session` and `repair_session` (above) are the tools for making the
+damaged segment readable again where that is possible.
+
 ## The CyberPSG / meflib check set
 
 The defect this validator exists for is **invisible to mef3io and to pymef** —

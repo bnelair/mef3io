@@ -101,7 +101,36 @@ int mef3io_reader_open(const char* mefd_path, const char* password, int n_thread
   });
 }
 
+int mef3io_reader_open_ex(const char* mefd_path, const char* password, int n_threads,
+                          int strict, mef3io_reader** out) {
+  if (!mefd_path || !out) return fail_argument("mefd_path and out must not be NULL");
+  *out = nullptr;
+  return guarded([&] {
+    *out = new mef3io_reader{mef3io::Reader(mefd_path, password ? std::string(password) : "",
+                                            n_threads, strict != 0)};
+  });
+}
+
 void mef3io_reader_close(mef3io_reader* r) { delete r; }
+
+int mef3io_reader_n_problems(mef3io_reader* r, int32_t* out) {
+  if (!r || !out) return fail_argument("NULL argument");
+  return guarded([&] { *out = static_cast<int32_t>(r->impl.problems().size()); });
+}
+
+int mef3io_reader_problem(mef3io_reader* r, int32_t index, mef3io_segment_problem* out) {
+  if (!r || !out) return fail_argument("NULL argument");
+  return guarded([&] {
+    const auto& ps = r->impl.problems();
+    if (index < 0 || static_cast<size_t>(index) >= ps.size())
+      throw std::out_of_range("problem index out of range");
+    const auto& p = ps[static_cast<size_t>(index)];
+    copy_str(out->channel, sizeof out->channel, p.channel);
+    out->segment_number = static_cast<int32_t>(p.segment_number);
+    copy_str(out->segment, sizeof out->segment, p.segment);
+    copy_str(out->reason, sizeof out->reason, p.reason);
+  });
+}
 
 int mef3io_reader_n_channels(mef3io_reader* r, int32_t* out) {
   if (!r || !out) return fail_argument("NULL argument");

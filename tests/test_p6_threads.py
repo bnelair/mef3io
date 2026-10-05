@@ -80,24 +80,48 @@ def _block_lengths(path):
 
 def _shift_block_times(path, shifts_samples):
     """Move block i's stored start time by shifts_samples[i] on the time axis.
+
     Blocks written by mef3io start exactly on the sampling grid, so they tile
     the output without overlap. Foreign writers carry acquisition jitter and
     per-block microsecond rounding, so a block can begin a few samples before
     the previous one ends and the two claim the same output samples. Times are
     stored NEGATED on disk, so moving a block later subtracts from the stored
     value.
+
+    BOTH COPIES MOVE. A block's start time is stored twice — in the `.tidx`
+    entry and in the RED block header at the head of the block — and the reader
+    places by the header (see BlockCopyMismatch in session.hpp). This helper
+    used to edit the index alone, which did not produce a jittered file at all:
+    it produced an INCONSISTENT one, where the copy mef3io read had moved and
+    the copy pymef read had not. That is what made the two libraries look like
+    they disagreed about layout (issue #11) when they do not. Editing the
+    header means re-sealing the per-block CRC over [4, block_bytes), which the
+    decoder verifies.
     """
     tidx = glob.glob(path + "/ch1.timd/*/*.tidx")[0]
+    tdat = tidx[:-5] + ".tdat"
     raw = bytearray(open(tidx, "rb").read())
+    dat = bytearray(open(tdat, "rb").read())
     uh, ent = 1024, 56
     n = (len(raw) - uh) // ent
     assert len(shifts_samples) == n, (len(shifts_samples), n)
     for i in range(n):
         off = uh + i * ent
-        stored = int.from_bytes(raw[off + 8: off + 16], "little", signed=True)
         shift_us = int(round(shifts_samples[i] * 1e6 / FS))
+
+        stored = int.from_bytes(raw[off + 8: off + 16], "little", signed=True)
         raw[off + 8: off + 16] = (stored - shift_us).to_bytes(8, "little", signed=True)
+
+        # The header's own copy, at block_offset + 40, then re-seal the block.
+        boff = int.from_bytes(raw[off: off + 8], "little", signed=True)
+        bbytes = int.from_bytes(raw[off + 28: off + 32], "little")
+        hstored = int.from_bytes(dat[boff + 40: boff + 48], "little", signed=True)
+        dat[boff + 40: boff + 48] = (hstored - shift_us).to_bytes(8, "little", signed=True)
+        crc = m.crc32(bytes(dat[boff + 4: boff + bbytes]))
+        dat[boff: boff + 4] = crc.to_bytes(4, "little")
+
     open(tidx, "wb").write(bytes(raw))
+    open(tdat, "wb").write(bytes(dat))
 
 
 def _assert_thread_invariant(path, threads=(2, 3, 4, 8, 16, 0), repeats=3):

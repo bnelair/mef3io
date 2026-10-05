@@ -72,6 +72,7 @@ RawData Reader::read_raw(const std::string& channel, std::optional<si8> t0_opt,
   out.valid.assign(static_cast<std::size_t>(n), 0);
 
   BlockJobs jobs = session_.collect_blocks(channel, t0, t1);
+  out.block_copy_mismatches = std::move(jobs.mismatches);
   const int threads = (n_threads == kUseDefaultThreads) ? n_threads_ : n_threads;
   const std::size_t n_jobs = jobs.jobs.size();
 

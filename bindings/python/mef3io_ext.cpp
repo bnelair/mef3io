@@ -595,9 +595,22 @@ NB_MODULE(_mef3io, m) {
   auto opt_time = [](nb::object o) { return opt_si8(o, "t0/t1"); };
 
   nb::class_<mef3io::Reader>(m, "Reader")
-      .def(nb::init<const std::string&, std::string, int>(), nb::arg("path"),
-           nb::arg("password") = "", nb::arg("n_threads") = 0)
+      .def(nb::init<const std::string&, std::string, int, bool>(), nb::arg("path"),
+           nb::arg("password") = "", nb::arg("n_threads") = 0, nb::arg("strict") = true)
       .def("set_threads", &mef3io::Reader::set_threads)
+      .def("problems",
+           [](mef3io::Reader& r) {
+             nb::list out;
+             for (const auto& p : r.problems()) {
+               nb::dict e;
+               e["channel"] = p.channel;
+               e["segment_number"] = p.segment_number;
+               e["segment"] = p.segment;
+               e["reason"] = p.reason;
+               out.append(e);
+             }
+             return out;
+           })
       .def_prop_ro("channels", &mef3io::Reader::channels)
       .def(
           "declaration_issues",
@@ -683,6 +696,18 @@ NB_MODULE(_mef3io, m) {
             out["units_conversion_factor"] = d.units_conversion_factor;
             out["samples"] = vec_to_numpy(std::move(d.samples));
             out["valid"] = vec_to_numpy(std::move(d.valid));
+            nb::list mm;
+            for (const auto& x : d.block_copy_mismatches) {
+              nb::dict e;
+              e["segment"] = x.segment;
+              e["block_index"] = x.block_index;
+              e["index_start_uutc"] = x.index_start_uutc;
+              e["header_start_uutc"] = x.header_start_uutc;
+              e["index_number_of_samples"] = x.index_number_of_samples;
+              e["header_number_of_samples"] = x.header_number_of_samples;
+              mm.append(e);
+            }
+            out["block_copy_mismatches"] = mm;
             return out;
           },
           nb::arg("channel"), nb::arg("t0") = nb::none(), nb::arg("t1") = nb::none(),
