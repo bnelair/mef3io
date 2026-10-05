@@ -33,7 +33,10 @@ from typing import Optional
 # on disk; bumping invalidates them instead, and the next open rebuilds.
 # 3: fingerprints now include a content signature, so fixed-size/header-only
 # rewrites still invalidate snapshots on coarse-mtime filesystems.
-CACHE_FORMAT_VERSION = 3
+# 4: added "problems" (segments a strict=False open skipped). Without it a warm
+# lenient open reported no problems and raised no warning, and a strict open
+# was served a snapshot of a session it would have refused.
+CACHE_FORMAT_VERSION = 4
 METADATA_FILE_BYTES = 16384
 
 
@@ -108,7 +111,8 @@ def _fingerprints(session_path: str) -> dict:
     return fp
 
 
-def build_snapshot(session_path: str, channel_infos: dict, declaration_issues=None) -> dict:
+def build_snapshot(session_path: str, channel_infos: dict, declaration_issues=None,
+                   problems=None) -> dict:
     return {
         "format": CACHE_FORMAT_VERSION,
         "session_path": os.path.abspath(session_path),
@@ -118,6 +122,10 @@ def build_snapshot(session_path: str, channel_infos: dict, declaration_issues=No
         # without touching the session tree. Snapshots written before this key
         # existed simply have no issues to report.
         "declaration_issues": list(declaration_issues or []),
+        # Segments a strict=False open skipped. The channel infos above were
+        # computed WITHOUT them, so a strict open must not be served this
+        # snapshot, and a lenient one must still report them.
+        "problems": list(problems or []),
     }
 
 

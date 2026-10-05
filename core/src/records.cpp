@@ -145,6 +145,7 @@ std::vector<ui1> base_uh_bytes(const std::string& ftype, const std::string& sess
   uh.channel_name = channel_name;
   std::copy(vf.level1.begin(), vf.level1.end(), uh.level_1_password_validation_field.begin());
   std::copy(vf.level2.begin(), vf.level2.end(), uh.level_2_password_validation_field.begin());
+  fmt::provenance::stamp_created(uh);
   std::vector<ui1> buf(fmt::UNIVERSAL_HEADER_BYTES);
   uh.serialize(buf);
   return buf;

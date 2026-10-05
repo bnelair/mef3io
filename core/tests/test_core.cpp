@@ -20,6 +20,7 @@
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
 #include "mef3io/validate.hpp"
+#include "mef3io/version.hpp"
 
 using namespace mef3io;
 
@@ -419,6 +420,19 @@ TEST_CASE("C ABI round trip (write, read, records, segments)") {
   REQUIRE(info.start_time == start);
   REQUIRE(info.section3_available == 1);
 
+  {
+    mef3io_provenance pv{};
+    REQUIRE(mef3io_reader_segment_provenance(r, "ch1", 0, &pv) == MEF3IO_OK);
+    REQUIRE(pv.present == 1);
+    REQUIRE(pv.layout_version == 1);
+    REQUIRE(std::string(pv.created_by) == mef3io_version());
+    REQUIRE(std::string(pv.last_modified_by) == mef3io_version());
+    REQUIRE(std::string(mef3io_operation_name(pv.last_operation)) == "create");
+    REQUIRE(pv.operations_mask == 0x2u);
+    REQUIRE(pv.modification_count == 0u);
+    REQUIRE(mef3io_operation_name(200) == nullptr);
+  }
+
   int64_t n = 0;
   REQUIRE(mef3io_reader_read_size(r, "ch1", MEF3IO_TIME_UNSET, MEF3IO_TIME_UNSET, &n) ==
           MEF3IO_OK);
@@ -671,4 +685,133 @@ TEST_CASE("C ABI exposes durability and recovery for the MATLAB binding") {
 
   fsys::remove_all(dir);
   fsys::remove(tar);
+}
+
+
+TEST_CASE("provenance region: frozen layout, bounds, saturation, foreign data",
+          "[headers][provenance]") {
+  using namespace mef3io;
+  namespace pv = fmt::provenance;
+  using Op = pv::Operation;
+
+  SECTION("golden bytes: the layout is frozen") {
+    fmt::UniversalHeader uh;
+    pv::stamp_created(uh, "1.2.0");
+    REQUIRE(pv::stamp_modified(uh, Op::Append, "1.3.0"));
+    std::vector<ui1> buf(fmt::UNIVERSAL_HEADER_BYTES, 0);
+    uh.serialize(buf);
+    // Every byte of the region, written out literally. If this fails, the
+    // on-disk format changed — which the spec forbids.
+    const std::array<ui1, 64> expected = {
+        'M', '3', 'I', 'O', 1, 2, 0, 0,                                         // 0..7
+        '1', '.', '2', '.', '0', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  // 8..27
+        '1', '.', '3', '.', '0', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  // 28..47
+        0x06, 0, 0, 0,                                                          // 48: mask
+        0x01, 0, 0, 0,                                                          // 52: count
+        0, 0, 0, 0, 0, 0, 0, 0};                                                // 56: reserved
+    REQUIRE(std::equal(expected.begin(), expected.end(), buf.begin() + 960));
+    // and nothing before the region was touched by the stamp
+    REQUIRE(std::all_of(buf.begin() + 900, buf.begin() + 960, [](ui1 b) { return b == 0; }));
+  }
+
+  SECTION("operation codes are append-only") {
+    REQUIRE(static_cast<int>(Op::Unset) == 0);
+    REQUIRE(static_cast<int>(Op::Create) == 1);
+    REQUIRE(static_cast<int>(Op::Append) == 2);
+    REQUIRE(static_cast<int>(Op::HeaderRepair) == 3);
+    REQUIRE(static_cast<int>(Op::Recovery) == 4);
+    REQUIRE(static_cast<int>(Op::MetadataUpdate) == 5);
+    REQUIRE(std::string(pv::operation_name(1)) == "create");
+    REQUIRE(std::string(pv::operation_name(2)) == "append");
+    REQUIRE(std::string(pv::operation_name(3)) == "header-repair");
+    REQUIRE(std::string(pv::operation_name(4)) == "recovery");
+    REQUIRE(std::string(pv::operation_name(5)) == "metadata-update");
+    REQUIRE(pv::operation_name(6) == nullptr);
+  }
+
+  SECTION("the count saturates; it never wraps back to zero") {
+    fmt::UniversalHeader uh;
+    pv::stamp_created(uh);
+    for (int i = 0; i < 10000; ++i) REQUIRE(pv::stamp_modified(uh, Op::Append));
+    REQUIRE(pv::read(uh).modification_count == 10000u);
+    // jump to the edge
+    byteio::write<ui4>(std::span<ui1>(uh.discretionary_region), pv::COUNT_OFFSET,
+                       pv::COUNT_MAX - 1);
+    REQUIRE(pv::stamp_modified(uh, Op::Append));
+    REQUIRE(pv::read(uh).modification_count == pv::COUNT_MAX);
+    for (int i = 0; i < 3; ++i) REQUIRE(pv::stamp_modified(uh, Op::Append));
+    REQUIRE(pv::read(uh).modification_count == pv::COUNT_MAX);
+    // and the saturated count did not bleed into the neighbouring fields
+    REQUIRE(pv::read(uh).operations_mask == 0x6u);
+    REQUIRE(std::all_of(uh.discretionary_region.begin() + 56, uh.discretionary_region.end(),
+                        [](ui1 b) { return b == 0; }));
+  }
+
+  SECTION("any version string stays inside its 20-byte field") {
+    fmt::UniversalHeader uh;
+    const std::string huge(500, 'x');
+    pv::stamp_created(uh, huge);
+    REQUIRE(pv::stamp_modified(uh, Op::Append, "1.2.0\xC3\xA9\x01weird"));
+    auto p = pv::read(uh);
+    REQUIRE(p.created_by == std::string(19, 'x'));  // 19 chars + NUL
+    REQUIRE(p.last_modified_by == "1.2.0???weird");  // non-ASCII/control -> '?'
+    const auto& r = uh.discretionary_region;
+    REQUIRE(r[pv::CREATED_BY_OFFSET + 19] == 0);
+    REQUIRE(r[pv::MODIFIED_BY_OFFSET + 19] == 0);
+    REQUIRE(pv::read(uh).operations_mask == 0x6u);  // neighbours intact
+  }
+
+  SECTION("an unstamped (all-zero) file gains provenance but no created-by") {
+    fmt::UniversalHeader uh;
+    REQUIRE_FALSE(pv::read(uh).present);
+    REQUIRE(pv::stamp_modified(uh, Op::HeaderRepair));
+    auto p = pv::read(uh);
+    REQUIRE(p.present);
+    REQUIRE(p.created_by.empty());
+    REQUIRE(p.last_modified_by == version());
+    REQUIRE(p.ever(Op::HeaderRepair));
+    REQUIRE_FALSE(p.ever(Op::Create));
+    REQUIRE(p.modification_count == 1u);
+  }
+
+  SECTION("the mask remembers what a later operation would hide") {
+    fmt::UniversalHeader uh;
+    pv::stamp_created(uh);
+    REQUIRE(pv::stamp_modified(uh, Op::HeaderRepair));
+    REQUIRE(pv::stamp_modified(uh, Op::Append));
+    auto p = pv::read(uh);
+    REQUIRE(p.last_operation == static_cast<ui1>(Op::Append));
+    REQUIRE(p.ever(Op::Create));
+    REQUIRE(p.ever(Op::HeaderRepair));
+    REQUIRE(p.ever(Op::Append));
+    REQUIRE_FALSE(p.ever(Op::Recovery));
+  }
+
+  SECTION("another application's region is never written") {
+    fmt::UniversalHeader uh;
+    for (std::size_t i = 0; i < uh.discretionary_region.size(); ++i)
+      uh.discretionary_region[i] = static_cast<ui1>(i + 1);
+    const auto before = uh.discretionary_region;
+    REQUIRE_FALSE(pv::read(uh).present);
+    REQUIRE_FALSE(pv::stamp_modified(uh, Op::Append));
+    REQUIRE(uh.discretionary_region == before);
+  }
+
+  SECTION("a newer layout's bytes survive an older writer") {
+    fmt::UniversalHeader uh;
+    pv::stamp_created(uh);
+    auto& r = uh.discretionary_region;
+    r[pv::LAYOUT_OFFSET] = 2;  // a future layout...
+    r[6] = 0xAB; r[7] = 0xCD;  // ...that assigned the reserved bytes
+    for (std::size_t i = 56; i < 64; ++i) r[i] = static_cast<ui1>(0xF0 + i - 56);
+    const auto before = r;
+    REQUIRE(pv::stamp_modified(uh, Op::Append));
+    REQUIRE(r[pv::LAYOUT_OFFSET] == 2);  // not downgraded
+    REQUIRE(r[6] == 0xAB);
+    REQUIRE(r[7] == 0xCD);
+    REQUIRE(std::equal(before.begin() + 56, before.end(), r.begin() + 56));
+    REQUIRE(std::equal(before.begin() + pv::CREATED_BY_OFFSET,
+                       before.begin() + pv::CREATED_BY_OFFSET + pv::VERSION_BYTES,
+                       r.begin() + pv::CREATED_BY_OFFSET));
+  }
 }

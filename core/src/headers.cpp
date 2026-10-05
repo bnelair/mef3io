@@ -2,9 +2,13 @@
 #include "mef3io/headers.hpp"
 
 #include <algorithm>
+#include <iterator>
+#include <string_view>
+#include <tuple>
 
 #include "mef3io/byteio.hpp"
 #include "mef3io/crc.hpp"
+#include "mef3io/version.hpp"
 
 namespace mef3io::fmt {
 namespace {
@@ -289,5 +293,109 @@ void RedBlockHeader::serialize(std::span<ui1> b) const {
   write<si8>(b, 40, start_time);
   write_bytes<256>(b, 48, statistics);
 }
+
+// --- Provenance region ---
+
+namespace provenance {
+namespace {
+
+using Region = std::array<ui1, REGION_BYTES>;
+static_assert(std::tuple_size_v<decltype(UniversalHeader::discretionary_region)> == REGION_BYTES);
+
+bool has_magic(const Region& r) {
+  return std::equal(std::begin(MAGIC), std::end(MAGIC), r.begin() + MAGIC_OFFSET);
+}
+
+bool all_zero(const Region& r) {
+  return std::all_of(r.begin(), r.end(), [](ui1 b) { return b == 0; });
+}
+
+ui4 read_u32(const Region& r, std::size_t off) {
+  return byteio::read<ui4>(std::span<const ui1>(r), off);  // range-checked
+}
+
+void write_u32(Region& r, std::size_t off, ui4 v) {
+  byteio::write<ui4>(std::span<ui1>(r), off, v);  // range-checked
+}
+
+std::string read_version(const Region& r, std::size_t off) {
+  std::string s;
+  for (std::size_t i = 0; i < VERSION_BYTES && r[off + i] != 0; ++i)
+    s.push_back(static_cast<char>(r[off + i]));
+  return s;
+}
+
+// ASCII only, at most VERSION_BYTES - 1 characters, always NUL-terminated:
+// the field is fully cleared first, then filled, so nothing outside it is
+// touched whatever the version string is.
+void write_version(Region& r, std::size_t off, std::string_view v) {
+  if (v.empty()) v = mef3io::version();
+  std::fill_n(r.begin() + off, VERSION_BYTES, ui1{0});
+  for (std::size_t i = 0; i + 1 < VERSION_BYTES && i < v.size() && v[i] != '\0'; ++i) {
+    const auto c = static_cast<unsigned char>(v[i]);
+    r[off + i] = (c >= 0x20 && c < 0x7F) ? c : static_cast<ui1>('?');
+  }
+}
+
+ui4 bit(Operation op) { return ui4{1} << static_cast<unsigned>(op); }
+
+}  // namespace
+
+const char* operation_name(ui1 code) {
+  switch (code) {
+    case 0: return "unset";
+    case 1: return "create";
+    case 2: return "append";
+    case 3: return "header-repair";
+    case 4: return "recovery";
+    case 5: return "metadata-update";
+    default: return nullptr;
+  }
+}
+
+Provenance read(const UniversalHeader& uh) {
+  const Region& r = uh.discretionary_region;
+  Provenance p;
+  if (!has_magic(r)) return p;
+  p.present = true;
+  p.layout_version = r[LAYOUT_OFFSET];
+  p.last_operation = r[LAST_OP_OFFSET];
+  p.created_by = read_version(r, CREATED_BY_OFFSET);
+  p.last_modified_by = read_version(r, MODIFIED_BY_OFFSET);
+  p.operations_mask = read_u32(r, MASK_OFFSET);
+  p.modification_count = read_u32(r, COUNT_OFFSET);
+  return p;
+}
+
+void stamp_created(UniversalHeader& uh, std::string_view version) {
+  Region& r = uh.discretionary_region;
+  r.fill(0);
+  std::copy(std::begin(MAGIC), std::end(MAGIC), r.begin() + MAGIC_OFFSET);
+  r[LAYOUT_OFFSET] = LAYOUT_VERSION;
+  r[LAST_OP_OFFSET] = static_cast<ui1>(Operation::Create);
+  write_version(r, CREATED_BY_OFFSET, version);
+  write_version(r, MODIFIED_BY_OFFSET, version);
+  write_u32(r, MASK_OFFSET, bit(Operation::Create));
+  write_u32(r, COUNT_OFFSET, 0);
+}
+
+bool stamp_modified(UniversalHeader& uh, Operation op, std::string_view version) {
+  Region& r = uh.discretionary_region;
+  if (!has_magic(r)) {
+    if (!all_zero(r)) return false;  // another application's region
+    std::copy(std::begin(MAGIC), std::end(MAGIC), r.begin() + MAGIC_OFFSET);
+    r[LAYOUT_OFFSET] = LAYOUT_VERSION;  // created-by stays empty: not ours
+  }
+  // A newer layout's version byte is kept: its extra fields live in bytes this
+  // code does not touch, and downgrading the byte would hide them.
+  r[LAST_OP_OFFSET] = static_cast<ui1>(op);
+  write_version(r, MODIFIED_BY_OFFSET, version);
+  write_u32(r, MASK_OFFSET, read_u32(r, MASK_OFFSET) | bit(op));
+  const ui4 n = read_u32(r, COUNT_OFFSET);
+  write_u32(r, COUNT_OFFSET, n == COUNT_MAX ? COUNT_MAX : n + 1);  // saturate
+  return true;
+}
+
+}  // namespace provenance
 
 }  // namespace mef3io::fmt

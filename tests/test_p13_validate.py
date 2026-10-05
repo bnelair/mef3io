@@ -111,6 +111,35 @@ def _tree_digest(path):
     return h.hexdigest()
 
 
+def _tree_files(path):
+    return {str(f.relative_to(path)): f.read_bytes()
+            for f in sorted(Path(path).rglob("*")) if f.is_file()}
+
+
+def _assert_restored_but_for_provenance(path, pristine: dict, what: str):
+    """A repair must restore the writer's bytes exactly — except that it now
+    RECORDS itself: the provenance region (universal header 960..1024) of each
+    file it rewrote says `header-repair`, and the header CRC (0..4) covers that
+    region. Everything else, body CRC included, must match byte for byte; the
+    header CRCs are checked by the validator pass that follows each call."""
+    now = _tree_files(path)
+    assert now.keys() == pristine.keys(), f"{what}: files added or removed"
+    changed = []
+    for rel, before in pristine.items():
+        after = now[rel]
+        if after == before:
+            continue
+        assert len(after) == len(before), f"{what}: {rel} changed size"
+        outside = lambda b: b[4:960] + b[1024:]
+        assert outside(after) == outside(before), (
+            f"{what}: {rel} differs outside the provenance region")
+        mask = struct.unpack_from("<I", after, 960 + 48)[0]
+        assert after[960:964] == b"M3IO" and after[965] == 3 and mask & (1 << 3), (
+            f"{what}: {rel} was rewritten but does not record header-repair")
+        changed.append(rel)
+    return changed
+
+
 def _ids(report):
     return {f.check_id for f in report.findings}
 
@@ -306,6 +335,7 @@ def test_check_detects_and_fix_repairs(tmp_path, check_id):
     _write(path)
     tmet = _tmet(path)
     pristine = _tree_digest(path)
+    pristine_files = _tree_files(path)
     corrupt(tmet, path)
     assert _tree_digest(path) != pristine, "the corruption must actually change bytes"
 
@@ -330,9 +360,8 @@ def test_check_detects_and_fix_repairs(tmp_path, check_id):
     assert check_id not in _ids(after)
     assert after.ok, after.summary()
     # The real oracle: the writer, not the validator's own detect.
-    assert _tree_digest(path) == pristine, (
-        f"{check_id}: repair did not restore the writer's bytes"
-    )
+    assert _assert_restored_but_for_provenance(path, pristine_files, check_id), (
+        f"{check_id}: the repair reported success but rewrote nothing")
 
 
 def test_repair_touches_only_the_selected_check(tmp_path):
@@ -1214,14 +1243,17 @@ def test_repaired_means_bytes_changed(tmp_path):
     assert tmet.read_bytes() == clean, "a clean session must not be rewritten"
 
     # Something wrong -> written, and claimed exactly once.
+    pristine_files = _tree_files(path)
     _patch_s2(tmet, "maximum_contiguous_samples", 22_129_876)
     report = mef3io.repair_session(str(path), ["sizing.contiguous"])
     hits = [f for f in report.findings if f.check_id == "sizing.contiguous"]
     assert hits and all(f.repaired for f in hits)
     assert report.segments_repaired == 1
     # Restoring the one corrupted field reproduces the original file exactly,
-    # CRCs included — the repair touched that field and nothing else.
-    assert tmet.read_bytes() == clean
+    # body CRC included — the repair touched that field and nothing else, apart
+    # from recording itself in the provenance region.
+    assert _assert_restored_but_for_provenance(path, pristine_files, "sizing.contiguous") == [
+        str(tmet.relative_to(path))]
     assert "sizing.contiguous" not in _ids(mef3io.Validator(str(path)).validate())
 
 
