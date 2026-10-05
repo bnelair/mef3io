@@ -20,6 +20,7 @@
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
 #include "mef3io/validate.hpp"
+#include "mef3io/version.hpp"
 
 using namespace mef3io;
 
@@ -419,6 +420,15 @@ TEST_CASE("C ABI round trip (write, read, records, segments)") {
   REQUIRE(info.start_time == start);
   REQUIRE(info.section3_available == 1);
 
+  {
+    char created[64], last[64];
+    REQUIRE(mef3io_reader_segment_stamp(r, "ch1", 0, created, sizeof created, last,
+                                        sizeof last) == MEF3IO_OK);
+    const std::string me = std::string("mef3io ") + mef3io_version();
+    REQUIRE(std::string(created) == me);
+    REQUIRE(std::string(last) == me);
+  }
+
   int64_t n = 0;
   REQUIRE(mef3io_reader_read_size(r, "ch1", MEF3IO_TIME_UNSET, MEF3IO_TIME_UNSET, &n) ==
           MEF3IO_OK);
@@ -671,4 +681,40 @@ TEST_CASE("C ABI exposes durability and recovery for the MATLAB binding") {
 
   fsys::remove_all(dir);
   fsys::remove(tar);
+}
+
+
+TEST_CASE("writer stamp lives in the discretionary region and respects foreign data",
+          "[headers][stamp]") {
+  using namespace mef3io;
+  const std::string me = std::string("mef3io ") + version();
+
+  fmt::UniversalHeader uh;
+  REQUIRE(fmt::created_by(uh).empty());
+  REQUIRE(fmt::last_written_by(uh).empty());
+
+  // Zeros (any other writer, or mef3io <= 1.1): only "last written" is claimed.
+  REQUIRE(fmt::stamp_modified(uh));
+  REQUIRE(fmt::created_by(uh).empty());
+  REQUIRE(fmt::last_written_by(uh) == me);
+
+  fmt::stamp_created(uh);
+  REQUIRE(fmt::created_by(uh) == me);
+  REQUIRE(fmt::last_written_by(uh) == me);
+
+  // Round trip through the on-disk bytes, at offset 960.
+  std::vector<ui1> buf(fmt::UNIVERSAL_HEADER_BYTES, 0);
+  uh.serialize(buf);
+  REQUIRE(std::memcmp(buf.data() + 960, me.data(), me.size()) == 0);
+  auto back = fmt::UniversalHeader::parse(buf);
+  REQUIRE(fmt::created_by(back) == me);
+
+  // Another application's bytes: neither read as a stamp nor overwritten.
+  fmt::UniversalHeader foreign;
+  for (std::size_t i = 0; i < foreign.discretionary_region.size(); ++i)
+    foreign.discretionary_region[i] = static_cast<ui1>(i + 1);
+  const auto before = foreign.discretionary_region;
+  REQUIRE(fmt::created_by(foreign).empty());
+  REQUIRE_FALSE(fmt::stamp_modified(foreign));
+  REQUIRE(foreign.discretionary_region == before);
 }

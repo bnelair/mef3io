@@ -389,6 +389,17 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   so zeros/sentinels/nonsense still read fine; `test_p12_sizing.py` pins both
   halves. Cross-checked against an independent third-party patcher in exact
   mode → "already consistent".
+- **Writer stamp** (`fmt::stamp_created`/`stamp_modified`, headers.hpp): the
+  universal header's 64 B DISCRETIONARY region (offset 960) holds two 32 B
+  slots, "mef3io <ver>" = created by / last written by. EVERY site that writes
+  a universal header must stamp: fresh files `stamp_created`; append, repair
+  (`overwrite_universal_header` + the .tmet rewrite) and recovery
+  `stamp_modified`. Zeros = unknown (every other writer) → only "last written"
+  is claimed; any other bytes are another application's → left alone, file
+  unstamped. Read via `SegmentInfo.created_by/last_written_by` (from the
+  .tmet); C ABI `mef3io_reader_segment_stamp` (NOT a new field in
+  `mef3io_segment_info` — callers allocate that struct, growing it overflows
+  them). Tests: `tests/test_p21_writer_stamp.py` + a Catch2 case.
 - **RED encode**: first emitted byte is junk (meflib overwrites stats[255] then
   restores) → drop emitted[0], payload = emitted[1:] at offset 304; stored
   difference_bytes = generated+1. Lossless no-detrend/no-scale, pymef-readable.

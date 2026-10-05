@@ -310,8 +310,8 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     check(mef3io_reader_n_segments(r, ch.c_str(), &n));
     const char* fields[] = {"segment",        "start_time",       "end_time",
                             "start_sample",   "number_of_samples", "number_of_blocks",
-                            "path"};
-    plhs[0] = mxCreateStructMatrix(n, 1, 7, fields);
+                            "path",           "created_by",       "last_written_by"};
+    plhs[0] = mxCreateStructMatrix(n, 1, 9, fields);
     for (std::int32_t i = 0; i < n; ++i) {
       mef3io_segment_info s{};
       check(mef3io_reader_segment(r, ch.c_str(), i, &s));
@@ -322,6 +322,11 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
       mxSetField(plhs[0], i, "number_of_samples", make_int64(s.number_of_samples));
       mxSetField(plhs[0], i, "number_of_blocks", make_int64(s.number_of_blocks));
       mxSetField(plhs[0], i, "path", mxCreateString(s.path));
+      char created[64] = {0}, last[64] = {0};
+      check(mef3io_reader_segment_stamp(r, ch.c_str(), i, created, sizeof created, last,
+                                        sizeof last));
+      mxSetField(plhs[0], i, "created_by", mxCreateString(created));
+      mxSetField(plhs[0], i, "last_written_by", mxCreateString(last));
     }
     return;
   }

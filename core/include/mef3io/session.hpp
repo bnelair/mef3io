@@ -130,6 +130,11 @@ struct SegmentInfo {
   si8 start_sample = 0;         // channel-wide index of the first sample
   si8 number_of_samples = 0;    // samples stored in this segment (gaps excluded)
   si8 number_of_blocks = 0;
+  /// "mef3io <version>" that created / last wrote this segment's .tmet, read
+  /// from its universal-header writer stamp; empty when unknown (a file from
+  /// another writer, or from mef3io before the stamp existed).
+  std::string created_by;
+  std::string last_written_by;
 };
 
 struct ChannelInfo {

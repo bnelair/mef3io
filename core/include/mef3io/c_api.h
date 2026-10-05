@@ -147,6 +147,12 @@ typedef struct {
 } mef3io_segment_info;
 
 int mef3io_reader_n_segments(mef3io_reader* r, const char* channel, int32_t* out);
+/* Writer stamp of segment `index`: "mef3io <version>" that created / last wrote
+ * it, or "" when unknown (another writer, or mef3io before the stamp existed).
+ * Separate from mef3io_segment_info so that struct keeps its size and layout. */
+int mef3io_reader_segment_stamp(mef3io_reader* r, const char* channel, int32_t index,
+                                char* created_by, int32_t created_len, char* last_written_by,
+                                int32_t last_len);
 int mef3io_reader_segment(mef3io_reader* r, const char* channel, int32_t index,
                           mef3io_segment_info* out);
 

@@ -5,6 +5,7 @@
 
 #include "mef3io/byteio.hpp"
 #include "mef3io/crc.hpp"
+#include "mef3io/version.hpp"
 
 namespace mef3io::fmt {
 namespace {
@@ -288,6 +289,51 @@ void RedBlockHeader::serialize(std::span<ui1> b) const {
   write<ui4>(b, 36, block_bytes);
   write<si8>(b, 40, start_time);
   write_bytes<256>(b, 48, statistics);
+}
+
+// --- Writer stamp ---
+
+namespace {
+
+constexpr std::size_t kSlot = WRITER_STAMP_SLOT_BYTES;
+
+std::string read_slot(const UniversalHeader& uh, std::size_t slot) {
+  const auto* p = uh.discretionary_region.data() + slot * kSlot;
+  std::string s(reinterpret_cast<const char*>(p), kSlot);
+  s.resize(std::min(s.find('\0'), kSlot));
+  return s.rfind(WRITER_STAMP_PREFIX, 0) == 0 ? s : std::string();
+}
+
+void write_slot(UniversalHeader& uh, std::size_t slot) {
+  std::string s = std::string(WRITER_STAMP_PREFIX) + mef3io::version();
+  s.resize(std::min(s.size(), kSlot - 1));  // always NUL-terminated
+  auto* p = uh.discretionary_region.data() + slot * kSlot;
+  std::fill(p, p + kSlot, ui1{0});
+  std::copy(s.begin(), s.end(), p);
+}
+
+bool slot_is_free(const UniversalHeader& uh, std::size_t slot) {
+  const auto* p = uh.discretionary_region.data() + slot * kSlot;
+  return std::all_of(p, p + kSlot, [](ui1 b) { return b == 0; }) || !read_slot(uh, slot).empty();
+}
+
+}  // namespace
+
+std::string created_by(const UniversalHeader& uh) { return read_slot(uh, 0); }
+std::string last_written_by(const UniversalHeader& uh) { return read_slot(uh, 1); }
+
+void stamp_created(UniversalHeader& uh) {
+  uh.discretionary_region.fill(0);
+  write_slot(uh, 0);
+  write_slot(uh, 1);
+}
+
+bool stamp_modified(UniversalHeader& uh) {
+  // Both slots must be ours or empty; anything else is another application's
+  // data and is not overwritten.
+  if (!slot_is_free(uh, 0) || !slot_is_free(uh, 1)) return false;
+  write_slot(uh, 1);
+  return true;
 }
 
 }  // namespace mef3io::fmt

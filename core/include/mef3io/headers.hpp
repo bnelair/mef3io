@@ -6,6 +6,7 @@
 #include <array>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "mef3io/types.hpp"
@@ -48,6 +49,38 @@ struct UniversalHeader {
 
   bool is_password_protected() const;
 };
+
+// ---------------------------------------------------------------------------
+// Writer stamp: which mef3io version created a file, and which last wrote it.
+//
+// Kept in the universal header's 64-byte DISCRETIONARY region (offset 960),
+// which MEF 3.0 leaves to the writing application: meflib never interprets
+// it, pymef only reports it as raw bytes, and it sits under the header CRC
+// every writer already recomputes. Every file carries a universal header, so
+// every file carries its own stamp.
+//
+// Two 32-byte slots, each "mef3io <version>" NUL-padded: [0, 32) = CREATED BY,
+// written once when the file is made; [32, 64) = LAST WRITTEN BY, refreshed by
+// an append, a repair or a recovery. A slot counts only if it begins with the
+// prefix, so zeros (meflib, pymef, mef_tools, mef3io <= 1.1.x) read as
+// "unknown" and nothing else can be mistaken for a stamp.
+//
+// A region holding anything else belongs to another application: it is LEFT
+// ALONE, and that file simply carries no stamp from mef3io.
+// ---------------------------------------------------------------------------
+inline constexpr std::size_t WRITER_STAMP_SLOT_BYTES = 32;
+inline constexpr std::string_view WRITER_STAMP_PREFIX = "mef3io ";
+
+/// "mef3io <version>" of the writer that created the file; empty if unknown.
+std::string created_by(const UniversalHeader& uh);
+/// "mef3io <version>" of the writer that last modified the file; empty if unknown.
+std::string last_written_by(const UniversalHeader& uh);
+/// Stamp a NEW file: both slots set to this library's version.
+void stamp_created(UniversalHeader& uh);
+/// Stamp a MODIFIED file: refresh the last-written slot. The created slot is
+/// kept as is — left empty for a file mef3io did not create. Returns false,
+/// writing nothing, when the region holds another application's bytes.
+bool stamp_modified(UniversalHeader& uh);
 
 // ---------------------------------------------------------------------------
 // Metadata section 1 (1536 B): encryption levels for sections 2 and 3.

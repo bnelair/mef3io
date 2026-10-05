@@ -112,7 +112,9 @@ level-2 access).
 
 `segments` maps what data is where — one dict per segment with
 `start_time`/`end_time`, `start_sample`, `number_of_samples`,
-`number_of_blocks`, `path` — from metadata only (nothing decoded), so it is
+`number_of_blocks`, `path`, and the writer stamp `created_by` /
+`last_written_by` (`"mef3io 1.2.0"`, or `""` for files from another writer or
+from mef3io before 1.2) — from metadata only (nothing decoded), so it is
 cheap even for huge, gap-riddled sessions. `toc` is the finer per-RED-block
 view (start time, sample counts, extrema, discontinuity flags).
 

@@ -243,6 +243,21 @@ int mef3io_reader_segment(mef3io_reader* r, const char* channel, int32_t index,
   });
 }
 
+int mef3io_reader_segment_stamp(mef3io_reader* r, const char* channel, int32_t index,
+                                char* created_by, int32_t created_len, char* last_written_by,
+                                int32_t last_len) {
+  if (!r || !channel || !created_by || !last_written_by || created_len <= 0 || last_len <= 0)
+    return fail_argument("NULL argument or empty buffer");
+  return guarded([&] {
+    auto segs = r->impl.segments(channel);
+    if (index < 0 || static_cast<size_t>(index) >= segs.size())
+      throw std::out_of_range("segment index out of range");
+    const mef3io::SegmentInfo& s = segs[static_cast<size_t>(index)];
+    copy_str(created_by, static_cast<size_t>(created_len), s.created_by);
+    copy_str(last_written_by, static_cast<size_t>(last_len), s.last_written_by);
+  });
+}
+
 int mef3io_reader_n_blocks(mef3io_reader* r, const char* channel, int64_t* out) {
   if (!r || !channel || !out) return fail_argument("NULL argument");
   return guarded([&] { *out = static_cast<int64_t>(r->impl.toc(channel).size()); });

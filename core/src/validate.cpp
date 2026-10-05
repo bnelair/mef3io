@@ -1207,6 +1207,7 @@ void overwrite_universal_header(const std::string& path, const fmt::UniversalHea
       throw IoError("short read: " + path);
   }
   fmt::UniversalHeader patched = uh;
+  fmt::stamp_modified(patched);
   patched.body_crc = byteio::read<ui4>(head, 4);
   patched.serialize(head);
   patched.update_header_crc(head);
@@ -1618,7 +1619,11 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
         auto enc = crypto::aes128_ecb_encrypt(s2_image, *s2_key);
         std::copy(enc.begin(), enc.end(), s2_image.begin());
       }
-      buffer.tmet_uh.serialize(file);
+      {
+        fmt::UniversalHeader uh = buffer.tmet_uh;
+        fmt::stamp_modified(uh);
+        uh.serialize(file);
+      }
       // If the file arrived with no body CRC at all — meflib's CRC_NO_ENTRY,
       // which a streaming writer legitimately leaves — then computing one now
       // turns "nobody ever verified these bytes" into "CRC verified", and the

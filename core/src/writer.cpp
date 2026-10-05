@@ -258,6 +258,7 @@ fmt::UniversalHeader base_uh(const SegmentSpec& spec, const std::string& ftype, 
   uh.provenance_uuid = uh.file_uuid;
   std::copy(vf.level1.begin(), vf.level1.end(), uh.level_1_password_validation_field.begin());
   std::copy(vf.level2.begin(), vf.level2.end(), uh.level_2_password_validation_field.begin());
+  fmt::stamp_created(uh);
   return uh;
 }
 
@@ -661,6 +662,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     auto uh = fmt::UniversalHeader::parse(new_tidx_uh);
     uh.end_time = end_disk;
     uh.number_of_entries = static_cast<si8>(index_entries);
+    fmt::stamp_modified(uh);
     uh.serialize(new_tidx_uh);
     byteio::write<ui4>(new_tidx_uh, 4, tidx_body_crc);
     byteio::write<ui4>(new_tidx_uh, 0,
@@ -712,6 +714,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
       auto uh = fmt::UniversalHeader::parse(new_tidx_uh);
       uh.end_time = end_disk;
       uh.number_of_entries = static_cast<si8>(n_entries);
+      fmt::stamp_modified(uh);
       uh.serialize(new_tidx_uh);
       byteio::write<ui4>(new_tidx_uh, 4, tidx_body_crc);
       byteio::write<ui4>(new_tidx_uh, 0,
@@ -758,6 +761,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     uh.end_time = end_disk;
     uh.number_of_entries = static_cast<si8>(index_entries);
     uh.maximum_entry_size = index_max_block_bytes;
+    fmt::stamp_modified(uh);
     uh.serialize(new_tdat_uh);
     byteio::write<ui4>(new_tdat_uh, 4,
                        tdat_body_crc_known ? tdat_body_crc : fmt::CRC_NO_ENTRY);
@@ -888,6 +892,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
 
     fmt::UniversalHeader uh = md.universal_header;
     uh.end_time = end_disk;
+    fmt::stamp_modified(uh);
     uh.serialize(new_tmet);
     // NOT finalize_crcs: .tmet is a FIXED-length record and foreign writers
     // append trailing bytes past its end. Hashing to EOF writes a body CRC the

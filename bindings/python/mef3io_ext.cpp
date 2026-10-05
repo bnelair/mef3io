@@ -725,6 +725,8 @@ NB_MODULE(_mef3io, m) {
                d["start_sample"] = s.start_sample;
                d["number_of_samples"] = s.number_of_samples;
                d["number_of_blocks"] = s.number_of_blocks;
+               d["created_by"] = s.created_by;
+               d["last_written_by"] = s.last_written_by;
                out.append(d);
              }
              return out;

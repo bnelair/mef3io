@@ -68,6 +68,26 @@ value 0xFFFFFFFF). The password validation fields hold the two-level key
 material (see [encryption_model.md](encryption_model.md)); all-zero fields
 mean the file is unencrypted.
 
+### Writer stamp (mef3io ≥ 1.2)
+
+The 64-byte **discretionary region** (offset 960) is set aside for the writing
+application. meflib never interprets it, and pymef only reports it as raw
+bytes. mef3io writes two 32-byte, NUL-padded slots there, in every file it
+creates or modifies:
+
+| Offset | Bytes | Content |
+|---|---|---|
+| 960 | 32 | **created by**, e.g. `mef3io 1.2.0`. Written once, when the file is made |
+| 992 | 32 | **last written by**. Refreshed by an append, a `repair_session` or a `recover_session` |
+
+A slot counts only if it starts with `mef3io `. All zeros, which is what meflib,
+pymef, mef_tools and mef3io ≤ 1.1 write, means *unknown*. A file mef3io did not
+create therefore gains only the "last written by" slot. If the region holds
+anything else, it belongs to another application: mef3io leaves it
+byte-for-byte alone and does not stamp that file. The region sits under the
+header CRC, which every write recomputes anyway. `Reader.segments(ch)` reports
+the segment's `.tmet` stamp as `created_by` / `last_written_by`.
+
 ## Metadata file (`.tmet`) — exactly 16 384 B
 
 ```
