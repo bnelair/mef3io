@@ -147,12 +147,26 @@ typedef struct {
 } mef3io_segment_info;
 
 int mef3io_reader_n_segments(mef3io_reader* r, const char* channel, int32_t* out);
-/* Writer stamp of segment `index`: "mef3io <version>" that created / last wrote
- * it, or "" when unknown (another writer, or mef3io before the stamp existed).
- * Separate from mef3io_segment_info so that struct keeps its size and layout. */
-int mef3io_reader_segment_stamp(mef3io_reader* r, const char* channel, int32_t index,
-                                char* created_by, int32_t created_len, char* last_written_by,
-                                int32_t last_len);
+/* Provenance of segment `index` (its .tmet's universal-header discretionary
+ * region; see docs/mef3_format.md "Provenance region"). Versions and
+ * operations only, no times. `present` is 0 for a file from another writer or
+ * from mef3io before 1.2, and every other field is then zero/empty. Separate
+ * from mef3io_segment_info so that struct keeps its size and layout. */
+typedef struct {
+  int32_t present;
+  int32_t layout_version;
+  int32_t last_operation;       /* code; name via mef3io_operation_name */
+  uint32_t operations_mask;     /* bit n = operation code n ever applied */
+  uint32_t modification_count;  /* operations after creation; saturates */
+  char created_by[24];          /* version string, "" if unknown */
+  char last_modified_by[24];
+} mef3io_provenance;
+
+int mef3io_reader_segment_provenance(mef3io_reader* r, const char* channel, int32_t index,
+                                     mef3io_provenance* out);
+/* "create", "append", "header-repair", "recovery", "metadata-update", "unset";
+ * NULL for a code this library does not know (a newer writer's). */
+const char* mef3io_operation_name(int32_t code);
 int mef3io_reader_segment(mef3io_reader* r, const char* channel, int32_t index,
                           mef3io_segment_info* out);
 

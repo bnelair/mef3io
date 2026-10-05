@@ -68,25 +68,78 @@ value 0xFFFFFFFF). The password validation fields hold the two-level key
 material (see [encryption_model.md](encryption_model.md)); all-zero fields
 mean the file is unencrypted.
 
-### Writer stamp (mef3io ≥ 1.2)
+### Provenance region (mef3io ≥ 1.2) — frozen format
 
-The 64-byte **discretionary region** (offset 960) is set aside for the writing
-application. meflib never interprets it, and pymef only reports it as raw
-bytes. mef3io writes two 32-byte, NUL-padded slots there, in every file it
-creates or modifies:
+The universal header's 64-byte **discretionary region** (file offset 960) is
+set aside for the writing application. meflib never interprets it, and pymef
+only reports it as raw bytes. mef3io uses it, in every file it creates or
+modifies, to record **which version created the file, which version last
+modified it, and what was done to it**.
 
-| Offset | Bytes | Content |
+**No times are recorded.** The universal header is never encrypted, so a
+write time would reveal when a recording was made, which is exactly what
+`recording_time_offset` exists to hide.
+
+| Offset | Bytes | Type | Field |
+|---|---|---|---|
+| 0 | 4 | ASCII | magic `M3IO` |
+| 4 | 1 | ui1 | layout version, currently `1` |
+| 5 | 1 | ui1 | last operation (code, below) |
+| 6 | 2 | — | reserved, zero |
+| 8 | 20 | ASCII | created-by version, e.g. `1.2.0` |
+| 28 | 20 | ASCII | last-modified-by version |
+| 48 | 4 | ui4 LE | operations-ever mask: bit *n* set = code *n* was applied at some point |
+| 52 | 4 | ui4 LE | modification count: operations after creation |
+| 56 | 8 | — | reserved, zero |
+
+Offsets are relative to the region; add 960 for the position in the file.
+
+**Operation codes**
+
+| Code | Name | Meaning |
 |---|---|---|
-| 960 | 32 | **created by**, e.g. `mef3io 1.2.0`. Written once, when the file is made |
-| 992 | 32 | **last written by**. Refreshed by an append, a `repair_session` or a `recover_session` |
+| 0 | `unset` | — |
+| 1 | `create` | file written fresh |
+| 2 | `append` | samples added to an existing segment |
+| 3 | `header-repair` | `repair_session`: declarations rewritten, samples untouched |
+| 4 | `recovery` | `recover_session`: index and data reconciled after an interrupted write |
+| 5 | `metadata-update` | reserved: descriptive metadata rewritten in place |
 
-A slot counts only if it starts with `mef3io `. All zeros, which is what meflib,
-pymef, mef_tools and mef3io ≤ 1.1 write, means *unknown*. A file mef3io did not
-create therefore gains only the "last written by" slot. If the region holds
-anything else, it belongs to another application: mef3io leaves it
-byte-for-byte alone and does not stamp that file. The region sits under the
-header CRC, which every write recomputes anyway. `Reader.segments(ch)` reports
-the segment's `.tmet` stamp as `created_by` / `last_written_by`.
+**Rules. These are the compatibility contract and do not change.**
+
+1. **The layout is frozen.** Offsets, widths, byte order and encodings never
+   change. A later layout version may only *assign* the reserved bytes
+   (6–7, 56–63); it never redefines an existing field.
+2. **Codes are append-only.** A code is never renumbered, reused or
+   redefined. Codes stay below 32 so that each has a bit in the mask. A
+   reader that meets an unknown code reports it as unknown and does not fail.
+3. **Version strings** are ASCII, NUL-padded, at most 19 characters plus a
+   NUL terminator. A longer version is truncated, and any non-printable or
+   non-ASCII byte is written as `?`. A string can never extend past its field.
+4. **The count saturates.** It stops at `0xFFFFFFFF` and never wraps back to
+   zero, so even an acquisition appended to for months cannot overflow it or
+   the fields next to it.
+5. **The mask only grows.** A bit, once set, is never cleared, so a later
+   append cannot hide that a file was repaired or recovered.
+6. **Ownership.** A region of all zeros, as written by meflib, pymef,
+   mef_tools and mef3io ≤ 1.1, has never been stamped. The first mef3io
+   modification initialises it but leaves created-by **empty**, so mef3io never
+   claims a file it did not create. A region holding anything else without the
+   magic belongs to another application and is **never written**.
+7. **Unknown bytes are preserved.** A writer updates only the fields above:
+   last operation, last-modified-by, mask and count. Every other byte is
+   copied through, and a newer layout-version byte is never downgraded.
+8. `archive_session` / `extract_session` are byte-exact copies, not
+   modifications, and never change the region.
+
+The region lies under the universal header's CRC (bytes 4–1023), which every
+mef3io write recomputes. `Reader.segments(ch)` reports the provenance of each
+segment's `.tmet` (`None` when there is none). The C ABI provides
+`mef3io_reader_segment_provenance` and `mef3io_operation_name`.
+
+The layout is pinned by a golden-bytes test and the codes by a literal table
+(`core/tests/test_core.cpp`, "provenance region"); behaviour on real files is
+covered by `tests/test_p21_writer_stamp.py`.
 
 ## Metadata file (`.tmet`) — exactly 16 384 B
 

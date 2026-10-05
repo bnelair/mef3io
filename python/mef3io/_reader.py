@@ -464,10 +464,14 @@ class Reader:
             One dict per segment (sorted by segment number) with keys
             ``segment``, ``start_time`` / ``end_time`` (uUTC), ``start_sample``
             (channel-wide index of the first sample), ``number_of_samples``,
-            ``number_of_blocks``, the on-disk ``path``, and the writer stamp:
-            ``created_by`` / ``last_written_by`` (``"mef3io 1.2.0"``; ``""``
-            when unknown — a file from another writer, or from mef3io before
-            1.2, carries no stamp).
+            ``number_of_blocks``, the on-disk ``path``, and ``provenance``:
+            ``None`` for a file from another writer or from mef3io before 1.2,
+            otherwise a dict with ``created_by`` / ``last_modified_by``
+            (version strings, ``""`` if unknown), ``last_operation``,
+            ``operations`` (every operation ever applied: ``"create"``,
+            ``"append"``, ``"header-repair"``, ``"recovery"``, ...),
+            ``modification_count`` and ``layout_version``. Versions and
+            operations only — no times are recorded.
         """
         return self._ensure_impl().segments(channel)
 

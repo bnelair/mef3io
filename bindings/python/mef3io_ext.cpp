@@ -106,6 +106,31 @@ std::optional<mef3io::si8> opt_si8(nb::object o, const char* what) {
 }
 }  // namespace
 
+namespace {
+// None when the file carries no provenance; otherwise a dict. A code this
+// build does not know (written by a newer mef3io) is reported as
+// "unknown(<code>)" rather than dropped.
+nb::object provenance_dict(const mef3io::fmt::provenance::Provenance& p) {
+  namespace pv = mef3io::fmt::provenance;
+  if (!p.present) return nb::none();
+  auto name = [](unsigned code) {
+    const char* n = pv::operation_name(static_cast<mef3io::ui1>(code));
+    return n ? std::string(n) : "unknown(" + std::to_string(code) + ")";
+  };
+  nb::dict d;
+  d["layout_version"] = p.layout_version;
+  d["created_by"] = p.created_by;
+  d["last_modified_by"] = p.last_modified_by;
+  d["last_operation"] = name(p.last_operation);
+  nb::list ops;
+  for (unsigned b = 0; b < 32; ++b)
+    if ((p.operations_mask >> b) & 1u) ops.append(name(b));
+  d["operations"] = ops;
+  d["modification_count"] = p.modification_count;
+  return d;
+}
+}  // namespace
+
 NB_MODULE(_mef3io, m) {
   m.attr("__version__") = mef3io::version();
   m.doc() = "mef3io C++ backend (nanobind extension)";
@@ -725,8 +750,7 @@ NB_MODULE(_mef3io, m) {
                d["start_sample"] = s.start_sample;
                d["number_of_samples"] = s.number_of_samples;
                d["number_of_blocks"] = s.number_of_blocks;
-               d["created_by"] = s.created_by;
-               d["last_written_by"] = s.last_written_by;
+               d["provenance"] = provenance_dict(s.provenance);
                out.append(d);
              }
              return out;

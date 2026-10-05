@@ -1207,7 +1207,7 @@ void overwrite_universal_header(const std::string& path, const fmt::UniversalHea
       throw IoError("short read: " + path);
   }
   fmt::UniversalHeader patched = uh;
-  fmt::stamp_modified(patched);
+  fmt::provenance::stamp_modified(patched, fmt::provenance::Operation::HeaderRepair);
   patched.body_crc = byteio::read<ui4>(head, 4);
   patched.serialize(head);
   patched.update_header_crc(head);
@@ -1621,7 +1621,7 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       }
       {
         fmt::UniversalHeader uh = buffer.tmet_uh;
-        fmt::stamp_modified(uh);
+        fmt::provenance::stamp_modified(uh, fmt::provenance::Operation::HeaderRepair);
         uh.serialize(file);
       }
       // If the file arrived with no body CRC at all — meflib's CRC_NO_ENTRY,

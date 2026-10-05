@@ -107,7 +107,8 @@ classdef Reader < handle
 
         function s = segments(obj, channel)
             %SEGMENTS Per-segment map: time range, sample range, block count,
-            %   and the writer stamp (created_by / last_written_by; '' if unknown).
+            %   and provenance (created_by / last_modified_by versions, last_operation,
+            %   operations, modification_count; [] for a file mef3io did not stamp).
             s = mef3io_mex('reader_segments', obj.h, channel);
         end
 

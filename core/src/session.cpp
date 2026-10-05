@@ -485,8 +485,7 @@ std::vector<SegmentInfo> Session::segment_map(const std::string& channel) {
     si.start_sample = md.section2.start_sample;
     si.number_of_samples = md.section2.number_of_samples;
     si.number_of_blocks = md.section2.number_of_blocks;
-    si.created_by = fmt::created_by(md.universal_header);
-    si.last_written_by = fmt::last_written_by(md.universal_header);
+    si.provenance = fmt::provenance::read(md.universal_header);
     out.push_back(std::move(si));
     }))
       out.resize(mark);  // a segment that threw part-way contributes nothing

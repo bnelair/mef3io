@@ -123,6 +123,31 @@ OptChannel get_opt_channel(const mxArray* a) {
 
 }  // namespace
 
+// [] when the file carries no provenance; otherwise a struct mirroring the
+// Python dict. Unknown codes (a newer writer's) read as 'unknown(<code>)'.
+static mxArray* provenance_struct(const mef3io_provenance& p) {
+  if (!p.present) return mxCreateDoubleMatrix(0, 0, mxREAL);
+  auto name = [](int code) {
+    const char* n = mef3io_operation_name(code);
+    return n ? std::string(n) : "unknown(" + std::to_string(code) + ")";
+  };
+  const char* f[] = {"layout_version", "created_by", "last_modified_by", "last_operation",
+                     "operations", "modification_count"};
+  mxArray* s = mxCreateStructMatrix(1, 1, 6, f);
+  mxSetField(s, 0, "layout_version", mxCreateDoubleScalar(p.layout_version));
+  mxSetField(s, 0, "created_by", mxCreateString(p.created_by));
+  mxSetField(s, 0, "last_modified_by", mxCreateString(p.last_modified_by));
+  mxSetField(s, 0, "last_operation", mxCreateString(name(p.last_operation).c_str()));
+  int n_ops = 0;
+  for (int b = 0; b < 32; ++b) n_ops += (p.operations_mask >> b) & 1u;
+  mxArray* ops = mxCreateCellMatrix(1, static_cast<mwSize>(n_ops));
+  for (int b = 0, k = 0; b < 32; ++b)
+    if ((p.operations_mask >> b) & 1u) mxSetCell(ops, k++, mxCreateString(name(b).c_str()));
+  mxSetField(s, 0, "operations", ops);
+  mxSetField(s, 0, "modification_count", mxCreateDoubleScalar(p.modification_count));
+  return s;
+}
+
 void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
   if (nrhs < 1) fail("usage: mef3io_mex(command, ...)");
   const std::string cmd = get_string(prhs[0], "command");
@@ -310,8 +335,8 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     check(mef3io_reader_n_segments(r, ch.c_str(), &n));
     const char* fields[] = {"segment",        "start_time",       "end_time",
                             "start_sample",   "number_of_samples", "number_of_blocks",
-                            "path",           "created_by",       "last_written_by"};
-    plhs[0] = mxCreateStructMatrix(n, 1, 9, fields);
+                            "path",           "provenance"};
+    plhs[0] = mxCreateStructMatrix(n, 1, 8, fields);
     for (std::int32_t i = 0; i < n; ++i) {
       mef3io_segment_info s{};
       check(mef3io_reader_segment(r, ch.c_str(), i, &s));
@@ -322,11 +347,9 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
       mxSetField(plhs[0], i, "number_of_samples", make_int64(s.number_of_samples));
       mxSetField(plhs[0], i, "number_of_blocks", make_int64(s.number_of_blocks));
       mxSetField(plhs[0], i, "path", mxCreateString(s.path));
-      char created[64] = {0}, last[64] = {0};
-      check(mef3io_reader_segment_stamp(r, ch.c_str(), i, created, sizeof created, last,
-                                        sizeof last));
-      mxSetField(plhs[0], i, "created_by", mxCreateString(created));
-      mxSetField(plhs[0], i, "last_written_by", mxCreateString(last));
+      mef3io_provenance pv{};
+      check(mef3io_reader_segment_provenance(r, ch.c_str(), i, &pv));
+      mxSetField(plhs[0], i, "provenance", provenance_struct(pv));
     }
     return;
   }

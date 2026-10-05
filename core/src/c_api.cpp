@@ -243,19 +243,28 @@ int mef3io_reader_segment(mef3io_reader* r, const char* channel, int32_t index,
   });
 }
 
-int mef3io_reader_segment_stamp(mef3io_reader* r, const char* channel, int32_t index,
-                                char* created_by, int32_t created_len, char* last_written_by,
-                                int32_t last_len) {
-  if (!r || !channel || !created_by || !last_written_by || created_len <= 0 || last_len <= 0)
-    return fail_argument("NULL argument or empty buffer");
+int mef3io_reader_segment_provenance(mef3io_reader* r, const char* channel, int32_t index,
+                                     mef3io_provenance* out) {
+  if (!r || !channel || !out) return fail_argument("NULL argument");
   return guarded([&] {
     auto segs = r->impl.segments(channel);
     if (index < 0 || static_cast<size_t>(index) >= segs.size())
       throw std::out_of_range("segment index out of range");
-    const mef3io::SegmentInfo& s = segs[static_cast<size_t>(index)];
-    copy_str(created_by, static_cast<size_t>(created_len), s.created_by);
-    copy_str(last_written_by, static_cast<size_t>(last_len), s.last_written_by);
+    const auto& p = segs[static_cast<size_t>(index)].provenance;
+    *out = mef3io_provenance{};
+    out->present = p.present ? 1 : 0;
+    out->layout_version = p.layout_version;
+    out->last_operation = p.last_operation;
+    out->operations_mask = p.operations_mask;
+    out->modification_count = p.modification_count;
+    copy_str(out->created_by, sizeof out->created_by, p.created_by);
+    copy_str(out->last_modified_by, sizeof out->last_modified_by, p.last_modified_by);
   });
+}
+
+const char* mef3io_operation_name(int32_t code) {
+  if (code < 0 || code > 255) return nullptr;
+  return mef3io::fmt::provenance::operation_name(static_cast<mef3io::ui1>(code));
 }
 
 int mef3io_reader_n_blocks(mef3io_reader* r, const char* channel, int64_t* out) {
