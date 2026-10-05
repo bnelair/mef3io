@@ -186,11 +186,16 @@ class Reader:
         self._cache_path = _cache.resolve_cache_path(self._path, cache)
         self._infos = None
         self._declaration_issues = []
+        self._cached_problems = []
         if self._cache_path is not None:
             snap = _cache.load_valid(self._cache_path, self._path)
-            if snap is not None:
+            # A snapshot taken by a lenient open that skipped segments describes
+            # the session WITHOUT them; a strict open has to see the failure,
+            # so it ignores the snapshot and opens cold (and raises).
+            if snap is not None and not (self._strict and snap.get("problems")):
                 self._infos = snap["channel_infos"]
                 self._declaration_issues = snap.get("declaration_issues", [])
+                self._cached_problems = snap.get("problems", [])
 
         if self._infos is None:
             self._ensure_impl()
@@ -200,11 +205,12 @@ class Reader:
             if self._cache_path is not None:
                 _cache.save(
                     self._cache_path,
-                    _cache.build_snapshot(self._path, self._infos, self._declaration_issues),
+                    _cache.build_snapshot(self._path, self._infos, self._declaration_issues,
+                                          self.problems),
                 )
 
-        if not self._strict and self._impl is not None:
-            problems = self.problems
+        if not self._strict:
+            problems = self.problems  # from the cache snapshot on a warm open
             if problems:
                 warnings.warn(
                     _unreadable_warning_text(problems, self._path),
@@ -240,7 +246,9 @@ class Reader:
         """
         impl = self._impl
         if impl is None:
-            return []
+            # Warm open: the backend is not built yet, so report what the
+            # snapshot recorded rather than an empty list.
+            return list(self._cached_problems)
         fn = getattr(impl, "problems", None)
         return list(fn()) if fn is not None else []
 
