@@ -12,7 +12,9 @@ below are measured, and each is reproducible by running
 
 Measured with `examples/08`: 5 channels × 5 h at 512 Hz (9.2 M samples per
 channel, ~88 MB session, band-pass-filtered noise, precision 3), encrypted,
-Apple-silicon macOS, Python 3.13:
+Apple-silicon macOS, Python 3.13. The same example on a 2013 6-core Xeon
+measured 2.1× (write) and ~9× (read). That run and every other benchmark,
+with the conditions it ran under, are on the [benchmarks page](benchmarks.md).
 
 | Operation | legacy | mef3io | speedup |
 |---|---|---|---|
