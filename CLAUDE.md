@@ -64,8 +64,12 @@ writer ctor, archive and extract all throw IoError otherwise
 (case-insensitive, trailing separators OK; `path_has_suffix` in source.hpp).
 `SegmentInfo.path` for tar reads is `"<archive>::<member>"`. cache.py fingerprints a tar session as the single
 file (an empty fingerprint dict would validate stale caches forever).
-Benchmarked on a ~2 GB session: full-read throughput identical to the dir,
-windowed reads ~8% slower, open faster; archive ~0.56 GB/s. Tests:
+Benchmarked (docs/benchmarks.md, `benchmarks/access_modes_benchmark.py`,
+2.2 GB / 768 segments): once open a tar reads like the dir (full and warm
+windowed identical); a COLD open is ~2.5x slower (0.5 s vs 0.2 s — the member
+index comes off disk); archive ~0.6 GB/s. The snapshot cache makes a tar open
+~10 ms but makes a DIRECTORY open ~2.7x SLOWER (validation hashes every
+.tmet + .tidx head = more I/O than a plain open) — known, unfixed. Tests:
 core/tests/test_tar.cpp, tests/test_p11_tar.py, tar block in
 matlab/test_mef3io.m.
 

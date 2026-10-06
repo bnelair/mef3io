@@ -25,7 +25,7 @@ compat = ["pandas"]
 # benchmarks run standalone (no local mef_tools checkout needed).
 test = ["pytest", "pandas", "pymef", "mef-tools"]
 # Everything the benchmarks compare against: legacy MEF stack + NWB-Zarr.
-bench = ["pymef", "mef-tools", "pandas", "pynwb", "hdmf-zarr", "zarr", "numcodecs"]
+bench = ["pymef", "mef-tools", "pandas", "pynwb", "hdmf-zarr", "zarr", "numcodecs", "scipy", "tqdm"]
 
 [tool.scikit-build]
 # The importable package lives in python/mef3io; the compiled _mef3io lands

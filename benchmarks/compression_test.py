@@ -27,6 +27,8 @@ from pathlib import Path
 
 import numpy as np
 
+from _zarr_compat import blosc_zstd_kwargs  # noqa: E402  (shared NWB-Zarr codec)
+
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "python"))  # mef3io dev tree
 
@@ -89,10 +91,10 @@ def write_mef(signal: np.ndarray, path: str, fs: float, precision: int):
             w.write(channel_name(i), col, BASE_UUTC, fs, precision=precision)
 
 
+
 def write_nwb(signal: np.ndarray, path: str, fs: float, segment_samples: int):
     from datetime import datetime, timezone
 
-    import numcodecs
     from hdmf_zarr.backend import ZarrDataIO
     from hdmf_zarr.nwb import NWBZarrIO
     from pynwb import NWBFile
@@ -109,7 +111,7 @@ def write_nwb(signal: np.ndarray, path: str, fs: float, segment_samples: int):
     wrapped = ZarrDataIO(
         data=signal,
         chunks=(segment_samples, 1),
-        compressor=numcodecs.Blosc(cname="zstd", clevel=3, shuffle=numcodecs.Blosc.SHUFFLE),
+        **blosc_zstd_kwargs(),
     )
     es = ElectricalSeries("eeg", wrapped, region, starting_time=0.0, rate=fs)
     nwb.add_acquisition(es)

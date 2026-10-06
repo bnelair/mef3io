@@ -1,5 +1,16 @@
 # MEF read/write benchmark
 
+Latest full run, with every table and the conditions it ran under:
+[docs/benchmarks.md](../docs/benchmarks.md) (2026-10-05, 6-core 2013 Xeon).
+
+`access_modes_benchmark.py` measures how a session is opened rather than how
+fast it decodes. It covers a `.mefd` directory vs the same session as one
+`.mefd.tar`, cold vs warm OS page cache (cold = evicted with
+`posix_fadvise(DONTNEED)`, no root needed, verified via `/proc/self/io`), and
+mef3io's snapshot cache on vs off. mef_tools serves as the baseline. Every
+cell runs in a fresh process, timing open, time to first data, random
+windows and full reads.
+
 `bindings_benchmark.py` measures the Python binding on the examples/08
 workload (5 ch × 5 h @ 512 Hz, plain + encrypted); its twin
 `matlab/benchmark_mef3io.m` runs the identical workload through the MATLAB
@@ -86,7 +97,7 @@ pass `--keep-files` to inspect them.
 Install the benchmark stack (legacy MEF baseline + NWB-Zarr) as an extra:
 
 ```bash
-pip install "mef3io[bench]"     # mef-tools, pymef, pynwb, hdmf-zarr, zarr, numcodecs, pandas
+pip install "mef3io[bench]"     # mef-tools, pymef, pynwb, hdmf-zarr, zarr, numcodecs, pandas, scipy, tqdm
 # or explicitly:
 pip install mef-tools pymef pynwb hdmf-zarr zarr numcodecs numpy pandas
 ```
@@ -168,6 +179,13 @@ end, and **exits non-zero if either fails** — a fast run that produced an
 inconsistent session is not a fast run.
 
 ### Measured (12-core laptop, ext4, default `durability="full"`)
+
+These are the original numbers. On the 2013 Xeon in
+[docs/benchmarks.md](../docs/benchmarks.md), mef3io's per-block time was
+the same ~700 ms. mef_tools's swung between 656 and 1218 ms from run to
+run (it has no durability barriers, so its timing follows kernel
+writeback), which moves the ratio anywhere from 0.94× to 1.74×. The file
+size (1.8× smaller) and the flat growth held.
 
 24 h × 16 ch @ 512 Hz, 10-minute blocks:
 
