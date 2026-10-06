@@ -27,6 +27,8 @@ from pathlib import Path
 
 import numpy as np
 
+from _zarr_compat import blosc_zstd_kwargs  # noqa: E402  (shared NWB-Zarr codec)
+
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "python"))  # mef3io dev tree
 
@@ -89,20 +91,6 @@ def write_mef(signal: np.ndarray, path: str, fs: float, precision: int):
             w.write(channel_name(i), col, BASE_UUTC, fs, precision=precision)
 
 
-
-def blosc_zstd_kwargs() -> dict:
-    """Blosc/zstd level 3 with byte shuffle — the same codec either way — in the
-    form the installed hdmf-zarr accepts: zarr v3 codecs under zarr >= 3
-    (`compressors=`), a numcodecs codec before that (`compressor=`)."""
-    import zarr
-
-    if int(zarr.__version__.split(".")[0]) >= 3:
-        from zarr.codecs import BloscCodec
-
-        return {"compressors": BloscCodec(cname="zstd", clevel=3, shuffle="shuffle")}
-    import numcodecs
-
-    return {"compressor": numcodecs.Blosc(cname="zstd", clevel=3, shuffle=numcodecs.Blosc.SHUFFLE)}
 
 def write_nwb(signal: np.ndarray, path: str, fs: float, segment_samples: int):
     from datetime import datetime, timezone

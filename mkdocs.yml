@@ -71,7 +71,7 @@ nav:
       - MEF 3.0 on-disk format: mef3_format.md
       - Encryption model: encryption_model.md
       - Performance & legacy comparison: legacy_comparison.md
-      - Benchmarks (2026-10): benchmarks.md
+      - Benchmarks: benchmarks.md
   - Development:
       - Design & internals: design.md
       - Versioning & releases: releasing.md

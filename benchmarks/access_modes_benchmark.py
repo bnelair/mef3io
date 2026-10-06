@@ -54,6 +54,27 @@ BASE_UUTC = 1_600_000_000_000_000
 # --------------------------------------------------------------------------- #
 # page cache
 # --------------------------------------------------------------------------- #
+def require_linux_proc() -> None:
+    """Fail up front, with a reason, where this benchmark cannot work.
+
+    Cold runs need posix_fadvise(DONTNEED) to evict the page cache, and every
+    cell proves it read from disk via /proc/self/io. Neither exists on macOS or
+    Windows, and /proc may be missing in some containers; without them a "cold"
+    number would be unverifiable, so the benchmark refuses instead of crashing
+    halfway with a FileNotFoundError."""
+    missing = []
+    if not sys.platform.startswith("linux"):
+        missing.append(f"Linux (this is {sys.platform})")
+    if not os.path.exists("/proc/self/io"):
+        missing.append("/proc/self/io")
+    if not hasattr(os, "posix_fadvise"):
+        missing.append("os.posix_fadvise")
+    if missing:
+        raise SystemExit("access_modes_benchmark.py needs Linux with /proc: missing "
+                         + ", ".join(missing) + ". Cold-cache eviction and the per-cell "
+                         "disk-read check depend on both.")
+
+
 def session_files(path: Path) -> list[Path]:
     if path.is_file():
         return [path]
@@ -295,6 +316,7 @@ def main():
     if args.child:
         print(json.dumps(child(json.loads(args.child))))
         return
+    require_linux_proc()
     if args.quick:
         args.hours, args.channels, args.windows, args.full_channels, args.repeats = 2, 8, 8, 2, 1
 
