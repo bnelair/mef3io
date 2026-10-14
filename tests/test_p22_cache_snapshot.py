@@ -392,6 +392,12 @@ def test_a_failed_save_never_fails_an_open(tmp_path, monkeypatch):
 
 
 def test_concurrent_saves_do_not_share_a_temp_file(tmp_path):
+    """Each save writes its own temp file, so concurrent savers never write
+    into one another's bytes, and the result is always a whole snapshot.
+    On Windows a rename over a file another thread is renaming at that moment
+    can fail with PermissionError; that save is simply lost (the Reader
+    ignores a failed save), so it is the one error tolerated, and only there.
+    """
     import threading
 
     path = _session(tmp_path)
@@ -400,11 +406,40 @@ def test_concurrent_saves_do_not_share_a_temp_file(tmp_path):
     errors = []
 
     def worker():
-        try:
-            for _ in range(50):
+        for _ in range(50):
+            try:
                 C.save(cache, snap)
-        except Exception as e:  # noqa: BLE001
-            errors.append(e)
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if os.name == "nt":
+        errors = [e for e in errors if not isinstance(e, PermissionError)]
+    assert not errors, errors
+    assert json.loads(cache.read_text())["format"] == C.CACHE_FORMAT_VERSION
+    assert not list(tmp_path.glob("snap.mef3cache.*")), "temp files left behind"
+
+
+def test_concurrent_cached_opens_never_fail(tmp_path):
+    """Several Readers racing to load and save one snapshot: every open must
+    succeed, whatever happens to the saves."""
+    import threading
+
+    path = _session(tmp_path)
+    cache = tmp_path / "snap.mef3cache"
+    errors = []
+
+    def worker():
+        for _ in range(20):
+            try:
+                r = mef3io.Reader(str(path), cache=str(cache))
+                assert r.info("ch1")["n_segments"] == 3
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
 
     threads = [threading.Thread(target=worker) for _ in range(4)]
     for t in threads:
@@ -412,8 +447,6 @@ def test_concurrent_saves_do_not_share_a_temp_file(tmp_path):
     for t in threads:
         t.join()
     assert not errors, errors
-    assert json.loads(cache.read_text())["format"] == C.CACHE_FORMAT_VERSION
-    assert not list(tmp_path.glob("snap.mef3cache.*")), "temp files left behind"
 
 
 # --- the documented blind spot -----------------------------------------------
