@@ -34,8 +34,8 @@ struct SeizureChannel {
 
 /// A decoded record: header fields, where it was found, and the body fields
 /// of its type. Body fields are nullopt when the body is too short to hold
-/// them or its version is not one meflib decodes (it decodes only 1.0 for the
-/// structured types, mefrec.c). Every TIME below — `time` and the body fields
+/// them or its version is not 1.0 (meflib decodes every body type only at
+/// 1.0, mefrec.c). Every TIME below — `time` and the body fields
 /// marked "uUTC" — is absolute, resolved with the same sign-aware rule
 /// (mef3io/time.hpp); see parse_records for why body times are converted too.
 struct Record {
@@ -84,7 +84,8 @@ struct Record {
   std::optional<si4> ampunit_code, mode_code;
   std::optional<std::string> waveform, anode, catode;
 
-  // LNTP (MEFREC_LNTP_1_0, mefrec.h:70): `length` si4 template values.
+  // LNTP (MEFREC_LNTP_1_0, mefrec.h:70): `length` template values. Stored si4
+  // per mefrec.h, or si8 as pymef writes them (detected; see records.cpp).
   std::optional<si8> template_length;
   std::vector<si4> line_noise_template;
 };
@@ -117,9 +118,12 @@ inline constexpr std::size_t RECORD_TYPE_BYTES = 4;
 // recording-time-offset for resolving absolute record times — header AND body
 // times (see records.cpp for the body-time rule); `keys` decrypts encrypted
 // record bodies when present. Level / channel / segment are left at their
-// defaults; the Session fills them in.
+// defaults; the Session fills them in. `offset_dependent`, when given, is set
+// to whether any parsed time (header or body) was stored negated, i.e.
+// whether the result depends on `rto` at all.
 std::vector<Record> parse_records(std::span<const ui1> rdat_bytes, si8 rto,
-                                   const crypto::AccessKeys& keys = {});
+                                   const crypto::AccessKeys& keys = {},
+                                   bool* offset_dependent = nullptr);
 
 // Write records to `<dir>/<base>.rdat` + `<base>.ridx`. `session_name`/
 // `channel_name` populate the universal headers; `rto` sets the on-disk time

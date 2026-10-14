@@ -54,29 +54,58 @@ constexpr std::size_t LNTP_BYTES = 8;
 //   * a negative one is resolved with the offset, as meflib shows it.
 // So every time in a Record is absolute uUTC whichever convention a writer
 // used. Sentinels are not times and pass through (UUTC_NO_ENTRY inside
-// to_user_time; Seiz channel onset/offset -1 here).
-si8 seiz_channel_time(si8 t, si8 rto) {
-  return t == SEIZ_CHANNEL_TIME_NO_ENTRY ? t : to_user_time(t, rto);
-}
+// to_user_time; Seiz channel onset/offset -1 in TimeConv::seiz_channel).
+// Converts on-disk times with one offset and remembers whether any of them
+// DEPENDED on it: only a negative (offset-applied) time does, so a file with
+// none can be placed even when the offset itself is unknown or disputed.
+struct TimeConv {
+  si8 rto;
+  bool offset_dependent = false;
+  si8 operator()(si8 t) {
+    if (t != fmt::UUTC_NO_ENTRY && t < 0) offset_dependent = true;
+    return to_user_time(t, rto);
+  }
+  si8 seiz_channel(si8 t) {  // -1 is a sentinel here, not a time (mefrec.h:129/131)
+    return t == SEIZ_CHANNEL_TIME_NO_ENTRY ? t : (*this)(t);
+  }
+};
 
 bool is_v1_0(int vmaj, int vmin) { return vmaj == 1 && vmin == 0; }
 
-// Decode the structured body of `rec` (already decrypted). meflib decodes
-// these types only at version 1.0 (every show_mefrec_*_type, mefrec.c), so
-// another version, or a body shorter than the struct, leaves the fields unset.
-void parse_body(Record& rec, std::span<const ui1> b, si8 rto) {
+// The LNTP template's element type. mefrec.h says si4 (MEFREC_LNTP_1_0_
+// TEMPLATE_OFFSET, "// si4"), but pymef writes si8 (pymef3_file.c:4159-4160;
+// its reader admits the discrepancy at :3729), and the legacy mef_tools stack
+// writes through pymef. The two cannot be told apart by the header, so take
+// si8 only when the body is big enough for `n` si8 values AND reading it that
+// way is self-consistent: every high word is the sign extension of its low
+// word, which a si4 template followed by meflib's 0x7e padding never is.
+bool lntp_is_pymef_int64(std::span<const ui1> tmpl, std::size_t n) {
+  if (n == 0 || tmpl.size() < n * sizeof(si8)) return false;
+  for (std::size_t i = 0; i < n; ++i) {
+    const si4 lo = read<si4>(tmpl, i * 8);
+    const si4 hi = read<si4>(tmpl, i * 8 + 4);
+    if (hi != (lo < 0 ? -1 : 0)) return false;
+  }
+  return true;
+}
+
+// Decode the body of `rec` (already decrypted). meflib decodes EVERY body
+// type only at version 1.0 (each show_mefrec_*_type, mefrec.c:201, 232, 304,
+// 375, 540, 569, 658, 793, 886), so another version leaves the body fields
+// unset; so does a body shorter than its type's fixed part.
+void parse_body(Record& rec, std::span<const ui1> b, TimeConv& conv) {
+  if (!is_v1_0(rec.version_major, rec.version_minor)) return;
   const std::string& type = rec.type;
   if (type == "Note" || type == "SyLg") {
     rec.text = read_string(b, 0, b.size());
   } else if (type == "EDFA") {
-    if (b.size() >= 8) rec.duration = read<si8>(b, 0);
-    rec.text = read_string(b, 8, b.size() > 8 ? b.size() - 8 : 0);
-  } else if (!is_v1_0(rec.version_major, rec.version_minor)) {
-    return;
+    if (b.size() < 8) return;  // no complete duration: neither field is there
+    rec.duration = read<si8>(b, 0);
+    rec.text = read_string(b, 8, b.size() - 8);
   } else if (type == "Seiz") {
     if (b.size() < SEIZ_BYTES) return;
-    rec.earliest_onset = to_user_time(read<si8>(b, 0), rto);
-    rec.latest_offset = to_user_time(read<si8>(b, 8), rto);
+    rec.earliest_onset = conv(read<si8>(b, 0));
+    rec.latest_offset = conv(read<si8>(b, 8));
     rec.duration = read<si8>(b, 16);
     rec.number_of_channels = read<si4>(b, 24);
     rec.onset_code = read<si4>(b, 28);
@@ -90,22 +119,21 @@ void parse_body(Record& rec, std::span<const ui1> b, si8 rto) {
     for (std::size_t i = 0; i < n; ++i) {
       const std::size_t c = SEIZ_BYTES + i * SEIZ_CHANNEL_BYTES;
       rec.seizure_channels.push_back(SeizureChannel{
-          read_string(b, c, SEIZ_CHANNEL_NAME_BYTES),
-          seiz_channel_time(read<si8>(b, c + 256), rto),
-          seiz_channel_time(read<si8>(b, c + 264), rto)});
+          read_string(b, c, SEIZ_CHANNEL_NAME_BYTES), conv.seiz_channel(read<si8>(b, c + 256)),
+          conv.seiz_channel(read<si8>(b, c + 264))});
     }
   } else if (type == "Epoc") {
     if (b.size() < EPOC_BYTES) return;
     rec.id_number = read<si8>(b, 0);
-    rec.timestamp = to_user_time(read<si8>(b, 8), rto);
-    rec.end_timestamp = to_user_time(read<si8>(b, 16), rto);
+    rec.timestamp = conv(read<si8>(b, 8));
+    rec.end_timestamp = conv(read<si8>(b, 16));
     rec.duration = read<si8>(b, 24);
     rec.epoch_type = read_string(b, 32, EPOC_TYPE_BYTES);
     rec.text = read_string(b, 64, EPOC_TEXT_BYTES);
   } else if (type == "Curs") {
     if (b.size() < CURS_BYTES) return;
     rec.id_number = read<si8>(b, 0);
-    rec.trace_timestamp = to_user_time(read<si8>(b, 8), rto);
+    rec.trace_timestamp = conv(read<si8>(b, 8));
     rec.latency = read<si8>(b, 16);
     rec.value = read<sf8>(b, 24);
     rec.name = read_string(b, 32, CURS_NAME_BYTES);
@@ -126,18 +154,20 @@ void parse_body(Record& rec, std::span<const ui1> b, si8 rto) {
     rec.anode = read_string(b, 160, ESTI_STRING_BYTES);
     rec.catode = read_string(b, 288, ESTI_STRING_BYTES);
   } else if (type == "LNTP") {
-    // The template is si4[length] starting at body offset 8, per the
-    // MEFREC_LNTP_1_0_TEMPLATE_OFFSET define. (meflib's own display,
-    // mefrec.c:306, computes it with si4-pointer arithmetic and so looks 4x
-    // too far; the define is the layout, the display is the bug.)
+    // The template starts at body offset 8, per the MEFREC_LNTP_1_0_TEMPLATE_
+    // OFFSET define. (meflib's own display, mefrec.c:306, computes it with
+    // si4-pointer arithmetic and so looks 4x too far; the define is the
+    // layout, the display is the bug.) Element width: see lntp_is_pymef_int64.
     if (b.size() < LNTP_BYTES) return;
     rec.template_length = read<si8>(b, 0);
-    const std::size_t room = (b.size() - LNTP_BYTES) / sizeof(si4);
-    const std::size_t n =
-        std::min(room, static_cast<std::size_t>(std::max<si8>(*rec.template_length, 0)));
+    const std::span<const ui1> tmpl = b.subspan(LNTP_BYTES);
+    const std::size_t declared = static_cast<std::size_t>(std::max<si8>(*rec.template_length, 0));
+    const bool wide = lntp_is_pymef_int64(tmpl, declared);
+    const std::size_t width = wide ? sizeof(si8) : sizeof(si4);
+    const std::size_t n = std::min(tmpl.size() / width, declared);  // bounded by the body
     rec.line_noise_template.reserve(n);
     for (std::size_t i = 0; i < n; ++i)
-      rec.line_noise_template.push_back(read<si4>(b, LNTP_BYTES + i * sizeof(si4)));
+      rec.line_noise_template.push_back(read<si4>(tmpl, i * width));  // low word when wide
   }
   // UnRc and unknown types: no defined body.
 }
@@ -221,8 +251,9 @@ std::vector<RecordField> record_fields(const Record& r) {
 }
 
 std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
-                                  const crypto::AccessKeys& keys) {
+                                  const crypto::AccessKeys& keys, bool* offset_dependent) {
   std::vector<Record> out;
+  TimeConv conv{rto};
   std::size_t off = fmt::UNIVERSAL_HEADER_BYTES;  // records follow the UH
 
   while (off + fmt::RECORD_HEADER_BYTES <= rdat.size()) {
@@ -257,10 +288,10 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
 
     Record rec;
     rec.type = type;
-    rec.time = to_user_time(time, rto);
+    rec.time = conv(time);
     rec.version_major = vmaj;
     rec.version_minor = vmin;
-    parse_body(rec, b, rto);
+    parse_body(rec, b, conv);
 
     out.push_back(std::move(rec));
 
@@ -269,6 +300,7 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
     std::size_t advance = fmt::RECORD_HEADER_BYTES + body_bytes;
     off += advance;
   }
+  if (offset_dependent) *offset_dependent = conv.offset_dependent;
   return out;
 }
 

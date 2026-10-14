@@ -154,7 +154,7 @@ mef3io::Session::RecordLevels record_levels(nb::object level) {
 // record_fields' stable order (None where the body does not carry one).
 nb::dict record_to_dict(const mef3io::Record& rec) {
   nb::dict d;
-  d["type"] = rec.type;
+  d["type"] = record_str(rec.type);  // 4 raw bytes from the file: may not be UTF-8
   d["time"] = rec.time;
   d["level"] = mef3io::record_level_name(rec.level);
   d["channel"] = rec.level == mef3io::RecordLevel::Session

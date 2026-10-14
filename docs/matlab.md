@@ -87,6 +87,11 @@ seg0 = r.records('ch1', 0);                   % one segment's records
 delete(r);
 ```
 
+Text comes back as UTF-8 decoded into MATLAB `char` (UTF-16) on every
+platform — the same encoding strings are read in with — rather than through
+the locale codepage, so non-ASCII annotations and subject names round-trip on
+Windows too. Bytes that are not valid UTF-8 become U+FFFD, as in Python.
+
 `info` returns `sampling_frequency`, `units_conversion_factor`,
 `units_description`, `start_time`/`end_time` (int64 uUTC),
 `number_of_samples` (stored samples; gaps not counted), `n_segments`,

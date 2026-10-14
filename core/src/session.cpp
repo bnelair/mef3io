@@ -247,13 +247,11 @@ std::vector<DataRun> Session::read_runs(const std::string& channel, std::optiona
   return runs;
 }
 
-si8 Session::agreed_rto(const std::string* channel, const char* what) {
+std::optional<si8> Session::agreed_rto(const std::string* channel, std::string& why) {
   // The offset the DATA of this scope is read with, so the records land
-  // where the data does. meflib applies one global offset to every record
-  // header (MEF_globals->recording_time_offset, meflib.c:1806 -> 1846), taken
-  // from section 3; for a session whose segments disagree it marks the
-  // aggregate NO_ENTRY (meflib.c:5529, 6208) — i.e. there is no single right
-  // value, and picking one would misplace some records by the difference.
+  // where the data does: the one every readable segment's section 3 agrees
+  // on. When they disagree there is no single right value; `why` says which
+  // two differ and read_record_file decides whether that matters.
   std::optional<si8> agreed;
   std::string agreed_where;
   for (const auto& name : channel_names_) {
@@ -265,29 +263,64 @@ si8 Session::agreed_rto(const std::string* channel, const char* what) {
         agreed = rto;
         agreed_where = source_->describe(seg.tmet_path);
       } else if (*agreed != rto) {
-        throw FormatError(std::string(what) +
-                          " records cannot be placed: segments disagree on "
-                          "recording_time_offset (" +
-                          std::to_string(*agreed) + " in " + agreed_where + ", " +
-                          std::to_string(rto) + " in " + source_->describe(seg.tmet_path) +
-                          "), so any choice would misplace records by the difference");
+        why = "segments disagree on recording_time_offset (" + std::to_string(*agreed) + " in " +
+              agreed_where + ", " + std::to_string(rto) + " in " +
+              source_->describe(seg.tmet_path) + ")";
+        return std::nullopt;
       }
     }
   }
   return agreed.value_or(0);
 }
 
-void Session::append_records(std::vector<Record>& out, const std::string& rdat_path, si8 rto,
-                             RecordLevel level, const std::string& channel, int segment) {
-  auto bytes = source_->read_all(rdat_path);
-  auto uh = fmt::UniversalHeader::parse(bytes);
-  crypto::AccessKeys keys = crypto::validate_password(
-      password_, uh.level_1_password_validation_field, uh.level_2_password_validation_field);
-  for (auto& rec : parse_records(bytes, rto, keys)) {
-    rec.level = level;
-    rec.channel = channel;
-    rec.segment = segment;
-    out.push_back(std::move(rec));
+void Session::read_record_file(std::vector<Record>& out, const std::string& rdat_path,
+                               std::optional<si8> rto, const std::string& why,
+                               RecordLevel level, const std::string& channel, int segment) {
+  auto run = [&] {
+    auto bytes = source_->read_all(rdat_path);
+    auto uh = fmt::UniversalHeader::parse(bytes);
+    crypto::AccessKeys keys = crypto::validate_password(
+        password_, uh.level_1_password_validation_field, uh.level_2_password_validation_field);
+    bool offset_dependent = false;
+    auto recs = parse_records(bytes, rto.value_or(0), keys, &offset_dependent);
+    // A disputed offset only matters to times stored negated (offset
+    // applied); non-negative times are absolute whatever the offset is.
+    // DELIBERATE DIVERGENCE: meflib, in its default RTO_REMOVE_ON_INPUT mode
+    // (meflib.h:278), resolves record times with MEF_globals->
+    // recording_time_offset -- whichever .tmet it happened to read last
+    // (meflib.c:1806 -> 1846). The NO_ENTRY at meflib.c:5529 / 6208 is only
+    // the METADATA aggregate. Following the read order would misplace the
+    // records by the difference without a word, so this refuses instead.
+    if (!rto && offset_dependent)
+      throw FormatError(std::string(record_level_name(level)) +
+                        "-level records cannot be placed: " + why +
+                        " and the file stores offset-dependent (negated) times, so any "
+                        "choice would misplace them by the difference: " +
+                        source_->describe(rdat_path));
+    for (auto& rec : recs) {
+      rec.level = level;
+      rec.channel = channel;
+      rec.segment = segment;
+    }
+    // Nothing is appended until the whole file parsed: a half-read file is
+    // worse than a skipped one.
+    out.insert(out.end(), std::make_move_iterator(recs.begin()),
+               std::make_move_iterator(recs.end()));
+  };
+  if (strict_) {
+    run();
+    return;
+  }
+  // Lenient: one bad record file is CONTAINED, like a bad segment -- reported
+  // in problems() (once per file), and the other files still read. It does
+  // NOT mark the segment failed: an unreadable annotation file says nothing
+  // about whether the segment's samples are intact.
+  try {
+    run();
+  } catch (const std::exception& e) {
+    if (reported_record_files_.insert(rdat_path).second)
+      problems_.push_back(SegmentProblem{channel, segment, source_->describe(rdat_path),
+                                         std::string("records: ") + e.what()});
   }
 }
 
@@ -340,9 +373,11 @@ std::vector<Record> Session::read_records(std::optional<std::string> channel,
         rdat_path = e.name;
         break;
       }
-    if (!rdat_path.empty())
-      append_records(out, rdat_path, agreed_rto(nullptr, "session-level"),
-                     RecordLevel::Session, "", -1);
+    if (!rdat_path.empty()) {
+      std::string why;
+      const auto rto = agreed_rto(nullptr, why);
+      read_record_file(out, rdat_path, rto, why, RecordLevel::Session, "", -1);
+    }
   }
 
   for (const auto& name : channel_names_) {
@@ -350,12 +385,15 @@ std::vector<Record> Session::read_records(std::optional<std::string> channel,
     // Channel level: <ch>.timd/<ch>.rdat (meflib.c:5660).
     if (want_channel) {
       const std::string cand = name + ".timd/" + name + ".rdat";
-      if (source_->exists(cand))
-        append_records(out, cand, agreed_rto(&name, ("channel-level (" + name + ")").c_str()),
-                       RecordLevel::Channel, name, -1);
+      if (source_->exists(cand)) {
+        std::string why;
+        const auto rto = agreed_rto(&name, why);
+        read_record_file(out, cand, rto, why, RecordLevel::Channel, name, -1);
+      }
     }
     // Segment level: <seg>.segd/<seg>.rdat, next to the segment's .tmet
-    // (meflib.c:6030). Its offset is the segment's own.
+    // (meflib.c:6030). Its offset is the segment's own, so it is never
+    // disputed, and a dispute at the channel level above never costs these.
     if (want_segment) {
       for (auto& seg : channels_.at(name).segments) {
         if (segment && seg.segment_number != *segment) continue;
@@ -363,8 +401,8 @@ std::vector<Record> Session::read_records(std::optional<std::string> channel,
         const std::string cand =
             seg.tmet_path.substr(0, seg.tmet_path.size() - 5) + ".rdat";  // ".tmet"
         if (source_->exists(cand))
-          append_records(out, cand, segment_rto(segment_metadata(seg)), RecordLevel::Segment,
-                         name, seg.segment_number);
+          read_record_file(out, cand, segment_rto(segment_metadata(seg)), "",
+                           RecordLevel::Segment, name, seg.segment_number);
       }
     }
   }

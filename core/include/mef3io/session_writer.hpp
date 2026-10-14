@@ -65,6 +65,10 @@ class SessionWriter {
 
   /// Write records (annotations). @p channel nullopt -> session-level (in the
   /// `.mefd` root), otherwise channel-level. Replaces the records at that level.
+  /// Times are stored with the recording-time offset the reader will resolve
+  /// them with (records_rto): 0 for a session mef3io wrote, section 3's value
+  /// for one that carries an offset. Throws WriteConflictError when the
+  /// level's segments disagree on it.
   void write_records(std::optional<std::string> channel, const std::vector<Record>& records);
 
   // Optional override for the RED block length (samples per block). <= 0 uses
@@ -128,6 +132,11 @@ class SessionWriter {
   // Load fs/ufact/total_samples/last_end_uutc from the channel's last segment
   // on disk (for sessions reopened with overwrite=false). No-op once hydrated.
   void hydrate(const std::string& channel, ChannelState& st);
+  // The recording-time offset records at this level are written with: the
+  // one every on-disk segment of the channel (or session) agrees on, i.e.
+  // what the reader will resolve them with. Throws WriteConflictError when
+  // the segments disagree.
+  si8 records_rto(const std::optional<std::string>& channel) const;
   WriteSummary write_blocks(const std::string& channel, const std::vector<si4>& samples,
                             std::span<const ui1> valid, sf8 ufact, si8 start_uutc, sf8 fs,
                             bool new_segment);

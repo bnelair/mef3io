@@ -128,13 +128,18 @@ class MefReader:
         """Records as a list of dicts (legacy ``mef_tools`` signature).
 
         ``channel=None`` returns session-level records; a channel name returns
-        that channel's channel-level AND segment-level records. Every dict
-        carries ``level`` / ``channel`` / ``segment`` so the two can be told
-        apart; see :meth:`mef3io.Reader.records` for the fields. Returns
-        ``None`` (with a printed warning) on failure, as the legacy API did.
+        that channel's CHANNEL-level records only, as the legacy reader did.
+        Segment-level records are not included here (the native
+        :meth:`mef3io.Reader.records` does include them for a channel, or use
+        ``Reader.records(channel, level="segment")``). Every dict carries
+        ``level`` / ``channel`` / ``segment``; see :meth:`mef3io.Reader.records`
+        for the fields. Returns ``None`` (with a printed warning) on failure,
+        as the legacy API did.
         """
         try:
-            return self._r.records(channel)
+            if channel is None:
+                return self._r.records()
+            return self._r.records(channel, level="channel")
         except Exception:
             print("WARNING: read of annotations record failed, no annotations returned")
             return None
@@ -274,9 +279,12 @@ class MefWriter:
 
     @property
     def record_offset(self) -> int:
-        """Kept for legacy compatibility. mef3io writes records with a zero
-        recording-time offset (annotation times round-trip unchanged either
-        way); non-zero values are accepted and ignored."""
+        """Kept for legacy compatibility; non-zero values are accepted and
+        ignored. mef3io writes its time-series data with a zero
+        recording-time offset, and stores records with whatever offset the
+        session's section 3 already holds (0 for a session mef3io wrote, the
+        legacy value for an older session it appends to), so annotation times
+        always read back as given."""
         return self._record_offset
 
     @record_offset.setter

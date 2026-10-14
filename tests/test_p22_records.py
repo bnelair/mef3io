@@ -71,13 +71,16 @@ def _reseal(raw, body_end):
     struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
 
 
-def _set_rto(path, rto, channels=None):
-    """Give section 3 of every (or the named channels') .tmet this offset.
+def _set_rto(path, rto, channels=None, segments=None):
+    """Give section 3 of every (or the named channels' / segment numbers')
+    .tmet this offset.
 
     The fixed-length .tmet body CRC is bounded by METADATA_FILE_BYTES — never
     to EOF (CLAUDE.md, ".tmet is a FIXED-length record")."""
     for tmet in sorted(Path(path).glob("*.timd/*.segd/*.tmet")):
         if channels is not None and tmet.parent.parent.name[:-5] not in channels:
+            continue
+        if segments is not None and int(tmet.stem.rsplit("-", 1)[1]) not in segments:
             continue
         raw = bytearray(tmet.read_bytes())
         struct.pack_into("<q", raw, S3_RTO_OFFSET, rto)
@@ -276,14 +279,21 @@ def test_segment_records_are_read_from_a_tar_archive(tmp_path):
     assert mef3io.Reader(tar).records(level="all") == mef3io.Reader(str(path)).records(level="all")
 
 
-def test_compat_get_annotations_includes_segment_records(tmp_path):
+def test_compat_get_annotations_keeps_the_legacy_channel_level_meaning(tmp_path):
+    """The legacy reader (pymef) returns a channel's CHANNEL-level records
+    only, so the drop-in shim does too; the native Reader includes the
+    segment level."""
     from mef3io.compat import MefReader
 
     path = tmp_path / "seg.mefd"
-    _write_session(path)
-    _add_segment_records(path)
+    _write_session(path, channel_text="channel")
+    _add_segment_records(path)                                   # moves the channel file away
+    with mef3io.Writer(str(path)) as w:
+        w.write_annotations([{"type": "Note", "time": START + SECOND, "text": "channel"}], "ch1")
     anns = MefReader(str(path)).get_annotations("ch1")
-    assert sorted(a["level"] for a in anns) == ["segment"]   # channel file was moved down
+    assert [(a["level"], a["text"]) for a in anns] == [("channel", "channel")]
+    assert sorted(a["level"] for a in mef3io.Reader(str(path)).records("ch1")) == [
+        "channel", "segment"]
 
 
 # --------------------------------------------------------------------------- #62
@@ -475,3 +485,203 @@ def test_records_written_by_mef3io_keep_their_shape(tmp_path):
     assert sess["type"] == "Note" and sess["text"] == "session"
     assert sess["time"] == START + SECOND
     assert (sess["version_major"], sess["version_minor"]) == (1, 0)
+
+
+# --------------------------------------------------------------------------- #77 writer
+
+
+def _stored_times(rdat):
+    """Header times of every record in a .rdat, exactly as stored."""
+    raw = Path(rdat).read_bytes()
+    out, off = [], UH_BYTES
+    while off + RECORD_HEADER_BYTES <= len(raw):
+        out.append(struct.unpack_from("<q", raw, off + 16)[0])
+        off += RECORD_HEADER_BYTES + struct.unpack_from("<I", raw, off + 12)[0]
+    return out
+
+
+def _rdat(path, channel=None):
+    if channel is None:
+        return next(Path(path).glob("*.rdat"))
+    return Path(path) / f"{channel}.timd" / f"{channel}.rdat"
+
+
+def test_records_written_into_an_offset_session_round_trip(tmp_path):
+    """#77: the writer stored record times with rto 0 whatever section 3 said,
+    so once #60 made the reader honour the offset, mef3io's own records in an
+    offset session read back rto late. Both levels must round-trip."""
+    path = tmp_path / "rto.mefd"
+    _write_session(path, annotate=False)
+    _set_rto(path, THREE_DAYS)
+    t = START + THREE_DAYS + SECOND
+    with mef3io.Writer(str(path)) as w:
+        w.write_annotations([{"type": "Note", "time": t, "text": "s"}])
+        w.write_annotations([{"type": "Note", "time": t, "text": "c"}], "ch1")
+    r = mef3io.Reader(str(path))
+    assert [a["time"] for a in r.records()] == [t]
+    assert [a["time"] for a in r.records("ch1")] == [t]
+    # Stored meflib-style: negated, offset removed (meflib.c:756).
+    assert _stored_times(_rdat(path)) == [THREE_DAYS - t]
+    assert _stored_times(_rdat(path, "ch1")) == [THREE_DAYS - t]
+
+
+def test_records_written_with_rto_zero_are_stored_exactly_as_before(tmp_path):
+    """A session mef3io wrote has rto 0, and the stored times must not change:
+    -t, the value every earlier release wrote."""
+    path = tmp_path / "zero.mefd"
+    _write_session(path)
+    assert _stored_times(_rdat(path)) == [-(START + SECOND)]
+    assert _stored_times(_rdat(path, "ch1")) == [-(START + SECOND)]
+
+
+def test_records_written_into_a_legacy_offset_session_agree_with_the_legacy_reader(tmp_path):
+    """#77 as reported: a mef_tools session with record_offset = START - 10 d;
+    mef3io writes annotations at START + 1 s at both levels. mef3io and the
+    legacy reader (pymef underneath) must both read them back at START + 1 s.
+    Before the fix mef3io read them 1576972800 s late."""
+    pytest.importorskip("mef_tools", reason="legacy oracle not installed")
+    from mef_tools.io import MefReader, MefWriter
+
+    path = str(tmp_path / "legacy.mefd")
+    w = MefWriter(path, overwrite=True)
+    w.record_offset = START - 10 * 86400 * SECOND
+    w.write_data(np.arange(5000, dtype=np.int32) * 1.0, "ch1", START, FS, precision=0)
+    del w
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")   # legacy declarations warning
+        with mef3io.Writer(path) as mw:
+            mw.write_annotations([{"type": "Note", "time": START + SECOND, "text": "s"}])
+            mw.write_annotations([{"type": "Note", "time": START + SECOND, "text": "c"}], "ch1")
+        r = mef3io.Reader(path)
+    assert [a["time"] for a in r.records()] == [START + SECOND]
+    assert [a["time"] for a in r.records("ch1")] == [START + SECOND]
+
+    legacy = MefReader(path)
+    assert [int(a["time"]) for a in legacy.get_annotations()] == [START + SECOND]
+    assert [int(a["time"]) for a in legacy.get_annotations("ch1")] == [START + SECOND]
+
+
+def test_writer_refuses_records_when_the_level_disagrees_on_the_offset(tmp_path):
+    path = tmp_path / "split.mefd"
+    _write_session(path, annotate=False)
+    _set_rto(path, THREE_DAYS, channels=["ch2"])
+    with mef3io.Writer(str(path)) as w:
+        with pytest.raises(RuntimeError, match="recording_time_offset"):
+            w.write_annotations([{"type": "Note", "time": START, "text": "s"}])
+        # one channel agrees with itself, so its own level is fine
+        w.write_annotations([{"type": "Note", "time": START + SECOND, "text": "c"}], "ch1")
+    assert mef3io.Reader(str(path)).records("ch1")[0]["time"] == START + SECOND
+
+
+# --------------------------------------------------------------------------- review fixes
+
+
+def test_a_short_edfa_body_reports_absent_fields_instead_of_failing(tmp_path):
+    """An EDFA body without its complete 8-byte duration used to throw from
+    read_string and take the whole records() call down."""
+    path = tmp_path / "edfa.mefd"
+    _write_session(path)
+    _install_records(next(path.glob("*.rdat")), [
+        _record("EDFA", b"", -START),
+        _record("Note", b"still here\0", -START),
+    ])
+    edfa, note = mef3io.Reader(str(path)).records()
+    assert edfa["duration"] is None and edfa["text"] is None
+    assert note["text"] == "still here"
+
+
+@pytest.mark.parametrize("rtype,body", [
+    ("Note", b"text\0"),
+    ("SyLg", b"text\0"),
+    ("EDFA", struct.pack("<q", 5) + b"text\0"),
+])
+def test_every_body_type_is_version_gated(tmp_path, rtype, body):
+    """meflib decodes Note/SyLg/EDFA only at version 1.0 too (mefrec.c:201,
+    232, 540); another version's layout is unknown, so its fields are absent.
+    Version 1.0 — what mef3io, pymef and mef_tools all write — is unchanged."""
+    path = tmp_path / "v.mefd"
+    _write_session(path)
+    _install_records(next(path.glob("*.rdat")), [
+        _record(rtype, body, -START, vmaj=1, vmin=0),
+        _record(rtype, body, -START, vmaj=2, vmin=0),
+        _record(rtype, body, -START, vmaj=1, vmin=1),
+    ])
+    v10, v20, v11 = mef3io.Reader(str(path)).records()
+    assert v10["text"] == "text"
+    assert v20["text"] is None and v11["text"] is None
+
+
+def test_lntp_written_by_pymef_uses_int64_and_is_detected(tmp_path):
+    """pymef writes the LNTP template as int64 (pymef3_file.c:4159-4160)
+    where mefrec.h says si4; read as si4 the template came back as
+    [1, 0, -2, -1, 3]. Detected, and read as the values written."""
+    pytest.importorskip("pymef")
+    from pymef.mef_session import MefSession
+
+    path = tmp_path / "lntp.mefd"
+    _write_session(path, annotate=False)
+    ms = MefSession(str(path), "", read_metadata=False)
+    ms.write_mef_records("", "", START, START + SECOND, 0, [
+        {"type": "LNTP", "time": START + SECOND, "length": 5,
+         "template": np.array([1, -2, 3, 4, 5])}])
+    (rec,) = mef3io.Reader(str(path)).records()
+    assert rec["length"] == 5 and rec["template"] == [1, -2, 3, 4, 5]
+
+
+@pytest.mark.parametrize("values", [[7], [1, 2, 3], [-1, 0, -1], [-5]])
+def test_lntp_si4_layout_is_not_mistaken_for_int64(tmp_path, values):
+    """The mefrec.h layout (si4) must still win whenever the int64 reading is
+    not self-consistent — including short templates whose 0x7e padding leaves
+    room for 8 bytes per value."""
+    path = tmp_path / "lntp.mefd"
+    _write_session(path)
+    body = struct.pack("<q", len(values)) + struct.pack(f"<{len(values)}i", *values)
+    _install_records(next(path.glob("*.rdat")), [_record("LNTP", body, -START)])
+    (rec,) = mef3io.Reader(str(path)).records()
+    assert rec["template"] == values
+
+
+def _two_segment_session(path):
+    """ch1 with two segments; channel-level and segment-0 records."""
+    with mef3io.Writer(str(path), overwrite=True) as w:
+        w.write("ch1", np.zeros(2560), START, FS, precision=0)
+        w.write("ch1", np.zeros(2560), START + 20 * SECOND, FS, precision=0, new_segment=True)
+    _add_segment_records(path, text="segment")
+    with mef3io.Writer(str(path)) as w:
+        w.write_annotations([{"type": "Note", "time": START + SECOND, "text": "channel"}], "ch1")
+
+
+def test_a_disputed_offset_only_matters_to_offset_dependent_times(tmp_path):
+    """Non-negative stored times are absolute whatever the offset is, so a
+    file holding only those is placed even when the segments disagree."""
+    path = tmp_path / "pos.mefd"
+    _write_session(path)
+    _set_rto(path, THREE_DAYS, channels=["ch2"])
+    _install_records(next(path.glob("*.rdat")),
+                     [_record("Note", b"absolute\0", START + SECOND)])   # stored positive
+    (rec,) = mef3io.Reader(str(path)).records()
+    assert rec["time"] == START + SECOND
+
+
+def test_a_disputed_channel_offset_does_not_cost_the_segment_records(tmp_path):
+    """Segment-level records carry their own segment's offset, so a dispute
+    at the channel level must not take them down: strict raises for the
+    channel file but level="segment" still reads; lenient skips only the
+    channel file and reports it."""
+    path = tmp_path / "split.mefd"
+    _two_segment_session(path)
+    _set_rto(path, THREE_DAYS, segments=[1])          # the segments of ch1 now disagree
+
+    strict = mef3io.Reader(str(path))
+    with pytest.raises(m.FormatError, match="recording_time_offset"):
+        strict.records("ch1")
+    assert [a["text"] for a in strict.records("ch1", level="segment")] == ["segment"]
+
+    lenient = mef3io.Reader(str(path), strict=False)
+    with pytest.warns(mef3io.UnreadableSegmentWarning, match="record file"):
+        recs = lenient.records("ch1")
+    assert [(a["level"], a["text"]) for a in recs] == [("segment", "segment")]
+    (problem,) = lenient.problems
+    assert problem["segment_number"] == -1 and "ch1.rdat" in problem["segment"]
+    assert "recording_time_offset" in problem["reason"]

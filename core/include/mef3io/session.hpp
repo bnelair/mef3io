@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <vector>
@@ -246,10 +247,16 @@ class Session {
   ///
   /// Times are resolved with the offset of what the file belongs to: a
   /// segment's own section 3; for a channel or the session, the offset ALL of
-  /// its readable segments agree on. When they disagree there is no correct
-  /// answer (meflib marks such a session's offset NO_ENTRY, meflib.c:6208),
-  /// so that level throws FormatError rather than guess — only when it has a
-  /// record file to read.
+  /// its readable segments agree on. When they disagree AND the file stores
+  /// an offset-dependent (negated) time, there is no correct answer, so that
+  /// file fails with FormatError rather than guess (a deliberate divergence
+  /// from meflib, which uses whichever offset it read last — see
+  /// read_record_file). Other files, including the segment-level ones, are
+  /// unaffected by that.
+  ///
+  /// A record file that cannot be read throws when strict; when lenient it is
+  /// skipped and reported in problems() (segment_number -1 for a session- or
+  /// channel-level file) without marking any segment's data unreadable.
   ///
   /// @throws std::invalid_argument  a segment without a channel, or a level
   ///         outside the scope (Session within a channel; Session/Channel
@@ -271,11 +278,15 @@ class Session {
   void discover();
   void load_channel_basic_info(const std::string& name, Channel& ch);
   /// The offset every readable segment of `channel` (or of the whole session
-  /// when null) agrees on; throws FormatError when they disagree.
-  si8 agreed_rto(const std::string* channel, const char* what);
-  /// Parse one record file, tagging each record; empty when it is absent.
-  void append_records(std::vector<Record>& out, const std::string& rdat_path, si8 rto,
-                      RecordLevel level, const std::string& channel, int segment);
+  /// when null) agrees on; nullopt, with `why` set, when they disagree.
+  std::optional<si8> agreed_rto(const std::string* channel, std::string& why);
+  /// Parse one record file and append its records, tagged with where they
+  /// came from. `rto` nullopt = disputed (see agreed_rto): the file is still
+  /// read if none of its times depends on the offset. Throws when strict;
+  /// when lenient a failure is reported in problems() and the file skipped.
+  void read_record_file(std::vector<Record>& out, const std::string& rdat_path,
+                        std::optional<si8> rto, const std::string& why, RecordLevel level,
+                        const std::string& channel, int segment);
   TimeSeriesMetadata& segment_metadata(SegmentReader& seg);
   /// Run `fn` for one segment, containing its failure when lenient.
   ///
@@ -319,6 +330,7 @@ class Session {
   std::map<std::string, Channel> channels_;
   bool strict_ = true;
   std::vector<SegmentProblem> problems_;
+  std::set<std::string> reported_record_files_;  // record files already in problems_
 };
 
 }  // namespace mef3io

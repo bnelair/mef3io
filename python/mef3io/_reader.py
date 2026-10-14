@@ -539,11 +539,28 @@ class Reader:
         Raises
         ------
         mef3io._mef3io.FormatError
-            The segments a channel or the session spans disagree on the
-            recording-time offset, so its records cannot be placed.
+            A record file cannot be read, or the segments a channel or the
+            session spans disagree on the recording-time offset AND its file
+            stores offset-dependent (negated) times, so they cannot be placed.
+            Only when strict: a lenient Reader skips that file, lists it in
+            :attr:`problems` and emits :class:`UnreadableSegmentWarning`; the
+            other files (e.g. the segment-level ones) are still returned.
         ValueError
             A ``segment`` without a ``channel``, or a level outside the scope.
         IndexError
             Unknown channel or segment number.
         """
-        return self._ensure_impl().records(channel, segment, level)
+        impl = self._ensure_impl()
+        before = len(impl.problems())
+        out = impl.records(channel, segment, level)
+        added = impl.problems()[before:]
+        if added:
+            # Lenient only (strict raises): a record file that could not be
+            # read was skipped. Say so — a missing annotation is otherwise
+            # indistinguishable from one that was never written.
+            warnings.warn(
+                f"{self._path}: {len(added)} record file(s) could not be read and were "
+                f"SKIPPED. First: {added[0]['segment']} — {added[0]['reason']}. "
+                "Full list in Reader.problems. Open with strict=True to fail instead.",
+                UnreadableSegmentWarning, stacklevel=2)
+        return out

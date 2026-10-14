@@ -138,8 +138,46 @@ void SessionWriter::hydrate(const std::string& channel, ChannelState& st) {
   st.last_end_uutc = end_stored == fmt::UUTC_NO_ENTRY ? 0 : to_user_time(end_stored, rto);
 }
 
+si8 SessionWriter::records_rto(const std::optional<std::string>& channel) const {
+  // Write with the offset the READER will resolve these records with
+  // (Session::read_records): the one every segment of the level agrees on,
+  // read from section 3 of the .tmet files on disk. Writing with 0 into a
+  // session that carries an offset (a legacy one, say) made the reader add
+  // the offset back and put the records ~rto too late.
+  std::optional<si8> agreed;
+  std::string agreed_where;
+  if (!fs::exists(mefd_path_)) return 0;
+  for (const auto& timd : fs::directory_iterator(mefd_path_)) {
+    if (!timd.is_directory() || timd.path().extension() != ".timd") continue;
+    if (channel && timd.path().stem().string() != *channel) continue;
+    for (const auto& segd : fs::directory_iterator(timd.path())) {
+      if (!segd.is_directory() || segd.path().extension() != ".segd") continue;
+      const fs::path tmet = segd.path() / (segd.path().stem().string() + ".tmet");
+      if (!fs::exists(tmet)) continue;
+      std::ifstream f(tmet, std::ios::binary);
+      std::vector<ui1> bytes((std::istreambuf_iterator<char>(f)),
+                             std::istreambuf_iterator<char>());
+      const si8 rto = segment_rto(
+          load_time_series_metadata(bytes, password_2_.empty() ? password_1_ : password_2_));
+      if (!agreed) {
+        agreed = rto;
+        agreed_where = tmet.string();
+      } else if (*agreed != rto) {
+        throw WriteConflictError(
+            "cannot write " + std::string(channel ? "channel" : "session") +
+            "-level records: segments disagree on recording_time_offset (" +
+            std::to_string(*agreed) + " in " + agreed_where + ", " + std::to_string(rto) +
+            " in " + tmet.string() + "), so no single offset would place them correctly");
+      }
+    }
+  }
+  return agreed.value_or(0);
+}
+
 void SessionWriter::write_records(std::optional<std::string> channel,
                                   const std::vector<Record>& records) {
+  if (records.empty()) return;  // write_records writes nothing for an empty batch
+  const si8 rto = records_rto(channel);
   std::string dir, base;
   if (channel) {
     dir = (fs::path(mefd_path_) / (*channel + ".timd")).string();
@@ -149,8 +187,8 @@ void SessionWriter::write_records(std::optional<std::string> channel,
     dir = mefd_path_;
     base = session_name_;
   }
-  mef3io::write_records(dir, base, session_name_, channel.value_or(""), 0, records,
-                        /*rto=*/0, password_1_, password_2_);
+  mef3io::write_records(dir, base, session_name_, channel.value_or(""), 0, records, rto,
+                        password_1_, password_2_);
 }
 
 si8 SessionWriter::block_length_for(sf8 fs) const {

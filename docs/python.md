@@ -143,13 +143,22 @@ same keys for a type and `None` where the body does not carry one: `text`
 `annotation` and `channels` (a list of `{"name", "onset", "offset"}`) for Seiz;
 and the Epoc, Curs, CSti, ESti and LNTP fields listed in the
 [format reference](mef3_format.md#body-layouts-mefrech). Body times
-(`earliest_onset`, a Seiz channel's `onset`/`offset`, Epoc `timestamp` /
-`end_timestamp`, Curs `trace_timestamp`) are absolute uUTC like `time`; the
+(`earliest_onset`, `latest_offset`, a Seiz channel's `onset`/`offset`, Epoc
+`timestamp` / `end_timestamp`, Curs `trace_timestamp`) are absolute uUTC like
+`time`; the
 [format reference](mef3_format.md#record-times-and-the-recording-time-offset)
 explains how they are resolved. If a channel's (or the session's) segments
-disagree on the recording-time offset, reading that level raises `FormatError`
-rather than misplacing its records. Reading every body type is supported;
-writing is limited to Note, SyLg and EDFA.
+disagree on the recording-time offset and its record file stores
+offset-dependent times, that one file raises `FormatError` rather than
+misplacing its records (a lenient Reader skips it, lists it in `problems` and
+warns; the segment-level records are unaffected). A record file that cannot be
+read is handled the same way. Reading every body type is supported; writing is
+limited to Note, SyLg and EDFA, and stores times with the session's existing
+offset so they read back as given.
+
+The `mef_tools`-compatible `MefReader.get_annotations(channel)` keeps the
+legacy meaning — that channel's channel-level records only — while
+`Reader.records(channel)` also includes its segment-level records.
 
 ### Warm-start cache (opt-in)
 

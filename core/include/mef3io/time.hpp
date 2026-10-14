@@ -20,19 +20,34 @@ namespace mef3io {
 /// offset", i.e. plain negation (meflib.c:753 / 7669).
 constexpr si8 effective_rto(si8 rto) noexcept { return rto == fmt::UUTC_NO_ENTRY ? 0 : rto; }
 
+/// a + b, saturated instead of overflowing (signed overflow is UB, and these
+/// inputs come straight from file bytes — a record body can hold anything).
+/// The low end stops at INT64_MIN + 1 so a result never turns into the
+/// NO_ENTRY sentinel.
+constexpr si8 saturating_add(si8 a, si8 b) noexcept {
+  constexpr si8 MAX = INT64_MAX;
+  constexpr si8 MIN = fmt::UUTC_NO_ENTRY + 1;
+  if (b > 0 && a > MAX - b) return MAX;
+  if (b < 0 && a < MIN - b) return MIN;
+  const si8 r = a + b;
+  return r < MIN ? MIN : r;
+}
+
 /// On-disk time -> absolute uUTC. NO_ENTRY passes through; a non-negative
 /// value is already absolute; a negative one has the offset removed.
+/// Saturates rather than overflowing on nonsense input.
 constexpr si8 to_user_time(si8 stored, si8 rto) noexcept {
   if (stored == fmt::UUTC_NO_ENTRY) return stored;
   if (stored >= 0) return stored;
-  return -stored + effective_rto(rto);
+  return saturating_add(-stored, effective_rto(rto));  // -stored fits: stored > INT64_MIN
 }
 
 /// Absolute uUTC -> on-disk time, meflib-style (negated, offset removed).
-/// Exact inverse of to_user_time for every absolute time > rto.
+/// Exact inverse of to_user_time for every absolute time > rto. Saturates
+/// rather than overflowing on nonsense input.
 constexpr si8 to_disk_time(si8 absolute, si8 rto) noexcept {
   if (absolute == fmt::UUTC_NO_ENTRY) return absolute;
-  return effective_rto(rto) - absolute;
+  return saturating_add(effective_rto(rto), -absolute);  // -absolute fits likewise
 }
 
 }  // namespace mef3io

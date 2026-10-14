@@ -186,3 +186,33 @@ def test_a_strict_open_is_not_served_a_lenient_snapshot(tmp_path):
         mef3io.Reader(str(path), strict=False, cache=str(cache))
     with pytest.raises(Exception):
         mef3io.Reader(str(path), strict=True, cache=str(cache))
+
+
+def test_an_unreadable_segment_record_file_is_contained_too(tmp_path):
+    """Segment-level record files (#61) are segment files like any other: one
+    that cannot be parsed must not take a lenient records() call down. It is
+    skipped and reported once; strict still fails loudly. It does NOT mark the
+    segment's DATA unreadable — a broken annotation file says nothing about
+    the samples."""
+    path = tmp_path / "s.mefd"
+    data = _write_segments(path, n_segments=2)
+    with mef3io.Writer(str(path)) as w:
+        w.write_annotations([{"type": "Note", "time": START, "text": "channel"}], "ch1")
+    seg = Path(_segd_dirs(path)[0])
+    (seg / (seg.stem + ".rdat")).write_bytes(b"\0" * 100)    # shorter than a universal header
+
+    with pytest.raises(m.FormatError):
+        mef3io.Reader(str(path)).records("ch1")
+
+    r = mef3io.Reader(str(path), strict=False)
+    with pytest.warns(mef3io.UnreadableSegmentWarning, match="record file"):
+        recs = r.records("ch1")
+    assert [(a["level"], a["text"]) for a in recs] == [("channel", "channel")]
+    (problem,) = r.problems
+    assert problem["segment_number"] == 0 and problem["segment"].endswith(".rdat")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                      # reported once, not per call
+        assert r.records("ch1") == recs
+    assert len(r.problems) == 1
+    raw = r.read_raw("ch1")
+    assert np.asarray(raw["valid"]).sum() == sum(len(d) for d in data)   # data untouched

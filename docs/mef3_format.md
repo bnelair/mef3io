@@ -41,7 +41,9 @@ quirks matter:
   `t >= 0 ? t : -t + rto`, where `rto` (the recording time offset) lives in
   metadata section 3. This applies to universal-header start/end times, block
   start times, and record header times alike (record body times: see
-  [Records](#records-rdat-ridx-annotations)). mef3io writes `rto = 0`. The
+  [Records](#records-rdat-ridx-annotations)). mef3io writes time-series data
+  with `rto = 0`; records it writes into an existing session use the offset
+  that session's section 3 already holds, so they read back as given. The
   rule is implemented once, in `core/include/mef3io/time.hpp`.
 - The empty value ("no entry") for a time is `INT64_MIN`.
 
@@ -333,10 +335,27 @@ the session and channel levels.
 
 The header time is negated like every other MEF time and is resolved with the
 offset of what the file belongs to: a segment's own section 3; for a channel
-or the session, the offset **all** of their segments agree on. If the
-segments disagree there is no correct single value (meflib marks such a
-session's offset "no entry", meflib.c:6208), so reading that level raises
-`FormatError` instead of placing the records by a guess.
+or the session, the offset **all** of their segments agree on.
+
+If those segments disagree, there is no correct single value. Only times
+stored negated depend on the offset, so a file holding none is read normally.
+One that does is refused with `FormatError` (strict), or skipped and listed in
+`Reader.problems` with an `UnreadableSegmentWarning` (lenient). Either way only
+that one file is affected: the segment-level files carry their own segment's
+offset and still read (`records(ch, level="segment")` in strict mode).
+
+This is a **deliberate divergence from meflib**. In its default
+`RTO_REMOVE_ON_INPUT` mode (meflib.h:278) meflib resolves record times with
+the global offset left by whichever `.tmet` it read last (meflib.c:1806 →
+1846); the "no entry" it records for a disagreeing channel or session
+(meflib.c:5529, 6208) is only the metadata aggregate. Following the read order
+would misplace the records by the difference without a word.
+
+**Writing.** mef3io stores the records it writes with the same offset the
+reader will use for that level — 0 for a session mef3io wrote (so those bytes
+are unchanged from earlier releases), section 3's value for, e.g., a legacy
+session written with `record_offset`. If the level's segments disagree, the
+write is refused (`WriteConflictError`).
 
 meflib applies the offset to the record **header** only (meflib.c:1846);
 `mefrec.c` never rewrites a body. It does, however, display every body time
@@ -350,9 +369,12 @@ Seiz channel's `-1` onset/offset are passed through as-is.
 
 ### Body layouts (mefrec.h)
 
-Offsets are relative to the start of the body. meflib decodes the structured
-bodies only at **version 1.0**; another version, or a body shorter than the
-layout, reads back with every body field `None`. The field names are the keys
+Offsets are relative to the start of the body. **Every** body type is
+version-gated: meflib decodes each one only at version 1.0 (mefrec.c:201, 232,
+540, …), so mef3io reads a body only when the header says 1.0 — which is what
+mef3io, pymef and mef_tools write. Another version, or a body shorter than the
+fixed part of its layout (e.g. an EDFA body without its 8-byte duration),
+reads back with every body field `None`. The field names are the keys
 `Reader.records()` returns (and the MATLAB struct fields); every record of a
 type always carries all of its type's keys.
 
@@ -364,16 +386,28 @@ type always carries all of its type's keys.
 | `Epoc` (192 B) | 0: si8 `id_number`; 8: si8 `timestamp` (uUTC); 16: si8 `end_timestamp` (uUTC); 24: si8 `duration`; 32: utf8[32] `epoch_type`; 64: utf8[128] `text` |
 | `Curs` (160 B) | 0: si8 `id_number`; 8: si8 `trace_timestamp` (uUTC); 16: si8 `latency`; 24: sf8 `value`; 32: utf8[128] `name` |
 | `CSti` (200 B) | 0: utf8[64] `task_type`; 64: si8 `stimulus_duration`; 72: utf8[64] `stimulus_type`; 136: utf8[64] `patient_response` |
-| `ESti` (416 B) | 0: sf8 `amplitude`; 8: sf8 `frequency`; 16: si8 `pulse_width`; 24: si4 `ampunit_code` (1 mA, 2 V); 28: si4 `mode_code` (1 current, 2 voltage); 32/160/288: utf8[128] `waveform` / `anode` / `catode` |
-| `LNTP` | 0: si8 `length`; 8: si4[`length`] `template` |
+| `ESti` (416 B) | 0: sf8 `amplitude`; 8: sf8 `frequency`; 16: si8 `pulse_width`; 24: si4 `ampunit_code` (−1 none, 0 unknown, 1 mA, 2 V); 28: si4 `mode_code` (−1 none, 0 unknown, 1 current, 2 voltage; mefrec.h:242-250); 32/160/288: utf8[128] `waveform` / `anode` / `catode` |
+| `LNTP` | 0: si8 `length`; 8: si4[`length`] `template` (pymef: si8, see below) |
 | `UnRc` | no body fields |
 
 `Seiz` returns at most `number_of_channels` channel entries, and fewer when
 the body is shorter than it declares. For `LNTP` mef3io follows the
 `MEFREC_LNTP_1_0_TEMPLATE_OFFSET` define (body offset 8); meflib's own display
 code (mefrec.c:306) applies that offset with `si4*` pointer arithmetic and so
-reads 4× too far. Reading these bodies is supported; writing remains limited to
-`Note`, `SyLg` and `EDFA`.
+reads 4× too far.
+
+**LNTP incompatibility.** pymef (and so the legacy `mef_tools`) writes the
+template as **si8** (pymef3_file.c:4159-4160; its reader notes the discrepancy
+at :3729), not the si4 `mefrec.h` defines, and the header cannot say which.
+mef3io reads si4 by default and takes the pymef layout only when the body
+holds at least 8 × `length` bytes after the length AND every high 4 bytes are
+the sign extension of the low 4 — which a si4 template followed by meflib's
+`0x7e` padding never is. The values are returned as integers either way.
+(A si4 file padded with zeros instead of `0x7e`, whose template happens to
+alternate value / sign-extension, would be misread; no known writer does that.)
+
+Reading these bodies is supported; writing remains limited to `Note`, `SyLg`
+and `EDFA`.
 
 ## Sentinels and other conventions
 

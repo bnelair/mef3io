@@ -10,7 +10,10 @@
 #include "mef3io/byteio.hpp"
 #include "mef3io/c_api.h"
 #include "mef3io/crc.hpp"
+#include "mef3io/errors.hpp"
+#include "mef3io/reader.hpp"
 #include "mef3io/records.hpp"
+#include "mef3io/session_writer.hpp"
 #include "mef3io/time.hpp"
 
 using namespace mef3io;
@@ -110,6 +113,17 @@ TEST_CASE("time conversion: one definition that handles NO_ENTRY itself") {
         REQUIRE(to_user_time(disk, rto) == t);
       }
   }
+  SECTION("nonsense input saturates instead of overflowing (signed overflow is UB)") {
+    // Body times come straight from file bytes, so these are reachable.
+    constexpr si8 MAX = INT64_MAX;
+    REQUIRE(to_user_time(NE + 1, RTO) == MAX);          // -stored == MAX, + rto overflows
+    REQUIRE(to_user_time(NE + 1, 0) == MAX);
+    REQUIRE(to_user_time(-1, MAX) == MAX);
+    REQUIRE(to_disk_time(NE + 1, RTO) == MAX);          // rto - (MIN+1) overflows
+    REQUIRE(to_disk_time(MAX, -RTO) == NE + 1);         // never becomes the sentinel
+    REQUIRE(to_disk_time(MAX, 0) == -MAX);
+    static_assert(to_user_time(fmt::UUTC_NO_ENTRY + 1, INT64_MAX) == INT64_MAX);
+  }
 }
 
 TEST_CASE("parse_records decodes every mefrec.h body type") {
@@ -118,7 +132,8 @@ TEST_CASE("parse_records decodes every mefrec.h body type") {
   const si8 disk = to_disk_time(t, RTO);
 
   Body epoc;
-  epoc.put<si8>(42).put<si8>(t).put<si8>(t + 60 * SEC).put<si8>(60 * SEC);
+  // timestamp negated (offset applied), end_timestamp absolute: both must be t-based.
+  epoc.put<si8>(42).put<si8>(to_disk_time(t, RTO)).put<si8>(t + 60 * SEC).put<si8>(60 * SEC);
   epoc.str("sleep", 32).str("N2", 128);
   Body curs;
   curs.put<si8>(7).put<si8>(to_disk_time(t, RTO)).put<si8>(1500).put<sf8>(-12.5).str("c1", 128);
@@ -300,5 +315,71 @@ TEST_CASE("C ABI reads records at every level with every body field") {
   REQUIRE(mef3io_reader_read_records(r, "ch1", -1, 17, &list) == MEF3IO_ERR_ARGUMENT);
 
   mef3io_reader_close(r);
+  fsys::remove_all(dir);
+}
+
+namespace {
+// Give one .tmet's section 3 this recording-time offset and reseal both CRCs
+// (the body CRC bounded by the fixed record length, never to EOF).
+void set_tmet_rto(const fsys::path& tmet, si8 rto) {
+  std::vector<ui1> raw(fsys::file_size(tmet));
+  std::ifstream(tmet, std::ios::binary)
+      .read(reinterpret_cast<char*>(raw.data()), static_cast<std::streamsize>(raw.size()));
+  constexpr std::size_t S3_RTO = 13312, FILE_BYTES = 16384;
+  byteio::write<si8>(raw, S3_RTO, rto);
+  const std::span<const ui1> all(raw);
+  byteio::write<ui4>(raw, 4, crc::calculate(all.subspan(fmt::UNIVERSAL_HEADER_BYTES,
+                                                        FILE_BYTES - fmt::UNIVERSAL_HEADER_BYTES)));
+  byteio::write<ui4>(raw, 0, crc::calculate(all.subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4)));
+  std::ofstream(tmet, std::ios::binary | std::ios::trunc)
+      .write(reinterpret_cast<const char*>(raw.data()), static_cast<std::streamsize>(raw.size()));
+}
+}  // namespace
+
+TEST_CASE("Record times follow the offset of the level they belong to") {
+  const auto dir = fsys::temp_directory_path() / "mef3io_records_rto.mefd";
+  fsys::remove_all(dir);
+  const si8 RTO = 3 * 86400 * SEC;
+  {
+    SessionWriter w(dir.string(), true);
+    const std::vector<si4> x(2560, 0);
+    w.write_int32("ch1", x, 1.0, T0, 256.0);
+    w.write_int32("ch2", x, 1.0, T0, 256.0);
+    Record r;
+    r.type = "Note";
+    r.time = T0 + SEC;
+    r.text = "note";
+    w.write_records(std::nullopt, {r});
+    w.write_records("ch1", {r});
+  }
+  // The same file at the segment level too (meflib.c:6030 naming).
+  const auto segd = dir / "ch1.timd" / "ch1-000000.segd";
+  fsys::copy_file(dir / "ch1.timd" / "ch1.rdat", segd / "ch1-000000.rdat");
+
+  SECTION("segment-level records use their segment's own offset") {
+    set_tmet_rto(segd / "ch1-000000.tmet", RTO);
+    set_tmet_rto(dir / "ch2.timd" / "ch2-000000.segd" / "ch2-000000.tmet", RTO);
+    Reader r(dir.string());
+    const auto recs = r.records("ch1", 0);
+    REQUIRE(recs.size() == 1);
+    REQUIRE(recs[0].level == RecordLevel::Segment);
+    REQUIRE(recs[0].time == T0 + SEC + RTO);  // written with rto 0, now read with RTO
+    REQUIRE(recs[0].time - r.info("ch1").start_time == SEC);
+    REQUIRE(r.records()[0].time - r.info("ch1").start_time == SEC);  // session level too
+  }
+
+  SECTION("a disputed offset refuses offset-dependent records, and only those") {
+    set_tmet_rto(dir / "ch2.timd" / "ch2-000000.segd" / "ch2-000000.tmet", RTO);
+    Reader strict(dir.string());
+    REQUIRE_THROWS_AS(strict.records(), FormatError);         // session level is disputed
+    REQUIRE(strict.records("ch1").size() == 2);               // ch1 agrees with itself
+
+    Reader lenient(dir.string(), "", 0, /*strict=*/false);
+    REQUIRE(lenient.records().empty());
+    REQUIRE(lenient.problems().size() == 1);
+    REQUIRE(lenient.problems()[0].segment_number == -1);
+    REQUIRE(lenient.records(std::nullopt, std::nullopt, Session::RecordLevels::All).size() == 2);
+    REQUIRE(lenient.problems().size() == 1);                  // reported once
+  }
   fsys::remove_all(dir);
 }
