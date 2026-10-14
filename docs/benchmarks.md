@@ -61,13 +61,31 @@ decodes on all cores; mef_tools is single-threaded.
 - **A tar archive reads like a directory once open.** A cold *open* is
   ~2.5× slower (0.5 s vs 0.2 s), because the archive's member index has to
   be read from disk. Warm, the two are the same.
-- **The snapshot cache helps tar archives and hurts directories.** On a tar,
-  `Reader(cache=...)` opens in under 10 ms, because validating the snapshot
-  is a single `stat` of the archive. On a directory it is ~2.7× *slower* than
-  no cache, cold and warm. Validating there hashes every segment's `.tmet`
-  (16 KB) and the start of every `.tidx`, which reads at least as much as a
-  plain open, and the JSON parse comes on top. This is a known issue, to be
-  fixed separately.
+- **The snapshot cache now helps directories as well as tar archives.** The
+  "directory + snapshot" row above was measured before issue #64 was fixed:
+  validating a snapshot then hashed every segment's `.tmet` (16 KB) and the
+  start of every `.tidx`, which read at least as much as a plain open, so a
+  cached directory open was ~2.7× *slower* than an uncached one. Validation is
+  now stat-only (size, mtime, ctime and inode of each file; on Linux and macOS
+  unchanged directory stats also replace re-listing the tree). Re-measured on
+  the same 768-segment configuration, `--ops open` only:
+
+  | reader | open cold | open warm |
+  |---|---|---|
+  | mef3io, directory | 233 ms | 150 ms |
+  | mef3io, directory + snapshot | 25 ms | 35 ms |
+  | mef3io, `.mefd.tar` | 565 ms | 124 ms |
+  | mef3io, `.mefd.tar` + snapshot | 8 ms | 9 ms |
+
+  A cached directory open is now 4–9× faster than an uncached one rather
+  than 2.7× slower. A tar is still the cheapest, because it is a single
+  `stat`. "Cold" here evicts file contents from the page cache, not inodes,
+  which is all a stat-only check needs. One exception: files modified within
+  the last 5 s are also content-hashed until they settle (filesystem
+  timestamps can be too coarse to separate two quick writes), so the first
+  cached open right after a write still costs about what it used to. That is
+  why `--quick`, which writes its session seconds before measuring it, shows
+  no gain.
 - Packing the 2.2 GB session into a tar took 2.6–4.2 s.
 
 ## Long session: the real workload

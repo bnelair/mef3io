@@ -248,7 +248,12 @@ storage; lazy open + mmap indices already fix the pathological local case).
   block-count summaries. No `.tidx` contents (mmap makes that unnecessary).
 - **Correctness:** cache is purely an accelerator. On open, real files are
   stat'd; any size/mtime/tree mismatch ⇒ affected entries ignored and
-  refreshed. A wrong cache can cost time, never correctness.
+  refreshed. A wrong cache can cost time, never correctness. (As built,
+  `python/mef3io/cache.py`: the snapshot is all-or-nothing, files are keyed by
+  size + mtime + ctime + inode, a file changed within a few seconds of the
+  snapshot also carries a content hash until it settles — git's "racy clean"
+  rule — and on POSIX unchanged directory stats stand in for re-listing the
+  tree. Validation must stay cheaper than the open it replaces; issue #64.)
 - **Write interaction:** any `Writer` operation on a session **removes** the
   auto-cache entry and any known persistent cache for it (removal, not
   in-place update — updating duplicates reader logic and risks silent

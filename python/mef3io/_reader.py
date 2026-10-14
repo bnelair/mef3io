@@ -198,15 +198,26 @@ class Reader:
                 self._cached_problems = snap.get("problems", [])
 
         if self._infos is None:
+            # Fingerprint BEFORE the backend reads the metadata: a write landing
+            # in between then leaves a snapshot that the next load rejects,
+            # rather than one whose fingerprints vouch for content it never saw.
+            # A path that cannot be listed gets no snapshot; the backend below
+            # reports the real error.
+            fingerprints = None
+            if self._cache_path is not None:
+                try:
+                    fingerprints = _cache.fingerprints(self._path)
+                except OSError:
+                    pass
             self._ensure_impl()
             self._infos = {ch: self._impl.info(ch) for ch in self._impl.channels}
             # Free at this point: every segment's metadata is already parsed.
             self._declaration_issues = self._collect_declaration_issues()
-            if self._cache_path is not None:
+            if fingerprints is not None:
                 _cache.save(
                     self._cache_path,
                     _cache.build_snapshot(self._path, self._infos, self._declaration_issues,
-                                          self.problems),
+                                          self.problems, fingerprints_=fingerprints),
                 )
 
         if not self._strict:

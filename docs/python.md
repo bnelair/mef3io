@@ -128,7 +128,13 @@ mef3io.Reader("session.mefd", cache="/data/s.cache")  # persistent snapshot
 
 Snapshots channel metadata so warm opens serve `channels`/`info` without
 touching the session tree, deferring the backend until a data read.
-Invalidated automatically on any size/mtime change and on write.
+Invalidated automatically on write and whenever a session file's size, mtime,
+ctime or identity (inode / file ID) changes — which covers in-place header
+repairs and `.tmet` files replaced by rename. Checking that is stat-only, so a
+warm open costs a few milliseconds even for hundreds of segments. Files
+modified within the last few seconds are also content-hashed until they settle,
+because a filesystem's timestamps can be too coarse to tell two quick writes
+apart.
 
 ## Tar archives (single-file sessions)
 

@@ -68,8 +68,21 @@ Benchmarked (docs/benchmarks.md, `benchmarks/access_modes_benchmark.py`,
 2.2 GB / 768 segments): once open a tar reads like the dir (full and warm
 windowed identical); a COLD open is ~2.5x slower (0.5 s vs 0.2 s — the member
 index comes off disk); archive ~0.6 GB/s. The snapshot cache makes a tar open
-~10 ms but makes a DIRECTORY open ~2.7x SLOWER (validation hashes every
-.tmet + .tidx head = more I/O than a plain open) — known, unfixed. Tests:
+~10 ms, and a DIRECTORY open ~25-35 ms vs ~150-230 ms uncached (768 segments).
+It used to make the directory ~2.7x SLOWER (#64: validation hashed every .tmet
++ .tidx head = more I/O than the open it replaced). Validation is now STAT-ONLY
+(cache format 5): files keyed by (size, mtime_ns, ctime_ns, inode) — rename
+repairs change the inode, in-place patches move mtime/ctime — plus git's
+"racy clean" rule: a file modified within RACY_WINDOW_NS (5 s) of the snapshot
+also carries a content hash, dropped (and the snapshot re-saved) once a load
+finds it settled. On POSIX, unchanged dir stats (root/.timd/.segd, stat'd
+BEFORE listing) replace re-listing. Windows: st_ctime is CREATION time so it is
+not used, and the tree is always listed (FAT keeps no dir mtimes); there an
+in-place same-size rewrite that ALSO restores mtime by hand on a settled file
+is the one residual blind spot. Fingerprints are taken BEFORE the backend
+reads the metadata. Keep validation cheaper than a plain open — use plain
+strings, not Path (Path construction cost more than the stats).
+tests/test_p22_cache_fingerprint.py pins each change shape. Tests:
 core/tests/test_tar.cpp, tests/test_p11_tar.py, tar block in
 matlab/test_mef3io.m.
 
