@@ -152,10 +152,8 @@ class Writer:
             )
         self._path = str(path)
         self._impl = _mef3io.SessionWriter(str(path), overwrite, password1 or "", password2 or "")
-        # A write changes the tree; drop any stale auto cache for this session.
-        from . import cache as _cache
-
-        _cache.invalidate(self._path, "auto")
+        # Deliberately cache-unaware: a snapshot is judged only when a cached
+        # open happens (mef3io.cache), never maintained by write paths.
         if units is not None:
             self._impl.set_units(units)
         if block_length is not None:

@@ -173,7 +173,8 @@ typedef struct {
 
 int mef3io_reader_segment_provenance(mef3io_reader* r, const char* channel, int32_t index,
                                      mef3io_provenance* out);
-/* "create", "append", "header-repair", "recovery", "metadata-update", "unset";
+/* "create", "append", "header-repair", "recovery", "metadata-update",
+ * "segment-repaired", "unset";
  * NULL for a code this library does not know (a newer writer's). */
 const char* mef3io_operation_name(int32_t code);
 int mef3io_reader_segment(mef3io_reader* r, const char* channel, int32_t index,

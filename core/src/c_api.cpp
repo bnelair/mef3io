@@ -489,6 +489,7 @@ int mef3io_recover_session(const char* mefd_path, int apply, int backup, const c
       if (!report.applied) text += "  (DRY RUN - nothing was written)";
       for (const auto& s : report.segments) text += "\n    " + s.path + ": " + s.action;
       for (const auto& s : report.skipped) text += "\n    skipped " + s;
+      for (const auto& n : report.notes) text += "\n    note: " + n;
       if (report.applied && !report.backup_root.empty())
         text += "\n  originals backed up under " + report.backup_root;
       copy_str(out_summary, out_summary_bytes, text);

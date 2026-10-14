@@ -140,6 +140,7 @@ void Session::load_channel_basic_info(const std::string& name, Channel& ch) {
       info.end_time = std::max(info.end_time, seg_end);
     }
     info.number_of_samples += md.section2.number_of_samples;
+    if (md.universal_header.is_password_protected()) info.password_protected = true;
     });
     if (ok) ++readable;
   }

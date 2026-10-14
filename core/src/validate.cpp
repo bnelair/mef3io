@@ -3,6 +3,7 @@
 #include "mef3io/validate.hpp"
 
 #include "durability.hpp"
+#include "last_segment.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -1377,6 +1378,7 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     }
     report.checks_repaired.assign(repair->check_ids.begin(), repair->check_ids.end());
   }
+  std::set<std::string> channels_to_stamp;
 
   for (const auto& files : discover_segments(*src, opts)) {
     auto skip = [&](const std::string& reason) {
@@ -1668,6 +1670,14 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     // Everything reached disk: only now is a finding a repair.
     for (const auto i : pending_repair) staged[i].repaired = true;
     ++report.segments_repaired;
+    {
+      // Remember channels whose NON-last segment changed: their last segment
+      // gets a segment-repaired stamp once every segment has been processed.
+      const fsys::path channel_dir = fsys::path(path) / (files.channel + ".timd");
+      const auto last = detail::last_segment_dir(channel_dir);
+      if (last && detail::segment_number_of(last->stem().string()) != files.segment_number)
+        channels_to_stamp.insert(files.channel);
+    }
     report.findings.insert(report.findings.end(), staged.begin(), staged.end());
     } catch (const std::exception& e) {
       // The findings still belong in the report — losing them would hide what
@@ -1693,6 +1703,51 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
           reason += "; no backup was taken (backup=false)";
       }
       skip(reason);
+    }
+  }
+
+  // segment-repaired: a non-last segment of these channels changed, so their
+  // LAST segment's .tmet says so (see last_segment.hpp). Header-only, backed up
+  // like the repair's own writes. A stamp that cannot be applied is a note,
+  // not an error: the repair itself already succeeded.
+  // Every outcome is reported as an Info finding `provenance.last-segment` on
+  // the last segment, so the report names each file this pass wrote.
+  for (const auto& channel : channels_to_stamp) {
+    const fsys::path channel_dir = fsys::path(path) / (channel + ".timd");
+    const auto stamp = detail::prepare_last_segment_stamp(channel_dir);
+    const std::string rel = channel + ".timd/" + stamp.segment_stem + ".segd/" +
+                            stamp.segment_stem + ".tmet";
+    Finding note;
+    note.check_id = "provenance.last-segment";
+    note.severity = Severity::Info;
+    note.repairable = false;
+    note.channel = channel;
+    note.segment_number = static_cast<int>(detail::segment_number_of(stamp.segment_stem));
+    note.path = stamp.tmet.string();
+    note.field = "provenance";
+    if (!stamp.ready) {
+      note.message = "a segment of this channel was repaired, but the last segment could not "
+                     "record it: " + stamp.note + detail::STAMP_SKIPPED_CONSEQUENCE;
+      report.findings.push_back(std::move(note));
+      continue;
+    }
+    try {
+      if (repair->backup) back_up(stamp.tmet.string(), backup_root_for(path), rel);
+      detail::write_last_segment_stamp(stamp);
+      note.stored = "written";
+      note.message = "last segment stamped segment-repaired (header only): " + rel +
+                     " records that an earlier segment of this channel was repaired";
+      report.findings.push_back(std::move(note));
+    } catch (const std::exception& e) {
+      std::string reason = std::string("aborted stamping segment-repaired: ") + e.what() +
+                           " — MAY ALREADY BE MODIFIED: " + rel;
+      reason += repair->backup ? "; restore from " + backup_root_for(path).string()
+                               : "; no backup was taken (backup=false)";
+      reason += ".";
+      reason += detail::STAMP_SKIPPED_CONSEQUENCE;
+      report.skipped.push_back({channel,
+                                static_cast<int>(detail::segment_number_of(stamp.segment_stem)),
+                                stamp.tmet.string(), reason});
     }
   }
 

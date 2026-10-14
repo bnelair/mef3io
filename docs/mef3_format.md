@@ -148,6 +148,19 @@ Offsets are relative to the region; add 960 for the position in the file.
 | 3 | `header-repair` | `repair_session`: declarations rewritten, samples untouched |
 | 4 | `recovery` | `recover_session`: index and data reconciled after an interrupted write |
 | 5 | `metadata-update` | reserved: descriptive metadata rewritten in place |
+| 6 | — | reserved for anonymize (#70), not yet assigned |
+| 7 | — | reserved for rename (#72), not yet assigned |
+| 8 | — | reserved for transform (#73), not yet assigned |
+| 9 | `segment-repaired` | stamped on a channel's **last** segment's `.tmet` when `repair_session` or `recover_session` modified **another** segment of that channel. The last segment itself was not repaired: that file only records that something earlier in its channel was. |
+
+`segment-repaired` exists so that one file per channel, the last segment's
+`.tmet`, shows that the channel changed, without anyone reading every segment.
+mef3io's warm-start snapshot relies on it. The stamp is header-only: just this
+region and the header CRC change. It is backed up like the repair's own writes.
+It is skipped, and reported as a note rather than an error, in three cases:
+the last segment's region belongs to another application, the last segment's
+CRCs do not verify, or a writer's `.mef3io-tmp` temp file sits in the last
+segment. The repair or recovery itself always proceeds.
 
 **Rules. These are the compatibility contract and do not change.**
 

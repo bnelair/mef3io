@@ -726,7 +726,14 @@ TEST_CASE("provenance region: frozen layout, bounds, saturation, foreign data",
     REQUIRE(std::string(pv::operation_name(3)) == "header-repair");
     REQUIRE(std::string(pv::operation_name(4)) == "recovery");
     REQUIRE(std::string(pv::operation_name(5)) == "metadata-update");
+    // 6-8 are reserved for #70/#72/#73 and deliberately unassigned here.
     REQUIRE(pv::operation_name(6) == nullptr);
+    REQUIRE(pv::operation_name(7) == nullptr);
+    REQUIRE(pv::operation_name(8) == nullptr);
+    REQUIRE(static_cast<int>(Op::SegmentRepaired) == 9);
+    REQUIRE(std::string(pv::operation_name(9)) == "segment-repaired");
+    REQUIRE(pv::operation_name(10) == nullptr);
+    REQUIRE(pv::MAX_CODE == 9);
   }
 
   SECTION("the count saturates; it never wraps back to zero") {

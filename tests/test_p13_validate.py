@@ -767,6 +767,12 @@ def test_warm_cache_open_still_warns(tmp_path):
     path = tmp_path / "s.mefd"
     _write(path)
     _patch_s2(_tmet(path), "maximum_difference_bytes", 0)
+    # A second segment: a one-segment-per-channel session is not worth a
+    # snapshot and never gets one (mef3io.cache.worth_caching).
+    rng = np.random.default_rng(1)
+    with mef3io.Writer(str(path)) as w:
+        w.write_int32("ch1", rng.normal(0, 3000, 4000).astype(np.int32), 0.5,
+                      START + int(60e6), FS, new_segment=True)
     cache_dir = str(tmp_path / "cache")
 
     mef3io.Reader(str(path), cache=cache_dir, warn_declarations=False)  # populate

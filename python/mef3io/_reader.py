@@ -187,27 +187,67 @@ class Reader:
         self._infos = None
         self._declaration_issues = []
         self._cached_problems = []
+        marker = False
         if self._cache_path is not None:
             snap = _cache.load_valid(self._cache_path, self._path)
+            # A marker says "a plain open is the fast path for this session"
+            # (cache.build_marker): open normally, skipping even the listing.
+            marker = _cache.is_marker(snap)
             # A snapshot taken by a lenient open that skipped segments describes
             # the session WITHOUT them; a strict open has to see the failure,
             # so it ignores the snapshot and opens cold (and raises).
-            if snap is not None and not (self._strict and snap.get("problems")):
+            if snap is not None and not marker and not (self._strict and snap.get("problems")):
                 self._infos = snap["channel_infos"]
                 self._declaration_issues = snap.get("declaration_issues", [])
                 self._cached_problems = snap.get("problems", [])
 
         if self._infos is None:
+            # Take the signature BEFORE the backend reads the metadata: a write landing
+            # in between then leaves a snapshot that the next load rejects,
+            # rather than one whose signature vouches for content it never saw.
+            # A path that cannot be listed gets no snapshot; the backend below
+            # reports the real error.
+            # A layout with no more segments than channels gets a marker, not a
+            # snapshot (cache.worth_caching): a snapshot could not make a later
+            # open faster, and computing its signature would slow this one down.
+            sig = None
+            save_marker = False
+            if self._cache_path is not None and not marker:
+                try:
+                    lay = _cache.layout(self._path)
+                    if _cache.worth_caching(lay):
+                        sig = _cache.signature(self._path, lay)
+                    else:
+                        save_marker = True
+                except OSError:
+                    pass
             self._ensure_impl()
             self._infos = {ch: self._impl.info(ch) for ch in self._impl.channels}
             # Free at this point: every segment's metadata is already parsed.
             self._declaration_issues = self._collect_declaration_issues()
-            if self._cache_path is not None:
-                _cache.save(
-                    self._cache_path,
-                    _cache.build_snapshot(self._path, self._infos, self._declaration_issues,
-                                          self.problems),
-                )
+            try:
+                if self._cache_path is None:
+                    pass
+                elif self._password_protected():
+                    # Encrypted sessions are never cached; drop any snapshot or
+                    # marker already there rather than leave it to be found
+                    # later — but only one of ours: cache=<path> can name any file.
+                    _cache.discard_if_ours(self._cache_path)
+                elif sig is not None:
+                    _cache.save(
+                        self._cache_path,
+                        _cache.build_snapshot(self._path, self._infos,
+                                              self._declaration_issues, self.problems,
+                                              signature_=sig),
+                    )
+                elif save_marker:
+                    _cache.save(self._cache_path, _cache.build_marker(self._path))
+                elif marker and _cache.worth_caching_infos(self._infos):
+                    # Grown past the threshold since the marker was written; the
+                    # next cached open takes the normal path and signs first.
+                    _cache.discard(self._cache_path)
+            except OSError:
+                pass  # a snapshot is an accelerator; failing to save never fails an open
 
         if not self._strict:
             problems = self.problems  # from the cache snapshot on a warm open
@@ -224,6 +264,12 @@ class Reader:
                 SessionDeclarationWarning,
                 stacklevel=2,
             )
+
+    def _password_protected(self) -> bool:
+        # Fail closed: a backend that cannot say is treated as encrypted, so
+        # nothing it decrypted is ever written to a snapshot.
+        fn = getattr(self._impl, "password_protected", None)
+        return True if fn is None else bool(fn())
 
     def _collect_declaration_issues(self) -> list:
         # getattr rather than try/except: a bare `except AttributeError` around

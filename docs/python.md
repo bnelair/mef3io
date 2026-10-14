@@ -200,8 +200,51 @@ mef3io.Reader("session.mefd", cache="/data/s.cache")  # persistent snapshot
 ```
 
 Snapshots channel metadata so warm opens serve `channels`/`info` without
-touching the session tree, deferring the backend until a data read.
-Invalidated automatically on any size/mtime change and on write.
+reading the session tree, deferring the backend until a data read.
+
+Whether a snapshot is still valid is decided only when a cached open
+happens; writing to a session never touches it. The check is small and costs
+the same whatever the number of segments. Per channel it compares:
+
+- the segment count;
+- the start and end times;
+- the last segment's file sizes;
+- the last segment's provenance region: which mef3io operation last modified
+  it, and how many times;
+- the random file IDs of the first and last segment's metadata files. This
+  catches a session rewritten with `overwrite=True` from the same samples but
+  with new units, conversion factor or subject.
+
+A snapshot is used only by the exact mef3io build that wrote it (the version
+plus the compiled extension). On any mismatch it is ignored, the session is
+opened normally, and a fresh snapshot is written.
+
+No metadata snapshot is saved for a session with no more segments than
+channels, for example 128 channels with one segment each. There a snapshot
+cannot make an open faster: measured, a cached open matched a plain one, and
+building the snapshot made the first open about twice as slow. A tiny marker
+is saved instead. It makes later `cache=` opens go straight to a plain open,
+at the cost of one small file read. The marker is dropped once the session
+grows past one segment per channel, and a real snapshot follows.
+
+**Encrypted sessions are never cached.** They are always opened normally, and
+any snapshot file found for one is deleted, whatever version wrote it.
+
+**Blind spot:** an in-place change to a segment that is *not* the channel's
+last is not detected if it leaves the channel's start and end, and everything
+checked in its last segment, unchanged. That covers:
+
+- edits by other tools;
+- mef3io's own `repair_session` or `recover_session` on an older segment, in
+  the cases where it could not stamp the channel's last segment. Normally such
+  a repair also stamps the last segment `segment-repaired`, which the check
+  does see. The stamp is skipped when the last segment's provenance region
+  belongs to another application, its CRC fails, or a writer's `.mef3io-tmp`
+  file sits next to it. The repair report then says that cached opens will
+  not see the change.
+
+If a session may have been edited that way, open it without `cache=`: a plain
+open always reads everything.
 
 ## Tar archives (single-file sessions)
 

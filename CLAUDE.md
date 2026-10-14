@@ -67,11 +67,60 @@ file (an empty fingerprint dict would validate stale caches forever).
 Benchmarked (docs/benchmarks.md, `benchmarks/access_modes_benchmark.py`,
 2.2 GB / 768 segments): once open a tar reads like the dir (full and warm
 windowed identical); a COLD open is ~2.5x slower (0.5 s vs 0.2 s — the member
-index comes off disk); archive ~0.6 GB/s. The snapshot cache makes a tar open
-~10 ms but makes a DIRECTORY open ~2.7x SLOWER (validation hashes every
-.tmet + .tidx head = more I/O than a plain open) — known, unfixed. Tests:
+index comes off disk); archive ~0.6 GB/s. Tests:
 core/tests/test_tar.cpp, tests/test_p11_tar.py, tar block in
 matlab/test_mef3io.m.
+
+Warm-start snapshot cache (`python/mef3io/cache.py`, `Reader(cache=)`, cache
+format 6, #64). RULE: a snapshot only makes sense if it is SMALL and CHEAPER
+than reading the original — both are test-pinned in tests/test_p22_cache_
+snapshot.py (size flat from 10 to 500 segments/channel; the cached open reads
+fewer bytes AND opens fewer files than a plain open at 10/150/500; a fresh
+session is not slower with cache=). It once hashed every .tmet and made a dir
+open 2.7x SLOWER; never reintroduce per-file work (the open/stat counter in
+p22 wraps os.open/os.stat/os.lstat/os.scandir/open). Validity is decided ONLY
+on a cached open, O(1) per channel: exact mef3io BUILD (version + the CMake
+build id `_mef3io.__build_id__` — git SHA, else configure time — + the
+extension binary's size/mtime, so dev builds and reinstalled wheels never share
+snapshots; TODO in `_version`: PyInstaller onefile gets a per-run identity);
+session identity is `session_key` = SHA-256 of the abs path, NEVER the path
+(subject names); per channel the .segd count (one listing of the .timd — always
+listed, never trust dir mtimes: FUSE/object stores report constant ones),
+start/end from the first/last segment's .tmet universal header plus both
+headers' random file_UUIDs (offset 836 — catches overwrite=True with the same
+samples but new units/ufact/subject), the last segment's .tdat/.tidx sizes,
+its provenance region (offset 960; the modification count is the change
+marker); plus channel folders and session .rdat/.ridx sizes. Sizes via
+open+fstat, not stat (NFS attribute cache). Tar: size+mtime of the archive.
+Signature taken BEFORE the backend reads metadata (test-pinned via a write
+injected mid-open). NO SNAPSHOT when total segments <= channels
+(`worth_caching`; measured 128x1/256x1: cached open == plain, first open ~2x
+slower) — the layout listing decides before any signature work, and a MARKER
+(`build_marker`, no metadata) is saved so later cache= opens skip even that
+listing (~17% of a 1-seg/channel open) for one tiny JSON read; the Reader
+drops it when its plain open's infos show the session grew past the threshold.
+DOCUMENTED BLIND SPOT: an in-place edit of a NON-last segment that moves none
+of the above is not detected — open without cache= for a full read. It covers
+(a) foreign tools, and (b) mef3io's own repair/recover of a non-last segment
+WHEN the segment-repaired stamp was skipped (foreign region or bad CRC in the
+last segment, or a writer's .mef3io-tmp next to it — the report says so and
+that cached opens will miss it). Otherwise the stamp makes them visible
+(provenance rule below).
+WRITE PATHS MUST NOT KNOW ABOUT THE CACHE: no invalidation calls from Writer,
+repair, recover or any future write path (the Writer's old auto-cache delete
+and `cache.invalidate()` were removed). ENCRYPTED SESSIONS ARE NEVER CACHED
+(infos hold decrypted subject fields): no snapshot or marker written. Load
+order: parse the JSON; a well-formed current marker returns at once (no
+metadata; the Reader deletes it if its plain open finds encryption); anything
+else gets the encryption check BEFORE format/version, and for an encrypted
+session a file that is a JSON object with a `format` key (any mef3io snapshot
+or marker, 1.1.x format-4 included) is deleted — NEVER any other file, since
+cache=<path> can name anything (`discard_if_ours`). Dirs check the UH password
+fields; tars peek at the first .tmet member; the Reader also refuses via the
+backend's `password_protected()`, failing closed. save() uses a unique temp
+file; a failed save never fails an open. Measured 64 ch x 150 seg: snapshot
+60 KB, cached open 25-54 ms vs plain 1.3-3.0 s; x 600 seg: 60 KB, 95-108 ms vs
+6.6-30 s.
 
 Validator/repair (`core/{include,src}/…/validate.{hpp,cpp}`, `python/mef3io/
 validate.py`, `python/mef3io/__main__.py`): a REGISTRY of 18 checks comparing a
@@ -402,7 +451,30 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   recording. EVERY site that writes a universal header must stamp: fresh
   files `stamp_created`; append `Operation::Append`, repair (both
   `overwrite_universal_header` and the .tmet rewrite) `HeaderRepair`,
-  recovery `Recovery`. All-zero region = unstamped (every other writer) →
+  recovery `Recovery`. RULE (core/src/last_segment.hpp): when repair or
+  recovery modifies a NON-last segment, it ALSO stamps the channel's LAST
+  segment's .tmet with `SegmentRepaired` (code 9; 6/7/8 are reserved for
+  anonymize #70 / rename #72 / transform #73 and deliberately unassigned).
+  Header-only (region + header CRC), backed up. Always reported, naming the
+  file: repair = an Info finding `provenance.last-segment`, recovery =
+  `RecoveryReport.notes`. `provenance.last-segment` is NOT a registered check,
+  so `Report.summary()` (and the CLI) renders every finding whose id is not in
+  `checks_run` in a "Notes:" block — the check loop alone silently dropped it.
+  SKIPPED with a note, never an error, on a foreign
+  region, a failed CRC, or a writer's `.mef3io-tmp` in the last segment (the
+  note names it, says it can be removed if no writer runs, and that cached
+  opens will miss the change). NEVER REFUSE a repair on "looks active"
+  heuristics: after `cp -r`/extract_session every mtime is fresh (the main
+  legacy-repair workflow) and a crash leaves the temp file forever; the race
+  is harmless anyway, a concurrent append moves the last segment's sizes.
+  C++ `segment_number_of`/`last_segment_dir` and Python cache `_segment_key`
+  use the SAME rule (ASCII digits only after the last '-', else -1, also on
+  long-long overflow; ties by full folder name; case-sensitive `.segd`/`.timd`
+  like the reader) — pinned by core/tests/test_last_segment.cpp and the same
+  cases in test_p22.
+  Do not reuse HeaderRepair for it: provenance describes what happened to THAT file.
+  A future write path that edits a non-last segment must do the same. Tests:
+  tests/test_p23_segment_repaired.py. All-zero region = unstamped (every other writer) →
   initialised WITHOUT created-by; any other non-magic bytes = another app's →
   never written. Unknown/reserved bytes are preserved. Bounds are
   static_asserted. Consequence for tests: a repair no longer restores the
