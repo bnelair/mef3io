@@ -215,6 +215,15 @@ def test_version_mismatch_is_rebuilt(tmp_path):
     assert json.loads(cache.read_text())["mef3io_version"] == C._version()
 
 
+def test_version_stamp_carries_the_cmake_build_id():
+    from mef3io import _mef3io as ext
+
+    build_id = getattr(ext, "__build_id__", "")
+    assert build_id, "the extension does not expose a CMake build id"
+    assert build_id.startswith(("git-", "cfg-")), build_id
+    assert f"+build.{build_id}." in C._version()
+
+
 def test_same_version_different_build_is_rebuilt(tmp_path):
     """The stored version carries the extension binary's identity: a dev build
     at another commit, or a reinstalled wheel, shares the version string."""
@@ -326,23 +335,109 @@ def test_planted_snapshot_for_an_encrypted_session_is_ignored_and_deleted(tmp_pa
     assert not cache.exists(), "the planted snapshot was left in place"
 
 
-@pytest.mark.parametrize("stale", ["format4", "other_version", "garbage"])
+@pytest.mark.parametrize("stale", ["format4", "other_version", "marker_with_metadata"])
 def test_any_snapshot_of_an_encrypted_session_is_deleted(tmp_path, stale):
     """Checked BEFORE format and version: a 1.1.x (format 4) snapshot held
-    decrypted subject fields in plaintext, and must go however old it is."""
+    decrypted subject fields in plaintext, and must go however old it is.
+    A file that claims to be a marker but carries metadata is NOT a marker: it
+    goes through the same encryption-first deletion."""
     path = _encrypted_session(tmp_path)
     cache = tmp_path / "snap.mef3cache"
-    if stale == "garbage":
-        cache.write_text("not json")
+    infos = {"ch1": {"subject_id": "MRN123"}}
+    if stale == "format4":
+        snap = {"format": 4, "session_path": str(path), "channel_infos": infos}
+    elif stale == "other_version":
+        snap = {"format": C.CACHE_FORMAT_VERSION, "mef3io_version": "0.0.0",
+                "session_key": C._session_key(str(path)), "channel_infos": infos}
     else:
-        snap = {"format": 4, "session_path": str(path),
-                "channel_infos": {"ch1": {"subject_id": "MRN123"}}}
-        if stale == "other_version":
-            snap = {"format": C.CACHE_FORMAT_VERSION, "mef3io_version": "0.0.0",
-                    "session_path": str(path), "channel_infos": snap["channel_infos"]}
-        cache.write_text(json.dumps(snap))
+        snap = dict(C.build_marker(str(path)), channel_infos=infos)
+    cache.write_text(json.dumps(snap))
     assert C.load_valid(cache, str(path)) is None
     assert not cache.exists()
+
+
+@pytest.mark.parametrize("content", ["not json", '["a", "list"]', '{"no": "format key"}'])
+def test_an_explicit_cache_path_that_is_not_ours_is_never_deleted(tmp_path, content):
+    """cache=<path> can name any file. Even for an encrypted session, where a
+    snapshot must go, only a mef3io snapshot or marker is ever deleted."""
+    path = _encrypted_session(tmp_path)
+    cache = tmp_path / "precious.json"
+    cache.write_text(content)
+    assert C.load_valid(cache, str(path)) is None
+    mef3io.Reader(str(path), password="pw2", cache=str(cache))
+    assert cache.read_text() == content
+
+
+def test_an_encrypted_session_never_gets_a_marker(tmp_path):
+    """One segment per channel would normally earn a marker; an encrypted
+    session gets nothing at all, and a marker left from before encryption is
+    removed by the first open."""
+    path = tmp_path / "enc.mefd"
+    x = np.arange(SEG_SAMPLES, dtype=np.int32) % 50
+    with mef3io.Writer(str(path), overwrite=True, password1="pw1", password2="pw2") as w:
+        w.write_int32("ch1", x, 0.5, START, FS)
+    assert not C.worth_caching(C.layout(str(path)))
+    cache = tmp_path / "snap.mef3cache"
+    mef3io.Reader(str(path), password="pw2", cache=str(cache))
+    assert not cache.exists()
+    C.save(cache, C.build_marker(str(path)))
+    mef3io.Reader(str(path), password="pw2", cache=str(cache))
+    assert not cache.exists()
+
+
+def test_snapshots_store_a_hash_of_the_session_path_not_the_path(tmp_path):
+    """Paths can carry a subject's name; the snapshot only ever compares it."""
+    path = tmp_path / "Jane_Doe_MRN123.mefd"
+    _write(path)
+    cache = _snapshot(tmp_path, path)
+    text = cache.read_text()
+    snap = json.loads(text)
+    # (The session NAME can still appear inside channel_infos — the writer's
+    # default session_description — which is the session's own metadata, not
+    # the path. What must not be stored is where the session lives.)
+    assert "session_path" not in snap and str(tmp_path) not in text
+    assert snap["session_key"] == C._session_key(str(path))
+    marker_dir = tmp_path / "m"
+    marker_dir.mkdir()
+    one = marker_dir / "Jane_Doe_2.mefd"
+    _write(one, segments=1)
+    mcache = marker_dir / "m.cache"
+    mef3io.Reader(str(one), cache=str(mcache))
+    assert C.is_marker(json.loads(mcache.read_text()))
+    assert "Jane_Doe" not in mcache.read_text()
+
+
+@pytest.mark.parametrize("names,last", [
+    (["ch-9.segd", "ch-10.segd"], "ch-10.segd"),            # numeric, not lexicographic
+    (["ch-10.segd", "zz-10.segd"], "zz-10.segd"),           # tie: name
+    (["ch-1.segd", "ch-².segd", "ch-12x.segd"], "ch-1.segd"),  # non-ASCII / junk -> -1
+    (["ch-1.segd", "ch-99.SEGD"], "ch-1.segd"),              # case-sensitive suffix
+    (["ch-1.segd", "ch-99999999999999999999.segd"], "ch-1.segd"),  # overflow -> -1
+])
+def test_last_segment_rule_matches_the_cpp_one(tmp_path, names, last):
+    """Same cases as core/tests/test_last_segment.cpp: both sides must name
+    the same folder, or a segment-repaired stamp lands where the cache does
+    not look. Odd names must never raise out of a cached open."""
+    timd = tmp_path / "ch.timd"
+    for n in names:
+        (timd / n).mkdir(parents=True)
+    count, first, got = C._segments(str(timd))
+    assert got == last
+    assert count == sum(1 for n in names if n.endswith(".segd"))
+
+
+def test_odd_segment_names_do_not_break_a_cached_open(tmp_path):
+    path = _session(tmp_path)
+    (path / "ch1.timd" / "ch1-².segd").mkdir()
+    (path / "ch1.timd" / "ch1-x.segd").mkdir()
+    cache = tmp_path / "snap.mef3cache"
+    C.signature(str(path))  # must not raise
+    try:
+        mef3io.Reader(str(path), cache=str(cache), strict=False)
+    except Exception as e:  # noqa: BLE001
+        # Whatever the backend thinks of an empty segment folder, it must not
+        # be a ValueError from the cache's name parsing.
+        assert not isinstance(e, ValueError), e
 
 
 def test_planted_snapshot_for_an_encrypted_tar_is_not_served(tmp_path):

@@ -229,9 +229,10 @@ class Reader:
                 if self._cache_path is None:
                     pass
                 elif self._password_protected():
-                    # Encrypted sessions are never cached; drop any file that is
-                    # already there rather than leave it to be found later.
-                    _cache.discard(self._cache_path)
+                    # Encrypted sessions are never cached; drop any snapshot or
+                    # marker already there rather than leave it to be found
+                    # later — but only one of ours: cache=<path> can name any file.
+                    _cache.discard_if_ours(self._cache_path)
                 elif sig is not None:
                     _cache.save(
                         self._cache_path,

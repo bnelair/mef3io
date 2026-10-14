@@ -133,6 +133,11 @@ nb::object provenance_dict(const mef3io::fmt::provenance::Provenance& p) {
 
 NB_MODULE(_mef3io, m) {
   m.attr("__version__") = mef3io::version();
+#ifdef MEF3IO_BUILD_ID
+  m.attr("__build_id__") = MEF3IO_BUILD_ID;  // see the top-level CMakeLists.txt
+#else
+  m.attr("__build_id__") = "";
+#endif
   m.doc() = "mef3io C++ backend (nanobind extension)";
   m.attr("__mef_version_major__") = mef3io::fmt::MEF_VERSION_MAJOR;
   m.attr("__mef_version_minor__") = mef3io::fmt::MEF_VERSION_MINOR;

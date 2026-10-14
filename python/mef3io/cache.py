@@ -107,21 +107,60 @@ _ROOT_SUFFIXES = (".rdat", ".ridx")
 
 
 def _version() -> str:
-    """The mef3io version PLUS the identity of the compiled extension (its
-    size and mtime). A version string alone is shared by every dev build at
-    any commit and by a reinstalled wheel; the binary's identity is not, so a
-    snapshot is only ever read by the exact build that wrote it."""
+    """The mef3io version PLUS the identity of the compiled extension: the
+    build ID CMake bakes in (git commit, else configure time —
+    ``_mef3io.__build_id__``) and the binary's size and mtime. A version
+    string alone is shared by every dev build at any commit and by a
+    reinstalled wheel; the build ID separates same-size binaries in stores
+    that pin every mtime (Nix), and size + mtime catch an incremental rebuild
+    that kept the configure-time ID. A snapshot is only ever read by the exact
+    build that wrote it.
+
+    TODO: a PyInstaller onefile app extracts the extension afresh on every run,
+    so its mtime — and with it this identity — changes per run and snapshots
+    are never reused there (slower, never wrong). Dropping size+mtime when the
+    build ID is a clean git commit would fix that, but needs a build-time (not
+    configure-time) ID to stay safe for incremental dev builds."""
     from . import __version__
 
-    build = "?"
+    build_id, binary = "", "?"
     try:
         from . import _mef3io
 
+        build_id = str(getattr(_mef3io, "__build_id__", "") or "")
         st = os.stat(_mef3io.__file__)
-        build = f"{st.st_size}-{st.st_mtime_ns}"
+        binary = f"{st.st_size}-{st.st_mtime_ns}"
     except (ImportError, OSError, AttributeError):
         pass
-    return f"{__version__}+build.{build}"
+    return f"{__version__}+build.{build_id or 'unknown'}.{binary}"
+
+
+def _session_key(session_path: str) -> str:
+    """What a snapshot stores to say which session it describes: a SHA-256 of
+    the absolute path, not the path. Only ever compared for equality, and
+    paths can carry a subject's name."""
+    return hashlib.sha256(
+        os.path.abspath(session_path).encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _looks_like_ours(data) -> bool:
+    """A parsed cache file that is a snapshot or marker of ANY mef3io version
+    (a JSON object with a ``format`` key). An explicit ``cache=<path>`` can
+    name any file; nothing that is not one of ours is ever deleted."""
+    return isinstance(data, dict) and "format" in data
+
+
+def _read_json(cache_path):
+    try:
+        return json.loads(Path(cache_path).read_text())
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+
+
+def discard_if_ours(cache_path) -> None:
+    """Delete ``cache_path`` only if it is a mef3io snapshot or marker."""
+    if _looks_like_ours(_read_json(cache_path)):
+        discard(cache_path)
 
 
 def _os_cache_dir() -> Path:
@@ -183,15 +222,35 @@ def _header(path: str) -> bytes:
         return b""
 
 
-def _segment_key(name: str):
-    # Segment folders are numbered "<channel>-NNNNNN.segd". Order by that
-    # number (the digits after the last '-'; -1 when there are none), then by
-    # name — the same rule as the C++ side's last-segment lookup
-    # (core/src/last_segment.hpp), so both agree on which segment is "last".
-    stem = name[:-5] if name.lower().endswith(".segd") else name
+_LL_MAX = 2**63 - 1
+
+
+def _segment_number(stem: str) -> int:
+    """``<channel>-NNNNNN`` -> NNNNNN; -1 unless everything after the last
+    '-' is an ASCII digit. A line-for-line port of C++ ``segment_number_of``
+    (core/src/last_segment.hpp), overflow cut-off included, so the snapshot
+    check and the segment-repaired stamp always agree on which segment is a
+    channel's last. ``str.isdigit`` alone would accept '²' or Arabic-Indic
+    digits, which C++ rejects and ``int()`` can raise on."""
     dash = stem.rfind("-")
-    digits = stem[dash + 1:] if dash >= 0 else ""
-    return (int(digits) if digits.isdigit() else -1, name)
+    if dash < 0 or dash + 1 >= len(stem):
+        return -1
+    n = 0
+    for c in stem[dash + 1:]:
+        if not ("0" <= c <= "9"):
+            return -1
+        if n > (_LL_MAX - 9) // 10:
+            return -1
+        n = n * 10 + (ord(c) - 48)
+    return n
+
+
+def _segment_key(name: str):
+    # Order by segment number, ties broken by the full folder name — the
+    # C++ rule (a pair of number and filename). Case-sensitive ".segd", as
+    # the C++ reader and stamp use.
+    stem = name[:-5] if name.endswith(".segd") else name
+    return (_segment_number(stem), name)
 
 
 def _segments(timd: str):
@@ -200,7 +259,9 @@ def _segments(timd: str):
     n, first, last = 0, None, None
     with os.scandir(timd) as it:
         for e in it:
-            if e.name.lower().endswith(".segd") and e.is_dir():
+            # Case-sensitive, like the C++ reader (session.cpp): a folder the
+            # reader ignores must not count here either.
+            if e.name.endswith(".segd") and e.is_dir():
                 n += 1
                 k = _segment_key(e.name)
                 if first is None or k < _segment_key(first):
@@ -278,7 +339,7 @@ def layout(session_path: str) -> dict:
     with os.scandir(root) as it:
         for e in it:
             low = e.name.lower()
-            if low.endswith(".timd") and e.is_dir():
+            if e.name.endswith(".timd") and e.is_dir():  # case-sensitive, as the reader
                 chans.append(e.name)
             elif low.endswith(_ROOT_SUFFIXES):
                 root_files.append(e.name)
@@ -320,7 +381,7 @@ def build_marker(session_path: str) -> dict:
     return {
         "format": CACHE_FORMAT_VERSION,
         "mef3io_version": _version(),
-        "session_path": os.path.abspath(session_path),
+        "session_key": _session_key(session_path),
         "not_worth_caching": True,
     }
 
@@ -363,7 +424,7 @@ def build_snapshot(session_path: str, channel_infos: dict, declaration_issues=No
     return {
         "format": CACHE_FORMAT_VERSION,
         "mef3io_version": _version(),
-        "session_path": os.path.abspath(session_path),
+        "session_key": _session_key(session_path),
         "signature": signature_ if signature_ is not None else signature(session_path),
         "channel_infos": channel_infos,
         # Carried so a warm open can still warn about unset size declarations
@@ -411,15 +472,12 @@ def load_valid(cache_path: Path, session_path: str) -> Optional[dict]:
     """
     if not Path(cache_path).exists():
         return None
-    try:
-        early = json.loads(Path(cache_path).read_text())
-    except (OSError, ValueError):
-        early = None
+    early = _read_json(cache_path)
     if (isinstance(early, dict) and is_marker(early)
             and early.get("format") == CACHE_FORMAT_VERSION
             and early.get("mef3io_version") == _version()
-            and early.get("session_path") == os.path.abspath(session_path)
-            and set(early) == {"format", "mef3io_version", "session_path",
+            and early.get("session_key") == _session_key(session_path)
+            and set(early) == {"format", "mef3io_version", "session_key",
                                "not_worth_caching"}):
         return early
     try:
@@ -431,7 +489,8 @@ def load_valid(cache_path: Path, session_path: str) -> Optional[dict]:
         # never cached, and a snapshot found for one is deleted whatever wrote
         # it — including the format-4 snapshots of mef3io 1.1.x, which held
         # decrypted metadata in plaintext.
-        discard(cache_path)
+        if _looks_like_ours(early):
+            discard(cache_path)
         return None
     snapshot = early
     if not isinstance(snapshot, dict) or is_marker(snapshot):
@@ -440,7 +499,7 @@ def load_valid(cache_path: Path, session_path: str) -> Optional[dict]:
         return None
     if snapshot.get("mef3io_version") != _version():
         return None  # only the exact build that wrote a snapshot may read it
-    if snapshot.get("session_path") != os.path.abspath(session_path):
+    if snapshot.get("session_key") != _session_key(session_path):
         return None
     if snapshot.get("signature") != current:
         return None
