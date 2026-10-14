@@ -406,8 +406,7 @@ void write_file(const std::string& path, const std::vector<ui1>& bytes) {
 void write_records(const std::string& dir, const std::string& base,
                    const std::string& session_name, const std::string& channel_name,
                    int segment_number, const std::vector<Record>& records, si8 rto,
-                   const std::string& password_1, const std::string& password_2,
-                   bool absolute_times) {
+                   const std::string& password_1, const std::string& password_2) {
   if (records.empty()) return;
   // Reject bad type codes before touching the filesystem, so a rejected batch
   // never leaves a half-written .rdat/.ridx pair behind. Any 4-character code
@@ -476,9 +475,9 @@ void write_records(const std::string& dir, const std::string& base,
       std::copy(e.begin(), e.end(), body.begin());
     }
 
-    // mef3io's write convention (time.hpp): -t when rto is 0, plain t
-    // otherwise -- or always plain t when the caller asks for it.
-    const si8 disk_time = absolute_times ? r.time : to_stored_time(r.time, rto);
+    // mef3io's write convention (time.hpp): -(t - rto); -t at rto 0.
+    require_storable_time(r.time, rto, "record time");
+    const si8 disk_time = to_stored_time(r.time, rto);
     si8 file_offset = fmt::UNIVERSAL_HEADER_BYTES + static_cast<si8>(rdat_body.size());
 
     // Record header (24 B).
@@ -518,8 +517,8 @@ void write_records(const std::string& dir, const std::string& base,
 
   const si8 n = static_cast<si8>(ordered.size());
   // Universal-header span, in the same convention as the record times.
-  const si8 start_disk = absolute_times ? min_time : to_stored_time(min_time, rto);
-  const si8 end_disk = absolute_times ? max_time : to_stored_time(max_time, rto);
+  const si8 start_disk = to_stored_time(min_time, rto);
+  const si8 end_disk = to_stored_time(max_time, rto);
   // .rdat
   {
     auto file = base_uh_bytes(fmt::FILE_TYPE_RECORD_DATA, session_name, channel_name,

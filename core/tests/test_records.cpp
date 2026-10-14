@@ -405,14 +405,24 @@ TEST_CASE("Record times follow the offset of the level they belong to") {
   fsys::remove_all(dir);
 }
 
-TEST_CASE("mef3io stores times plainly when an offset is in play") {
+TEST_CASE("mef3io stores times offset-applied and refuses what would reveal the date") {
   constexpr si8 RTO = 3 * 86400 * SEC;
+  const si8 R = T0 + RTO;
   REQUIRE(to_stored_time(T0, 0) == -T0);                        // byte-identical to before
   REQUIRE(to_stored_time(T0, fmt::UUTC_NO_ENTRY) == -T0);
-  for (si8 t : {T0 + RTO - SEC, T0 + RTO, T0 + RTO + SEC}) {    // at, before and after rto
-    REQUIRE(to_stored_time(t, T0 + RTO) == t);
-    REQUIRE(to_user_time(to_stored_time(t, T0 + RTO), T0 + RTO) == t);
+  // After the offset: rto - t, negative, never the absolute time.
+  const si8 after = R + SEC;
+  REQUIRE(time_is_storable(after, R));
+  REQUIRE(to_stored_time(after, R) == -SEC);
+  REQUIRE(to_user_time(to_stored_time(after, R), R) == after);
+  REQUIRE_NOTHROW(require_storable_time(after, R, "t"));
+  // At or before it: not representable without writing the real date.
+  for (si8 t : {R, R - SEC}) {
+    REQUIRE_FALSE(time_is_storable(t, R));
+    REQUIRE_THROWS_AS(require_storable_time(t, R, "t"), WriteConflictError);
   }
+  REQUIRE(time_is_storable(T0, 0));                             // rto 0: anything goes
+  REQUIRE(time_is_storable(fmt::UUTC_NO_ENTRY, R));
   REQUIRE(to_stored_time(fmt::UUTC_NO_ENTRY, RTO) == fmt::UUTC_NO_ENTRY);
 }
 

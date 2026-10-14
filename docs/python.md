@@ -153,12 +153,18 @@ offset-dependent times, that one file raises `FormatError` rather than
 misplacing its records (a lenient Reader skips it, lists it in `problems` and
 warns; the segment-level records are unaffected). A record file that cannot be
 read is handled the same way. Reading every body type is supported; writing is
-limited to Note, SyLg and EDFA. Written times are stored as `−t` in a
-session at offset 0 (every session mef3io creates). They are stored as plain
-absolute UTC wherever an offset is in play (a foreign, anonymized session), so
-they always read back as given — even at or before the offset. A segment or
-channel mef3io adds to such a session inherits its offset, which keeps the
-existing annotations readable.
+limited to Note, SyLg and EDFA.
+
+Written times are stored as `−t` in a session at offset 0 (every session
+mef3io creates). In a foreign session anonymized with a recording-time offset
+they are stored as `rto − t`, so the real date stays hidden. A segment or
+channel mef3io adds to such a session inherits its offset.
+
+A write is refused, rather than revealing the date or misplacing times, when:
+- the time is at or before the offset (`WriteConflictError`);
+- the level's segments disagree on the offset (`WriteConflictError`);
+- the offset is locked because only the level-1 password was given
+  (`PasswordError`).
 
 The `mef_tools`-compatible `MefReader.get_annotations(channel)` keeps the
 legacy meaning — that channel's channel-level records only — while

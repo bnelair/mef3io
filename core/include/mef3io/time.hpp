@@ -12,6 +12,9 @@
 // not re-derive it locally.
 #pragma once
 
+#include <string>
+
+#include "mef3io/errors.hpp"
 #include "mef3io/types.hpp"
 
 namespace mef3io {
@@ -50,19 +53,39 @@ constexpr si8 to_disk_time(si8 absolute, si8 rto) noexcept {
   return saturating_add(effective_rto(rto), -absolute);  // -absolute fits likewise
 }
 
-/// How mef3io WRITES a time (header, index, block and record times alike).
+/// Whether mef3io can WRITE `absolute` under `rto` (see to_stored_time).
 ///
-///   * rto == 0 (every session mef3io creates): meflib's marker, -t. Byte-
-///     identical to every earlier release.
-///   * rto != 0 (only in a foreign session that used meflib's anonymization,
-///     which mef3io extends): plain absolute UTC, t. Every reader takes a
-///     non-negative stored time as absolute (remove_recording_time_offset,
-///     meflib.c:7665), so no offset arithmetic is involved and nothing can go
-///     wrong for any t. The negated form `rto - t` would turn NON-NEGATIVE for
-///     t <= rto and be read back as a time near 1970.
+/// With a non-zero offset only times AFTER it can be stored: for t <= rto the
+/// offset-applied form rto - t is non-negative, every reader takes a
+/// non-negative time as absolute (meflib.c:7665), and the only way to store
+/// it correctly would be the real date in plain — which the offset exists to
+/// hide (meflib's anonymization). Such a write is refused, never degraded.
+constexpr bool time_is_storable(si8 absolute, si8 rto) noexcept {
+  const si8 r = effective_rto(rto);
+  return absolute == fmt::UUTC_NO_ENTRY || r == 0 || absolute > r;
+}
+
+/// How mef3io WRITES a time — data blocks, index, universal headers and
+/// records alike: meflib's offset-applied form, -(t - rto).
+///   * rto == 0 (every session mef3io creates): -t, byte-identical to every
+///     earlier release.
+///   * rto != 0 (a foreign session that used meflib's anonymization): rto - t,
+///     which keeps the real date hidden and reads back right in every reader.
+///     Requires time_is_storable(); write paths check it and refuse first.
 constexpr si8 to_stored_time(si8 absolute, si8 rto) noexcept {
-  if (absolute == fmt::UUTC_NO_ENTRY) return absolute;
-  return effective_rto(rto) == 0 ? to_disk_time(absolute, 0) : absolute;
+  return to_disk_time(absolute, rto);
+}
+
+/// Throw WriteConflictError, in plain words, unless time_is_storable().
+/// `what` names the time ("record time", "block start", ...).
+inline void require_storable_time(si8 absolute, si8 rto, const std::string& what) {
+  if (time_is_storable(absolute, rto)) return;
+  throw WriteConflictError(
+      "cannot write " + what + " " + std::to_string(absolute) +
+      " (uUTC): it is at or before this session's anonymization offset (recording_time_offset "
+      "= " + std::to_string(effective_rto(rto)) +
+      "). MEF can only store such a time as the real date in plain, which the offset exists "
+      "to hide, so the write is refused.");
 }
 
 }  // namespace mef3io

@@ -520,10 +520,10 @@ def test_records_written_into_an_offset_session_round_trip(tmp_path):
     r = mef3io.Reader(str(path))
     assert [a["time"] for a in r.records()] == [t]
     assert [a["time"] for a in r.records("ch1")] == [t]
-    # rto != 0: stored as plain absolute UTC, which every reader takes as
-    # absolute (meflib.c:7665) -- no offset arithmetic to get wrong.
-    assert _stored_times(_rdat(path)) == [t]
-    assert _stored_times(_rdat(path, "ch1")) == [t]
+    # rto != 0: stored offset-applied, rto - t (meflib.c:756) -- the real
+    # date never reaches the file.
+    assert _stored_times(_rdat(path)) == [THREE_DAYS - t]
+    assert _stored_times(_rdat(path, "ch1")) == [THREE_DAYS - t]
 
 
 def test_records_written_with_rto_zero_are_stored_exactly_as_before(tmp_path):
@@ -571,22 +571,21 @@ def test_records_written_into_a_legacy_offset_session_agree_with_the_legacy_read
     assert [int(a["time"]) for a in legacy.get_annotations("ch1")] == [START + SECOND]
 
 
-def test_writer_stores_absolute_times_when_the_level_disagrees_on_the_offset(tmp_path):
-    """A level whose segments disagree has no single offset, but a plain
-    absolute time needs none: the write succeeds and the reader -- which
-    refuses only offset-DEPENDENT files of a disputed level -- places it."""
+def test_writer_refuses_records_when_the_level_disagrees_on_the_offset(tmp_path):
+    """A level whose segments disagree has no single offset to store against,
+    and plain UTC would reveal the date an anonymized segment hides: refused,
+    naming the segments, before any file is written. A channel that agrees
+    with itself is unaffected."""
     path = tmp_path / "split.mefd"
     _write_session(path, annotate=False)
     _set_rto(path, THREE_DAYS, channels=["ch2"])
     with mef3io.Writer(str(path)) as w:
-        w.write_annotations([{"type": "Note", "time": START, "text": "s"}])
-        # one channel agrees with itself (rto 0): the classic -t form
+        with pytest.raises(m.WriteConflictError, match=r"disagree.*ch1-000000\.tmet.*ch2|"
+                                                       r"disagree.*ch2-000000\.tmet.*ch1"):
+            w.write_annotations([{"type": "Note", "time": START + THREE_DAYS, "text": "s"}])
         w.write_annotations([{"type": "Note", "time": START + SECOND, "text": "c"}], "ch1")
-    assert _stored_times(_rdat(path)) == [START]
+    assert not list(Path(path).glob("*.rdat"))
     assert _stored_times(_rdat(path, "ch1")) == [-(START + SECOND)]
-    r = mef3io.Reader(str(path))
-    assert [a["time"] for a in r.records()] == [START]
-    assert r.records("ch1")[0]["time"] == START + SECOND
 
 
 # --------------------------------------------------------------------------- review fixes
@@ -737,26 +736,26 @@ def _three_readers(path):
 
 @pytest.mark.parametrize("rto", [START, START + 3600 * SECOND],
                          ids=["rto=START", "rto=START+1h"])
-def test_records_at_or_before_the_offset_survive(tmp_path, rto):
-    """meflib's negated form rto - t turns NON-NEGATIVE for t <= rto, and
-    every reader then takes it as absolute: a Note at START would read back as
-    1970. mef3io stores plain absolute UTC whenever the level's offset is
-    non-zero, which no reader can misplace. Checked with all three readers."""
+def test_a_time_at_or_before_the_offset_is_refused(tmp_path, rto):
+    """Under an anonymization offset a time t <= rto has no hidden form: rto - t
+    would be non-negative, which every reader takes as the absolute date
+    (meflib.c:7665), so the only correct encoding is the real date in plain.
+    The write is refused, with nothing written; a time after the offset is
+    stored as rto - t and all three readers agree on it."""
     pytest.importorskip("pymef")
     path = tmp_path / "early.mefd"
     _legacy_session(path, rto, annotate=False)
-    times = [START - SECOND, START, START + SECOND]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         with mef3io.Writer(str(path)) as w:
-            w.write_annotations([{"type": "Note", "time": t, "text": str(i)}
-                                 for i, t in enumerate(times)])
-    want = [(str(i), t) for i, t in enumerate(times)]
+            for t in (START - SECOND, START, rto):
+                with pytest.raises(m.WriteConflictError, match="anonymization offset"):
+                    w.write_annotations([{"type": "Note", "time": t, "text": "early"}])
+            assert not list(Path(path).glob("*.rdat"))
+            w.write_annotations([{"type": "Note", "time": rto + SECOND, "text": "late"}])
     ours, legacy, pym = _three_readers(path)
-    assert ours == want
-    assert legacy == want
-    assert pym == want
-    assert _stored_times(_rdat(path)) == times         # plain absolute, no arithmetic
+    assert ours == legacy == pym == [("late", rto + SECOND)]
+    assert _stored_times(_rdat(path)) == [-SECOND]           # rto - t: the date stays hidden
 
 
 def test_extending_a_legacy_offset_session_keeps_its_annotations(tmp_path):
@@ -965,3 +964,122 @@ def test_one_damaged_tmet_does_not_block_unrelated_writes(tmp_path, write):
             np.testing.assert_array_equal(r.read("ch3"), np.arange(512.0))
         else:
             assert r.segments("ch1")[1]["start_time"] == START + 60 * SECOND
+
+
+# --------------------------------------------------------------------------- keep the date hidden
+
+
+def _all_bytes(path):
+    return b"".join(f.read_bytes() for f in sorted(Path(path).rglob("*")) if f.is_file())
+
+
+def test_writes_into_an_anonymized_session_never_store_the_real_date(tmp_path):
+    """The recording-time offset exists to keep the real date out of the
+    files. An in-segment append, a new segment, a new channel and records all
+    store rto - t: no 8-byte value anywhere in the session equals one of the
+    absolute times written. All of it still reads back at the right time."""
+    path = tmp_path / "anon.mefd"
+    _write_session(path, annotate=False)              # ch1, ch2 at START, 10 s each
+    _set_rto(path, THREE_DAYS)                        # now an anonymized session
+    t0 = START + THREE_DAYS                           # where the data now reads
+    append_at = t0 + 10 * SECOND                      # right after ch1's end
+    seg_at = t0 + 60 * SECOND
+    data = np.arange(2560.0)                          # one 10 s block each
+    with mef3io.Writer(str(path)) as w:
+        w.write("ch1", data, append_at, FS)                                # in-segment append
+        w.write("ch1", data, seg_at, FS, precision=3, new_segment=True)    # new segment
+        w.write("ch3", data, seg_at, FS, precision=0)                      # new channel
+        w.write_annotations([{"type": "Note", "time": seg_at + SECOND, "text": "s"}])
+        w.write_annotations([{"type": "Note", "time": seg_at + 2 * SECOND, "text": "c"}], "ch3")
+
+    end = int(round(len(data) / FS * 1e6))
+    written = {append_at, append_at + end, seg_at, seg_at + end, seg_at + SECOND,
+               seg_at + 2 * SECOND}
+    blob = _all_bytes(path)
+    leaked = [t for t in written if struct.pack("<q", t) in blob]
+    assert leaked == [], f"real dates stored in plain: {leaked}"
+
+    r = mef3io.Reader(str(path))
+    assert [s["recording_time_offset"] for s in map(r.info, ("ch1", "ch3"))] == [THREE_DAYS] * 2
+    np.testing.assert_array_equal(r.read("ch1", append_at, append_at + end), data)
+    np.testing.assert_array_equal(r.read("ch3"), data)
+    assert [s["start_time"] for s in r.segments("ch1")] == [t0, seg_at]
+    assert [(a["text"], a["time"]) for a in r.records(level="all")] == [
+        ("s", seg_at + SECOND), ("c", seg_at + 2 * SECOND)]
+
+
+def test_a_level_1_writer_refuses_what_needs_the_locked_offset(tmp_path):
+    """With only the level-1 password, section 3 — and the offset in it — is
+    locked. That offset is UNKNOWN, not 0: storing against 0 placed an
+    appended block decades off. Every write that needs it is refused, saying
+    the level-2 password is required; with it, the same writes work."""
+    pytest.importorskip("mef_tools", reason="legacy oracle not installed")
+    from mef_tools.io import MefWriter
+
+    rto = START - 10 * 86400 * SECOND
+    path = str(tmp_path / "locked.mefd")
+    lw = MefWriter(path, overwrite=True, password1="lvl1", password2="lvl2")
+    lw.record_offset = rto
+    lw.write_data(np.arange(5000, dtype=np.int32) * 1.0, "ch1", START, FS, precision=0)
+    del lw
+    before = _all_bytes(path)
+
+    later = START + 60 * SECOND
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        w = mef3io.Writer(path, password1="lvl1")
+        for attempt in (
+            lambda: w.write_annotations([{"type": "Note", "time": later, "text": "x"}]),
+            lambda: w.write_annotations([{"type": "Note", "time": later, "text": "x"}], "ch1"),
+            lambda: w.write("ch1", np.zeros(512), later, FS, precision=0),
+            lambda: w.write("ch2", np.zeros(512), later, FS, precision=0),
+        ):
+            with pytest.raises(m.PasswordError, match="level-2"):
+                attempt()
+        w.close()
+    assert _all_bytes(path) == before, "a refused write must leave the session untouched"
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with mef3io.Writer(path, password1="lvl1", password2="lvl2") as w:
+            w.write_annotations([{"type": "Note", "time": later, "text": "x"}])
+        r = mef3io.Reader(path, password="lvl2")
+        assert [a["time"] for a in r.records()] == [later]
+
+
+def test_a_disputed_session_refuses_a_new_channel(tmp_path):
+    """A new channel takes the session's offset; with the segments disputing
+    it there is none to take. A new segment of a channel that agrees with
+    itself is unaffected."""
+    path = tmp_path / "split.mefd"
+    _write_session(path, annotate=False)
+    _set_rto(path, THREE_DAYS, channels=["ch2"])
+    with mef3io.Writer(str(path)) as w:
+        with pytest.raises(m.WriteConflictError, match="disagree"):
+            w.write("ch3", np.zeros(512), START, FS, precision=0)
+        w.write("ch1", np.zeros(512), START + 60 * SECOND, FS, precision=0, new_segment=True)
+    assert not (Path(path) / "ch3.timd").exists() or not list(
+        (Path(path) / "ch3.timd").rglob("*.tdat"))
+    assert len(mef3io.Reader(str(path)).segments("ch1")) == 2
+
+
+def test_mixed_segments_stay_consistent(tmp_path):
+    """The reviewer's invariants on a legacy session extended by mef3io:
+    every segment's start <= end, and the block index runs forward in
+    absolute time across the legacy and the mef3io-written segments."""
+    rto = START - 10 * 86400 * SECOND
+    path = tmp_path / "mixed.mefd"
+    _legacy_session(path, rto, annotate=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with mef3io.Writer(str(path)) as w:
+            w.write("ch1", np.arange(2560.0), START + 60 * SECOND, FS, precision=0,
+                    new_segment=True)
+            w.write("ch1", np.arange(2560.0), START + 70 * SECOND, FS, precision=0)
+        r = mef3io.Reader(str(path))
+    for s in r.segments("ch1"):
+        assert s["start_time"] <= s["end_time"]
+    starts = [b["start_uutc"] for b in r.toc("ch1")] if isinstance(r.toc("ch1"), list) \
+        else list(r.toc("ch1")["start_uutc"])
+    assert starts == sorted(starts) and len(set(starts)) == len(starts)
+    assert starts[0] == START and starts[-1] == START + 70 * SECOND

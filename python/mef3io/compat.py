@@ -285,11 +285,13 @@ class MefWriter:
         Times are UTC, always. A new session is written at offset 0 with
         times stored as -t, as before. A session that already carries a
         non-zero offset (e.g. one the legacy stack wrote with
-        ``record_offset``) has its offset reused for the segments and
-        channels mef3io adds, so its existing annotations stay readable. All
-        times mef3io writes there -- data and annotations -- are stored as
-        plain absolute UTC, so they read back exactly as given, even at or
-        before the offset."""
+        ``record_offset``) keeps it: segments and channels mef3io adds reuse
+        it, and every time mef3io writes there -- data and annotations -- is
+        stored as rto - t, so the real date stays hidden and the existing
+        annotations stay readable. A time at or before the offset cannot be
+        stored that way and is refused, as is any write while the session's
+        segments disagree on the offset or it is locked (level-1 password
+        only)."""
         return self._record_offset
 
     @record_offset.setter

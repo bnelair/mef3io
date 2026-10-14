@@ -128,6 +128,13 @@ void SessionWriter::hydrate(const std::string& channel, ChannelState& st) {
   std::vector<ui1> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
   auto md = load_time_series_metadata(bytes,
                                       password_2_.empty() ? password_1_ : password_2_);
+  // Section 3 holds the offset the segment's end time is stored against.
+  // Locked (level-1 access only) it is UNKNOWN, not 0: refuse rather than
+  // validate and place the appended data against the wrong baseline.
+  if (!md.section3_available)
+    throw PasswordError("writing to channel " + channel + " needs the full-access (level-2) "
+                        "password: section 3 of " + tmet_path + ", which holds the "
+                        "recording-time offset, is locked with the level-1 password alone");
   const si8 rto = segment_rto(md);
   st.sampling_frequency = md.section2.sampling_frequency;
   st.units_conversion_factor = md.section2.units_conversion_factor;
@@ -138,21 +145,21 @@ void SessionWriter::hydrate(const std::string& channel, ChannelState& st) {
   st.last_end_uutc = end_stored == fmt::UUTC_NO_ENTRY ? 0 : to_user_time(end_stored, rto);
 }
 
-std::optional<si8> SessionWriter::agreed_disk_rto(const std::optional<std::string>& channel,
-                                                  int* readable) {
-  // The offset every READABLE on-disk segment of the level (one channel, or
-  // the whole session) agrees on, from section 3 of its .tmet files — what the
-  // reader resolves that level's times with (Session::read_records, which also
-  // gives an unreadable segment no say). nullopt when they disagree; 0 when
-  // there are none.
-  //
-  // An unreadable .tmet is SKIPPED and reported (unreadable_metadata()), never
-  // thrown: it belongs to some other segment, and failing here made one
-  // damaged file block every unrelated write — session annotations, a new
-  // channel, a new segment elsewhere — where main wrote them fine.
-  std::optional<si8> agreed;
-  if (readable) *readable = 0;
-  if (!fs::exists(mefd_path_)) return si8{0};
+SessionWriter::LevelOffset SessionWriter::level_offset(const std::optional<std::string>& channel) {
+  // What the on-disk segments of the level (one channel, or the whole
+  // session) say about the recording-time offset — the value the reader
+  // resolves that level's times with (Session::read_records).
+  //   Agreed   every readable segment has the same offset (0 when none);
+  //   Disputed two readable segments differ (`detail` names them);
+  //   Unknown  a segment's section 3 is locked (level-1 access only), so its
+  //            offset cannot be seen: unknown is NOT 0 (`detail` names it).
+  // A .tmet that cannot be read at all is SKIPPED and reported
+  // (unreadable_metadata()), never thrown: it belongs to some other segment,
+  // and failing here made one damaged file block every unrelated write.
+  LevelOffset out;
+  std::string agreed_where;
+  bool have = false;
+  if (!fs::exists(mefd_path_)) return out;
   for (const auto& timd : fs::directory_iterator(mefd_path_)) {
     if (!timd.is_directory() || timd.path().extension() != ".timd") continue;
     if (channel && timd.path().stem().string() != *channel) continue;
@@ -160,13 +167,12 @@ std::optional<si8> SessionWriter::agreed_disk_rto(const std::optional<std::strin
       if (!segd.is_directory() || segd.path().extension() != ".segd") continue;
       const fs::path tmet = segd.path() / (segd.path().stem().string() + ".tmet");
       if (!fs::exists(tmet)) continue;
-      si8 rto = 0;
+      TimeSeriesMetadata md;
       try {
         std::ifstream f(tmet, std::ios::binary);
         std::vector<ui1> bytes((std::istreambuf_iterator<char>(f)),
                                std::istreambuf_iterator<char>());
-        rto = segment_rto(
-            load_time_series_metadata(bytes, password_2_.empty() ? password_1_ : password_2_));
+        md = load_time_series_metadata(bytes, password_2_.empty() ? password_1_ : password_2_);
       } catch (const std::exception& e) {
         const std::string what = tmet.string() + ": " + e.what();
         if (std::find(unreadable_metadata_.begin(), unreadable_metadata_.end(), what) ==
@@ -174,53 +180,89 @@ std::optional<si8> SessionWriter::agreed_disk_rto(const std::optional<std::strin
           unreadable_metadata_.push_back(what);
         continue;
       }
-      if (readable) ++*readable;
-      if (!agreed)
-        agreed = rto;
-      else if (*agreed != rto)
-        return std::nullopt;
+      ++out.readable;
+      if (!md.section3_available) {
+        out.state = LevelOffset::State::Unknown;
+        out.detail = tmet.string();
+        return out;  // nothing else can make it known
+      }
+      const si8 rto = segment_rto(md);
+      if (!have) {
+        have = true;
+        out.rto = rto;
+        agreed_where = tmet.string();
+      } else if (out.state == LevelOffset::State::Agreed && rto != out.rto) {
+        out.state = LevelOffset::State::Disputed;
+        out.detail = std::to_string(out.rto) + " in " + agreed_where + ", " +
+                     std::to_string(rto) + " in " + tmet.string();
+      }
     }
   }
-  return agreed.value_or(0);
+  return out;
 }
+
+namespace {
+// The errors for an offset a write cannot use, in plain words.
+[[noreturn]] void refuse_unknown_offset(const std::string& what, const std::string& where) {
+  throw PasswordError("cannot write " + what + ": the session's recording-time offset is in "
+                      "section 3 of " + where + ", which is locked with the level-1 password "
+                      "alone. Open the Writer with the full-access (level-2) password; with a "
+                      "guessed offset the times would be stored years off.");
+}
+[[noreturn]] void refuse_disputed_offset(const std::string& what, const std::string& detail) {
+  throw WriteConflictError("cannot write " + what + ": the segments it belongs to disagree on "
+                           "the recording-time offset (" + detail + "), so there is no single "
+                           "offset to store the times against without misplacing them or "
+                           "revealing the real date.");
+}
+}  // namespace
 
 si8 SessionWriter::new_segment_rto(const std::string& channel, ChannelState& st) {
   // A NEW segment inherits the offset its neighbours agree on. mef3io never
   // creates an offset itself (its own sessions are 0), but a foreign session
   // that used meflib's anonymization has one, and a new segment written with
   // 0 would make its channel and the session DISAGREE — after which their
-  // legacy records could no longer be placed.
+  // records could no longer be placed — and would write the real date.
   //   * its own channel's readable segments first (the level the segment
-  //     joins, and the cheapest scan);
+  //     joins, and the cheapest scan: no other channel's metadata is read);
   //   * for a new channel, or one with no readable segment, the session's;
-  //   * disagreeing or nothing readable: 0, mef3io's own convention.
+  //   * a locked or disputed offset is refused, never guessed.
   // Cached per channel: the segments this writer adds carry the same value,
   // so the agreement it found still holds, and a months-long recording does
   // not rescan its metadata at every new segment.
   if (st.new_segment_rto) return *st.new_segment_rto;
-  std::optional<si8> rto;
+  const std::string what = "a new segment of channel " + channel;
   if (st.n_segments > 0) {
-    int readable = 0;
-    rto = agreed_disk_rto(channel, &readable);
-    if (readable == 0) rto.reset();  // nothing readable agreed on anything
+    const LevelOffset ch = level_offset(channel);
+    if (ch.state == LevelOffset::State::Unknown) refuse_unknown_offset(what, ch.detail);
+    if (ch.state == LevelOffset::State::Disputed) refuse_disputed_offset(what, ch.detail);
+    if (ch.readable > 0) {
+      st.new_segment_rto = ch.rto;
+      return ch.rto;
+    }
   }
-  if (!rto) {
-    if (!session_rto_) session_rto_ = agreed_disk_rto(std::nullopt).value_or(0);
-    rto = *session_rto_;
-  }
-  st.new_segment_rto = *rto;
-  return *rto;
+  if (!session_offset_) session_offset_ = level_offset(std::nullopt);
+  if (session_offset_->state == LevelOffset::State::Unknown)
+    refuse_unknown_offset(what, session_offset_->detail);
+  if (session_offset_->state == LevelOffset::State::Disputed)
+    refuse_disputed_offset(what, session_offset_->detail);
+  st.new_segment_rto = session_offset_->rto;
+  return session_offset_->rto;
 }
 
 void SessionWriter::write_records(std::optional<std::string> channel,
                                   const std::vector<Record>& records) {
   if (records.empty()) return;  // write_records writes nothing for an empty batch
-  // Store the times so the reader places them right (time.hpp,
-  // to_stored_time): a level at rto 0 gets -t exactly as before; a level
-  // with a non-zero offset, or whose segments disagree on one, gets plain
-  // absolute UTC, which every reader takes as absolute without consulting
-  // the offset — so it cannot be wrong for any t and needs no agreement.
-  const std::optional<si8> rto = agreed_disk_rto(channel);
+  // Store the times the way the reader resolves this level (time.hpp,
+  // to_stored_time): -t at offset 0 (byte-identical to earlier releases),
+  // rto - t under an anonymization offset (date stays hidden). A locked or
+  // disputed offset, or a time at or before the offset, is refused.
+  const std::string what =
+      channel ? "channel-level records of " + *channel : std::string("session-level records");
+  const LevelOffset level = level_offset(channel);
+  if (level.state == LevelOffset::State::Unknown) refuse_unknown_offset(what, level.detail);
+  if (level.state == LevelOffset::State::Disputed) refuse_disputed_offset(what, level.detail);
+  for (const auto& r : records) require_storable_time(r.time, level.rto, "record time");
   std::string dir, base;
   if (channel) {
     dir = (fs::path(mefd_path_) / (*channel + ".timd")).string();
@@ -230,9 +272,8 @@ void SessionWriter::write_records(std::optional<std::string> channel,
     dir = mefd_path_;
     base = session_name_;
   }
-  mef3io::write_records(dir, base, session_name_, channel.value_or(""), 0, records,
-                        rto.value_or(0), password_1_, password_2_,
-                        /*absolute_times=*/!rto.has_value());
+  mef3io::write_records(dir, base, session_name_, channel.value_or(""), 0, records, level.rto,
+                        password_1_, password_2_);
 }
 
 si8 SessionWriter::block_length_for(sf8 fs) const {

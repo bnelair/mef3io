@@ -127,15 +127,14 @@ std::vector<Record> parse_records(std::span<const ui1> rdat_bytes, si8 rto,
 
 // Write records to `<dir>/<base>.rdat` + `<base>.ridx`. `session_name`/
 // `channel_name` populate the universal headers. Times are stored with
-// to_stored_time(t, rto) (time.hpp): -t when `rto` is 0, plain absolute t
-// otherwise; `absolute_times` forces plain t (for a level whose offset is
-// disputed — a non-negative time needs no offset to read). When
+// to_stored_time(t, rto) (time.hpp): -t at rto 0, rto - t under an
+// anonymization offset; a time at or before a non-zero `rto` is refused
+// (WriteConflictError) before any file is touched. When
 // `password_1`/`password_2` are set, record bodies are level-2 encrypted
 // (meflib convention: records may hold identifying data).
 void write_records(const std::string& dir, const std::string& base,
                    const std::string& session_name, const std::string& channel_name,
                    int segment_number, const std::vector<Record>& records, si8 rto,
-                   const std::string& password_1 = "", const std::string& password_2 = "",
-                   bool absolute_times = false);
+                   const std::string& password_1 = "", const std::string& password_2 = "");
 
 }  // namespace mef3io

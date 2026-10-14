@@ -47,16 +47,31 @@ quirks matter:
   - **rto = 0** (every session mef3io creates): times are stored as `−t`, the
     form shown above. The bytes are unchanged from earlier releases.
   - **rto ≠ 0** (only in a foreign session that used meflib's anonymization,
-    which mef3io is extending): times — data, index, header and record times
-    alike — are stored as **plain positive absolute UTC**. Every reader takes
-    a non-negative time as absolute (meflib.c:7665), so no offset arithmetic
-    is involved and it cannot be wrong for any `t`. The negated form `rto − t`
-    would be wrong for `t ≤ rto`: it turns non-negative and reads back near
-    1970.
-  - **New segments and channels.** When mef3io adds a segment or channel to a
-    session whose existing segments all agree on a non-zero `rto`, the new
-    segment's section 3 carries that same `rto`. The session keeps agreeing,
-    so its existing (legacy) records stay readable.
+    which mef3io is extending): times are stored as `rto − t`, meflib's own
+    offset-applied form. This covers data blocks, index, universal headers and
+    records alike. The real date never reaches the file, which is what the
+    offset is for, and every reader places the time correctly.
+  - **New segments and channels** added to a session whose segments all agree
+    on a non-zero `rto` carry that same `rto` in section 3, and their times
+    follow the same rule. The session keeps agreeing, so its existing
+    records stay readable.
+  - **Refused writes.** These raise an error and leave the files untouched,
+    rather than store something that would misplace times or reveal the
+    date:
+    - **A time at or before a non-zero `rto`** (`WriteConflictError`). `rto − t`
+      would be non-negative, and every reader takes a non-negative time as
+      the absolute date (meflib.c:7665). So the only correct encoding is the
+      real date in plain, which the offset exists to hide.
+    - **A write to a level whose segments disagree on `rto`**
+      (`WriteConflictError`, naming the segments). There is no single offset
+      to store against.
+    - **A write that needs the offset while it is locked**: section 3 of an
+      L2-encrypted session opened with only the level-1 password
+      (`PasswordError`; open the writer with the level-2 password). A locked
+      offset is unknown, never assumed to be 0.
+  - **Damaged metadata is skipped.** A `.tmet` that cannot be read at all is
+    skipped and reported when mef3io works out the offset, so one damaged
+    segment does not block unrelated writes.
 - The empty value ("no entry") for a time is `INT64_MIN`.
 
 ## Universal header — 1024 B, prefixes every file
@@ -385,9 +400,10 @@ would misplace the records by the difference without a word.
 
 **Writing.** Record times follow the rule in [Times](#times):
 - **rto = 0 level:** stored as `−t`, byte-identical to earlier releases.
-- **Non-zero rto, or segments that disagree on it:** stored as plain absolute
-  UTC. The reader places such a file whatever the offset is, so writing to a
-  disputed level succeeds.
+- **Non-zero rto:** stored as `rto − t`. A record at or before the offset is
+  refused.
+- **A level whose segments disagree, or whose offset is locked:** the write
+  is refused.
 
 meflib applies the offset to the record **header** only (meflib.c:1846);
 `mefrec.c` never rewrites a body. It does, however, display every body time

@@ -259,6 +259,9 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
   const sf8 fs_hz = spec.sampling_frequency;
   const si8 rto = spec.recording_time_offset;
   const bool encrypt = !spec.password_1.empty();
+  // With an anonymization offset, only times after it can be stored without
+  // writing the real date (time.hpp). Refuse before any file is touched.
+  for (const auto& b : blocks) require_storable_time(b.start_uutc, rto, "block start time");
 
   crypto::ValidationFields vf =
       encrypt ? crypto::make_validation_fields(spec.password_1, spec.password_2)
@@ -468,7 +471,16 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   if (encrypt && md.access_level < fmt::LEVEL_1_ACCESS)
     throw PasswordError("appending to an encrypted segment requires level-1 access: " + tmet_path);
 
+  // The offset is in section 3. Locked (an L2-encrypted session opened with
+  // only the level-1 password) it is UNKNOWN, not 0: taking it as 0 would
+  // store the new times against the wrong baseline, decades off.
+  if (!md.section3_available)
+    throw PasswordError("appending to " + tmet_path +
+                        " needs the full-access (level-2) password: its section 3, which holds "
+                        "the recording-time offset the new times must be stored against, is "
+                        "locked with the level-1 password alone");
   const si8 rto = segment_rto(md);
+  for (const auto& b : blocks) require_storable_time(b.start_uutc, rto, "block start time");
   const sf8 fs_hz = md.section2.sampling_frequency;
 
   if (std::abs(fs_hz - spec.sampling_frequency) > 1e-9 * std::max(1.0, std::abs(fs_hz)))

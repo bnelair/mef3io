@@ -65,10 +65,12 @@ class SessionWriter {
 
   /// Write records (annotations). @p channel nullopt -> session-level (in the
   /// `.mefd` root), otherwise channel-level. Replaces the records at that level.
-  /// Times are stored so the reader places them as given: -t (meflib's
-  /// marker) when the level's segments are at offset 0 — every session
-  /// mef3io creates, byte-identical to earlier releases — and plain absolute
-  /// UTC when they carry a non-zero offset or disagree on one.
+  /// Times are stored the way the reader resolves the level: -t at offset 0
+  /// (every session mef3io creates; byte-identical to earlier releases) and
+  /// rto - t under an anonymization offset, which keeps the real date hidden.
+  /// Refused (WriteConflictError) when the level's segments disagree on the
+  /// offset or a time is at or before it, and (PasswordError) when the
+  /// offset is locked in a level-2 section 3.
   void write_records(std::optional<std::string> channel, const std::vector<Record>& records);
 
   /// `.tmet` files of OTHER segments that could not be read while this writer
@@ -141,16 +143,20 @@ class SessionWriter {
   // Load fs/ufact/total_samples/last_end_uutc from the channel's last segment
   // on disk (for sessions reopened with overwrite=false). No-op once hydrated.
   void hydrate(const std::string& channel, ChannelState& st);
-  // The recording-time offset every on-disk segment of the channel (or the
-  // whole session) agrees on — what the reader resolves that level with.
-  // nullopt when they disagree, 0 when there are none.
+  // What the on-disk segments of a level (one channel, or the whole session)
+  // say about the recording-time offset (see session_writer.cpp).
+  struct LevelOffset {
+    enum class State { Agreed, Disputed, Unknown } state = State::Agreed;
+    si8 rto = 0;         // the agreed offset (0 when nothing readable)
+    int readable = 0;    // segments whose metadata could be read
+    std::string detail;  // which segments disagree / which section 3 is locked
+  };
   // Unreadable .tmet files are skipped and recorded in unreadable_metadata_.
-  // `readable`, when given, receives how many segments had a say.
-  std::optional<si8> agreed_disk_rto(const std::optional<std::string>& channel,
-                                     int* readable = nullptr);
-  // The offset a NEW segment of `channel` is written with (session_writer.cpp).
+  LevelOffset level_offset(const std::optional<std::string>& channel);
+  // The offset a NEW segment of `channel` is written with; throws when it is
+  // locked or disputed.
   si8 new_segment_rto(const std::string& channel, ChannelState& st);
-  std::optional<si8> session_rto_;  // the session-wide agreement, once scanned
+  std::optional<LevelOffset> session_offset_;  // the session-wide answer, once scanned
   std::vector<std::string> unreadable_metadata_;
   WriteSummary write_blocks(const std::string& channel, const std::vector<si4>& samples,
                             std::span<const ui1> valid, sf8 ufact, si8 start_uutc, sf8 fs,
