@@ -90,9 +90,12 @@ its provenance region (offset 960; the modification count is the change
 marker); plus channel folders and session .rdat/.ridx sizes. Sizes via
 open+fstat, not stat (NFS attribute cache). Tar: size+mtime of the archive.
 Signature taken BEFORE the backend reads metadata (test-pinned via a write
-injected mid-open). NOT SAVED when total segments <= channels
+injected mid-open). NO SNAPSHOT when total segments <= channels
 (`worth_caching`; measured 128x1/256x1: cached open == plain, first open ~2x
-slower) — the layout listing decides before any signature work.
+slower) — the layout listing decides before any signature work, and a MARKER
+(`build_marker`, no metadata) is saved so later cache= opens skip even that
+listing (~17% of a 1-seg/channel open) for one tiny JSON read; the Reader
+drops it when its plain open's infos show the session grew past the threshold.
 DOCUMENTED BLIND SPOT: an in-place edit of a NON-last segment that moves none
 of the above is not detected — open without cache= for a full read. It covers
 (a) foreign tools, and (b) mef3io's own repair/recover of a non-last segment

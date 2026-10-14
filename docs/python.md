@@ -146,10 +146,13 @@ A snapshot is used only by the exact mef3io build that wrote it (the version
 plus the compiled extension). On any mismatch it is ignored, the session is
 opened normally, and a fresh snapshot is written.
 
-No snapshot is saved for a session with no more segments than channels (for
-example 128 channels with one segment each). There it cannot make an open
-faster: measured, a cached open matched a plain one, and building the snapshot
-made the first open about twice as slow.
+No metadata snapshot is saved for a session with no more segments than
+channels, for example 128 channels with one segment each. There a snapshot
+cannot make an open faster: measured, a cached open matched a plain one, and
+building the snapshot made the first open about twice as slow. A tiny marker
+is saved instead. It makes later `cache=` opens go straight to a plain open,
+at the cost of one small file read. The marker is dropped once the session
+grows past one segment per channel, and a real snapshot follows.
 
 **Encrypted sessions are never cached.** They are always opened normally, and
 any snapshot file found for one is deleted, whatever version wrote it.

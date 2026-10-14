@@ -22,7 +22,8 @@ replaces (issue #64: hashing every ``.tmet`` once made a cached directory open
 ~2.7x slower than an uncached one). So its size and the work to check it do
 not depend on the number of segments, and none is saved for a session with no
 more segments than channels, where it cannot beat a plain open
-(:func:`worth_caching`).
+(:func:`worth_caching`) — only a metadata-free marker (:func:`build_marker`)
+that sends later cached opens straight to a plain open.
 
 Validation (per channel, O(1) in segments)
 ------------------------------------------
@@ -304,6 +305,30 @@ def worth_caching(lay: dict) -> bool:
     return sum(n for n, _, _ in chans.values()) > len(chans)
 
 
+def worth_caching_infos(channel_infos: dict) -> bool:
+    """:func:`worth_caching` from an open backend's channel infos (free)."""
+    return sum(int(i.get("n_segments") or 0) for i in channel_infos.values()) > len(channel_infos)
+
+
+# A session not worth a snapshot gets a MARKER instead: no metadata at all,
+# just "a plain open is the fast path here". It lets later cached opens skip
+# even the O(channels) listing that decides this (~40 us per channel, ~17% of
+# a one-segment-per-channel open) and pay one tiny JSON read instead. The
+# Reader drops the marker as soon as its plain open shows the session has
+# grown past the threshold; the next cached open then builds a snapshot.
+def build_marker(session_path: str) -> dict:
+    return {
+        "format": CACHE_FORMAT_VERSION,
+        "mef3io_version": _version(),
+        "session_path": os.path.abspath(session_path),
+        "not_worth_caching": True,
+    }
+
+
+def is_marker(snapshot: Optional[dict]) -> bool:
+    return bool(snapshot) and snapshot.get("not_worth_caching") is True
+
+
 def signature(session_path: str, lay: Optional[dict] = None) -> dict:
     """The snapshot's signature of ``session_path``: O(channels) in size, and
     O(channels) in I/O to compute (never per segment).
@@ -378,9 +403,25 @@ def discard(cache_path: Path) -> None:
 
 
 def load_valid(cache_path: Path, session_path: str) -> Optional[dict]:
-    """Return the cached snapshot if present and still consistent, else None."""
+    """Return the cached snapshot if present and still consistent, else None.
+
+    A current marker (:func:`build_marker`) is returned as is, without any
+    check of the session: it carries no metadata, so there is nothing stale or
+    secret to protect, and the caller opens the session normally anyway.
+    """
     if not Path(cache_path).exists():
         return None
+    try:
+        early = json.loads(Path(cache_path).read_text())
+    except (OSError, ValueError):
+        early = None
+    if (isinstance(early, dict) and is_marker(early)
+            and early.get("format") == CACHE_FORMAT_VERSION
+            and early.get("mef3io_version") == _version()
+            and early.get("session_path") == os.path.abspath(session_path)
+            and set(early) == {"format", "mef3io_version", "session_path",
+                               "not_worth_caching"}):
+        return early
     try:
         current = signature(session_path)
     except OSError:
@@ -392,12 +433,9 @@ def load_valid(cache_path: Path, session_path: str) -> Optional[dict]:
         # decrypted metadata in plaintext.
         discard(cache_path)
         return None
-    try:
-        snapshot = json.loads(Path(cache_path).read_text())
-    except (OSError, ValueError):
-        return None
-    if not isinstance(snapshot, dict):
-        return None
+    snapshot = early
+    if not isinstance(snapshot, dict) or is_marker(snapshot):
+        return None  # unreadable, or a marker of another build/path
     if snapshot.get("format") != CACHE_FORMAT_VERSION:
         return None
     if snapshot.get("mef3io_version") != _version():

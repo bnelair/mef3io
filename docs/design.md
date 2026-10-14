@@ -259,7 +259,8 @@ storage; lazy open + mmap indices already fix the pathological local case).
   of channel folders or the session-level `.rdat`/`.ridx` sizes differ.
   The two first/last `.tmet` file UUIDs are compared too (a same-samples
   `overwrite=True` with new metadata), and the version includes the compiled
-  extension's identity. No snapshot is saved when segments ≤ channels.
+  extension's identity. No snapshot is saved when segments ≤ channels;
+  a metadata-free marker sends later cached opens straight to a plain open.
   **Blind spot, by design:** an in-place change to a non-last segment that
   moves none of those is not detected: foreign tools, and mef3io's own repair
   or recovery when its `segment-repaired` stamp on the last segment was skipped

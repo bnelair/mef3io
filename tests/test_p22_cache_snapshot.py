@@ -179,6 +179,28 @@ def test_session_level_records_change_is_detected(tmp_path):
     assert C.load_valid(cache, str(path)) is None
 
 
+def test_sizes_are_read_through_an_open_not_a_bare_stat(tmp_path, monkeypatch):
+    """On NFS a bare stat can come from the client's attribute cache and hide
+    another host's append; an open revalidates. So no size-bearing file may be
+    stat'd by path — only opened and fstat'd."""
+    path = _session(tmp_path)
+    with mef3io.Writer(str(path)) as w:
+        w.write_annotations([{"time": START, "text": "event"}])
+    statted = []
+    real_stat = os.stat
+
+    def spy(p, *a, **k):
+        statted.append(os.fspath(p))
+        return real_stat(p, *a, **k)
+
+    monkeypatch.setattr(os, "stat", spy)
+    sig = C.signature(str(path))
+    monkeypatch.undo()
+    assert sig["root_files"] and sig["channels"]["ch1.timd"]["tdat_size"]
+    bad = [p for p in statted if p.lower().endswith((".tdat", ".tidx", ".rdat", ".ridx"))]
+    assert not bad, bad
+
+
 def test_version_mismatch_is_rebuilt(tmp_path):
     path = _session(tmp_path)
     cache = _snapshot(tmp_path, path)
@@ -524,15 +546,47 @@ def test_fresh_session_is_not_slower_with_a_cache(tmp_path, channels, segments):
     slack = 0.05  # one JSON read/write, plus CI noise
     assert first <= 1.5 * plain + slack, (first, plain)
     assert warm <= 1.5 * plain + slack, (warm, plain)
-    assert cache.exists() == (segments > 1)
+    assert C.is_marker(json.loads(cache.read_text())) == (segments == 1)
 
 
-def test_one_segment_per_channel_saves_no_snapshot(tmp_path):
+def test_one_segment_per_channel_saves_only_a_marker(tmp_path, monkeypatch):
+    """No metadata snapshot for a shape it cannot speed up; a marker instead,
+    so later cached opens skip even the listing that decided it."""
     path = tmp_path / "s.mefd"
     _write(path, channels=("ch1", "ch2"), segments=1)
     cache = tmp_path / "snap.mef3cache"
     mef3io.Reader(str(path), cache=str(cache))
-    assert not cache.exists()
+    snap = json.loads(cache.read_text())
+    assert C.is_marker(snap) and "channel_infos" not in snap
     assert not C.worth_caching(C.layout(str(path)))
-    _write(path, channels=("ch1",), segments=1, first=1)  # now 3 segments, 2 channels
+
+    def boom(*a, **k):
+        raise AssertionError("a marker open listed or signed the session")
+
+    monkeypatch.setattr(C, "layout", boom)
+    monkeypatch.setattr(C, "signature", boom)
+    r = mef3io.Reader(str(path), cache=str(cache))
+    assert r._impl is not None and r.info("ch1")["n_segments"] == 1
+    monkeypatch.undo()
+
+    # Grown past the threshold: the marker's plain open notices and drops it,
+    # and the next cached open builds a real snapshot.
+    _write(path, channels=("ch1",), segments=1, first=1)  # 3 segments, 2 channels
     assert C.worth_caching(C.layout(str(path)))
+    mef3io.Reader(str(path), cache=str(cache))
+    assert not cache.exists()
+    mef3io.Reader(str(path), cache=str(cache))
+    assert C.load_valid(cache, str(path)) is not None
+    assert mef3io.Reader(str(path), cache=str(cache))._impl is None
+
+
+def test_a_marker_from_another_build_or_path_is_not_trusted(tmp_path):
+    path = _session(tmp_path, channels=("ch1", "ch2"), segments=1)
+    cache = tmp_path / "snap.mef3cache"
+    marker = C.build_marker(str(path))
+    marker["mef3io_version"] = "0.0.0"
+    cache.write_text(json.dumps(marker))
+    assert C.load_valid(cache, str(path)) is None
+    marker = C.build_marker(str(tmp_path / "other.mefd"))
+    cache.write_text(json.dumps(marker))
+    assert C.load_valid(cache, str(path)) is None
