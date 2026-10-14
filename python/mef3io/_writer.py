@@ -40,6 +40,30 @@ def _as_int32_counts(data):
     return np.ascontiguousarray(a, dtype=np.int32)
 
 
+@contextlib.contextmanager
+def reporting_unreadable_metadata(impl):
+    """Warn about segment metadata the core skipped during one write call.
+
+    Choosing the recording-time offset reads other segments' ``.tmet`` files;
+    in a session at offset 0 one that cannot be read is skipped so the write
+    can go ahead (a damaged segment must not block unrelated writes). It is
+    still damage, so it is reported, never silent. Shared by
+    :class:`Writer` and the ``mef_tools``-compatible ``MefWriter``.
+    """
+    before = len(impl.unreadable_metadata)
+    try:
+        yield
+    finally:
+        added = impl.unreadable_metadata[before:]
+        if added:
+            from ._reader import UnreadableSegmentWarning
+
+            warnings.warn(
+                f"{len(added)} segment metadata file(s) could not be read and were "
+                f"skipped when choosing the recording-time offset: {added[0]}",
+                UnreadableSegmentWarning, stacklevel=4)
+
+
 class Writer:
     """Write a MEF 3.0 session.
 
@@ -296,24 +320,18 @@ class Writer:
         with self._reporting_unreadable_metadata():
             self._impl.write_records(channel, norm)
 
-    @contextlib.contextmanager
-    def _reporting_unreadable_metadata(self):
-        """Warn about segment metadata the core skipped during the call.
+    @property
+    def unreadable_metadata(self) -> list[str]:
+        """Segment metadata this writer could not use, as ``"path: reason"``.
 
-        Choosing the recording-time offset for a write reads other segments'
-        ``.tmet`` files; one that cannot be read is skipped so the write can
-        go ahead (one damaged segment must not block unrelated writes), but it
-        is damage, so it is reported rather than silent.
+        ``.tmet`` files that could not be read while choosing the
+        recording-time offset, and empty segment directories ignored on open
+        (what a crashed write can leave behind). In a session at offset 0 an
+        unreadable file is skipped so it does not block unrelated writes (with
+        an :class:`UnreadableSegmentWarning`); where the offset is non-zero,
+        or nothing else is readable, the write is refused instead.
         """
-        before = len(self._impl.unreadable_metadata)
-        try:
-            yield
-        finally:
-            added = self._impl.unreadable_metadata[before:]
-            if added:
-                from ._reader import UnreadableSegmentWarning
+        return list(self._impl.unreadable_metadata)
 
-                warnings.warn(
-                    f"{len(added)} segment metadata file(s) could not be read and were "
-                    f"skipped when choosing the recording-time offset: {added[0]}",
-                    UnreadableSegmentWarning, stacklevel=3)
+    def _reporting_unreadable_metadata(self):
+        return reporting_unreadable_metadata(self._impl)

@@ -572,10 +572,10 @@ def test_records_written_into_a_legacy_offset_session_agree_with_the_legacy_read
 
 
 def test_writer_refuses_records_when_the_level_disagrees_on_the_offset(tmp_path):
-    """A level whose segments disagree has no single offset to store against,
-    and plain UTC would reveal the date an anonymized segment hides: refused,
-    naming the segments, before any file is written. A channel that agrees
-    with itself is unaffected."""
+    """A level whose segments disagree has no single offset to store against
+    -- any choice misplaces the times or reveals the date an anonymized
+    segment hides -- so the write is refused, naming the segments, before any
+    file is written. A channel that agrees with itself is unaffected."""
     path = tmp_path / "split.mefd"
     _write_session(path, annotate=False)
     _set_rto(path, THREE_DAYS, channels=["ch2"])
@@ -704,7 +704,7 @@ def test_a_disputed_channel_offset_does_not_cost_the_segment_records(tmp_path):
 # --------------------------------------------------------------------------- times at or before rto
 
 
-def _legacy_session(path, rto, annotate=True):
+def _legacy_session(path, rto, annotate=True, chans=("ch1",)):
     """A session the legacy stack wrote with record_offset = rto, optionally
     with its own session- and channel-level Note at START + 1 s."""
     pytest.importorskip("mef_tools", reason="legacy oracle not installed")
@@ -713,7 +713,8 @@ def _legacy_session(path, rto, annotate=True):
 
     w = MefWriter(str(path), overwrite=True)
     w.record_offset = rto
-    w.write_data(np.arange(5000, dtype=np.int32) * 1.0, "ch1", START, FS, precision=0)
+    for ch in chans:
+        w.write_data(np.arange(5000, dtype=np.int32) * 1.0, ch, START, FS, precision=0)
     if annotate:
         w.write_annotations(pd.DataFrame([{"time": START + SECOND, "type": "Note", "text": "s"}]))
         w.write_annotations(
@@ -761,8 +762,8 @@ def test_a_time_at_or_before_the_offset_is_refused(tmp_path, rto):
 def test_extending_a_legacy_offset_session_keeps_its_annotations(tmp_path):
     """A new channel and a new segment added by mef3io inherit the session's
     offset, so the levels keep agreeing and the legacy session- and
-    channel-level annotations stay readable; new data is stored as plain
-    absolute UTC and every reader places it; write_annotations still works."""
+    channel-level annotations stay readable; new data is stored as rto - t
+    (date hidden) and every reader places it; write_annotations still works."""
     pytest.importorskip("pymef")
     from mef3io.compat import MefReader as CompatReader
     from mef_tools.io import MefReader
@@ -1054,12 +1055,13 @@ def test_a_disputed_session_refuses_a_new_channel(tmp_path):
     path = tmp_path / "split.mefd"
     _write_session(path, annotate=False)
     _set_rto(path, THREE_DAYS, channels=["ch2"])
+    before = _tree(path)
     with mef3io.Writer(str(path)) as w:
         with pytest.raises(m.WriteConflictError, match="disagree"):
             w.write("ch3", np.zeros(512), START, FS, precision=0)
+    assert _tree(path) == before, "a refused write must leave the tree exactly as it was"
+    with mef3io.Writer(str(path)) as w:
         w.write("ch1", np.zeros(512), START + 60 * SECOND, FS, precision=0, new_segment=True)
-    assert not (Path(path) / "ch3.timd").exists() or not list(
-        (Path(path) / "ch3.timd").rglob("*.tdat"))
     assert len(mef3io.Reader(str(path)).segments("ch1")) == 2
 
 
@@ -1083,3 +1085,191 @@ def test_mixed_segments_stay_consistent(tmp_path):
         else list(r.toc("ch1")["start_uutc"])
     assert starts == sorted(starts) and len(set(starts)) == len(starts)
     assert starts[0] == START and starts[-1] == START + 70 * SECOND
+
+
+# --------------------------------------------------------------------------- final review
+
+
+def _tree(path):
+    """Every directory and file under `path`, with file contents hashed."""
+    import hashlib
+
+    out = {}
+    for f in sorted(Path(path).rglob("*")):
+        rel = str(f.relative_to(path))
+        out[rel] = "<dir>" if f.is_dir() else hashlib.sha256(f.read_bytes()).hexdigest()
+    return out
+
+
+def _corrupt_tmet(tmet):
+    raw = bytearray(tmet.read_bytes())
+    raw[2000] ^= 0xFF
+    tmet.write_bytes(bytes(raw))
+
+
+def test_annotations_for_a_channel_without_data_take_the_session_offset(tmp_path):
+    """A channel with no segment yet has no offset of its own; its records
+    must use the SESSION's. Taking 0 there stored the real date, and once the
+    channel got data every reader placed the note ~50 years off."""
+    pytest.importorskip("pymef")
+    from pymef.mef_session import MefSession
+
+    rto = START - 3600 * SECOND
+    path = tmp_path / "chnew.mefd"
+    _legacy_session(path, rto, annotate=False)
+    note_at = START + 30 * SECOND
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with mef3io.Writer(str(path)) as w:
+            w.write_annotations([{"type": "Note", "time": note_at, "text": "n"}], "chNew")
+            w.write("chNew", np.arange(512.0), START + 20 * SECOND, FS, precision=0)
+        r = mef3io.Reader(str(path))
+        assert [a["time"] for a in r.records("chNew")] == [note_at]
+    assert _stored_times(_rdat(path, "chNew")) == [rto - note_at]
+    assert struct.pack("<q", note_at) not in _rdat(path, "chNew").read_bytes()
+    ms = MefSession(str(path), "")
+    assert [int(x["time"]) for x in ms.read_records("chNew")] == [note_at]
+
+
+def _damaged_anonymized(path, rto, chans):
+    _legacy_session(path, rto, annotate=False, chans=chans)
+
+
+@pytest.mark.parametrize("write", ["session note", "ch1 note", "new channel ch9"])
+def test_unreadable_metadata_with_nothing_readable_is_refused(tmp_path, write):
+    """Every .tmet in scope unreadable: the offset is UNKNOWN, never 0 --
+    taking 0 stored the real date in an anonymized session."""
+    rto = START - 3600 * SECOND
+    path = tmp_path / "a.mefd"
+    _damaged_anonymized(path, rto, ("ch1",))
+    _corrupt_tmet(next(Path(path).glob("ch1.timd/*.segd/*.tmet")))
+    before = _tree(path)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with mef3io.Writer(str(path)) as w:
+            with pytest.raises(m.WriteConflictError, match="cannot be read"):
+                if write == "session note":
+                    w.write_annotations([{"type": "Note", "time": START + SECOND, "text": "x"}])
+                elif write == "ch1 note":
+                    w.write_annotations([{"type": "Note", "time": START + SECOND, "text": "x"}],
+                                        "ch1")
+                else:
+                    w.write("ch9", np.arange(512.0), START + 100 * SECOND, FS, precision=0)
+            assert any("ch1-000000.tmet" in u for u in w.unreadable_metadata)
+    assert _tree(path) == before
+
+
+def test_unreadable_metadata_beside_a_nonzero_agreement_is_refused(tmp_path):
+    """The readable segments agree on an offset, but an unreadable one may
+    not: writing against an unverified offset produced session records that,
+    once the damaged segment was restored, could not be read at all."""
+    rto = START - 3600 * SECOND
+    path = tmp_path / "b.mefd"
+    _damaged_anonymized(path, rto, ("ch1", "ch2"))
+    _corrupt_tmet(next(Path(path).glob("ch2.timd/*.segd/*.tmet")))
+    before = _tree(path)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with mef3io.Writer(str(path)) as w:
+            with pytest.raises(m.WriteConflictError, match="cannot be verified"):
+                w.write_annotations([{"type": "Note", "time": START + SECOND, "text": "s"}])
+            with pytest.raises(m.WriteConflictError, match="cannot be verified"):
+                w.write("ch3", np.arange(512.0), START + 100 * SECOND, FS, precision=0)
+            # ch1's own level is fully readable: its records are fine.
+            w.write_annotations([{"type": "Note", "time": START + SECOND, "text": "c"}], "ch1")
+    after = _tree(path)
+    assert {k: v for k, v in after.items() if "ch1.rdat" not in k and "ch1.ridx" not in k} \
+        == before
+
+
+def test_unreadable_metadata_beside_offset_zero_is_skipped_with_a_warning(tmp_path):
+    """In an ordinary (offset 0) session a damaged segment must not block
+    unrelated writes: skipped, reported, and the compat writer says so too."""
+    from mef3io.compat import MefWriter as CompatWriter
+
+    path = tmp_path / "zero.mefd"
+    _write_session(path, annotate=False)
+    _corrupt_tmet(next(Path(path).glob("ch2.timd/*.segd/*.tmet")))
+    cw = CompatWriter(str(path), overwrite=False)
+    with pytest.warns(mef3io.UnreadableSegmentWarning, match="ch2"):
+        cw.write_annotations([{"type": "Note", "time": START, "text": "ok"}])
+    cw.close()
+    cw = CompatWriter(str(path), overwrite=False)       # a fresh writer reports it again
+    with pytest.warns(mef3io.UnreadableSegmentWarning, match="ch2"):
+        cw.write_data(np.arange(512.0), "ch4", START, FS, precision=0)
+    cw.close()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = mef3io.Reader(str(path), strict=False)
+        assert [a["text"] for a in r.records()] == ["ok"]
+        np.testing.assert_array_equal(r.read("ch4"), np.arange(512.0))
+
+
+@pytest.mark.parametrize("how", ["new channel", "new segment", "write_int32", "compat write_data"])
+def test_a_refused_write_leaves_the_tree_untouched_and_the_channel_usable(tmp_path, how):
+    """The refusal used to come AFTER the segment directory was created; the
+    next Writer adopted the empty directory as a segment and every later
+    write failed ("cannot open segment metadata for append")."""
+    from mef3io.compat import MefWriter as CompatWriter
+
+    rto = START - 3600 * SECOND
+    path = tmp_path / "wedge.mefd"
+    _legacy_session(path, rto, annotate=False)
+    early, late = rto - SECOND, START + 500 * SECOND
+    ch = "ch1" if how == "new segment" else "chX"
+
+    def attempt(t):
+        if how == "compat write_data":
+            cw = CompatWriter(str(path), overwrite=False)
+            try:
+                cw.write_data(np.arange(512.0), ch, t, FS, precision=0)
+            finally:
+                cw.close()
+            return
+        with mef3io.Writer(str(path)) as w:
+            if how == "write_int32":
+                w.write_int32(ch, np.arange(512, dtype=np.int32), 1.0, t, FS)
+            else:
+                w.write(ch, np.arange(512.0), t, FS, precision=0,
+                        new_segment=how == "new segment")
+
+    before = _tree(path)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(m.WriteConflictError, match="anonymization offset"):
+            attempt(early)
+        assert _tree(path) == before
+        attempt(late)                                   # a later valid write works
+        r = mef3io.Reader(str(path))
+        assert r.segments(ch)[-1]["start_time"] == late
+
+
+def test_a_wedged_empty_segment_directory_is_ignored(tmp_path):
+    """Sessions already wedged by an earlier release: an empty .segd (no
+    .tmet) is not adopted as a segment; it is reported and its number reused."""
+    path = tmp_path / "wedged.mefd"
+    _write_session(path, annotate=False)
+    empty = Path(path) / "ch1.timd" / "ch1-000001.segd"
+    empty.mkdir()
+    with mef3io.Writer(str(path)) as w:
+        w.write("ch1", np.arange(512.0), START + 10 * SECOND, FS, precision=3)   # in-segment
+        w.write("ch1", np.arange(512.0), START + 60 * SECOND, FS, precision=3,
+                new_segment=True)
+        assert any("empty segment directory" in u for u in w.unreadable_metadata)
+    segs = mef3io.Reader(str(path)).segments("ch1")
+    assert [s["segment"] for s in segs] == [0, 1]
+    assert segs[1]["start_time"] == START + 60 * SECOND
+
+
+def test_a_renamed_archive_still_finds_its_session_records(tmp_path):
+    """For a .mefd.tar the session name is the folder INSIDE the archive; the
+    archive file can be renamed freely."""
+    path = tmp_path / "orig.mefd"
+    _write_session(path, session_text="the session's")
+    stray = Path(path) / "aaa_stray.rdat"
+    stray.write_bytes(_rdat(path).read_bytes())
+    _install_records(stray, [_record("Note", b"stray\0", -START)])
+    tar = Path(mef3io.archive_session(str(path)))
+    renamed = tar.with_name("renamed.mefd.tar")
+    tar.rename(renamed)
+    assert [a["text"] for a in mef3io.Reader(str(renamed)).records()] == ["the session's"]

@@ -73,10 +73,13 @@ class SessionWriter {
   /// offset is locked in a level-2 section 3.
   void write_records(std::optional<std::string> channel, const std::vector<Record>& records);
 
-  /// `.tmet` files of OTHER segments that could not be read while this writer
-  /// worked out a recording-time offset ("path: reason"). They are skipped —
-  /// one damaged segment must not block unrelated writes — and listed here so
-  /// the damage is not silent. Grows over the writer's life; deduplicated.
+  /// Segment metadata this writer could not use ("path: reason"): `.tmet`
+  /// files that could not be read while working out a recording-time offset,
+  /// and empty segment directories it ignored on open. In a session at offset
+  /// 0 an unreadable one is skipped so it does not block unrelated writes;
+  /// where the offset is non-zero or nothing else is readable, the write is
+  /// refused instead. Listed here either way so the damage is not silent.
+  /// Grows over the writer's life; deduplicated.
   const std::vector<std::string>& unreadable_metadata() const { return unreadable_metadata_; }
 
   // Optional override for the RED block length (samples per block). <= 0 uses
@@ -149,14 +152,19 @@ class SessionWriter {
     enum class State { Agreed, Disputed, Unknown } state = State::Agreed;
     si8 rto = 0;         // the agreed offset (0 when nothing readable)
     int readable = 0;    // segments whose metadata could be read
+    int unreadable = 0;  // segments whose .tmet could not be read at all
     std::string detail;  // which segments disagree / which section 3 is locked
+    std::string unreadable_example;
   };
-  // Unreadable .tmet files are skipped and recorded in unreadable_metadata_.
   LevelOffset level_offset(const std::optional<std::string>& channel);
-  // The offset a NEW segment of `channel` is written with; throws when it is
-  // locked or disputed.
+  // The offset a write at this level stores times against, or a refusal
+  // (see session_writer.cpp for the rule). Channel scope falls back to the
+  // session when the channel has no segment.
+  si8 resolve_offset(const std::optional<std::string>& channel, const std::string& what);
+  // The offset a NEW segment of `channel` is written with.
   si8 new_segment_rto(const std::string& channel, ChannelState& st);
-  std::optional<LevelOffset> session_offset_;  // the session-wide answer, once scanned
+  void note_unreadable(const std::string& what);
+  std::optional<si8> session_rto_;  // the session's resolved offset, once known
   std::vector<std::string> unreadable_metadata_;
   WriteSummary write_blocks(const std::string& channel, const std::vector<si4>& samples,
                             std::span<const ui1> valid, sf8 ufact, si8 start_uutc, sf8 fs,

@@ -455,6 +455,22 @@ int mef3io_record_list_seizure_channel(const mef3io_record_list* list, int32_t i
 
 /* ----- archive ----------------------------------------------------------- */
 
+int mef3io_writer_n_unreadable_metadata(mef3io_writer* w, int32_t* out) {
+  if (!w || !out) return fail_argument("NULL argument");
+  return guarded([&] { *out = static_cast<int32_t>(w->impl.unreadable_metadata().size()); });
+}
+
+int mef3io_writer_unreadable_metadata(mef3io_writer* w, int32_t index, char* buf,
+                                      size_t buf_bytes) {
+  if (!w || !buf) return fail_argument("NULL argument");
+  return guarded([&] {
+    const auto& u = w->impl.unreadable_metadata();
+    if (index < 0 || static_cast<size_t>(index) >= u.size())
+      throw std::out_of_range("unreadable-metadata index out of range");
+    copy_str(buf, buf_bytes, u[static_cast<size_t>(index)]);
+  });
+}
+
 int mef3io_writer_set_durable(mef3io_writer* w, int durable) {
   if (!w) return fail_argument("writer must not be NULL");
   return guarded([&] { reinterpret_cast<mef3io::SessionWriter*>(w)->set_durable(durable != 0); });

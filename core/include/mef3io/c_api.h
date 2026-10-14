@@ -328,6 +328,15 @@ int mef3io_writer_set_threads(mef3io_writer* w, int n_threads);
  * files, with no recovery step needed. */
 int mef3io_writer_set_durable(mef3io_writer* w, int durable);
 
+/* Segment metadata the writer could not use: .tmet files it could not read
+ * while choosing a recording-time offset, and empty segment directories it
+ * ignored. Each entry is "path: reason". In a session at offset 0 such a file
+ * is skipped so it does not block unrelated writes; with a non-zero offset, or
+ * nothing else readable, the write is refused instead. */
+int mef3io_writer_n_unreadable_metadata(mef3io_writer* w, int32_t* out);
+int mef3io_writer_unreadable_metadata(mef3io_writer* w, int32_t index, char* buf,
+                                      size_t buf_bytes);
+
 typedef struct {
   int64_t samples_written;
   int64_t blocks;

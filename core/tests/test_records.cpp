@@ -469,3 +469,40 @@ TEST_CASE("parse_records fails on damage instead of returning less") {
     REQUIRE(parse_records(img, 0).size() == 2);
   }
 }
+
+TEST_CASE("C ABI reports segment metadata the writer could not use") {
+  const auto dir = fsys::temp_directory_path() / "mef3io_unreadable_md.mefd";
+  fsys::remove_all(dir);
+  {
+    SessionWriter w(dir.string(), true);
+    const std::vector<si4> x(512, 0);
+    w.write_int32("ch1", x, 1.0, T0, 256.0);
+    w.write_int32("ch2", x, 1.0, T0, 256.0);
+  }
+  // Break ch2's metadata body (the CRC check rejects it).
+  const auto tmet = dir / "ch2.timd" / "ch2-000000.segd" / "ch2-000000.tmet";
+  {
+    std::fstream f(tmet, std::ios::in | std::ios::out | std::ios::binary);
+    f.seekp(2000);
+    const char junk = 0x5a;
+    f.write(&junk, 1);
+  }
+  mef3io_writer* w = nullptr;
+  REQUIRE(mef3io_writer_open(dir.string().c_str(), 0, "", "", &w) == MEF3IO_OK);
+  int32_t n = -1;
+  REQUIRE(mef3io_writer_n_unreadable_metadata(w, &n) == MEF3IO_OK);
+  REQUIRE(n == 0);
+  mef3io_records* recs = mef3io_records_create();
+  REQUIRE(mef3io_records_add(recs, "Note", T0, "ok", -1) == MEF3IO_OK);
+  // Offset 0 everywhere readable: skipped and reported, the write goes ahead.
+  REQUIRE(mef3io_writer_write_records(w, nullptr, recs) == MEF3IO_OK);
+  mef3io_records_free(recs);
+  REQUIRE(mef3io_writer_n_unreadable_metadata(w, &n) == MEF3IO_OK);
+  REQUIRE(n == 1);
+  char buf[1024];
+  REQUIRE(mef3io_writer_unreadable_metadata(w, 0, buf, sizeof buf) == MEF3IO_OK);
+  REQUIRE(std::string(buf).find("ch2-000000.tmet") != std::string::npos);
+  REQUIRE(mef3io_writer_unreadable_metadata(w, 1, buf, sizeof buf) == MEF3IO_ERR_ARGUMENT);
+  mef3io_writer_close(w);
+  fsys::remove_all(dir);
+}

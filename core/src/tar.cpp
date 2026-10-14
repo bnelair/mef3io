@@ -217,6 +217,10 @@ TarIndex::TarIndex(std::string tar_path) : path_(std::move(tar_path)) {
   }
 }
 
+std::string TarSource::session_name() const {
+  return session_name_from_path(root_.empty() ? tar_path_ : root_);
+}
+
 TarSource::TarSource(const std::string& tar_path) : tar_path_(tar_path) {
   TarIndex idx(tar_path);
   if (idx.files().empty()) throw FormatError("tar archive contains no files: " + tar_path);

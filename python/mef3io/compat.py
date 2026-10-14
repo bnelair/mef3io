@@ -17,6 +17,7 @@ from __future__ import annotations
 import warnings
 from typing import Optional, Union
 
+from ._writer import reporting_unreadable_metadata
 from ._reader import SessionDeclarationWarning, _declaration_warning_text
 
 import numpy as np
@@ -318,16 +319,18 @@ class MefWriter:
 
             counts = _as_int32_counts(data)
             ufact = 10.0 ** -(precision if precision is not None else 0)
-            self._w.write_int32(
-                channel, counts, ufact, int(start_uutc),
-                float(sampling_freq), None, bool(new_segment),
-            )
+            with reporting_unreadable_metadata(self._w):
+                self._w.write_int32(
+                    channel, counts, ufact, int(start_uutc),
+                    float(sampling_freq), None, bool(new_segment),
+                )
         else:
-            self._w.write_float(
-                channel, np.ascontiguousarray(data, np.float64), int(start_uutc),
-                float(sampling_freq), int(precision) if precision is not None else -1,
-                bool(new_segment),
-            )
+            with reporting_unreadable_metadata(self._w):
+                self._w.write_float(
+                    channel, np.ascontiguousarray(data, np.float64), int(start_uutc),
+                    float(sampling_freq), int(precision) if precision is not None else -1,
+                    bool(new_segment),
+                )
         return True
 
     def write_annotations(self, annotations, channel: Optional[str] = None):
@@ -342,7 +345,8 @@ class MefWriter:
             if "duration" in r and r["duration"] is not None:
                 rec["duration"] = int(r["duration"])
             norm.append(rec)
-        self._w.write_records(channel, norm)
+        with reporting_unreadable_metadata(self._w):
+            self._w.write_records(channel, norm)
 
     def close(self):
         self._w = None

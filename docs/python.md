@@ -29,6 +29,22 @@ block_length=None, n_threads=0)`
   state is recovered from disk, so this works across program runs.
 - Encryption: pass **both** passwords (MEF has no "level-1 only" files; see
   the [encryption model](encryption_model.md)).
+- **Appending to an encrypted session needs the level-2 password.** That
+  includes sessions at offset 0. Section 3, which holds the recording-time
+  offset every new time is stored against, is level-2 encrypted, and without
+  it the offset is unknown. A Writer opened with only the level-1 password is
+  refused (`PasswordError`) for anything that stores times into that
+  session, rather than guessing the offset. Earlier releases took it as 0,
+  which in an anonymized session placed appended data decades off.
+- `Writer.unreadable_metadata` lists segment metadata the writer could not
+  use (`"path: reason"`). That means `.tmet` files it could not read while
+  choosing the offset, and empty segment directories left by a crashed
+  write, which are ignored. At offset 0 such a file is skipped with an
+  `UnreadableSegmentWarning`, so one damaged segment does not block
+  unrelated writes. Where the offset is non-zero, or nothing else is
+  readable, the write is refused instead.
+- **A refused write leaves the session exactly as it was.** No directory or
+  file is created before every check has passed.
 - `block_length` overrides the RED block size (default: `fs` samples for
   fs ≥ 5000, else `10*fs`). `n_threads=0` uses all cores.
 
@@ -164,7 +180,13 @@ A write is refused, rather than revealing the date or misplacing times, when:
 - the time is at or before the offset (`WriteConflictError`);
 - the level's segments disagree on the offset (`WriteConflictError`);
 - the offset is locked because only the level-1 password was given
-  (`PasswordError`).
+  (`PasswordError`);
+- the offset cannot be verified because segment metadata in scope is
+  unreadable, and the readable segments use a non-zero offset or none are
+  readable at all (`WriteConflictError`).
+
+A channel that has no data yet takes the session's offset for its
+annotations.
 
 The `mef_tools`-compatible `MefReader.get_annotations(channel)` keeps the
 legacy meaning — that channel's channel-level records only — while

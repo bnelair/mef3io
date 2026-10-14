@@ -39,6 +39,11 @@ class SessionSource {
   /// SegmentInfo.path). Directories: the on-disk path; tar members:
   /// "<archive>::<member>".
   virtual std::string describe(const std::string& rel) const = 0;
+  /// The session's name, as meflib names its session-level files
+  /// (<name>.mefd/<name>.rdat, meflib.c:6335): the session directory's name
+  /// without ".mefd". For an archive that is the folder INSIDE it, not the
+  /// archive's own file name, which can be renamed freely.
+  virtual std::string session_name() const = 0;
 };
 
 /// Plain directory tree on the local filesystem (the classic .mefd layout).
@@ -53,6 +58,7 @@ class DirectorySource : public SessionSource {
   std::vector<ui1> read_range(const std::string& rel, std::size_t offset,
                               std::size_t length) const override;
   std::string describe(const std::string& rel) const override;
+  std::string session_name() const override;
 
  private:
   std::string join(const std::string& rel) const;
@@ -62,6 +68,10 @@ class DirectorySource : public SessionSource {
 /// Case-insensitive suffix test on a path, ignoring trailing separators
 /// ("S.MEFD/" has suffix ".mefd"). Backs the session naming rules.
 bool path_has_suffix(const std::string& path, const std::string& suffix);
+
+/// "…/name.mefd", "…/name.mefd/" or "…/name.mefd.tar" -> "name" (suffixes
+/// matched case-insensitively).
+std::string session_name_from_path(std::string path);
 
 /// Open `path` as a session source: a directory becomes a DirectorySource, a
 /// regular file is treated as an uncompressed tar archive of the session

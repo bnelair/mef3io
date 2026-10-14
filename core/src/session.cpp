@@ -18,24 +18,6 @@
 namespace mef3io {
 namespace {
 
-// "…/name.mefd", "…/name.mefd/" or "…/name.mefd.tar" -> "name" (the suffix is
-// enforced, case-insensitively, when the source is opened).
-std::string session_name_from_path(std::string path) {
-  while (!path.empty() && (path.back() == '/' || path.back() == '\\')) path.pop_back();
-  const auto slash = path.find_last_of("/\\");
-  std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
-  for (const char* suffix : {".tar", ".mefd"}) {
-    const std::size_t n = std::strlen(suffix);
-    if (name.size() >= n) {
-      std::string tail = name.substr(name.size() - n);
-      std::transform(tail.begin(), tail.end(), tail.begin(),
-                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-      if (tail == suffix) name.resize(name.size() - n);
-    }
-  }
-  return name;
-}
-
 int segment_number_from_name(const std::string& stem) {
   // "<channel>-000000" -> 0
   auto dash = stem.rfind('-');
@@ -401,7 +383,7 @@ std::vector<Record> Session::read_records(std::optional<std::string> channel,
     // silently picking the first in listing order is how annotations go
     // missing.
     std::string rdat_path;
-    const std::string preferred = session_name_from_path(mefd_path_) + ".rdat";
+    const std::string preferred = source_->session_name() + ".rdat";
     std::vector<std::string> candidates;
     for (const auto& e : source_->list_dir(""))
       if (!e.is_dir && e.name.ends_with(".rdat")) candidates.push_back(e.name);

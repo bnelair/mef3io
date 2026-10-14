@@ -69,9 +69,21 @@ quirks matter:
       L2-encrypted session opened with only the level-1 password
       (`PasswordError`; open the writer with the level-2 password). A locked
       offset is unknown, never assumed to be 0.
-  - **Damaged metadata is skipped.** A `.tmet` that cannot be read at all is
-    skipped and reported when mef3io works out the offset, so one damaged
-    segment does not block unrelated writes.
+  - **Unreadable metadata.** A `.tmet` that cannot be read at all, found
+    while mef3io works out the offset, is always reported
+    (`Writer.unreadable_metadata`, plus a warning). What happens next
+    depends on the readable segments:
+    - **They agree on rto 0:** the damaged file is skipped, so one damaged
+      segment in an ordinary session does not block unrelated writes.
+    - **They agree on a non-zero rto:** the write is refused, because the
+      agreement is unverified.
+    - **None are readable:** the write is refused, because the offset is
+      unknown.
+  - **A channel with no segment yet** takes the session's offset for its
+    records, under the same rules.
+  - **A refused write changes nothing.** Every check runs before any
+    directory or file is created. An empty segment directory left by an
+    earlier crash is ignored (and reported) instead of being adopted.
 - The empty value ("no entry") for a time is `INT64_MIN`.
 
 ## Universal header — 1024 B, prefixes every file
@@ -371,9 +383,10 @@ one segment; `records(level="all")` everything. Every record carries `level`,
 `channel` and `segment` so the source is never ambiguous. mef3io writes only
 the session and channel levels.
 
-The session-level file is `<session name>.rdat`, the name of the `.mefd`
-directory (or `.mefd.tar` archive) without its suffix — the only name meflib
-reads (meflib.c:6335). A differently named `.rdat` at the root is used only
+The session-level file is `<session name>.rdat`, the only name meflib reads
+(meflib.c:6335). The session name is the `.mefd` directory's name without
+its suffix. For a `.mefd.tar` archive it is the session folder inside the
+archive, so the archive file itself can be renamed freely. A differently named `.rdat` at the root is used only
 when it is the only one there. With several and none matching the name, the
 session-level records are ambiguous: strict raises, lenient reports it in
 `problems` and returns none.

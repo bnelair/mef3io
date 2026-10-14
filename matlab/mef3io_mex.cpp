@@ -756,6 +756,19 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     mxSetField(plhs[0], 0, "segment", mxCreateDoubleScalar(sum.segment));
     return;
   }
+  if (cmd == "writer_unreadable_metadata") {
+    need_args(nrhs, 2, "writer_unreadable_metadata");
+    mef3io_writer* w = get_writer(prhs[1]);
+    std::int32_t n = 0;
+    check(mef3io_writer_n_unreadable_metadata(w, &n));
+    plhs[0] = mxCreateCellMatrix(static_cast<mwSize>(n), 1);
+    for (std::int32_t i = 0; i < n; ++i) {
+      char buf[4096] = {0};
+      check(mef3io_writer_unreadable_metadata(w, i, buf, sizeof buf));
+      mxSetCell(plhs[0], static_cast<mwIndex>(i), make_utf8_string(buf));
+    }
+    return;
+  }
   if (cmd == "writer_write_records") {
     need_args(nrhs, 4, "writer_write_records");
     mef3io_writer* w = get_writer(prhs[1]);
