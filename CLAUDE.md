@@ -510,12 +510,17 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   entries; Epoc, Curs, CSti, ESti, LNTP, UnRc), gated on version 1.0 like
   meflib. Records WRITE builds bodies for Note/SyLg (text) and EDFA
   (duration+text) only; any other 4-char type writes a header with an empty
-  body. The writer stores record times with the level's agreed on-disk
-  `recording_time_offset` (0 for mef3io sessions) and refuses if segments
-  disagree; the reader refuses only offset-dependent (negated-time) files
-  whose segments disagree — a deliberate divergence from meflib, which uses
-  the last-read global offset. A bad record file is skipped on its own in
-  lenient mode (reported in problems(), samples stay readable). `write_records` rejects a record carrying a
+  body. TIMES ARE UTC. Every written time goes through `to_stored_time`
+  (time.hpp): rto 0 stores −t (byte-identical to earlier releases, meflib's
+  convention); rto ≠ 0 (foreign/legacy offset sessions) or a disputed level
+  stores plain positive absolute UTC, which every reader takes as absolute.
+  New segments/channels added to a session inherit its agreed non-zero rto,
+  so legacy records stay readable. The reader refuses only offset-dependent
+  (negated-time) record files whose segments disagree — a deliberate
+  divergence from meflib, which uses the last-read global offset. A damaged
+  record file (mid-record truncation, count ≠ number_of_entries, per-record
+  CRC) fails and is contained: strict raises, lenient skips it and reports
+  it in problems() with samples still readable. `write_records` rejects a record carrying a
   payload its type cannot store, so the gap fails loudly instead of silently.
   Cache is Python-level (a C++ warm-start is future).
 - **MATLAB binding implemented**: flat C ABI (`core/include/mef3io/c_api.h`,
@@ -551,7 +556,10 @@ appended before it threw (`out.resize(mark)`; collect_blocks restores buffers,
 jobs AND mismatches; read_runs also drops `current`, which points into the
 vector it resizes) — a half-written segment is worse than a skipped one. Note
 `continue` inside those lambdas means the inner loop; use `return` for "this
-segment contributes nothing". `info.n_segments` counts READABLE segments so it
+segment contributes nothing". problems() entries carry `kind` = "segment" |
+"records" (C ABI: `mef3io_reader_problem_kind`, struct layout unchanged);
+record-file problems have segment_number −1 at session/channel level and
+never mark a segment's data unreadable. `info.n_segments` counts READABLE segments so it
 cannot out-count `segment_map`. Surfaced as Python `Reader(strict=False)` /
 `Reader.problems` / `UnreadableSegmentWarning`, C ABI
 `mef3io_reader_open_ex` + `mef3io_reader_n_problems`/`_problem` (the original
