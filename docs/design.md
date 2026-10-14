@@ -270,10 +270,22 @@ storage; lazy open + mmap indices already fix the pathological local case).
   attribute cache cannot hide another host's append. Each `.timd` is always
   listed; directory timestamps are never trusted (FUSE/object-store mounts
   report constant ones).
-- **Encrypted sessions are never cached** (any level): no snapshot is written,
-  and any snapshot file found for an encrypted session is deleted before its
-  format or version is even read (1.1.x format-4 snapshots included). Channel infos
-  hold decrypted metadata, which must not land in a plaintext file.
+- **Encrypted sessions are never cached** (any level). Channel infos hold
+  decrypted metadata, which must not land in a plaintext file. No snapshot or
+  marker is written for one. The order on load is:
+  1. The cache file is parsed as JSON.
+  2. A well-formed marker of this build and session is returned at once. It
+     holds no metadata, and the Reader then opens normally. When that open
+     finds the session encrypted, the Reader deletes the marker.
+  3. For anything else, the encryption check runs **before** format, version
+     and session are compared. A file that parses as a JSON object with a
+     `format` key, meaning any mef3io snapshot or marker of any version
+     (1.1.x format-4 snapshots included), is deleted for an encrypted
+     session. Anything else is left alone, because an explicit `cache=<path>`
+     can name any file.
+- **Session identity:** snapshots and markers store a SHA-256 of the absolute
+  session path (`session_key`), never the path itself. It is only compared
+  for equality, and paths can carry a subject's name.
 - **Write interaction:** none. Write paths are cache-unaware and never touch a
   snapshot; a stale one is refused at the next cached open.
 
