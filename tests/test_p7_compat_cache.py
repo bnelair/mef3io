@@ -132,10 +132,17 @@ def test_encrypted_records_roundtrip(tmp_path):
 # --- cache behaviors ---
 
 
+# Two segments: a session with no more segments than channels gets no
+# snapshot at all (mef3io.cache.worth_caching), since it could not be faster.
+SEG2 = START + 20_000_000
+END = SEG2 + int(1000 / FS * 1e6)
+
+
 def _make_session(tmp_path):
     path = str(tmp_path / "s.mefd")
     with mef3io.Writer(path, overwrite=True) as w:
         w.write("ch1", _sig(), START, FS, 3)
+        w.write("ch1", _sig(1000), SEG2, FS, 3, new_segment=True)
     return path
 
 
@@ -156,7 +163,7 @@ def test_auto_cache_warm_start_defers_backend(tmp_path):
     warm = mef3io.Reader(path, cache="auto")
     assert warm._impl is None  # served from cache
     assert warm.channels == ["ch1"]
-    assert warm.info("ch1")["number_of_samples"] == 3000
+    assert warm.info("ch1")["number_of_samples"] == 4000
     assert warm._impl is None  # still deferred after metadata queries
     _ = warm.read("ch1")  # data read builds the backend
     assert warm._impl is not None
@@ -169,7 +176,7 @@ def test_cache_invalidated_by_append(tmp_path):
     mef3io.Reader(path, cache="auto")  # create snapshot
     assert C.load_valid(cp, path) is not None
     with mef3io.Writer(path) as w:
-        w.write("ch1", _sig(256), START + int(3000 / FS * 1e6), FS, 3)
+        w.write("ch1", _sig(256), END, FS, 3)
     assert C.load_valid(cp, path) is None
     cp.unlink(missing_ok=True)
 
@@ -185,7 +192,7 @@ def test_cache_invalidated_by_same_size_metadata_repair(tmp_path):
     from mef3io import _mef3io as m
 
     path = _make_session(tmp_path)
-    tmet = Path(glob.glob(path + "/ch1.timd/*/*.tmet")[0])
+    tmet = Path(sorted(glob.glob(path + "/ch1.timd/*/*.tmet"))[-1])  # the last segment
     raw = bytearray(tmet.read_bytes())
     struct.pack_into("<I", raw, 1024 + 1536 + 6388, 0)  # maximum_difference_bytes
     struct.pack_into("<I", raw, 4, m.crc32(bytes(raw[1024:16384])))
@@ -210,7 +217,7 @@ def test_writers_are_cache_unaware(tmp_path):
     mef3io.Reader(path, cache="auto")
     assert cp.exists()
     with mef3io.Writer(path) as w:
-        w.write("ch1", _sig(256), START + int(3000 / FS * 1e6), FS, 3)
+        w.write("ch1", _sig(256), END, FS, 3)
     assert cp.exists()
     assert C.load_valid(cp, path) is None
     r = mef3io.Reader(path, cache="auto")

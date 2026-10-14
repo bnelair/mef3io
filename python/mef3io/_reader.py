@@ -203,10 +203,17 @@ class Reader:
             # rather than one whose signature vouches for content it never saw.
             # A path that cannot be listed gets no snapshot; the backend below
             # reports the real error.
+            # A layout with no more segments than channels gets no snapshot at
+            # all (cache.worth_caching): it could not make a later open faster,
+            # and computing the signature would only slow this one down.
             sig = None
             if self._cache_path is not None:
                 try:
-                    sig = _cache.signature(self._path)
+                    lay = _cache.layout(self._path)
+                    if _cache.worth_caching(lay):
+                        sig = _cache.signature(self._path, lay)
+                    else:
+                        _cache.discard(self._cache_path)  # stale; never valid again
                 except OSError:
                     pass
             self._ensure_impl()

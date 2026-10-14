@@ -183,13 +183,66 @@ def test_version_mismatch_is_rebuilt(tmp_path):
     path = _session(tmp_path)
     cache = _snapshot(tmp_path, path)
     snap = json.loads(cache.read_text())
-    assert snap["mef3io_version"] == mef3io.__version__
+    assert snap["mef3io_version"] == C._version()
+    assert snap["mef3io_version"].startswith(mef3io.__version__ + "+build.")
     snap["mef3io_version"] = "0.0.0-other"
     cache.write_text(json.dumps(snap))
     assert C.load_valid(cache, str(path)) is None
     r = mef3io.Reader(str(path), cache=str(cache))
     assert r._impl is not None, "a foreign-version snapshot was used"
-    assert json.loads(cache.read_text())["mef3io_version"] == mef3io.__version__
+    assert json.loads(cache.read_text())["mef3io_version"] == C._version()
+
+
+def test_same_version_different_build_is_rebuilt(tmp_path):
+    """The stored version carries the extension binary's identity: a dev build
+    at another commit, or a reinstalled wheel, shares the version string."""
+    path = _session(tmp_path)
+    cache = _snapshot(tmp_path, path)
+    snap = json.loads(cache.read_text())
+    snap["mef3io_version"] = mef3io.__version__ + "+build.1-2"
+    cache.write_text(json.dumps(snap))
+    assert C.load_valid(cache, str(path)) is None
+
+
+@pytest.mark.parametrize("change", ["units", "ufact", "subject"])
+def test_overwrite_with_same_samples_new_metadata_is_detected(tmp_path, change):
+    """Writer(overwrite=True) with the very same samples leaves counts, times,
+    sizes and provenance (create/0) identical; only the per-file random UUID
+    tells the new files from the old ones."""
+    path = tmp_path / "s.mefd"
+    x = np.arange(SEG_SAMPLES, dtype=np.int32) % 50
+
+    def write(second):
+        kw = {}
+        if change == "units":
+            kw["units"] = "mV" if second else "uV"
+        if change == "subject":
+            kw["metadata"] = mef3io.Metadata(
+                subject=mef3io.Subject(id="B" if second else "A"))
+        ufact = 0.25 if (change == "ufact" and second) else 0.5
+        with mef3io.Writer(str(path), overwrite=True, **kw) as w:
+            for s in range(2):
+                w.write_int32("ch1", x, ufact, START + s * SEG_US, FS, new_segment=True)
+
+    write(False)
+    cache = _snapshot(tmp_path, path)
+    old = mef3io.Reader(str(path), cache=str(cache)).info("ch1")
+    write(True)
+    assert C.load_valid(cache, str(path)) is None
+    new = mef3io.Reader(str(path), cache=str(cache)).info("ch1")
+    assert new != old
+
+
+@pytest.mark.parametrize("suffix", [".tdat", ".tidx"])
+def test_only_the_last_segment_file_size_changing_is_detected(tmp_path, suffix):
+    """A torn tail or an append that did not (yet) reach the .tmet: same
+    provenance, same times, only one file in the last segment grew."""
+    path = _session(tmp_path)
+    cache = _snapshot(tmp_path, path)
+    f = next(_tmets(path)[-1].parent.glob("*" + suffix))
+    with open(f, "ab") as fh:
+        fh.write(b"\0" * 8)
+    assert C.load_valid(cache, str(path)) is None
 
 
 def test_refused_snapshot_is_replaced_by_a_fresh_one(tmp_path):
@@ -249,6 +302,25 @@ def test_planted_snapshot_for_an_encrypted_session_is_ignored_and_deleted(tmp_pa
     with pytest.raises(type(no_pw.value)):
         mef3io.Reader(str(path), cache=str(cache))  # no password: must not be served
     assert not cache.exists(), "the planted snapshot was left in place"
+
+
+@pytest.mark.parametrize("stale", ["format4", "other_version", "garbage"])
+def test_any_snapshot_of_an_encrypted_session_is_deleted(tmp_path, stale):
+    """Checked BEFORE format and version: a 1.1.x (format 4) snapshot held
+    decrypted subject fields in plaintext, and must go however old it is."""
+    path = _encrypted_session(tmp_path)
+    cache = tmp_path / "snap.mef3cache"
+    if stale == "garbage":
+        cache.write_text("not json")
+    else:
+        snap = {"format": 4, "session_path": str(path),
+                "channel_infos": {"ch1": {"subject_id": "MRN123"}}}
+        if stale == "other_version":
+            snap = {"format": C.CACHE_FORMAT_VERSION, "mef3io_version": "0.0.0",
+                    "session_path": str(path), "channel_infos": snap["channel_infos"]}
+        cache.write_text(json.dumps(snap))
+    assert C.load_valid(cache, str(path)) is None
+    assert not cache.exists()
 
 
 def test_planted_snapshot_for_an_encrypted_tar_is_not_served(tmp_path):
@@ -382,11 +454,13 @@ def _rchar() -> int:
 
 
 class _OpenCounter:
-    """Counts every file and directory the Python side opens."""
+    """Counts every file and directory the Python side opens OR stats — an
+    O(segments) stat loop is as much a regression as an O(segments) read."""
 
     def __init__(self, monkeypatch):
         self.n = 0
-        for mod, name in ((builtins, "open"), (io, "open"), (os, "open"), (os, "scandir")):
+        for mod, name in ((builtins, "open"), (io, "open"), (os, "open"), (os, "scandir"),
+                          (os, "stat"), (os, "lstat")):
             orig = getattr(mod, name)
 
             def wrapped(*a, _orig=orig, **k):
@@ -426,12 +500,15 @@ def test_cached_open_does_less_io_than_a_plain_open(tmp_path, monkeypatch, segme
     assert counter.n < n_tmet, (counter.n, n_tmet)
 
 
-def test_fresh_session_is_not_slower_with_a_cache(tmp_path):
+@pytest.mark.parametrize("channels,segments", [(8, 40), (128, 1)])
+def test_fresh_session_is_not_slower_with_a_cache(tmp_path, channels, segments):
     """Written moments ago and opened at once: the cached path (first open
     builds the snapshot, later ones use it) must not cost more than a plain
-    open beyond a small constant."""
+    open beyond a small constant. 128 x 1 is the shape a snapshot cannot help
+    (one segment per channel): none is saved, and the open must not pay for
+    computing one."""
     path = tmp_path / "s.mefd"
-    _write(path, channels=tuple(f"ch{i}" for i in range(8)), segments=40)
+    _write(path, channels=tuple(f"ch{i}" for i in range(channels)), segments=segments)
     cache = tmp_path / "snap.mef3cache"
 
     def timed(**kw):
@@ -447,3 +524,15 @@ def test_fresh_session_is_not_slower_with_a_cache(tmp_path):
     slack = 0.05  # one JSON read/write, plus CI noise
     assert first <= 1.5 * plain + slack, (first, plain)
     assert warm <= 1.5 * plain + slack, (warm, plain)
+    assert cache.exists() == (segments > 1)
+
+
+def test_one_segment_per_channel_saves_no_snapshot(tmp_path):
+    path = tmp_path / "s.mefd"
+    _write(path, channels=("ch1", "ch2"), segments=1)
+    cache = tmp_path / "snap.mef3cache"
+    mef3io.Reader(str(path), cache=str(cache))
+    assert not cache.exists()
+    assert not C.worth_caching(C.layout(str(path)))
+    _write(path, channels=("ch1",), segments=1, first=1)  # now 3 segments, 2 channels
+    assert C.worth_caching(C.layout(str(path)))

@@ -10,7 +10,8 @@ Policy:
 - ``cache="auto"`` stores the snapshot in a per-user OS cache directory, keyed
   by the absolute session path — safe for read-only sessions.
 - ``cache=<path>`` writes an explicit, persistent cache file the caller names.
-- A snapshot is only ever read by the exact mef3io version that wrote it.
+- A snapshot is only ever read by the exact mef3io BUILD that wrote it: the
+  version string plus the compiled extension's size and mtime.
 - Validity is decided ONLY here, when a cached open happens. Write paths
   (Writer, repair, recover, ...) know nothing about the cache and never touch
   a snapshot. On any mismatch the snapshot is refused, the session is opened
@@ -19,7 +20,9 @@ Policy:
 A snapshot is only worth having while it is SMALL and CHEAPER than the open it
 replaces (issue #64: hashing every ``.tmet`` once made a cached directory open
 ~2.7x slower than an uncached one). So its size and the work to check it do
-not depend on the number of segments:
+not depend on the number of segments, and none is saved for a session with no
+more segments than channels, where it cannot beat a plain open
+(:func:`worth_caching`).
 
 Validation (per channel, O(1) in segments)
 ------------------------------------------
@@ -31,9 +34,11 @@ Validation (per channel, O(1) in segments)
    version and modification count — no dates, by design). The modification
    count is the change marker: it catches a mef3io edit of the last segment
    even at equal file size. Files without the ``M3IO`` magic contribute no
-   provenance.
-3. ``stat`` the last segment's ``.tdat`` and ``.tidx`` sizes (appends grow
-   them).
+   provenance. Both headers' random per-file UUIDs (offset 836) are compared
+   too, which catches a session rewritten with ``overwrite=True`` from the same
+   samples but with new units, conversion factor or subject.
+3. The last segment's ``.tdat`` and ``.tidx`` sizes (appends grow them), via
+   ``open`` + ``fstat`` so an NFS attribute cache cannot hide them.
 
 Plus, for the session root: the set of channel folders and the sizes of the
 session-level ``.rdat``/``.ridx``. A ``.mefd.tar`` is one file: its size and
@@ -43,18 +48,26 @@ Nothing here compares timestamps or inodes of files inside a directory session,
 so there is no "same clock tick" race and no platform difference (Windows'
 ``st_ctime`` and FAT's coarse times do not matter).
 
-**Blind spot, by design:** a FOREIGN tool's in-place change to a NON-last
-segment that changes neither the channel's start/end nor the last segment's
-sizes or provenance is not detected. Open without ``cache=`` for a full
-re-read; that is always available. (mef3io's own ``repair_session`` /
-``recover_session`` on an older segment also stamp the LAST segment with the
-``segment-repaired`` provenance code, so those are seen — this module still
-knows nothing about them, and they nothing about it.)
+**Blind spot, by design:** an in-place change to a NON-last segment that
+changes neither the channel's start/end nor anything checked in its last
+segment is not detected. Open without ``cache=`` for a full re-read; that is
+always available. In practice that covers:
+
+- a FOREIGN tool editing an older segment;
+- mef3io's own ``repair_session`` / ``recover_session`` on an older segment
+  WHEN its ``segment-repaired`` stamp on the last segment was skipped: the
+  last segment's provenance region belongs to another application, its CRC
+  fails, or a writer's ``.mef3io-tmp`` file sits next to it. The repair report
+  says so in that case. Otherwise the stamp moves the last segment's
+  provenance and the change IS seen. (This module still knows nothing about
+  repairs, and they nothing about it.)
 
 Encrypted sessions are never cached: no snapshot is written for a session
-whose metadata is encrypted at any level, and a snapshot file found for one is
-ignored and deleted. Such sessions are always opened normally. (Channel infos
-hold decrypted metadata, which must not end up in a plaintext file.)
+whose metadata is encrypted at any level, and ANY snapshot file found for one
+— whatever its format or version, including the format-4 snapshots of mef3io
+1.1.x — is deleted before anything else is looked at. Such sessions are always
+opened normally. (Channel infos hold decrypted metadata, which must not end up
+in a plaintext file.)
 
 The snapshot stores only metadata (channel infos + signatures), never signal
 data.
@@ -88,12 +101,26 @@ _START_OFFSET, _END_OFFSET = 16, 24          # si8, stored (negated) uUTC
 _PROVENANCE_OFFSET, _PROVENANCE_BYTES = 960, 64
 _PROVENANCE_MAGIC = b"M3IO"
 _PASSWORD_FIELDS_OFFSET = 868                # L1 + L2 validation fields, 16 B each
+_FILE_UUID_OFFSET = 836                      # random per file, drawn at creation
 _ROOT_SUFFIXES = (".rdat", ".ridx")
 
 
 def _version() -> str:
+    """The mef3io version PLUS the identity of the compiled extension (its
+    size and mtime). A version string alone is shared by every dev build at
+    any commit and by a reinstalled wheel; the binary's identity is not, so a
+    snapshot is only ever read by the exact build that wrote it."""
     from . import __version__
-    return str(__version__)
+
+    build = "?"
+    try:
+        from . import _mef3io
+
+        st = os.stat(_mef3io.__file__)
+        build = f"{st.st_size}-{st.st_mtime_ns}"
+    except (ImportError, OSError, AttributeError):
+        pass
+    return f"{__version__}+build.{build}"
 
 
 def _os_cache_dir() -> Path:
@@ -156,9 +183,14 @@ def _header(path: str) -> bytes:
 
 
 def _segment_key(name: str):
-    # Segment folders are numbered "<channel>-NNNNNN.segd"; past 999999 the
-    # number grows a digit, so order by length first, then by name.
-    return (len(name), name)
+    # Segment folders are numbered "<channel>-NNNNNN.segd". Order by that
+    # number (the digits after the last '-'; -1 when there are none), then by
+    # name — the same rule as the C++ side's last-segment lookup
+    # (core/src/last_segment.hpp), so both agree on which segment is "last".
+    stem = name[:-5] if name.lower().endswith(".segd") else name
+    dash = stem.rfind("-")
+    digits = stem[dash + 1:] if dash >= 0 else ""
+    return (int(digits) if digits.isdigit() else -1, name)
 
 
 def _segments(timd: str):
@@ -200,9 +232,8 @@ def _tar_password_protected(path: str) -> bool:
     return False
 
 
-def _channel_signature(timd: str):
-    """(signature, password_protected) of one channel."""
-    n, first, last = _segments(timd)
+def _channel_signature(timd: str, n: int, first: Optional[str], last: Optional[str]):
+    """(signature, password_protected) of one channel, from its listing."""
     if not n:
         return {"n_segments": 0}, False
     last_dir = os.path.join(timd, last)
@@ -226,10 +257,54 @@ def _channel_signature(timd: str):
         # modification count (the change marker). Files without mef3io's magic
         # (zeros, a foreign writer) contribute nothing.
         "provenance": prov.hex() if prov[:4] == _PROVENANCE_MAGIC else None,
+        # The writer draws a fresh random file UUID for every file it creates,
+        # so a session REWRITTEN in place (Writer(overwrite=True)) with the same
+        # samples but new units, conversion factor or subject — same counts,
+        # times, sizes, and provenance back to create/0 — still differs here.
+        "file_uuids": first_uh[_FILE_UUID_OFFSET:_FILE_UUID_OFFSET + 16].hex()
+        + last_uh[_FILE_UUID_OFFSET:_FILE_UUID_OFFSET + 16].hex(),
     }, _password_protected(first_uh) or _password_protected(last_uh)
 
 
-def signature(session_path: str) -> dict:
+def layout(session_path: str) -> dict:
+    """The listing a signature is built from: the channel folders, each
+    channel's segment count and first/last segment, and the session-level
+    record files. O(channels) directory reads; no file is opened."""
+    root = os.fspath(session_path)
+    if os.path.isfile(root):
+        return {"kind": "file"}
+    chans, root_files = [], []
+    with os.scandir(root) as it:
+        for e in it:
+            low = e.name.lower()
+            if low.endswith(".timd") and e.is_dir():
+                chans.append(e.name)
+            elif low.endswith(_ROOT_SUFFIXES):
+                root_files.append(e.name)
+    return {
+        "kind": "dir",
+        "channels": {ch: _segments(os.path.join(root, ch)) for ch in sorted(chans)},
+        "root_files": sorted(root_files),
+    }
+
+
+def worth_caching(lay: dict) -> bool:
+    """Whether a snapshot can make an open of this layout cheaper.
+
+    A snapshot replaces reading one ``.tmet`` per segment with a few small
+    reads per channel. With one segment per channel there is nothing to
+    replace — measured on 128 x 1 and 256 x 1, a cached open was no faster than
+    a plain one, and building the snapshot made the first open ~2x slower — so
+    none is saved when the session has no more segments than channels. A tar
+    is always worth it: its cold open has to read the archive's member index.
+    """
+    if lay.get("kind") == "file":
+        return True
+    chans = lay.get("channels", {})
+    return sum(n for n, _, _ in chans.values()) > len(chans)
+
+
+def signature(session_path: str, lay: Optional[dict] = None) -> dict:
     """The snapshot's signature of ``session_path``: O(channels) in size, and
     O(channels) in I/O to compute (never per segment).
 
@@ -238,29 +313,22 @@ def signature(session_path: str) -> dict:
     the next load rejects, instead of one newer than it, which it would accept.
     """
     root = os.fspath(session_path)
-    if os.path.isfile(root):
+    lay = lay if lay is not None else layout(root)
+    if lay["kind"] == "file":
         st = _fresh_stat(root)
         return {"kind": "file", "size": st.st_size, "mtime_ns": st.st_mtime_ns,
                 "encrypted": _tar_password_protected(root)}
-    chans, root_files = [], {}
-    with os.scandir(root) as it:
-        for e in it:
-            low = e.name.lower()
-            if low.endswith(".timd") and e.is_dir():
-                chans.append(e.name)
-            elif low.endswith(_ROOT_SUFFIXES):
-                root_files[e.name] = _size(e.path)
     channels = {}
     encrypted = False
-    for ch in sorted(chans):
-        channels[ch], enc = _channel_signature(os.path.join(root, ch))
+    for ch, (n, first, last) in lay["channels"].items():
+        channels[ch], enc = _channel_signature(os.path.join(root, ch), n, first, last)
         encrypted = encrypted or enc
     return {
         "kind": "dir",
         # Never cached (see the module docstring); recorded so a load can
         # refuse, and delete, a snapshot of a session that is encrypted now.
         "encrypted": encrypted,
-        "root_files": dict(sorted(root_files.items())),
+        "root_files": {name: _size(os.path.join(root, name)) for name in lay["root_files"]},
         "channels": channels,
     }
 
@@ -311,24 +379,30 @@ def discard(cache_path: Path) -> None:
 
 def load_valid(cache_path: Path, session_path: str) -> Optional[dict]:
     """Return the cached snapshot if present and still consistent, else None."""
-    try:
-        snapshot = json.loads(cache_path.read_text())
-    except (OSError, ValueError):
-        return None
-    if snapshot.get("format") != CACHE_FORMAT_VERSION:
-        return None
-    if snapshot.get("mef3io_version") != _version():
-        return None  # only the exact version that wrote a snapshot may read it
-    if snapshot.get("session_path") != os.path.abspath(session_path):
+    if not Path(cache_path).exists():
         return None
     try:
         current = signature(session_path)
     except OSError:
         return None
     if current.get("encrypted"):
-        # Encrypted sessions are never cached. A snapshot found here anyway
-        # (planted, or left from before the session was encrypted) is deleted.
+        # Checked FIRST, before format or version: encrypted sessions are
+        # never cached, and a snapshot found for one is deleted whatever wrote
+        # it — including the format-4 snapshots of mef3io 1.1.x, which held
+        # decrypted metadata in plaintext.
         discard(cache_path)
+        return None
+    try:
+        snapshot = json.loads(Path(cache_path).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(snapshot, dict):
+        return None
+    if snapshot.get("format") != CACHE_FORMAT_VERSION:
+        return None
+    if snapshot.get("mef3io_version") != _version():
+        return None  # only the exact build that wrote a snapshot may read it
+    if snapshot.get("session_path") != os.path.abspath(session_path):
         return None
     if snapshot.get("signature") != current:
         return None
