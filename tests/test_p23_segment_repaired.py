@@ -197,6 +197,49 @@ def test_stale_writer_temp_file_skips_only_the_stamp(session, tmp_path):
     assert C.load_valid(cache, str(session)) is not None
 
 
+def _cli_repair(session, capsys):
+    from mef3io.__main__ import main
+
+    main(["repair", str(session), "--check", "sizing.difference-bytes", "--no-backup"])
+    return capsys.readouterr().out
+
+
+def test_cli_reports_the_stamp(session, capsys):
+    """The stamp is not a registered check, so summary() used to drop it:
+    the CLI never said it had written the last segment's .tmet."""
+    _break_difference_bytes(_tmets(session)[1])
+    out = _cli_repair(session, capsys)
+    assert "stamped segment-repaired" in out, out
+    assert _tmets(session)[-1].name in out
+
+
+def test_cli_reports_a_skipped_stamp(session, capsys):
+    """...nor, worse, that it could NOT, which is the one a user acts on."""
+    middle, last = _tmets(session)[1], _tmets(session)[-1]
+    _break_difference_bytes(middle)
+    (last.parent / (last.name + ".mef3io-tmp")).write_bytes(b"")
+    out = _cli_repair(session, capsys)
+    assert "provenance.last-segment" in out, out
+    assert "can be removed" in out and "Cached opens" in out, out
+
+
+def test_last_segment_with_a_bad_crc_is_left_byte_identical(session):
+    """The stamp's own CRC gate: never write into a file whose bytes do not
+    verify. The last .tmet keeps every byte, and the report says why."""
+    middle, last = _tmets(session)[1], _tmets(session)[-1]
+    _break_difference_bytes(middle)
+    raw = bytearray(last.read_bytes())
+    raw[UH + 100] ^= 0xFF  # body changed, stored body CRC now wrong
+    last.write_bytes(bytes(raw))
+    before = last.read_bytes()
+    report = mef3io.repair_session(str(session), ["sizing.difference-bytes"], backup=False)
+    assert report.segments_repaired == 1
+    assert last.read_bytes() == before
+    notes = [f for f in report.findings if f.check_id == "provenance.last-segment"]
+    assert len(notes) == 1 and "CRC" in notes[0].message, notes
+    assert "Cached opens" in notes[0].message
+
+
 def test_foreign_region_is_skipped_with_a_note(session):
     middle, last = _tmets(session)[1], _tmets(session)[-1]
     _break_difference_bytes(middle)

@@ -255,6 +255,31 @@ class Report:
         if max_examples and len(self.skipped) > max_examples:
             lines.append(f"    ... and {len(self.skipped) - max_examples} more")
 
+    def _append_notes(self, lines: list[str], max_examples: int) -> None:
+        """Findings that do not belong to a registered check — today the
+        ``provenance.last-segment`` stamp record. The check loop above only
+        renders ids in ``checks_run``, so without this block the CLI never
+        showed that a repair wrote the last segment's ``.tmet``, nor that it
+        could NOT, which is the one a user has to act on. Successful stamps are
+        summarised; every other note is printed in full."""
+        notes = [f for f in self.findings if f.check_id not in self.checks_run]
+        if not notes:
+            return
+        lines.append("")
+        lines.append("Notes:")
+        stamped = [f for f in notes if f.stored == "written"]
+        if stamped:
+            where = ", ".join(f.path for f in stamped[: max_examples or len(stamped)])
+            more = (f" ... and {len(stamped) - max_examples} more"
+                    if max_examples and len(stamped) > max_examples else "")
+            lines.append(
+                f"    last segment stamped segment-repaired in {len(stamped)} channel(s), "
+                f"recording that an earlier segment was repaired: {where}{more}"
+            )
+        for f in notes:
+            if f.stored != "written":
+                lines.append(f"    [{f.severity}] {f.check_id} — {f.location}: {f.message}")
+
     def summary(self, max_examples: int = 3) -> str:
         """A full human-readable report: counts, then each check that fired."""
         lines = []
@@ -330,6 +355,7 @@ class Report:
             if max_examples and len(hits) > max_examples:
                 lines.append(f"    ... and {len(hits) - max_examples} more")
 
+        self._append_notes(lines, max_examples)
         self._append_skipped(lines, max_examples)
 
         fixable = self.repairable_check_ids
