@@ -67,24 +67,36 @@ file (an empty fingerprint dict would validate stale caches forever).
 Benchmarked (docs/benchmarks.md, `benchmarks/access_modes_benchmark.py`,
 2.2 GB / 768 segments): once open a tar reads like the dir (full and warm
 windowed identical); a COLD open is ~2.5x slower (0.5 s vs 0.2 s — the member
-index comes off disk); archive ~0.6 GB/s. The snapshot cache makes a tar open
-~10 ms, and a DIRECTORY open ~25-35 ms vs ~150-230 ms uncached (768 segments).
-It used to make the directory ~2.7x SLOWER (#64: validation hashed every .tmet
-+ .tidx head = more I/O than the open it replaced). Validation is now STAT-ONLY
-(cache format 5): files keyed by (size, mtime_ns, ctime_ns, inode) — rename
-repairs change the inode, in-place patches move mtime/ctime — plus git's
-"racy clean" rule: a file modified within RACY_WINDOW_NS (5 s) of the snapshot
-also carries a content hash, dropped (and the snapshot re-saved) once a load
-finds it settled. On POSIX, unchanged dir stats (root/.timd/.segd, stat'd
-BEFORE listing) replace re-listing. Windows: st_ctime is CREATION time so it is
-not used, and the tree is always listed (FAT keeps no dir mtimes); there an
-in-place same-size rewrite that ALSO restores mtime by hand on a settled file
-is the one residual blind spot. Fingerprints are taken BEFORE the backend
-reads the metadata. Keep validation cheaper than a plain open — use plain
-strings, not Path (Path construction cost more than the stats).
-tests/test_p22_cache_fingerprint.py pins each change shape. Tests:
+index comes off disk); archive ~0.6 GB/s. Tests:
 core/tests/test_tar.cpp, tests/test_p11_tar.py, tar block in
 matlab/test_mef3io.m.
+
+Warm-start snapshot cache (`python/mef3io/cache.py`, `Reader(cache=)`, cache
+format 6, #64). RULE: a snapshot only makes sense if it is SMALL and CHEAPER
+than reading the original — both are test-pinned in tests/test_p22_cache_
+snapshot.py (size flat from 10 to 500 segments/channel; the cached open reads
+fewer bytes AND opens fewer files than a plain open at 10/150/500; a fresh
+session is not slower with cache=). It once hashed every .tmet and made a dir
+open 2.7x SLOWER; never reintroduce per-file work. Validity is decided ONLY on
+a cached open, O(1) per channel: exact mef3io version; per channel the .segd
+count (one listing of the .timd — always listed, never trust dir mtimes:
+FUSE/object stores report constant ones), start/end from the first/last
+segment's .tmet universal header, the last segment's .tdat/.tidx sizes, its
+provenance region (offset 960; the modification count is the change marker);
+plus channel folders and session .rdat/.ridx sizes. Sizes via open+fstat, not
+stat (NFS attribute cache). Tar: size+mtime of the archive. Signature taken
+BEFORE the backend reads metadata (test-pinned via a write injected mid-open).
+DOCUMENTED BLIND SPOT: an in-place edit of a NON-last segment that moves none
+of the above is not detected — open without cache= for a full read.
+WRITE PATHS MUST NOT KNOW ABOUT THE CACHE: no invalidation calls from Writer,
+repair, recover or any future write path (the Writer's old auto-cache delete
+was removed). ENCRYPTED SESSIONS ARE NEVER CACHED (infos hold decrypted
+subject fields): no snapshot written, one found is deleted on load (dirs check
+the UH password fields; tars peek at the first .tmet member; the Reader also
+refuses via the backend's `password_protected()`). save() uses a unique temp
+file; a failed save never fails an open. Measured 64 ch x 150 seg: snapshot
+60 KB, cached open 25-54 ms vs plain 1.3-3.0 s; x 600 seg: 60 KB, 95-108 ms vs
+6.6-30 s.
 
 Validator/repair (`core/{include,src}/…/validate.{hpp,cpp}`, `python/mef3io/
 validate.py`, `python/mef3io/__main__.py`): a REGISTRY of 18 checks comparing a

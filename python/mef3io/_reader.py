@@ -198,27 +198,35 @@ class Reader:
                 self._cached_problems = snap.get("problems", [])
 
         if self._infos is None:
-            # Fingerprint BEFORE the backend reads the metadata: a write landing
+            # Take the signature BEFORE the backend reads the metadata: a write landing
             # in between then leaves a snapshot that the next load rejects,
-            # rather than one whose fingerprints vouch for content it never saw.
+            # rather than one whose signature vouches for content it never saw.
             # A path that cannot be listed gets no snapshot; the backend below
             # reports the real error.
-            fingerprints = None
+            sig = None
             if self._cache_path is not None:
                 try:
-                    fingerprints = _cache.fingerprints(self._path)
+                    sig = _cache.signature(self._path)
                 except OSError:
                     pass
             self._ensure_impl()
             self._infos = {ch: self._impl.info(ch) for ch in self._impl.channels}
             # Free at this point: every segment's metadata is already parsed.
             self._declaration_issues = self._collect_declaration_issues()
-            if fingerprints is not None:
-                _cache.save(
-                    self._cache_path,
-                    _cache.build_snapshot(self._path, self._infos, self._declaration_issues,
-                                          self.problems, fingerprints_=fingerprints),
-                )
+            if self._cache_path is not None and self._password_protected():
+                # Encrypted sessions are never cached; drop any file that is
+                # already there rather than leave it to be found later.
+                _cache.discard(self._cache_path)
+            elif sig is not None:
+                try:
+                    _cache.save(
+                        self._cache_path,
+                        _cache.build_snapshot(self._path, self._infos,
+                                              self._declaration_issues, self.problems,
+                                              signature_=sig),
+                    )
+                except OSError:
+                    pass  # a snapshot is an accelerator; failing to save never fails an open
 
         if not self._strict:
             problems = self.problems  # from the cache snapshot on a warm open
@@ -235,6 +243,12 @@ class Reader:
                 SessionDeclarationWarning,
                 stacklevel=2,
             )
+
+    def _password_protected(self) -> bool:
+        # Fail closed: a backend that cannot say is treated as encrypted, so
+        # nothing it decrypted is ever written to a snapshot.
+        fn = getattr(self._impl, "password_protected", None)
+        return True if fn is None else bool(fn())
 
     def _collect_declaration_issues(self) -> list:
         # getattr rather than try/except: a bare `except AttributeError` around

@@ -127,14 +127,30 @@ mef3io.Reader("session.mefd", cache="/data/s.cache")  # persistent snapshot
 ```
 
 Snapshots channel metadata so warm opens serve `channels`/`info` without
-touching the session tree, deferring the backend until a data read.
-Invalidated automatically on write and whenever a session file's size, mtime,
-ctime or identity (inode / file ID) changes — which covers in-place header
-repairs and `.tmet` files replaced by rename. Checking that is stat-only, so a
-warm open costs a few milliseconds even for hundreds of segments. Files
-modified within the last few seconds are also content-hashed until they settle,
-because a filesystem's timestamps can be too coarse to tell two quick writes
-apart.
+reading the session tree, deferring the backend until a data read.
+
+Whether a snapshot is still valid is decided only when a cached open
+happens; writing to a session never touches it. The check is small and costs
+the same whatever the number of segments. Per channel it compares:
+
+- the segment count;
+- the start and end times;
+- the last segment's file sizes;
+- the last segment's provenance region: which mef3io operation last modified
+  it, and how many times.
+
+A snapshot is used only by the exact mef3io version that wrote it. On any
+mismatch it is ignored, the session is opened normally, and a fresh snapshot is
+written.
+
+**Encrypted sessions are never cached.** They are always opened normally, and
+any snapshot file found for one is deleted.
+
+**Blind spot:** an in-place change to a segment that is *not* the channel's
+last is not detected if it leaves the channel's start and end, and everything
+in its last segment, unchanged. That includes mef3io's own `repair_session`
+on an old segment. If a session may have been edited that way, open it without
+`cache=`: a plain open always reads everything.
 
 ## Tar archives (single-file sessions)
 

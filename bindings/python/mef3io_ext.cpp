@@ -638,6 +638,15 @@ NB_MODULE(_mef3io, m) {
            })
       .def_prop_ro("channels", &mef3io::Reader::channels)
       .def(
+          "password_protected",
+          [](mef3io::Reader& r) {
+            for (const auto& ch : r.channels())
+              if (r.info(ch).password_protected) return true;
+            return false;
+          },
+          "Whether any segment's metadata is encrypted. The warm-start cache "
+          "never snapshots such a session.")
+      .def(
           "declaration_issues",
           [](mef3io::Reader& r) {
             nb::list out;

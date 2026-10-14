@@ -178,7 +178,7 @@ ABI shim (later) converts to codes. Bindings map to Python exceptions.
   under-declaring truncates the buffer it decodes into. The read path never consults these fields — it
   sizes from each block's own header — so older or foreign declarations stay
   readable. See `docs/mef3_format.md` and `docs/legacy_comparison.md`.
-- Any write invalidates caches for the session (see §6).
+- Writes never touch caches; a cached open detects the change (see §6).
 
 ### 4.6 Threading
 
@@ -241,24 +241,34 @@ storage; lazy open + mmap indices already fix the pathological local case).
     a foreign/stale cache file inside a session dir cannot surprise a
     default-configured reader.
   - `cache=None`: off.
-- **Contents:** format version, directory tree, per-file (relpath, size,
-  mtime) fingerprints, and **raw bytes of all `.tmet` files with encrypted
-  sections still encrypted** (decryption happens at load with the user's
-  password — cache never weakens the password scheme). Optional per-channel
-  block-count summaries. No `.tidx` contents (mmap makes that unnecessary).
-- **Correctness:** cache is purely an accelerator. On open, real files are
-  stat'd; any size/mtime/tree mismatch ⇒ affected entries ignored and
-  refreshed. A wrong cache can cost time, never correctness. (As built,
-  `python/mef3io/cache.py`: the snapshot is all-or-nothing, files are keyed by
-  size + mtime + ctime + inode, a file changed within a few seconds of the
-  snapshot also carries a content hash until it settles — git's "racy clean"
-  rule — and on POSIX unchanged directory stats stand in for re-listing the
-  tree. Validation must stay cheaper than the open it replaces; issue #64.)
-- **Write interaction:** any `Writer` operation on a session **removes** the
-  auto-cache entry and any known persistent cache for it (removal, not
-  in-place update — updating duplicates reader logic and risks silent
-  divergence). Removal is best-effort cleanup; stat validation remains the
-  guarantee for caches the writer couldn't see or delete.
+- **Contents (original plan, not what was built):** per-file fingerprints and
+  the raw, still-encrypted `.tmet` bytes. The built cache stores decoded
+  channel infos instead, which is why it refuses encrypted sessions outright.
+- **As built** (`python/mef3io/cache.py`, cache format 6, issue #64): the
+  snapshot holds the channel infos, the open-time warnings, the exact mef3io
+  version that wrote it, and an O(1)-per-channel signature — no per-file
+  fingerprints and no `.tmet` bytes. A snapshot only makes sense while it is
+  small and cheaper than the open it replaces, so its size and the cost of
+  checking it are independent of the segment count (both test-pinned).
+- **Correctness:** checked only when a cached open happens. Refused (session
+  opened normally, fresh snapshot written) on a different mef3io version, or
+  when, per channel, the segment count, the start time in the first segment's
+  `.tmet` header, the end time and provenance region (offset 960: last
+  operation, version, modification count) in the last segment's `.tmet`
+  header, or the last segment's `.tdat`/`.tidx` sizes differ; or when the set
+  of channel folders or the session-level `.rdat`/`.ridx` sizes differ.
+  **Blind spot, by design:** an in-place change to a non-last segment that
+  moves none of those is not detected. Opening without `cache=` always
+  re-reads everything. Last-segment sizes and the session-level record sizes
+  are read through `open` + `fstat`, not a bare `stat`, so an NFS client's
+  attribute cache cannot hide another host's append. Each `.timd` is always
+  listed; directory timestamps are never trusted (FUSE/object-store mounts
+  report constant ones).
+- **Encrypted sessions are never cached** (any level): no snapshot is written,
+  and one found for an encrypted session is ignored and deleted. Channel infos
+  hold decrypted metadata, which must not land in a plaintext file.
+- **Write interaction:** none. Write paths are cache-unaware and never touch a
+  snapshot; a stale one is refused at the next cached open.
 
 ## 7. Build & distribution
 

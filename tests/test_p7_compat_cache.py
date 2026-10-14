@@ -163,42 +163,60 @@ def test_auto_cache_warm_start_defers_backend(tmp_path):
     cp.unlink(missing_ok=True)
 
 
-def test_cache_invalidated_by_fingerprint_change(tmp_path):
+def test_cache_invalidated_by_append(tmp_path):
     path = _make_session(tmp_path)
     cp = C.auto_cache_path(path)
     mef3io.Reader(path, cache="auto")  # create snapshot
     assert C.load_valid(cp, path) is not None
-    tmet = glob.glob(path + "/ch1.timd/*/*.tmet")[0]
-    os.utime(tmet, None)  # touch -> mtime changes
+    with mef3io.Writer(path) as w:
+        w.write("ch1", _sig(256), START + int(3000 / FS * 1e6), FS, 3)
     assert C.load_valid(cp, path) is None
     cp.unlink(missing_ok=True)
 
 
-def test_cache_invalidated_by_same_size_same_mtime_metadata_rewrite(tmp_path):
-    path = _make_session(tmp_path)
-    cp = C.auto_cache_path(path)
-    mef3io.Reader(path, cache="auto")  # create snapshot
-    assert C.load_valid(cp, path) is not None
+def test_cache_invalidated_by_same_size_metadata_repair(tmp_path):
+    """A repair rewrites the (last) segment's .tmet at the same size. The
+    snapshot check reads no section bodies; the provenance region's
+    modification count is what moves. (Before cache format 6 this test
+    flipped a byte and reset mtime; timestamps are no longer part of the
+    check, see mef3io/cache.py.)"""
+    import struct
 
+    from mef3io import _mef3io as m
+
+    path = _make_session(tmp_path)
     tmet = Path(glob.glob(path + "/ch1.timd/*/*.tmet")[0])
-    st = tmet.stat()
     raw = bytearray(tmet.read_bytes())
-    raw[-1] ^= 0x01
-    tmet.write_bytes(raw)
-    os.utime(tmet, ns=(st.st_atime_ns, st.st_mtime_ns))
+    struct.pack_into("<I", raw, 1024 + 1536 + 6388, 0)  # maximum_difference_bytes
+    struct.pack_into("<I", raw, 4, m.crc32(bytes(raw[1024:16384])))
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:1024])))
+    tmet.write_bytes(bytes(raw))
 
+    cp = C.auto_cache_path(path)
+    mef3io.Reader(path, cache="auto", warn_declarations=False)  # create snapshot
+    assert C.load_valid(cp, path) is not None
+    size = tmet.stat().st_size
+    mef3io.repair_session(path, ["sizing.difference-bytes"], backup=False)
+    assert tmet.stat().st_size == size
     assert C.load_valid(cp, path) is None
     cp.unlink(missing_ok=True)
 
 
-def test_write_removes_auto_cache(tmp_path):
+def test_writers_are_cache_unaware(tmp_path):
+    """A write leaves the snapshot file alone; validity is decided only when a
+    cached open happens, which refuses it and writes a fresh one."""
     path = _make_session(tmp_path)
     cp = C.auto_cache_path(path)
     mef3io.Reader(path, cache="auto")
     assert cp.exists()
-    with mef3io.Writer(path) as _:
-        pass
-    assert not cp.exists()
+    with mef3io.Writer(path) as w:
+        w.write("ch1", _sig(256), START + int(3000 / FS * 1e6), FS, 3)
+    assert cp.exists()
+    assert C.load_valid(cp, path) is None
+    r = mef3io.Reader(path, cache="auto")
+    assert r._impl is not None
+    assert C.load_valid(cp, path) is not None
+    cp.unlink(missing_ok=True)
 
 
 def test_persistent_cache_path(tmp_path):
