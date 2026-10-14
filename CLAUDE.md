@@ -504,11 +504,18 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
 - **Do NOT `pip install -e .` for C++ dev** — scikit-build-core's editable hook
   loads an install-time extension snapshot that shadows the dev_build symlink
   (meta-path beats sys.path). Keep mef3io uninstalled; use scripts/dev_build.sh.
-- Pure-Python backend is a stub. Records write builds bodies for Note/SyLg
-  (text) and EDFA (duration+text) only; Seiz is read-only (`parse_records`
-  decodes onset/offset/duration, `record_body` has no Seiz branch, and the
-  bindings expose no onset/offset fields). Any other 4-char type writes a
-  header with an empty body. `write_records` rejects a record carrying a
+- Pure-Python backend is a stub. Records are READ at all three levels
+  (session / channel / segment, each with its own on-disk offset) and every
+  mefrec.h body type is decoded read-only (Seiz fully, incl. per-channel
+  entries; Epoc, Curs, CSti, ESti, LNTP, UnRc), gated on version 1.0 like
+  meflib. Records WRITE builds bodies for Note/SyLg (text) and EDFA
+  (duration+text) only; any other 4-char type writes a header with an empty
+  body. The writer stores record times with the level's agreed on-disk
+  `recording_time_offset` (0 for mef3io sessions) and refuses if segments
+  disagree; the reader refuses only offset-dependent (negated-time) files
+  whose segments disagree — a deliberate divergence from meflib, which uses
+  the last-read global offset. A bad record file is skipped on its own in
+  lenient mode (reported in problems(), samples stay readable). `write_records` rejects a record carrying a
   payload its type cannot store, so the gap fails loudly instead of silently.
   Cache is Python-level (a C++ warm-start is future).
 - **MATLAB binding implemented**: flat C ABI (`core/include/mef3io/c_api.h`,
