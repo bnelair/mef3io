@@ -43,11 +43,13 @@ Nothing here compares timestamps or inodes of files inside a directory session,
 so there is no "same clock tick" race and no platform difference (Windows'
 ``st_ctime`` and FAT's coarse times do not matter).
 
-**Blind spot, by design:** an in-place change to a NON-last segment — by any
-tool, mef3io included (e.g. ``repair_session`` on an old segment) — that
-changes neither the channel's start/end nor the last segment's sizes or
-provenance is not detected. Open without ``cache=`` for a full re-read; that
-is always available.
+**Blind spot, by design:** a FOREIGN tool's in-place change to a NON-last
+segment that changes neither the channel's start/end nor the last segment's
+sizes or provenance is not detected. Open without ``cache=`` for a full
+re-read; that is always available. (mef3io's own ``repair_session`` /
+``recover_session`` on an older segment also stamp the LAST segment with the
+``segment-repaired`` provenance code, so those are seen — this module still
+knows nothing about them, and they nothing about it.)
 
 Encrypted sessions are never cached: no snapshot is written for a session
 whose metadata is encrypted at any level, and a snapshot file found for one is

@@ -257,9 +257,10 @@ storage; lazy open + mmap indices already fix the pathological local case).
   operation, version, modification count) in the last segment's `.tmet`
   header, or the last segment's `.tdat`/`.tidx` sizes differ; or when the set
   of channel folders or the session-level `.rdat`/`.ridx` sizes differ.
-  **Blind spot, by design:** an in-place change to a non-last segment that
-  moves none of those is not detected. Opening without `cache=` always
-  re-reads everything. Last-segment sizes and the session-level record sizes
+  **Blind spot, by design:** a foreign tool's in-place change to a non-last
+  segment that moves none of those is not detected (mef3io's own repair and
+  recovery stamp the last segment `segment-repaired`, so they are). Opening
+  without `cache=` always re-reads everything. Last-segment sizes and the session-level record sizes
   are read through `open` + `fstat`, not a bare `stat`, so an NFS client's
   attribute cache cannot hide another host's append. Each `.timd` is always
   listed; directory timestamps are never trusted (FUSE/object-store mounts

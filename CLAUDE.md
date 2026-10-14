@@ -86,8 +86,10 @@ provenance region (offset 960; the modification count is the change marker);
 plus channel folders and session .rdat/.ridx sizes. Sizes via open+fstat, not
 stat (NFS attribute cache). Tar: size+mtime of the archive. Signature taken
 BEFORE the backend reads metadata (test-pinned via a write injected mid-open).
-DOCUMENTED BLIND SPOT: an in-place edit of a NON-last segment that moves none
-of the above is not detected — open without cache= for a full read.
+DOCUMENTED BLIND SPOT: a FOREIGN tool's in-place edit of a NON-last segment
+that moves none of the above is not detected — open without cache= for a full
+read. mef3io's own repair/recover of a non-last segment ARE seen, via the
+segment-repaired stamp on the last segment (provenance rule below).
 WRITE PATHS MUST NOT KNOW ABOUT THE CACHE: no invalidation calls from Writer,
 repair, recover or any future write path (the Writer's old auto-cache delete
 was removed). ENCRYPTED SESSIONS ARE NEVER CACHED (infos hold decrypted
@@ -427,7 +429,19 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   recording. EVERY site that writes a universal header must stamp: fresh
   files `stamp_created`; append `Operation::Append`, repair (both
   `overwrite_universal_header` and the .tmet rewrite) `HeaderRepair`,
-  recovery `Recovery`. All-zero region = unstamped (every other writer) →
+  recovery `Recovery`. RULE (core/src/last_segment.hpp): when repair or
+  recovery modifies a NON-last segment, it ALSO stamps the channel's LAST
+  segment's .tmet with `SegmentRepaired` (code 9; 6/7/8 are reserved for
+  anonymize #70 / rename #72 / transform #73 and deliberately unassigned).
+  Header-only (region + header CRC), backed up, listed as written; skipped with
+  a NOTE, never an error, on a foreign region or failed CRC (repair: an Info
+  finding `provenance.last-segment`; recovery: `RecoveryReport.notes`). Such a
+  repair/recovery is REFUSED while the channel looks written-to (a
+  `.mef3io-tmp` in the last segment, or its files changed < 2 min ago) — a
+  read-only pre-pass decides, so nothing is written before the refusal. Do not
+  reuse HeaderRepair for it: provenance describes what happened to THAT file.
+  A future write path that edits a non-last segment must do the same. Tests:
+  tests/test_p23_segment_repaired.py. All-zero region = unstamped (every other writer) →
   initialised WITHOUT created-by; any other non-magic bytes = another app's →
   never written. Unknown/reserved bytes are preserved. Bounds are
   static_asserted. Consequence for tests: a repair no longer restores the

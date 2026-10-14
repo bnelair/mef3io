@@ -608,6 +608,9 @@ class RecoveryReport:
     segments_examined: int = 0
     applied: bool = False
     backup_root: str = ""
+    #: Informational, never errors — e.g. a channel's last segment could not
+    #: record the ``segment-repaired`` provenance stamp.
+    notes: tuple[str, ...] = ()
 
     @property
     def nothing_to_do(self) -> bool:
@@ -623,6 +626,8 @@ class RecoveryReport:
             lines.append(f"    {s.path}: {s.action}")
         for s in self.skipped:
             lines.append(f"    skipped {s}")
+        for n in self.notes:
+            lines.append(f"    note: {n}")
         if self.applied and self.backup_root:
             lines.append(f"  originals backed up under {self.backup_root}")
         if self.segments and not self.applied:
@@ -700,6 +705,7 @@ def recover_session(
         segments_examined=raw["segments_examined"],
         applied=raw["applied"],
         backup_root=raw["backup_root"],
+        notes=tuple(raw.get("notes", ())),
     )
 
 

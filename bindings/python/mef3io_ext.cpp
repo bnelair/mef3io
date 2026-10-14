@@ -207,6 +207,9 @@ NB_MODULE(_mef3io, m) {
         out["segments_examined"] = r.segments_examined;
         out["applied"] = r.applied;
         out["backup_root"] = r.backup_root;
+        nb::list notes;
+        for (const auto& n : r.notes) notes.append(n);
+        out["notes"] = notes;
         return out;
       },
       nb::arg("path"), nb::arg("apply") = false, nb::arg("backup") = true,

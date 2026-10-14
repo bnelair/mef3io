@@ -13,8 +13,9 @@ Validation is O(1) per channel: the segment count, start/end from the first and
 last segment's `.tmet` universal header, the last segment's `.tdat`/`.tidx`
 sizes and its provenance region; plus the channel folders and session-level
 record sizes. Each of those is pinned below, and so is the documented BLIND
-SPOT (an in-place edit of a middle segment, by any tool including mef3io's own
-`repair_session`), on purpose: it is a design decision, not an accident.
+SPOT (a foreign tool's in-place edit of a middle segment), on purpose: it is a
+design decision, not an accident. mef3io's own repair/recovery of a middle
+segment stamps the last segment ("segment-repaired"), so it IS detected.
 
 Writers are cache-unaware; validity is decided only when a cached open happens.
 Oracle-free, so it runs on every CI platform.
@@ -325,9 +326,10 @@ def test_concurrent_saves_do_not_share_a_temp_file(tmp_path):
 
 
 def test_blind_spot_foreign_edit_of_a_middle_segment(tmp_path):
-    """NOT detected, by design: a middle segment changed in place without
-    touching the channel's start/end or the last segment. Open without
-    ``cache=`` for a full re-read."""
+    """NOT detected, by design: a FOREIGN tool changing a middle segment in
+    place without touching the channel's start/end or the last segment.
+    (mef3io's own repairs stamp the last segment; see the next test.) Open
+    without ``cache=`` for a full re-read."""
     path = _session(tmp_path)
     cache = _snapshot(tmp_path, path)
     middle = _tmets(path)[1]
@@ -335,9 +337,10 @@ def test_blind_spot_foreign_edit_of_a_middle_segment(tmp_path):
     assert C.load_valid(cache, str(path)) is not None
 
 
-def test_blind_spot_repair_of_a_middle_segment(tmp_path):
-    """Also NOT detected, by design: mef3io's own repair_session on a middle
-    segment. Writers do not know about the cache."""
+def test_repair_of_a_middle_segment_is_detected(tmp_path):
+    """NOT the blind spot: mef3io's repair_session on a middle segment also
+    stamps the channel's LAST segment ("segment-repaired"), whose provenance
+    the snapshot compares. Writers still know nothing about the cache."""
     path = _session(tmp_path)
     middle = _tmets(path)[1]
     raw = bytearray(middle.read_bytes())
@@ -345,11 +348,16 @@ def test_blind_spot_repair_of_a_middle_segment(tmp_path):
     struct.pack_into("<I", raw, 4, m.crc32(bytes(raw[UH_BYTES:METADATA_FILE_BYTES])))
     struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
     middle.write_bytes(bytes(raw))
+    hour = 3600 * 10**9
+    for f in path.rglob("*"):  # idle: repair refuses a channel being written
+        if f.is_file():
+            st = f.stat()
+            os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns - hour))
 
     cache = _snapshot(tmp_path, path)
     report = mef3io.repair_session(str(path), ["sizing.difference-bytes"], backup=False)
-    assert report.segments_repaired >= 1
-    assert C.load_valid(cache, str(path)) is not None
+    assert report.segments_repaired == 1
+    assert C.load_valid(cache, str(path)) is None
 
 
 # --- small, and cheaper than the original ------------------------------------

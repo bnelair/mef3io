@@ -146,11 +146,15 @@ written.
 **Encrypted sessions are never cached.** They are always opened normally, and
 any snapshot file found for one is deleted.
 
-**Blind spot:** an in-place change to a segment that is *not* the channel's
-last is not detected if it leaves the channel's start and end, and everything
-in its last segment, unchanged. That includes mef3io's own `repair_session`
-on an old segment. If a session may have been edited that way, open it without
-`cache=`: a plain open always reads everything.
+mef3io's own `repair_session` and `recover_session` are detected even when
+they change an older segment: they also stamp the channel's last segment with
+a `segment-repaired` provenance code.
+
+**Blind spot:** a *foreign* tool's in-place change to a segment that is not
+the channel's last is not detected if it leaves the channel's start and end,
+and everything in its last segment, unchanged. If a session may have been
+edited that way, open it without `cache=`: a plain open always reads
+everything.
 
 ## Tar archives (single-file sessions)
 

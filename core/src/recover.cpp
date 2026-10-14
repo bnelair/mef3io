@@ -4,8 +4,11 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <set>
 
 #include "durability.hpp"
+#include "last_segment.hpp"
 #include "mef3io/byteio.hpp"
 #include "mef3io/crc.hpp"
 #include "mef3io/errors.hpp"
@@ -121,8 +124,37 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
     throw IoError("session directory must end with .mefd: " + path);
   if (!fsys::is_directory(path)) throw IoError("no such session directory: " + path);
 
-  RecoveryReport report;
   const fsys::path root(path);
+  if (apply) {
+    // A recovery that touches a NON-last segment also stamps the channel's
+    // last one; refuse outright if a writer may still be appending there.
+    // The dry run is the plan: it writes nothing.
+    std::map<fsys::path, std::string> active;
+    for (const auto& ch : fsys::directory_iterator(root)) {
+      std::string why;
+      if (ch.is_directory() && ch.path().extension() == ".timd" &&
+          detail::channel_looks_active(ch.path(), why))
+        active[ch.path()] = why;
+    }
+    if (!active.empty()) {
+      const RecoveryReport plan = recover_session(path, false, backup, password);
+      for (const auto& s : plan.segments) {
+        const fsys::path channel_dir = root / (s.channel + ".timd");
+        const auto it = active.find(channel_dir);
+        if (it == active.end()) continue;
+        const auto last = detail::last_segment_dir(channel_dir);
+        if (last && detail::segment_number_of(last->stem().string()) != s.segment_number)
+          throw IoError("refusing to recover " + path + ": segment " +
+                        std::to_string(s.segment_number) + " of channel '" + s.channel +
+                        "' needs recovery, which also stamps the channel's last segment, and "
+                        "that channel looks like it is being written (" + it->second +
+                        "). Re-run once the writer has stopped.");
+      }
+    }
+  }
+
+  RecoveryReport report;
+  std::set<fsys::path> channels_to_stamp;
   const fsys::path backup_root =
       root.parent_path() / (root.filename().string() + ".recover-backup");
 
@@ -387,7 +419,29 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
         if (!f) throw IoError("header update failed: " + tdat.string());
       }
       (void)detail::fsync_file(tdat.string());
+      if (const auto last = detail::last_segment_dir(ch_entry.path());
+          last && detail::segment_number_of(last->stem().string()) != segment_number)
+        channels_to_stamp.insert(ch_entry.path());
     }
+  }
+
+  // segment-repaired: a NON-last segment changed, so the channel's last
+  // segment records it (last_segment.hpp). Same backup and durability rules
+  // as recovery's own header writes; a stamp that cannot be applied is a note.
+  for (const auto& channel_dir : channels_to_stamp) {
+    const auto stamp = detail::prepare_last_segment_stamp(channel_dir);
+    const std::string channel = channel_dir.stem().string();
+    if (!stamp.ready) {
+      report.notes.push_back(channel + ": a segment was recovered, but the last segment could "
+                                       "not record it: " + stamp.note);
+      continue;
+    }
+    if (backup) {
+      report.backup_root = backup_root.string();
+      back_up_bytes(backup_root, channel + "/" + stamp.segment_stem + ".tmet.header",
+                    stamp.old_header);
+    }
+    detail::write_last_segment_stamp(stamp);
   }
   report.applied = apply;
   return report;
