@@ -113,12 +113,10 @@ Offsets are relative to the region; add 960 for the position in the file.
 `.tmet`, shows that the channel changed, without anyone reading every segment.
 mef3io's warm-start snapshot relies on it. The stamp is header-only: just this
 region and the header CRC change. It is backed up like the repair's own writes.
-It is skipped, and reported as a note rather than an error, in two cases: the
-last segment's region belongs to another application, or the last segment's
-CRCs do not verify. A repair or recovery that would need the stamp is refused
-outright while the channel looks like it is being written. That means a
-writer's temp file is present, or the last segment changed within the last two
-minutes.
+It is skipped, and reported as a note rather than an error, in three cases:
+the last segment's region belongs to another application, the last segment's
+CRCs do not verify, or a writer's `.mef3io-tmp` temp file sits in the last
+segment. The repair or recovery itself always proceeds.
 
 **Rules. These are the compatibility contract and do not change.**
 

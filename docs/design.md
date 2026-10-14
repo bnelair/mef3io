@@ -257,16 +257,21 @@ storage; lazy open + mmap indices already fix the pathological local case).
   operation, version, modification count) in the last segment's `.tmet`
   header, or the last segment's `.tdat`/`.tidx` sizes differ; or when the set
   of channel folders or the session-level `.rdat`/`.ridx` sizes differ.
-  **Blind spot, by design:** a foreign tool's in-place change to a non-last
-  segment that moves none of those is not detected (mef3io's own repair and
-  recovery stamp the last segment `segment-repaired`, so they are). Opening
+  The two first/last `.tmet` file UUIDs are compared too (a same-samples
+  `overwrite=True` with new metadata), and the version includes the compiled
+  extension's identity. No snapshot is saved when segments ≤ channels.
+  **Blind spot, by design:** an in-place change to a non-last segment that
+  moves none of those is not detected: foreign tools, and mef3io's own repair
+  or recovery when its `segment-repaired` stamp on the last segment was skipped
+  (foreign region, bad CRC, a writer's temp file; the report says so). Opening
   without `cache=` always re-reads everything. Last-segment sizes and the session-level record sizes
   are read through `open` + `fstat`, not a bare `stat`, so an NFS client's
   attribute cache cannot hide another host's append. Each `.timd` is always
   listed; directory timestamps are never trusted (FUSE/object-store mounts
   report constant ones).
 - **Encrypted sessions are never cached** (any level): no snapshot is written,
-  and one found for an encrypted session is ignored and deleted. Channel infos
+  and any snapshot file found for an encrypted session is deleted before its
+  format or version is even read (1.1.x format-4 snapshots included). Channel infos
   hold decrypted metadata, which must not land in a plaintext file.
 - **Write interaction:** none. Write paths are cache-unaware and never touch a
   snapshot; a stale one is refused at the next cached open.

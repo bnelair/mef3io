@@ -100,16 +100,25 @@ a pristine backup, and a completed backup is never overwritten. Pass
 segment is not its channel's last, the last segment's `.tmet` gets a
 `segment-repaired` provenance stamp (operation code 9,
 [format](mef3_format.md#provenance-region-mef3io-12-frozen-format)). Only its
-universal header changes, and that header is backed up and listed like the
-repair's own writes. Readers that look at one file per channel, such as the
-warm-start snapshot check, can then see that the channel changed. If the
-stamp cannot be applied, the report carries an *info* finding
-`provenance.last-segment`, not an error. That happens when the last segment's
-region belongs to another application or its CRCs fail. A repair that would
-need the stamp is **refused** while the channel looks like it is being
-written: a writer's `.mef3io-tmp` file is present, or the last segment changed
-in the last two minutes. The error says which file gave it away. Re-run once
-the writer has stopped.
+universal header changes, and that header is backed up like the repair's own
+writes. Readers that look at one file per channel, such as the warm-start
+snapshot check, can then see that the channel changed.
+
+Either way the report carries an *info* finding `provenance.last-segment` on
+the last segment. When the stamp was written, the finding names that file.
+When it was skipped, the finding says why. The stamp is skipped, never as an
+error, in three cases:
+
+- the last segment's region belongs to another application;
+- its CRCs fail;
+- a writer's `.mef3io-tmp` temp file sits in it. A write may be in progress,
+  or one crashed and left the file behind; if no writer is running, the file
+  can be removed.
+
+The repair itself always goes ahead; nothing is refused. When the stamp is
+skipped, the finding also says that cached opens will not see the repair
+until the channel is next written, or until the session is opened without
+the cache.
 
 A segment whose CRCs do not verify is **reported and left alone** — if the
 bytes cannot be trusted, neither can anything derived from them. Tar archives
@@ -333,9 +342,10 @@ for s in report.segments:
   tool unusable on exactly the sessions it is for. Pass `backup=False` to skip.
 - **A healthy session is untouched**, byte for byte.
 - **Recovering an older segment stamps the last one** with `segment-repaired`,
-  as a repair does (header only; the old header goes to the backup). When it
-  cannot, `report.notes` says why. Applying is refused while such a channel
-  looks like it is being written.
+  as a repair does (header only; the old header goes to the backup).
+  `report.notes` names the stamped file, or says why the stamp was skipped
+  (the same three cases as for a repair) and that cached opens will not see
+  the recovery.
 - **Tar archives are refused** — extract first.
 - It **streams**: the `.tdat`'s size, plus a 304-byte RED header and the one
   block it describes, at a handful of offsets. It never loads the data file.

@@ -77,25 +77,38 @@ than reading the original — both are test-pinned in tests/test_p22_cache_
 snapshot.py (size flat from 10 to 500 segments/channel; the cached open reads
 fewer bytes AND opens fewer files than a plain open at 10/150/500; a fresh
 session is not slower with cache=). It once hashed every .tmet and made a dir
-open 2.7x SLOWER; never reintroduce per-file work. Validity is decided ONLY on
-a cached open, O(1) per channel: exact mef3io version; per channel the .segd
-count (one listing of the .timd — always listed, never trust dir mtimes:
-FUSE/object stores report constant ones), start/end from the first/last
-segment's .tmet universal header, the last segment's .tdat/.tidx sizes, its
-provenance region (offset 960; the modification count is the change marker);
-plus channel folders and session .rdat/.ridx sizes. Sizes via open+fstat, not
-stat (NFS attribute cache). Tar: size+mtime of the archive. Signature taken
-BEFORE the backend reads metadata (test-pinned via a write injected mid-open).
-DOCUMENTED BLIND SPOT: a FOREIGN tool's in-place edit of a NON-last segment
-that moves none of the above is not detected — open without cache= for a full
-read. mef3io's own repair/recover of a non-last segment ARE seen, via the
-segment-repaired stamp on the last segment (provenance rule below).
+open 2.7x SLOWER; never reintroduce per-file work (the open/stat counter in
+p22 wraps os.open/os.stat/os.lstat/os.scandir/open). Validity is decided ONLY
+on a cached open, O(1) per channel: exact mef3io BUILD (version + the
+extension binary's size/mtime, so dev builds and reinstalled wheels never share
+snapshots); per channel the .segd count (one listing of the .timd — always
+listed, never trust dir mtimes: FUSE/object stores report constant ones),
+start/end from the first/last segment's .tmet universal header plus both
+headers' random file_UUIDs (offset 836 — catches overwrite=True with the same
+samples but new units/ufact/subject), the last segment's .tdat/.tidx sizes,
+its provenance region (offset 960; the modification count is the change
+marker); plus channel folders and session .rdat/.ridx sizes. Sizes via
+open+fstat, not stat (NFS attribute cache). Tar: size+mtime of the archive.
+Signature taken BEFORE the backend reads metadata (test-pinned via a write
+injected mid-open). NOT SAVED when total segments <= channels
+(`worth_caching`; measured 128x1/256x1: cached open == plain, first open ~2x
+slower) — the layout listing decides before any signature work.
+DOCUMENTED BLIND SPOT: an in-place edit of a NON-last segment that moves none
+of the above is not detected — open without cache= for a full read. It covers
+(a) foreign tools, and (b) mef3io's own repair/recover of a non-last segment
+WHEN the segment-repaired stamp was skipped (foreign region or bad CRC in the
+last segment, or a writer's .mef3io-tmp next to it — the report says so and
+that cached opens will miss it). Otherwise the stamp makes them visible
+(provenance rule below).
 WRITE PATHS MUST NOT KNOW ABOUT THE CACHE: no invalidation calls from Writer,
 repair, recover or any future write path (the Writer's old auto-cache delete
-was removed). ENCRYPTED SESSIONS ARE NEVER CACHED (infos hold decrypted
-subject fields): no snapshot written, one found is deleted on load (dirs check
-the UH password fields; tars peek at the first .tmet member; the Reader also
-refuses via the backend's `password_protected()`). save() uses a unique temp
+and `cache.invalidate()` were removed). ENCRYPTED SESSIONS ARE NEVER CACHED
+(infos hold decrypted subject fields): no snapshot written; on load the
+encryption check runs FIRST, before format/version, and ANY snapshot file for
+an encrypted session is deleted — including 1.1.x format-4 ones, which hold
+plaintext L2 fields (dirs check the UH password fields; tars peek at the first
+.tmet member; the Reader also refuses via the backend's `password_protected()`,
+failing closed). save() uses a unique temp
 file; a failed save never fails an open. Measured 64 ch x 150 seg: snapshot
 60 KB, cached open 25-54 ms vs plain 1.3-3.0 s; x 600 seg: 60 KB, 95-108 ms vs
 6.6-30 s.
@@ -433,13 +446,18 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   recovery modifies a NON-last segment, it ALSO stamps the channel's LAST
   segment's .tmet with `SegmentRepaired` (code 9; 6/7/8 are reserved for
   anonymize #70 / rename #72 / transform #73 and deliberately unassigned).
-  Header-only (region + header CRC), backed up, listed as written; skipped with
-  a NOTE, never an error, on a foreign region or failed CRC (repair: an Info
-  finding `provenance.last-segment`; recovery: `RecoveryReport.notes`). Such a
-  repair/recovery is REFUSED while the channel looks written-to (a
-  `.mef3io-tmp` in the last segment, or its files changed < 2 min ago) — a
-  read-only pre-pass decides, so nothing is written before the refusal. Do not
-  reuse HeaderRepair for it: provenance describes what happened to THAT file.
+  Header-only (region + header CRC), backed up. Always reported, naming the
+  file: repair = an Info finding `provenance.last-segment`, recovery =
+  `RecoveryReport.notes`. SKIPPED with a note, never an error, on a foreign
+  region, a failed CRC, or a writer's `.mef3io-tmp` in the last segment (the
+  note names it, says it can be removed if no writer runs, and that cached
+  opens will miss the change). NEVER REFUSE a repair on "looks active"
+  heuristics: after `cp -r`/extract_session every mtime is fresh (the main
+  legacy-repair workflow) and a crash leaves the temp file forever; the race
+  is harmless anyway, a concurrent append moves the last segment's sizes.
+  C++ `segment_number_of`/`last_segment_dir` and Python cache `_segment_key`
+  use the SAME rule (all-digits after the last '-', else -1; ties by name).
+  Do not reuse HeaderRepair for it: provenance describes what happened to THAT file.
   A future write path that edits a non-last segment must do the same. Tests:
   tests/test_p23_segment_repaired.py. All-zero region = unstamped (every other writer) →
   initialised WITHOUT created-by; any other non-magic bytes = another app's →
