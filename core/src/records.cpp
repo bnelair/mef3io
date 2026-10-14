@@ -258,10 +258,12 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
   TimeConv conv{rto};
   if (rdat.size() < static_cast<std::size_t>(fmt::UNIVERSAL_HEADER_BYTES))
     throw FormatError("record file smaller than its universal header (truncated?)");
-  // The universal header says how many records follow (meflib walks exactly
-  // that many when it is known, meflib.c:1869). A damaged file must FAIL —
-  // so the caller can contain it (strict raises, lenient skips and reports) —
-  // rather than come back silently short or with corrupted text.
+  // The universal header says how many records follow, and meflib walks
+  // exactly that many when it is known (meflib.c:1869). So a file that
+  // declares MORE records than it holds is damaged and must FAIL, letting the
+  // caller contain it (strict raises, lenient skips and reports) instead of
+  // coming back silently short. One that declares FEWER is tolerated as
+  // meflib tolerates it: only the declared records are read.
   const si8 declared = read<si8>(rdat, 32);  // number_of_entries
   const bool count_known = declared != UNKNOWN_NUMBER_OF_ENTRIES;
   std::size_t off = fmt::UNIVERSAL_HEADER_BYTES;  // records follow the UH

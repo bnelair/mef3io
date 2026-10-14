@@ -326,6 +326,19 @@ in encrypted sessions record bodies are **level-2 encrypted**. Each `.ridx`
 entry (24 B): type[4] @ 0, version @ 5/6, encryption @ 7, file offset
 (file-relative) @ 8, time @ 16.
 
+**Damaged record files fail.** Rather than returning fewer records or
+corrupted text, a record file is rejected for any of:
+- a record cut off mid-way, or a header claiming more `body_bytes` than the
+  file holds;
+- a per-record CRC mismatch (the coverage meflib checks, meflib.c:1839; a CRC
+  of 0, meflib's "no entry", is not checked);
+- a universal header that declares **more** records than are present.
+
+A file that declares fewer records than it holds is tolerated, as in meflib:
+only the declared records are read (meflib.c:1869). A rejected file is
+contained like any other: strict raises, lenient skips it and lists it in
+`Reader.problems` with kind `"records"`.
+
 ### Where record files live
 
 Record files can exist at **three** levels (meflib.c:6343 / 5660 / 6030), each
@@ -342,6 +355,13 @@ channel level AND every segment level of `ch1`; `records("ch1", segment=0)`
 one segment; `records(level="all")` everything. Every record carries `level`,
 `channel` and `segment` so the source is never ambiguous. mef3io writes only
 the session and channel levels.
+
+The session-level file is `<session name>.rdat`, the name of the `.mefd`
+directory (or `.mefd.tar` archive) without its suffix — the only name meflib
+reads (meflib.c:6335). A differently named `.rdat` at the root is used only
+when it is the only one there. With several and none matching the name, the
+session-level records are ambiguous: strict raises, lenient reports it in
+`problems` and returns none.
 
 ### Record times and the recording-time offset
 

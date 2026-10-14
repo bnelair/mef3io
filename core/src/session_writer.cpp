@@ -138,13 +138,20 @@ void SessionWriter::hydrate(const std::string& channel, ChannelState& st) {
   st.last_end_uutc = end_stored == fmt::UUTC_NO_ENTRY ? 0 : to_user_time(end_stored, rto);
 }
 
-std::optional<si8> SessionWriter::agreed_disk_rto(
-    const std::optional<std::string>& channel) const {
-  // The offset every on-disk segment of the level (one channel, or the whole
-  // session) agrees on, from section 3 of its .tmet files — what the READER
-  // will resolve that level's times with (Session::read_records). nullopt
-  // when they disagree; 0 when there are none.
+std::optional<si8> SessionWriter::agreed_disk_rto(const std::optional<std::string>& channel,
+                                                  int* readable) {
+  // The offset every READABLE on-disk segment of the level (one channel, or
+  // the whole session) agrees on, from section 3 of its .tmet files — what the
+  // reader resolves that level's times with (Session::read_records, which also
+  // gives an unreadable segment no say). nullopt when they disagree; 0 when
+  // there are none.
+  //
+  // An unreadable .tmet is SKIPPED and reported (unreadable_metadata()), never
+  // thrown: it belongs to some other segment, and failing here made one
+  // damaged file block every unrelated write — session annotations, a new
+  // channel, a new segment elsewhere — where main wrote them fine.
   std::optional<si8> agreed;
+  if (readable) *readable = 0;
   if (!fs::exists(mefd_path_)) return si8{0};
   for (const auto& timd : fs::directory_iterator(mefd_path_)) {
     if (!timd.is_directory() || timd.path().extension() != ".timd") continue;
@@ -153,11 +160,21 @@ std::optional<si8> SessionWriter::agreed_disk_rto(
       if (!segd.is_directory() || segd.path().extension() != ".segd") continue;
       const fs::path tmet = segd.path() / (segd.path().stem().string() + ".tmet");
       if (!fs::exists(tmet)) continue;
-      std::ifstream f(tmet, std::ios::binary);
-      std::vector<ui1> bytes((std::istreambuf_iterator<char>(f)),
-                             std::istreambuf_iterator<char>());
-      const si8 rto = segment_rto(
-          load_time_series_metadata(bytes, password_2_.empty() ? password_1_ : password_2_));
+      si8 rto = 0;
+      try {
+        std::ifstream f(tmet, std::ios::binary);
+        std::vector<ui1> bytes((std::istreambuf_iterator<char>(f)),
+                               std::istreambuf_iterator<char>());
+        rto = segment_rto(
+            load_time_series_metadata(bytes, password_2_.empty() ? password_1_ : password_2_));
+      } catch (const std::exception& e) {
+        const std::string what = tmet.string() + ": " + e.what();
+        if (std::find(unreadable_metadata_.begin(), unreadable_metadata_.end(), what) ==
+            unreadable_metadata_.end())
+          unreadable_metadata_.push_back(what);
+        continue;
+      }
+      if (readable) ++*readable;
       if (!agreed)
         agreed = rto;
       else if (*agreed != rto)
@@ -167,17 +184,32 @@ std::optional<si8> SessionWriter::agreed_disk_rto(
   return agreed.value_or(0);
 }
 
-si8 SessionWriter::session_rto() {
-  // A NEW segment or channel inherits the offset the session's existing
-  // segments all agree on. mef3io never creates an offset itself (its own
-  // sessions are 0), but a foreign session that used meflib's anonymization
-  // has one, and a new segment written with 0 would make its channel and the
-  // session DISAGREE — after which their legacy records could no longer be
-  // placed. Scanned once, on the first new segment: the segments this writer
-  // adds carry the same value, so the agreement it found still holds.
-  // Disagreeing (or no) segments: 0, mef3io's own convention.
-  if (!session_rto_) session_rto_ = agreed_disk_rto(std::nullopt).value_or(0);
-  return *session_rto_;
+si8 SessionWriter::new_segment_rto(const std::string& channel, ChannelState& st) {
+  // A NEW segment inherits the offset its neighbours agree on. mef3io never
+  // creates an offset itself (its own sessions are 0), but a foreign session
+  // that used meflib's anonymization has one, and a new segment written with
+  // 0 would make its channel and the session DISAGREE — after which their
+  // legacy records could no longer be placed.
+  //   * its own channel's readable segments first (the level the segment
+  //     joins, and the cheapest scan);
+  //   * for a new channel, or one with no readable segment, the session's;
+  //   * disagreeing or nothing readable: 0, mef3io's own convention.
+  // Cached per channel: the segments this writer adds carry the same value,
+  // so the agreement it found still holds, and a months-long recording does
+  // not rescan its metadata at every new segment.
+  if (st.new_segment_rto) return *st.new_segment_rto;
+  std::optional<si8> rto;
+  if (st.n_segments > 0) {
+    int readable = 0;
+    rto = agreed_disk_rto(channel, &readable);
+    if (readable == 0) rto.reset();  // nothing readable agreed on anything
+  }
+  if (!rto) {
+    if (!session_rto_) session_rto_ = agreed_disk_rto(std::nullopt).value_or(0);
+    rto = *session_rto_;
+  }
+  st.new_segment_rto = *rto;
+  return *rto;
 }
 
 void SessionWriter::write_records(std::optional<std::string> channel,
@@ -309,7 +341,7 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   spec.durable = durable_;
   // Only a NEW segment takes the session's offset; an append keeps the one
   // already in the segment it extends (append_time_series_segment).
-  if (!append) spec.recording_time_offset = session_rto();
+  if (!append) spec.recording_time_offset = new_segment_rto(channel, st);
 
   // Only pass on a maximum this writer measured itself. A segment adopted from
   // disk leaves the flag false, so the append bounds the blocks it cannot see

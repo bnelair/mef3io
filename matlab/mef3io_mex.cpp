@@ -10,7 +10,10 @@
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <stdexcept>
+#include <memory>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -44,9 +47,23 @@ void untrack(std::unordered_set<std::uint64_t>& set, std::uint64_t h) {
   if (g_readers.empty() && g_writers.empty()) mexUnlock();
 }
 
+// Every argument / library error in this file is a C++ exception of this
+// type, thrown from wherever it is detected and turned into a MATLAB error in
+// exactly ONE place: mexFunction, after the whole C++ call has unwound.
+//
+// Calling mexErrMsgIdAndTxt from a helper is NOT equivalent. It raises
+// MATLAB's own C++ exception from MATLAB's libstdc++, and on Linux this MEX
+// links its own static libstdc++ (see build_mex.m), so unwinding that
+// exception through the MEX's frames — any frame with a destructor to run —
+// can abort MATLAB inside __cxa_throw. That is what a fractional time did.
+struct MexError : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
+
 [[noreturn]] void fail(const char* fmt, const char* detail = "") {
-  mexErrMsgIdAndTxt("mef3io:error", fmt, detail);
-  throw 0;  // unreachable; mexErrMsgIdAndTxt does not return
+  char buf[2048];
+  std::snprintf(buf, sizeof buf, fmt, detail);
+  throw MexError(buf);
 }
 
 void check(int code) {
@@ -76,13 +93,26 @@ double checked_integral(const mxArray* a, const char* what, double lo, double hi
   return v;
 }
 
+// [-2^63, 2^63): the upper bound is exclusive because 2^63 itself is a
+// double but not an int64.
+constexpr double TWO63 = 9223372036854775808.0;
+
 std::int64_t get_int64(const mxArray* a, const char* what) {
   if (mxIsInt64(a) && mxGetNumberOfElements(a) == 1) return *mxGetInt64s(a);
-  // [-2^63, 2^63): the upper bound is exclusive because 2^63 itself is a
-  // double but not an int64.
-  constexpr double TWO63 = 9223372036854775808.0;
   const double v = checked_integral(a, what, -TWO63, TWO63);
   if (v >= TWO63) fail("expected a finite integer in range for %s", what);
+  return static_cast<std::int64_t>(v);
+}
+
+// A time or duration in microseconds. Fractions are ROUNDED to the nearest
+// microsecond rather than rejected: pure-double MATLAB code computing
+// t0 + n/fs*1e6 produces them routinely, and a microsecond is the format's
+// resolution. Non-finite and out-of-range values are still errors.
+std::int64_t get_time(const mxArray* a, const char* what) {
+  if (mxIsInt64(a) && mxGetNumberOfElements(a) == 1) return *mxGetInt64s(a);
+  const double v = std::nearbyint(get_scalar(a, what));
+  if (!std::isfinite(v) || v < -TWO63 || v >= TWO63)
+    fail("expected a finite time in microseconds for %s", what);
   return static_cast<std::int64_t>(v);
 }
 
@@ -94,7 +124,7 @@ int get_int(const mxArray* a, const char* what) {
 // [] -> "unset"; otherwise an int64/double uUTC.
 std::int64_t get_opt_time(const mxArray* a, const char* what) {
   if (mxIsEmpty(a)) return MEF3IO_TIME_UNSET;
-  return get_int64(a, what);
+  return get_time(a, what);
 }
 
 mef3io_reader* get_reader(const mxArray* a) {
@@ -215,7 +245,7 @@ static mxArray* provenance_struct(const mef3io_provenance& p) {
   return s;
 }
 
-void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
+static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
   if (nrhs < 1) fail("usage: mef3io_mex(command, ...)");
   const std::string cmd = get_string(prhs[0], "command");
 
@@ -655,7 +685,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     const mxArray* fa = mxGetField(s, 0, "acquisition_channel_number");
     if (fa && !mxIsEmpty(fa)) md.acquisition_channel_number = get_int64(fa, "acq num");
     const mxArray* fg = mxGetField(s, 0, "gmt_offset");
-    if (fg && !mxIsEmpty(fg)) md.gmt_offset = static_cast<std::int32_t>(get_int64(fg, "gmt"));
+    if (fg && !mxIsEmpty(fg)) md.gmt_offset = static_cast<std::int32_t>(get_int(fg, "gmt_offset"));
     check(mef3io_writer_set_metadata(w, &md));
     return;
   }
@@ -682,7 +712,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     if (is_float) {
       if (!mxIsDouble(prhs[3]) || mxIsComplex(prhs[3])) fail("data must be a real double vector");
       std::int64_t n = static_cast<std::int64_t>(mxGetNumberOfElements(prhs[3]));
-      std::int64_t start = get_int64(prhs[4], "start_uutc");
+      std::int64_t start = get_time(prhs[4], "start_uutc");
       double fs = get_scalar(prhs[5], "fs");
       int precision = get_int(prhs[6], "precision");
       int new_segment = nrhs > 7 ? get_int(prhs[7], "new_segment") : 0;
@@ -712,7 +742,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         }
       }
       double ufact = get_scalar(prhs[5], "ufact");
-      std::int64_t start = get_int64(prhs[6], "start_uutc");
+      std::int64_t start = get_time(prhs[6], "start_uutc");
       double fs = get_scalar(prhs[7], "fs");
       int new_segment = nrhs > 8 ? get_int(prhs[8], "new_segment") : 0;
       check(mef3io_writer_write_int32(w, ch.c_str(), mxGetInt32s(prhs[3]), valid, n, ufact,
@@ -732,32 +762,48 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     OptChannel ch = get_opt_channel(prhs[2]);
     const mxArray* recs = prhs[3];
     if (!mxIsStruct(recs)) fail("records must be a struct array");
-    mef3io_records* list = mef3io_records_create();
+    // Owned by a guard: any argument error below throws, and the list must
+    // not leak on the way out.
+    std::unique_ptr<mef3io_records, decltype(&mef3io_records_free)> list(
+        mef3io_records_create(), &mef3io_records_free);
     const size_t n = mxGetNumberOfElements(recs);
     for (size_t i = 0; i < n; ++i) {
       const mxArray* f_time = mxGetField(recs, i, "time");
-      if (!f_time) {
-        mef3io_records_free(list);
-        fail("each record needs a 'time' field");
-      }
-      std::int64_t time = get_int64(f_time, "record time");
+      if (!f_time) fail("each record needs a 'time' field");
+      std::int64_t time = get_time(f_time, "record time");
       const mxArray* f_type = mxGetField(recs, i, "type");
       std::string type = f_type && !mxIsEmpty(f_type) ? get_string(f_type, "type") : "Note";
       const mxArray* f_text = mxGetField(recs, i, "text");
       std::string text = f_text && !mxIsEmpty(f_text) ? get_string(f_text, "text") : "";
       const mxArray* f_dur = mxGetField(recs, i, "duration");
-      std::int64_t dur = f_dur && !mxIsEmpty(f_dur) ? get_int64(f_dur, "duration") : -1;
-      int code = mef3io_records_add(list, type.c_str(), time, text.c_str(), dur);
-      if (code != MEF3IO_OK) {
-        mef3io_records_free(list);
-        fail("%s", mef3io_last_error());
-      }
+      std::int64_t dur = f_dur && !mxIsEmpty(f_dur) ? get_time(f_dur, "duration") : -1;
+      check(mef3io_records_add(list.get(), type.c_str(), time, text.c_str(), dur));
     }
-    int code = mef3io_writer_write_records(w, ch.c_str(), list);
-    mef3io_records_free(list);
+    int code = mef3io_writer_write_records(w, ch.c_str(), list.get());
     check(code);
     return;
   }
 
   fail("unknown command: %s", cmd.c_str());
+}
+
+// Message of the error dispatch() threw. Static, so that by the time
+// mexErrMsgIdAndTxt runs no C++ object with a destructor is alive in this
+// MEX's frames (see MexError).
+static char g_error_message[4096];
+
+static bool run(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
+  try {
+    dispatch(nlhs, plhs, nrhs, prhs);
+    return true;
+  } catch (const std::exception& e) {
+    std::snprintf(g_error_message, sizeof g_error_message, "%s", e.what());
+  } catch (...) {
+    std::snprintf(g_error_message, sizeof g_error_message, "%s", "unknown error");
+  }
+  return false;
+}
+
+void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
+  if (!run(nlhs, plhs, nrhs, prhs)) mexErrMsgIdAndTxt("mef3io:error", "%s", g_error_message);
 }

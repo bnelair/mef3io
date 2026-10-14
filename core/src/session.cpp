@@ -4,7 +4,9 @@
 #include "mef3io/session.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 
 #include "mef3io/byteio.hpp"
@@ -15,6 +17,24 @@
 
 namespace mef3io {
 namespace {
+
+// "…/name.mefd", "…/name.mefd/" or "…/name.mefd.tar" -> "name" (the suffix is
+// enforced, case-insensitively, when the source is opened).
+std::string session_name_from_path(std::string path) {
+  while (!path.empty() && (path.back() == '/' || path.back() == '\\')) path.pop_back();
+  const auto slash = path.find_last_of("/\\");
+  std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+  for (const char* suffix : {".tar", ".mefd"}) {
+    const std::size_t n = std::strlen(suffix);
+    if (name.size() >= n) {
+      std::string tail = name.substr(name.size() - n);
+      std::transform(tail.begin(), tail.end(), tail.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      if (tail == suffix) name.resize(name.size() - n);
+    }
+  }
+  return name;
+}
 
 int segment_number_from_name(const std::string& stem) {
   // "<channel>-000000" -> 0
@@ -374,12 +394,33 @@ std::vector<Record> Session::read_records(std::optional<std::string> channel,
   // Session level: <session>.mefd/<session>.rdat (meflib.c:6343). Any .rdat at
   // the root is accepted, as before.
   if (want_session) {
+    // meflib reads exactly <session>.mefd/<session>.rdat (meflib.c:6335/6343),
+    // the session name being the directory's (or archive's) stem. A file of
+    // another name is accepted only when it is the ONLY .rdat at the root —
+    // with several there is no telling which holds the session's records, and
+    // silently picking the first in listing order is how annotations go
+    // missing.
     std::string rdat_path;
+    const std::string preferred = session_name_from_path(mefd_path_) + ".rdat";
+    std::vector<std::string> candidates;
     for (const auto& e : source_->list_dir(""))
-      if (!e.is_dir && e.name.ends_with(".rdat")) {
-        rdat_path = e.name;
-        break;
-      }
+      if (!e.is_dir && e.name.ends_with(".rdat")) candidates.push_back(e.name);
+    if (std::find(candidates.begin(), candidates.end(), preferred) != candidates.end()) {
+      rdat_path = preferred;
+    } else if (candidates.size() == 1) {
+      rdat_path = candidates.front();
+    } else if (candidates.size() > 1) {
+      std::sort(candidates.begin(), candidates.end());
+      std::string list;
+      for (const auto& c : candidates) list += (list.empty() ? "" : ", ") + c;
+      const std::string reason =
+          "ambiguous session-level records: no " + preferred + " but " +
+          std::to_string(candidates.size()) + " .rdat files at the session root (" + list + ")";
+      if (strict_) throw FormatError(reason);
+      if (reported_record_files_.insert("<session-root>").second)
+        problems_.push_back(SegmentProblem{"", -1, source_->describe(""),
+                                           "records: " + reason, "records"});
+    }
     if (!rdat_path.empty()) {
       std::string why;
       const auto rto = agreed_rto(nullptr, why);

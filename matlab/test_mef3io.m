@@ -52,6 +52,21 @@ assert(max(abs(y(ok) - round(x(ok), 3))) < 1e-9);      % quantized round trip
 yw = r.read('ch1', start + int64(1e6), start + int64(2e6));
 assert(numel(yw) == fs);
 
+% ---- argument errors: clean MATLAB errors, never a crash -----------------
+% A fractional double time (what pure-double code computing n/fs*1e6 makes)
+% is rounded to the nearest microsecond, not rejected.
+yf = r.read('ch1', double(start) + 1e6 + 0.2, double(start) + 2e6 + 0.2);
+assert(isequaln(yf, yw), 'a fractional time must round to the nearest microsecond');
+gotError = false;                                      % a string is not a time
+try r.read('ch1', 'abc', []); catch err, gotError = strcmp(err.identifier, 'mef3io:error'); end
+assert(gotError, 'a string time must raise a clean mef3io:error');
+gotError = false;                                      % neither is NaN
+try r.read('ch1', NaN, []); catch err, gotError = strcmp(err.identifier, 'mef3io:error'); end
+assert(gotError, 'a NaN time must raise a clean mef3io:error');
+gotError = false;                                      % segment must be an integer
+try r.records('ch1', 0.5); catch err, gotError = strcmp(err.identifier, 'mef3io:error'); end
+assert(gotError, 'a fractional segment must raise a clean mef3io:error');
+
 raw = r.readRaw('ch2');
 assert(isa(raw.samples, 'int32') && islogical(raw.valid));
 assert(isequal(raw.samples(raw.valid), counts(valid)));  % bit-exact

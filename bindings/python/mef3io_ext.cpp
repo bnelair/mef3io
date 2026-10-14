@@ -573,6 +573,8 @@ NB_MODULE(_mef3io, m) {
            nb::arg("overwrite") = false, nb::arg("password1") = "", nb::arg("password2") = "")
       .def("set_block_length", &mef3io::SessionWriter::set_block_length)
       .def("set_units", &mef3io::SessionWriter::set_units)
+      .def_prop_ro("unreadable_metadata",
+                   [](const mef3io::SessionWriter& w) { return w.unreadable_metadata(); })
       .def("set_threads", &mef3io::SessionWriter::set_threads)
           .def("set_durable", &mef3io::SessionWriter::set_durable, nb::arg("durable"))
       .def(

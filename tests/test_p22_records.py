@@ -821,7 +821,7 @@ def _two_notes(path):
 
 
 @pytest.mark.parametrize("damage", ["tail-truncated", "huge-body-bytes", "flipped-body-byte",
-                                    "count-mismatch"])
+                                    "declares-more-than-present"])
 def test_a_damaged_record_file_fails_instead_of_returning_less(tmp_path, damage):
     """Damage used to come back silently: a cut-off file returned fewer
     records, a flipped byte returned corrupted text. Now it raises (strict) or
@@ -872,3 +872,96 @@ def test_a_strict_channel_dispute_points_at_the_segment_records(tmp_path):
     _set_rto(path, THREE_DAYS, segments=[1])
     with pytest.raises(m.FormatError, match=r'records\("ch1", level="segment"\)'):
         mef3io.Reader(str(path)).records("ch1")
+
+
+def test_a_record_file_declaring_fewer_records_than_it_holds_is_tolerated(tmp_path):
+    """meflib reads exactly the declared count (meflib.c:1869); so does mef3io.
+    Only declaring MORE than present is damage."""
+    path = tmp_path / "fewer.mefd"
+    rdat = _two_notes(path)
+    raw = bytearray(rdat.read_bytes())
+    struct.pack_into("<q", raw, 32, 1)
+    rdat.write_bytes(bytes(raw))
+    assert [a["text"] for a in mef3io.Reader(str(path)).records()] == ["first note"]
+
+
+# --------------------------------------------------------------------------- session file naming
+
+
+def test_session_records_prefer_the_session_named_file(tmp_path):
+    """meflib reads exactly <session>.mefd/<session>.rdat (meflib.c:6335); a
+    stray .rdat at the root that sorts first must not be picked instead."""
+    path = tmp_path / "named.mefd"
+    _write_session(path, session_text="the session's")
+    stray = Path(path) / "aaa_stray.rdat"
+    stray.write_bytes(_rdat(path).read_bytes())
+    _install_records(stray, [_record("Note", b"stray\0", -START)])
+    assert [a["text"] for a in mef3io.Reader(str(path)).records()] == ["the session's"]
+
+
+def test_a_single_differently_named_session_file_is_still_read(tmp_path):
+    path = tmp_path / "renamed.mefd"
+    _write_session(path)
+    _rdat(path).rename(Path(path) / "other.rdat")
+    assert [a["text"] for a in mef3io.Reader(str(path)).records()] == ["session"]
+
+
+def test_two_session_files_and_none_named_for_the_session_are_ambiguous(tmp_path):
+    path = tmp_path / "two.mefd"
+    _write_session(path)
+    original = _rdat(path)
+    (Path(path) / "a.rdat").write_bytes(original.read_bytes())
+    original.rename(Path(path) / "b.rdat")
+    with pytest.raises(m.FormatError, match="ambiguous"):
+        mef3io.Reader(str(path)).records()
+    r = mef3io.Reader(str(path), strict=False)
+    with pytest.warns(mef3io.UnreadableSegmentWarning, match="record file"):
+        assert r.records() == []
+    (problem,) = r.problems
+    assert problem["kind"] == "records" and "a.rdat, b.rdat" in problem["reason"]
+    assert [a["text"] for a in r.records("ch1")] == ["channel"]    # other levels unaffected
+
+
+# --------------------------------------------------------------------------- one damaged .tmet
+
+
+@pytest.mark.parametrize("write", ["session annotations", "new channel ch3",
+                                   "ch1 new_segment=True"])
+def test_one_damaged_tmet_does_not_block_unrelated_writes(tmp_path, write):
+    """The writer reads other segments' metadata to choose an offset. A single
+    damaged .tmet used to make that throw, so annotations, a new channel and a
+    new segment elsewhere all failed where main wrote them fine. It is now
+    skipped (with a warning) and the write goes ahead."""
+    path = tmp_path / "dmg.mefd"
+    _write_session(path, annotate=False)
+    tmet = next(Path(path).glob("ch2.timd/*.segd/*.tmet"))
+    raw = bytearray(tmet.read_bytes())
+    raw[2000] ^= 0xFF                                     # break ch2's metadata CRC
+    tmet.write_bytes(bytes(raw))
+
+    # A new segment of ch1 is scoped to ch1's own segments, so it never even
+    # reads ch2's metadata; the other two consult the whole session and warn.
+    expect = (pytest.warns(mef3io.UnreadableSegmentWarning, match="ch2")
+              if write != "ch1 new_segment=True" else warnings.catch_warnings())
+    with mef3io.Writer(str(path)) as w:
+        with expect:
+            if write == "ch1 new_segment=True":
+                warnings.simplefilter("error")                # ...so it must not warn
+            if write == "session annotations":
+                w.write_annotations([{"type": "Note", "time": START, "text": "ok"}])
+            elif write == "new channel ch3":
+                w.write("ch3", np.arange(512.0), START, FS, precision=0)
+            else:
+                w.write("ch1", np.arange(512.0), START + 60 * SECOND, FS, precision=0,
+                        new_segment=True)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = mef3io.Reader(str(path), strict=False)            # ch2 itself stays unreadable
+        if write == "session annotations":
+            assert [(a["text"], a["time"]) for a in r.records()] == [("ok", START)]
+            assert _stored_times(_rdat(path)) == [-START]      # rto 0: classic form
+        elif write == "new channel ch3":
+            np.testing.assert_array_equal(r.read("ch3"), np.arange(512.0))
+        else:
+            assert r.segments("ch1")[1]["start_time"] == START + 60 * SECOND

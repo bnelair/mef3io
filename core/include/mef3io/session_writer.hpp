@@ -71,6 +71,12 @@ class SessionWriter {
   /// UTC when they carry a non-zero offset or disagree on one.
   void write_records(std::optional<std::string> channel, const std::vector<Record>& records);
 
+  /// `.tmet` files of OTHER segments that could not be read while this writer
+  /// worked out a recording-time offset ("path: reason"). They are skipped —
+  /// one damaged segment must not block unrelated writes — and listed here so
+  /// the damage is not silent. Grows over the writer's life; deduplicated.
+  const std::vector<std::string>& unreadable_metadata() const { return unreadable_metadata_; }
+
   // Optional override for the RED block length (samples per block). <= 0 uses
   // the fs-derived heuristic.
   void set_block_length(si8 n) { block_length_override_ = n; }
@@ -126,6 +132,9 @@ class SessionWriter {
     // reuses it, which is what keeps a months-long recording's appends O(new
     // data) instead of O(session length). Reset whenever a new segment starts.
     AppendIndexCache index_cache;
+    // Offset for this channel's next NEW segment, once worked out
+    // (new_segment_rto); unset until the channel first needs one.
+    std::optional<si8> new_segment_rto;
   };
 
   si8 block_length_for(sf8 fs) const;
@@ -135,10 +144,14 @@ class SessionWriter {
   // The recording-time offset every on-disk segment of the channel (or the
   // whole session) agrees on — what the reader resolves that level with.
   // nullopt when they disagree, 0 when there are none.
-  std::optional<si8> agreed_disk_rto(const std::optional<std::string>& channel) const;
-  // The offset NEW segments are written with (see session_writer.cpp).
-  si8 session_rto();
-  std::optional<si8> session_rto_;  // cached by session_rto()
+  // Unreadable .tmet files are skipped and recorded in unreadable_metadata_.
+  // `readable`, when given, receives how many segments had a say.
+  std::optional<si8> agreed_disk_rto(const std::optional<std::string>& channel,
+                                     int* readable = nullptr);
+  // The offset a NEW segment of `channel` is written with (session_writer.cpp).
+  si8 new_segment_rto(const std::string& channel, ChannelState& st);
+  std::optional<si8> session_rto_;  // the session-wide agreement, once scanned
+  std::vector<std::string> unreadable_metadata_;
   WriteSummary write_blocks(const std::string& channel, const std::vector<si4>& samples,
                             std::span<const ui1> valid, sf8 ufact, si8 start_uutc, sf8 fs,
                             bool new_segment);

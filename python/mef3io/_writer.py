@@ -8,6 +8,8 @@ Two write paths:
 """
 from __future__ import annotations
 
+import contextlib
+import warnings
 from typing import Optional
 
 import numpy as np
@@ -203,9 +205,10 @@ class Writer:
             starting before the segment's end).
         """
         data = np.atleast_1d(np.ascontiguousarray(data, dtype=np.float64))
-        return self._impl.write_float(
-            channel, data, start_uutc, float(fs), int(precision), bool(new_segment)
-        )
+        with self._reporting_unreadable_metadata():
+            return self._impl.write_float(
+                channel, data, start_uutc, float(fs), int(precision), bool(new_segment)
+            )
 
     def write_int32(
         self,
@@ -261,9 +264,10 @@ class Writer:
             valid = np.ascontiguousarray(
                 np.atleast_1d(np.asarray(valid)) != 0, dtype=np.uint8
             )
-        return self._impl.write_int32(
-            channel, data, float(ufact), start_uutc, float(fs), valid, bool(new_segment)
-        )
+        with self._reporting_unreadable_metadata():
+            return self._impl.write_int32(
+                channel, data, float(ufact), start_uutc, float(fs), valid, bool(new_segment)
+            )
 
     def write_annotations(self, annotations, channel: Optional[str] = None) -> None:
         """Write records (annotations).
@@ -289,4 +293,27 @@ class Writer:
             if r.get("duration") is not None:
                 rec["duration"] = int(r["duration"])
             norm.append(rec)
-        self._impl.write_records(channel, norm)
+        with self._reporting_unreadable_metadata():
+            self._impl.write_records(channel, norm)
+
+    @contextlib.contextmanager
+    def _reporting_unreadable_metadata(self):
+        """Warn about segment metadata the core skipped during the call.
+
+        Choosing the recording-time offset for a write reads other segments'
+        ``.tmet`` files; one that cannot be read is skipped so the write can
+        go ahead (one damaged segment must not block unrelated writes), but it
+        is damage, so it is reported rather than silent.
+        """
+        before = len(self._impl.unreadable_metadata)
+        try:
+            yield
+        finally:
+            added = self._impl.unreadable_metadata[before:]
+            if added:
+                from ._reader import UnreadableSegmentWarning
+
+                warnings.warn(
+                    f"{len(added)} segment metadata file(s) could not be read and were "
+                    f"skipped when choosing the recording-time offset: {added[0]}",
+                    UnreadableSegmentWarning, stacklevel=3)
