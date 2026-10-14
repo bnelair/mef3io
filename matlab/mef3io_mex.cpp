@@ -7,6 +7,7 @@
 #include <mex.h>
 #include <matrix.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -387,21 +388,126 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     return;
   }
   if (cmd == "reader_records") {
+    // reader_records(h, channel, [segment], [level]); [] = not given.
     need_args(nrhs, 3, "reader_records");
     mef3io_reader* r = get_reader(prhs[1]);
     OptChannel ch = get_opt_channel(prhs[2]);
+    std::int32_t segment = -1;
+    if (nrhs >= 4 && !mxIsEmpty(prhs[3])) {
+      const double s = get_scalar(prhs[3], "segment");
+      if (s < 0 || s != static_cast<double>(static_cast<std::int32_t>(s)))
+        fail("segment must be a non-negative integer");
+      segment = static_cast<std::int32_t>(s);
+    }
+    std::int32_t level = MEF3IO_RECORD_LEVEL_DEFAULT;
+    if (nrhs >= 5 && !mxIsEmpty(prhs[4])) {
+      const std::string l = get_string(prhs[4], "level");
+      if (l == "session") level = MEF3IO_RECORD_LEVEL_SESSION;
+      else if (l == "channel") level = MEF3IO_RECORD_LEVEL_CHANNEL;
+      else if (l == "segment") level = MEF3IO_RECORD_LEVEL_SEGMENT;
+      else if (l == "all") level = MEF3IO_RECORD_LEVEL_ALL;
+      else fail("level must be 'session', 'channel', 'segment' or 'all'; got '%s'", l.c_str());
+    }
+    mef3io_record_list* list = nullptr;
+    check(mef3io_reader_read_records(r, ch.c_str(), segment, level, &list));
+
+    // Copy everything out and free the list BEFORE building mxArrays, so no
+    // error path can leak it. Indices below are in range by construction.
+    struct Field {
+      std::string name;
+      int kind = MEF3IO_FIELD_ABSENT;
+      std::int64_t i = 0;
+      double d = 0;
+      std::string s;
+      std::vector<std::int32_t> arr;
+      std::vector<mef3io_seizure_channel> chans;
+    };
+    struct Rec {
+      mef3io_record_header h{};
+      std::vector<Field> fields;
+    };
+    std::vector<Rec> recs;
     std::int32_t n = 0;
-    check(mef3io_reader_n_records(r, ch.c_str(), &n));
-    const char* fields[] = {"type", "time", "text", "duration"};
-    plhs[0] = mxCreateStructMatrix(n, 1, 4, fields);
+    mef3io_record_list_size(list, &n);
     for (std::int32_t i = 0; i < n; ++i) {
-      mef3io_record_info rec{};
-      check(mef3io_reader_record(r, ch.c_str(), i, &rec));
-      mxSetField(plhs[0], i, "type", mxCreateString(rec.type));
-      mxSetField(plhs[0], i, "time", make_int64(rec.time));
-      mxSetField(plhs[0], i, "text", mxCreateString(rec.text));
-      mxSetField(plhs[0], i, "duration",
-                 rec.duration >= 0 ? make_int64(rec.duration) : mxCreateDoubleMatrix(0, 0, mxREAL));
+      Rec rec;
+      mef3io_record_list_header(list, i, &rec.h);
+      for (std::int32_t k = 0; k < rec.h.n_fields; ++k) {
+        mef3io_record_field f{};
+        mef3io_record_list_field(list, i, k, &f);
+        Field out;
+        out.name = f.name;
+        out.kind = f.kind;
+        out.i = f.int_value;
+        out.d = f.double_value;
+        if (f.kind == MEF3IO_FIELD_STRING) out.s = f.string_value;
+        if (f.kind == MEF3IO_FIELD_INT32_ARRAY)
+          out.arr.assign(f.int32_values, f.int32_values + f.count);
+        for (std::int64_t c = 0; f.kind == MEF3IO_FIELD_SEIZURE_CHANNELS && c < f.count; ++c) {
+          mef3io_seizure_channel sc{};
+          mef3io_record_list_seizure_channel(list, i, k, c, &sc);
+          out.chans.push_back(sc);
+        }
+        rec.fields.push_back(std::move(out));
+      }
+      recs.push_back(std::move(rec));
+    }
+    mef3io_record_list_free(list);
+
+    // A struct array needs one field set: the common fields (text/duration
+    // kept for every record, as before), then every body field any record
+    // carries, in first-seen order. A field a record does not have is [].
+    std::vector<std::string> names = {"type",          "time",          "level", "channel",
+                                      "segment",       "version_major", "version_minor",
+                                      "text",          "duration"};
+    for (const auto& rec : recs)
+      for (const auto& f : rec.fields)
+        if (std::find(names.begin(), names.end(), f.name) == names.end()) names.push_back(f.name);
+    std::vector<const char*> cnames;
+    for (const auto& s : names) cnames.push_back(s.c_str());
+    plhs[0] = mxCreateStructMatrix(static_cast<mwSize>(recs.size()), 1,
+                                   static_cast<int>(cnames.size()), cnames.data());
+    auto empty = [] { return mxCreateDoubleMatrix(0, 0, mxREAL); };
+    static const char* const level_names[] = {"session", "channel", "segment"};
+    for (std::size_t i = 0; i < recs.size(); ++i) {
+      const auto& h = recs[i].h;
+      const auto idx = static_cast<mwIndex>(i);
+      mxSetField(plhs[0], idx, "type", mxCreateString(h.type));
+      mxSetField(plhs[0], idx, "time", make_int64(h.time));
+      mxSetField(plhs[0], idx, "level",
+                 mxCreateString(h.level >= 0 && h.level <= 2 ? level_names[h.level] : "session"));
+      mxSetField(plhs[0], idx, "channel", mxCreateString(h.channel));
+      mxSetField(plhs[0], idx, "segment",
+                 h.segment >= 0 ? mxCreateDoubleScalar(h.segment) : empty());
+      mxSetField(plhs[0], idx, "version_major", mxCreateDoubleScalar(h.version_major));
+      mxSetField(plhs[0], idx, "version_minor", mxCreateDoubleScalar(h.version_minor));
+      for (const auto& f : recs[i].fields) {
+        mxArray* v = nullptr;
+        switch (f.kind) {
+          case MEF3IO_FIELD_INT64: v = make_int64(f.i); break;
+          case MEF3IO_FIELD_DOUBLE: v = mxCreateDoubleScalar(f.d); break;
+          case MEF3IO_FIELD_STRING: v = mxCreateString(f.s.c_str()); break;
+          case MEF3IO_FIELD_INT32_ARRAY: {
+            v = mxCreateNumericMatrix(static_cast<mwSize>(f.arr.size()), 1, mxINT32_CLASS, mxREAL);
+            if (!f.arr.empty())
+              std::memcpy(mxGetInt32s(v), f.arr.data(), f.arr.size() * sizeof(std::int32_t));
+            break;
+          }
+          case MEF3IO_FIELD_SEIZURE_CHANNELS: {
+            const char* cf[] = {"name", "onset", "offset"};
+            v = mxCreateStructMatrix(static_cast<mwSize>(f.chans.size()), 1, 3, cf);
+            for (std::size_t c = 0; c < f.chans.size(); ++c) {
+              const auto ci = static_cast<mwIndex>(c);
+              mxSetField(v, ci, "name", mxCreateString(f.chans[c].name));
+              mxSetField(v, ci, "onset", make_int64(f.chans[c].onset));
+              mxSetField(v, ci, "offset", make_int64(f.chans[c].offset));
+            }
+            break;
+          }
+          default: v = empty(); break;
+        }
+        mxSetField(plhs[0], idx, f.name.c_str(), v);
+      }
     }
     return;
   }

@@ -117,10 +117,25 @@ classdef Reader < handle
             s = mef3io_mex('reader_toc', obj.h, channel);
         end
 
-        function s = records(obj, channel)
-            %RECORDS Annotations for a channel, or session-level when omitted.
+        function s = records(obj, channel, segment, level)
+            %RECORDS Records (annotations) at the session, channel or segment level.
+            %   s = r.records()                     % session-level records
+            %   s = r.records('ch1')                % ch1's channel- AND segment-level
+            %   s = r.records('ch1', 0)             % segment 0 of ch1 only
+            %   s = r.records('ch1', [], 'channel') % level: 'session', 'channel',
+            %   s = r.records([], [], 'all')        %   'segment' or 'all'
+            %
+            % Struct array with type, time (int64 uUTC), level, channel ('' at
+            % session level), segment ([] unless segment level),
+            % version_major, version_minor, text, duration, then every body
+            % field any returned record carries ([] where a record has none),
+            % e.g. a Seiz record's channels struct array (name/onset/offset).
+            % Body times are absolute uUTC like time. Mirrors Python's
+            % Reader.records(channel, segment, level).
             if nargin < 2, channel = []; end
-            s = mef3io_mex('reader_records', obj.h, channel);
+            if nargin < 3, segment = []; end
+            if nargin < 4, level = []; end
+            s = mef3io_mex('reader_records', obj.h, channel, segment, level);
         end
     end
 end

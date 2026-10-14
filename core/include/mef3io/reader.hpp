@@ -103,10 +103,14 @@ class Reader {
     return session_.segment_map(channel);
   }
 
-  /// Records (annotations): channel-level for @p channel, or session-level
-  /// when @p channel is nullopt.
-  std::vector<Record> records(std::optional<std::string> channel = std::nullopt) {
-    return session_.read_records(std::move(channel));
+  /// Records (annotations). With the default levels: session-level when
+  /// @p channel is nullopt; the channel's channel- AND segment-level records
+  /// otherwise; one segment's when @p segment is given. See
+  /// Session::read_records for the levels, ordering and time rules.
+  std::vector<Record> records(std::optional<std::string> channel = std::nullopt,
+                              std::optional<int> segment = std::nullopt,
+                              Session::RecordLevels levels = Session::RecordLevels::Default) {
+    return session_.read_records(std::move(channel), segment, levels);
   }
 
   Session& session() { return session_; }

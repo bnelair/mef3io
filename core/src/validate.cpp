@@ -22,6 +22,7 @@
 #include "mef3io/headers.hpp"
 #include "mef3io/metadata.hpp"
 #include "mef3io/source.hpp"
+#include "mef3io/time.hpp"
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -75,15 +76,7 @@ bool selected(const std::vector<int>& filter, int value) {
 // non-negative one is already absolute. Foreign writers mix the two within a
 // segment — pymef negates block times but not universal-header times — so
 // every time comparison here happens in absolute space, exactly as a reader
-// does it.
-si8 to_user_time(si8 stored, si8 rto) {
-  if (stored == fmt::UUTC_NO_ENTRY) return stored;
-  return stored >= 0 ? stored : -stored + rto;
-}
-si8 to_disk_time(si8 absolute, si8 rto) {
-  if (absolute == fmt::UUTC_NO_ENTRY) return absolute;
-  return rto - absolute;
-}
+// does it — through the one conversion in mef3io/time.hpp.
 
 // meflib's RED_MAX_DIFFERENCE_BYTES(x): a full si4 plus one keysample flag
 // byte per sample. The worst case a reader can safely allocate from.

@@ -232,9 +232,32 @@ class Session {
   void set_index_cache_bytes(std::size_t n) { index_budget_ = n; }
   std::size_t index_cache_bytes() const;
 
-  // Read records (annotations). channel == nullopt -> session-level records;
-  // otherwise the given channel's records. Empty if none.
-  std::vector<Record> read_records(std::optional<std::string> channel = std::nullopt);
+  /// Which record levels read_records returns.
+  ///
+  /// `Default` keeps the historical meaning of each scope: no channel ->
+  /// session-level records only; a channel -> that channel's channel-level
+  /// records AND those of its segments; a channel + segment -> that segment's.
+  /// `All` widens the no-channel scope to every record in the session.
+  enum class RecordLevels { Default, Session, Channel, Segment, All };
+
+  /// Read records (annotations), each tagged with the level, channel and
+  /// segment it was found at, grouped session -> channel -> its segments
+  /// (channels by name, segments by number), each file in its own order.
+  ///
+  /// Times are resolved with the offset of what the file belongs to: a
+  /// segment's own section 3; for a channel or the session, the offset ALL of
+  /// its readable segments agree on. When they disagree there is no correct
+  /// answer (meflib marks such a session's offset NO_ENTRY, meflib.c:6208),
+  /// so that level throws FormatError rather than guess — only when it has a
+  /// record file to read.
+  ///
+  /// @throws std::invalid_argument  a segment without a channel, or a level
+  ///         outside the scope (Session within a channel; Session/Channel
+  ///         within a segment).
+  /// @throws std::out_of_range      unknown channel or segment number.
+  std::vector<Record> read_records(std::optional<std::string> channel = std::nullopt,
+                                   std::optional<int> segment = std::nullopt,
+                                   RecordLevels levels = RecordLevels::Default);
 
  private:
   struct Channel {
@@ -247,6 +270,12 @@ class Session {
 
   void discover();
   void load_channel_basic_info(const std::string& name, Channel& ch);
+  /// The offset every readable segment of `channel` (or of the whole session
+  /// when null) agrees on; throws FormatError when they disagree.
+  si8 agreed_rto(const std::string* channel, const char* what);
+  /// Parse one record file, tagging each record; empty when it is absent.
+  void append_records(std::vector<Record>& out, const std::string& rdat_path, si8 rto,
+                      RecordLevel level, const std::string& channel, int segment);
   TimeSeriesMetadata& segment_metadata(SegmentReader& seg);
   /// Run `fn` for one segment, containing its failure when lenient.
   ///

@@ -13,6 +13,7 @@
 #include "mef3io/metadata.hpp"
 #include "mef3io/source.hpp"
 #include "mef3io/writer.hpp"
+#include "mef3io/time.hpp"
 
 namespace fs = std::filesystem;
 
@@ -127,18 +128,14 @@ void SessionWriter::hydrate(const std::string& channel, ChannelState& st) {
   std::vector<ui1> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
   auto md = load_time_series_metadata(bytes,
                                       password_2_.empty() ? password_1_ : password_2_);
-  si8 rto = md.section3_available ? md.section3.recording_time_offset : 0;
-  if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
+  const si8 rto = segment_rto(md);
   st.sampling_frequency = md.section2.sampling_frequency;
   st.units_conversion_factor = md.section2.units_conversion_factor;
   // start_sample is channel-wide, so the last segment's start + count is the
   // channel total.
   st.total_samples = md.section2.start_sample + md.section2.number_of_samples;
-  si8 end_stored = md.universal_header.end_time;
-  if (end_stored == fmt::UUTC_NO_ENTRY)
-    st.last_end_uutc = 0;
-  else
-    st.last_end_uutc = (end_stored >= 0) ? end_stored : -end_stored + rto;
+  const si8 end_stored = md.universal_header.end_time;
+  st.last_end_uutc = end_stored == fmt::UUTC_NO_ENTRY ? 0 : to_user_time(end_stored, rto);
 }
 
 void SessionWriter::write_records(std::optional<std::string> channel,

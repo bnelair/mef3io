@@ -17,6 +17,15 @@ struct TimeSeriesMetadata {
   bool section3_available = true;          // false if L2-encrypted and only L1 access
 };
 
+/// The recording-time offset this segment's times are resolved with: section
+/// 3's value, or 0 when section 3 is unreadable (level-1 access) or NO_ENTRY.
+/// Pass it to to_user_time / to_disk_time (mef3io/time.hpp).
+inline si8 segment_rto(const TimeSeriesMetadata& md) {
+  if (!md.section3_available || md.section3.recording_time_offset == fmt::UUTC_NO_ENTRY)
+    return 0;
+  return md.section3.recording_time_offset;
+}
+
 // Parse a 16 KB .tmet image. Validates the universal-header CRC (throws
 // CrcError on mismatch), then, if encrypted, validates `password` and decrypts
 // sections 2/3 in place before parsing. Section 3 requires L2 access when

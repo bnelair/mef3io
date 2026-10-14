@@ -27,24 +27,12 @@
 #include "mef3io/metadata.hpp"
 #include "mef3io/parallel.hpp"
 #include "mef3io/red.hpp"
+#include "mef3io/time.hpp"
 
 namespace fs = std::filesystem;
 
 namespace mef3io {
 namespace {
-
-// Store an absolute uUTC as meflib does: negated, offset removed.
-// to_user_time inverts this: -stored + rto == absolute.
-si8 to_disk_time(si8 absolute, si8 rto) {
-  if (absolute == fmt::UUTC_NO_ENTRY) return absolute;
-  return rto - absolute;  // negative (absolute > rto)
-}
-
-si8 to_user_time(si8 stored, si8 rto) {
-  if (stored == fmt::UUTC_NO_ENTRY) return stored;
-  if (stored >= 0) return stored;
-  return -stored + rto;
-}
 
 std::string segment_base_name(const SegmentSpec& spec) {
   char buf[8];
@@ -480,8 +468,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   if (encrypt && md.access_level < fmt::LEVEL_1_ACCESS)
     throw PasswordError("appending to an encrypted segment requires level-1 access: " + tmet_path);
 
-  si8 rto = md.section3_available ? md.section3.recording_time_offset : 0;
-  if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
+  const si8 rto = segment_rto(md);
   const sf8 fs_hz = md.section2.sampling_frequency;
 
   if (std::abs(fs_hz - spec.sampling_frequency) > 1e-9 * std::max(1.0, std::abs(fs_hz)))

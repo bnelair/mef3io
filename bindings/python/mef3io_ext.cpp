@@ -131,6 +131,73 @@ nb::object provenance_dict(const mef3io::fmt::provenance::Provenance& p) {
 }
 }  // namespace
 
+namespace {
+// Record text comes from foreign writers and is not guaranteed UTF-8; one
+// bad byte must not make the whole records() call raise, so decode leniently.
+nb::object record_str(const std::string& s) {
+  return nb::steal(PyUnicode_DecodeUTF8(s.data(), static_cast<Py_ssize_t>(s.size()), "replace"));
+}
+
+mef3io::Session::RecordLevels record_levels(nb::object level) {
+  using L = mef3io::Session::RecordLevels;
+  if (level.is_none()) return L::Default;
+  const std::string s = nb::cast<std::string>(level);
+  if (s == "session") return L::Session;
+  if (s == "channel") return L::Channel;
+  if (s == "segment") return L::Segment;
+  if (s == "all") return L::All;
+  throw std::invalid_argument(
+      "level must be None, 'session', 'channel', 'segment' or 'all'; got '" + s + "'");
+}
+
+// One record as a dict: common keys, then the body fields of its type in
+// record_fields' stable order (None where the body does not carry one).
+nb::dict record_to_dict(const mef3io::Record& rec) {
+  nb::dict d;
+  d["type"] = rec.type;
+  d["time"] = rec.time;
+  d["level"] = mef3io::record_level_name(rec.level);
+  d["channel"] = rec.level == mef3io::RecordLevel::Session
+                     ? nb::object(nb::none())
+                     : nb::object(nb::str(rec.channel.c_str()));
+  d["segment"] =
+      rec.level == mef3io::RecordLevel::Segment ? nb::object(nb::int_(rec.segment)) : nb::none();
+  d["version_major"] = rec.version_major;
+  d["version_minor"] = rec.version_minor;
+  for (const auto& f : mef3io::record_fields(rec)) {
+    nb::object v = nb::none();
+    if (f.value) {
+      v = std::visit(
+          [](const auto& x) -> nb::object {
+            using T = std::decay_t<decltype(x)>;
+            if constexpr (std::is_same_v<T, std::string>) {
+              return record_str(x);
+            } else if constexpr (std::is_same_v<T, std::vector<mef3io::si4>>) {
+              nb::list l;
+              for (auto s : x) l.append(s);
+              return l;
+            } else if constexpr (std::is_same_v<T, std::vector<mef3io::SeizureChannel>>) {
+              nb::list l;
+              for (const auto& c : x) {
+                nb::dict cd;
+                cd["name"] = record_str(c.name);
+                cd["onset"] = c.onset;
+                cd["offset"] = c.offset;
+                l.append(cd);
+              }
+              return l;
+            } else {
+              return nb::cast(x);
+            }
+          },
+          *f.value);
+    }
+    d[f.name.c_str()] = v;
+  }
+  return d;
+}
+}  // namespace
+
 NB_MODULE(_mef3io, m) {
   m.attr("__version__") = mef3io::version();
   m.doc() = "mef3io C++ backend (nanobind extension)";
@@ -773,22 +840,16 @@ NB_MODULE(_mef3io, m) {
            })
       .def(
           "records",
-          [](mef3io::Reader& r, nb::object channel) {
+          [](mef3io::Reader& r, nb::object channel, nb::object segment, nb::object level) {
             std::optional<std::string> ch;
             if (!channel.is_none()) ch = nb::cast<std::string>(channel);
-            auto recs = r.records(ch);
+            std::optional<int> seg;
+            if (!segment.is_none()) seg = nb::cast<int>(segment);
+            auto recs = r.records(ch, seg, record_levels(level));
             nb::list out;
-            for (const auto& rec : recs) {
-              nb::dict d;
-              d["type"] = rec.type;
-              d["time"] = rec.time;
-              if (rec.text) d["text"] = *rec.text;
-              if (rec.duration) d["duration"] = *rec.duration;
-              if (rec.earliest_onset) d["earliest_onset"] = *rec.earliest_onset;
-              if (rec.latest_offset) d["latest_offset"] = *rec.latest_offset;
-              out.append(d);
-            }
+            for (const auto& rec : recs) out.append(record_to_dict(rec));
             return out;
           },
-          nb::arg("channel") = nb::none());
+          nb::arg("channel") = nb::none(), nb::arg("segment") = nb::none(),
+          nb::arg("level") = nb::none());
 }

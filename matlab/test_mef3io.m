@@ -69,6 +69,16 @@ anns = r.records('ch1');
 assert(numel(anns) == 2);
 assert(strcmp(anns(1).text, 'marker') && isempty(anns(1).duration));
 assert(strcmp(anns(2).type, 'EDFA') && anns(2).duration == int64(5e5));
+% every record says where it came from (session / channel / segment level)
+assert(strcmp(anns(1).level, 'channel') && strcmp(anns(1).channel, 'ch1'));
+assert(isempty(anns(1).segment) && anns(1).version_major == 1);
+assert(isequal(r.records('ch1', [], 'channel'), anns));
+assert(isempty(r.records('ch1', [], 'segment')));      % none written at that level
+assert(isempty(r.records('ch1', 0)));
+assert(numel(r.records([], [], 'all')) == numel(r.records()) + 2);
+gotError = false;                                      % a level outside the scope
+try r.records('ch1', [], 'session'); catch, gotError = true; end
+assert(gotError, 'session-level records cannot be asked of a channel');
 delete(r);
 
 % ---- encrypted round trip --------------------------------------------------

@@ -5,24 +5,16 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 #include "mef3io/byteio.hpp"
 #include "mef3io/errors.hpp"
 #include "mef3io/red.hpp"
 #include "mef3io/validate.hpp"
+#include "mef3io/time.hpp"
 
 namespace mef3io {
 namespace {
-
-// Convert an on-disk MEF time to a user-facing absolute uUTC. meflib marks
-// "recording-time-offset applied" times by negating them; the true time is
-// recovered as (-stored + rto). Non-negative values are already user times
-// (offset not applied). Mirrors meflib remove_recording_time_offset.
-si8 to_user_time(si8 t, si8 rto) {
-  if (t == fmt::UUTC_NO_ENTRY) return t;
-  if (t >= 0) return t;
-  return -t + rto;
-}
 
 int segment_number_from_name(const std::string& stem) {
   // "<channel>-000000" -> 0
@@ -114,8 +106,7 @@ void Session::load_channel_basic_info(const std::string& name, Channel& ch) {
     // whole body cannot leave `info` half-updated by a segment that failed.
     const bool ok = with_segment(name, seg, [&] {
     auto& md = segment_metadata(seg);
-    si8 rto = md.section3_available ? md.section3.recording_time_offset : 0;
-    if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
+    const si8 rto = segment_rto(md);
     si8 seg_start = to_user_time(md.universal_header.start_time, rto);
     si8 seg_end = to_user_time(md.universal_header.end_time, rto);
     if (first) {
@@ -179,8 +170,7 @@ std::vector<DataRun> Session::read_runs(const std::string& channel, std::optiona
     const std::size_t mark = runs.size();
     if (!with_segment(channel, seg, [&] {
     auto& md = segment_metadata(seg);
-    si8 rto = md.section3_available ? md.section3.recording_time_offset : 0;
-    if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
+    const si8 rto = segment_rto(md);
 
     auto idx = segment_index(seg);
     const std::size_t n_entries = index_entry_count(idx, source_->describe(seg.tidx_path));
@@ -257,31 +247,128 @@ std::vector<DataRun> Session::read_runs(const std::string& channel, std::optiona
   return runs;
 }
 
-std::vector<Record> Session::read_records(std::optional<std::string> channel) {
-  // Locate the .rdat file: channel-level lives in <channel>.timd/, session-
-  // level in the .mefd root. rto comes from the channel (0 for session-level).
-  std::string rdat_path;
-  si8 rto = 0;
-  if (channel) {
-    auto it = channels_.find(*channel);
-    if (it == channels_.end()) throw std::out_of_range("no such channel: " + *channel);
-    rto = it->second.info.recording_time_offset;
-    std::string cand = *channel + ".timd/" + *channel + ".rdat";
-    if (source_->exists(cand)) rdat_path = cand;
-  } else {
+si8 Session::agreed_rto(const std::string* channel, const char* what) {
+  // The offset the DATA of this scope is read with, so the records land
+  // where the data does. meflib applies one global offset to every record
+  // header (MEF_globals->recording_time_offset, meflib.c:1806 -> 1846), taken
+  // from section 3; for a session whose segments disagree it marks the
+  // aggregate NO_ENTRY (meflib.c:5529, 6208) — i.e. there is no single right
+  // value, and picking one would misplace some records by the difference.
+  std::optional<si8> agreed;
+  std::string agreed_where;
+  for (const auto& name : channel_names_) {
+    if (channel && name != *channel) continue;
+    for (auto& seg : channels_.at(name).segments) {
+      if (!seg.load_error.empty()) continue;  // lenient: already reported, has no say
+      const si8 rto = segment_rto(segment_metadata(seg));
+      if (!agreed) {
+        agreed = rto;
+        agreed_where = source_->describe(seg.tmet_path);
+      } else if (*agreed != rto) {
+        throw FormatError(std::string(what) +
+                          " records cannot be placed: segments disagree on "
+                          "recording_time_offset (" +
+                          std::to_string(*agreed) + " in " + agreed_where + ", " +
+                          std::to_string(rto) + " in " + source_->describe(seg.tmet_path) +
+                          "), so any choice would misplace records by the difference");
+      }
+    }
+  }
+  return agreed.value_or(0);
+}
+
+void Session::append_records(std::vector<Record>& out, const std::string& rdat_path, si8 rto,
+                             RecordLevel level, const std::string& channel, int segment) {
+  auto bytes = source_->read_all(rdat_path);
+  auto uh = fmt::UniversalHeader::parse(bytes);
+  crypto::AccessKeys keys = crypto::validate_password(
+      password_, uh.level_1_password_validation_field, uh.level_2_password_validation_field);
+  for (auto& rec : parse_records(bytes, rto, keys)) {
+    rec.level = level;
+    rec.channel = channel;
+    rec.segment = segment;
+    out.push_back(std::move(rec));
+  }
+}
+
+std::vector<Record> Session::read_records(std::optional<std::string> channel,
+                                          std::optional<int> segment, RecordLevels levels) {
+  // Validate the query first, so a bad one fails the same whether or not any
+  // record files happen to exist.
+  if (segment && !channel)
+    throw std::invalid_argument("a record segment needs its channel");
+  if (channel && channels_.find(*channel) == channels_.end())
+    throw std::out_of_range("no such channel: " + *channel);
+  if (channel && levels == RecordLevels::Session)
+    throw std::invalid_argument("session-level records do not belong to a channel");
+  if (segment && levels == RecordLevels::Channel)
+    throw std::invalid_argument("channel-level records do not belong to a segment");
+  if (segment) {
+    const auto& segs = channels_.at(*channel).segments;
+    if (std::none_of(segs.begin(), segs.end(),
+                     [&](const SegmentReader& s) { return s.segment_number == *segment; }))
+      throw std::out_of_range("no such segment: " + *channel + " segment " +
+                              std::to_string(*segment));
+  }
+
+  // Which levels this call returns (see RecordLevels).
+  bool want_session = false, want_channel = false, want_segment = false;
+  switch (levels) {
+    case RecordLevels::Default:
+      want_session = !channel;
+      want_channel = channel && !segment;
+      want_segment = channel.has_value();
+      break;
+    case RecordLevels::Session: want_session = true; break;
+    case RecordLevels::Channel: want_channel = true; break;
+    case RecordLevels::Segment: want_segment = true; break;
+    case RecordLevels::All:
+      want_session = !channel;
+      want_channel = !segment;
+      want_segment = true;
+      break;
+  }
+
+  std::vector<Record> out;
+
+  // Session level: <session>.mefd/<session>.rdat (meflib.c:6343). Any .rdat at
+  // the root is accepted, as before.
+  if (want_session) {
+    std::string rdat_path;
     for (const auto& e : source_->list_dir(""))
       if (!e.is_dir && e.name.ends_with(".rdat")) {
         rdat_path = e.name;
         break;
       }
+    if (!rdat_path.empty())
+      append_records(out, rdat_path, agreed_rto(nullptr, "session-level"),
+                     RecordLevel::Session, "", -1);
   }
-  if (rdat_path.empty()) return {};
 
-  auto bytes = source_->read_all(rdat_path);
-  auto uh = fmt::UniversalHeader::parse(bytes);
-  crypto::AccessKeys keys = crypto::validate_password(
-      password_, uh.level_1_password_validation_field, uh.level_2_password_validation_field);
-  return parse_records(bytes, rto, keys);
+  for (const auto& name : channel_names_) {
+    if (channel && name != *channel) continue;
+    // Channel level: <ch>.timd/<ch>.rdat (meflib.c:5660).
+    if (want_channel) {
+      const std::string cand = name + ".timd/" + name + ".rdat";
+      if (source_->exists(cand))
+        append_records(out, cand, agreed_rto(&name, ("channel-level (" + name + ")").c_str()),
+                       RecordLevel::Channel, name, -1);
+    }
+    // Segment level: <seg>.segd/<seg>.rdat, next to the segment's .tmet
+    // (meflib.c:6030). Its offset is the segment's own.
+    if (want_segment) {
+      for (auto& seg : channels_.at(name).segments) {
+        if (segment && seg.segment_number != *segment) continue;
+        if (!seg.load_error.empty()) continue;  // lenient: reported in problems()
+        const std::string cand =
+            seg.tmet_path.substr(0, seg.tmet_path.size() - 5) + ".rdat";  // ".tmet"
+        if (source_->exists(cand))
+          append_records(out, cand, segment_rto(segment_metadata(seg)), RecordLevel::Segment,
+                         name, seg.segment_number);
+      }
+    }
+  }
+  return out;
 }
 
 BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8> t0_opt,
@@ -302,8 +389,7 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
                       mark_mm = out.mismatches.size();
     if (!with_segment(channel, seg, [&] {
     auto& md = segment_metadata(seg);
-    si8 rto = md.section3_available ? md.section3.recording_time_offset : 0;
-    if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
+    const si8 rto = segment_rto(md);
     crypto::AccessKeys keys = crypto::validate_password(
         password_, md.universal_header.level_1_password_validation_field,
         md.universal_header.level_2_password_validation_field);
@@ -475,8 +561,7 @@ std::vector<SegmentInfo> Session::segment_map(const std::string& channel) {
     const std::size_t mark = out.size();
     if (!with_segment(channel, seg, [&] {
     auto& md = segment_metadata(seg);
-    si8 rto = md.section3_available ? md.section3.recording_time_offset : 0;
-    if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
+    const si8 rto = segment_rto(md);
     SegmentInfo si;
     si.segment_number = seg.segment_number;
     si.path = source_->describe(seg.tmet_path.substr(0, seg.tmet_path.rfind('/')));
@@ -507,8 +592,7 @@ std::vector<BlockIndexEntry> Session::read_index(const std::string& channel) {
     const std::size_t mark = out.size();
     if (!with_segment(channel, seg, [&] {
     auto& md = segment_metadata(seg);
-    si8 rto = md.section3_available ? md.section3.recording_time_offset : 0;
-    if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
+    const si8 rto = segment_rto(md);
     auto idx = segment_index(seg);
     const std::size_t n = index_entry_count(idx, source_->describe(seg.tidx_path));
     for (std::size_t i = 0; i < n; ++i) {

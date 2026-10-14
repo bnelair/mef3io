@@ -77,7 +77,8 @@ with mef3io.Reader("session.mefd") as r:          # password="..." if encrypted
     xi = r.read_raw("ch1", t0, t1)                # int32 + validity mask
     r.segments("ch1")                             # per-segment map
     r.toc("ch1")                                  # block-level index
-    r.records("ch1")                              # annotations (None -> session level)
+    r.records()                                   # session-level annotations
+    r.records("ch1")                              # ch1's channel- + segment-level ones
 ```
 
 `Reader(path, password="", backend="cpp", n_threads=0, cache=None)`
@@ -118,6 +119,37 @@ for files from another writer or from mef3io before 1.2; see the
 [provenance region](mef3_format.md#provenance-region-mef3io-12-frozen-format)) — from metadata only (nothing decoded), so it is
 cheap even for huge, gap-riddled sessions. `toc` is the finer per-RED-block
 view (start time, sample counts, extrema, discontinuity flags).
+
+### `records(channel=None, segment=None, level=None)`
+
+MEF keeps record (annotation) files at three levels — session, channel and
+segment — and every returned dict says which: `level`
+(`"session"`/`"channel"`/`"segment"`), `channel` (`None` at session level) and
+`segment` (`None` unless segment level).
+
+```python
+r.records()                       # session-level records
+r.records("ch1")                  # ch1's channel-level AND segment-level records
+r.records("ch1", segment=0)       # only segment 0's
+r.records("ch1", level="channel") # only the channel file
+r.records(level="all")            # every record in the session
+```
+
+Each dict has `type`, `time` (absolute uUTC), the three location keys,
+`version_major`/`version_minor`, then the body fields of its type, always the
+same keys for a type and `None` where the body does not carry one: `text`
+(Note, SyLg); `duration` + `text` (EDFA); `earliest_onset`, `latest_offset`,
+`duration`, `number_of_channels`, `onset_code`, `marker_name_1/2`,
+`annotation` and `channels` (a list of `{"name", "onset", "offset"}`) for Seiz;
+and the Epoc, Curs, CSti, ESti and LNTP fields listed in the
+[format reference](mef3_format.md#body-layouts-mefrech). Body times
+(`earliest_onset`, a Seiz channel's `onset`/`offset`, Epoc `timestamp` /
+`end_timestamp`, Curs `trace_timestamp`) are absolute uUTC like `time`; the
+[format reference](mef3_format.md#record-times-and-the-recording-time-offset)
+explains how they are resolved. If a channel's (or the session's) segments
+disagree on the recording-time offset, reading that level raises `FormatError`
+rather than misplacing its records. Reading every body type is supported;
+writing is limited to Note, SyLg and EDFA.
 
 ### Warm-start cache (opt-in)
 

@@ -493,19 +493,57 @@ class Reader:
         """
         return self._ensure_impl().toc(channel)
 
-    def records(self, channel: Optional[str] = None) -> list[dict]:
-        """Read records (annotations).
+    def records(
+        self,
+        channel: Optional[str] = None,
+        segment: Optional[int] = None,
+        level: Optional[str] = None,
+    ) -> list[dict]:
+        """Read records (annotations) at the session, channel or segment level.
+
+        MEF 3.0 keeps record files at three levels: the session
+        (``<session>.mefd``), each channel (``<ch>.timd``) and each segment
+        (``<ch>-NNNNNN.segd``). Every returned record says where it came from.
 
         Parameters
         ----------
         channel : str or None, optional
-            Channel name for channel-level records, or ``None`` (default) for
-            session-level records.
+            ``None`` (default) for the session scope; a channel name for that
+            channel's records.
+        segment : int or None, optional
+            A segment number (requires ``channel``): only that segment's
+            records.
+        level : {None, "session", "channel", "segment", "all"}, optional
+            Which levels to return. ``None`` (default) keeps each scope's
+            natural meaning: session-level records when ``channel`` is
+            ``None``; the channel's channel-level AND segment-level records
+            when it is given; the segment's when ``segment`` is given.
+            ``"all"`` without a channel returns every record in the session.
+            A level outside the scope (``"session"`` with a channel) raises
+            ``ValueError``.
 
         Returns
         -------
         list of dict
-            One dict per record with ``type`` (e.g. ``"Note"``, ``"EDFA"``),
-            ``time`` (uUTC), optional ``text`` and ``duration``.
+            One dict per record, grouped session -> channel -> its segments.
+            Every dict has ``type`` (e.g. ``"Note"``), ``time`` (absolute
+            uUTC), ``level`` (``"session"``/``"channel"``/``"segment"``),
+            ``channel`` (``None`` at session level), ``segment`` (``None``
+            unless segment level), ``version_major`` and ``version_minor``,
+            then the body fields of its type, always the same keys for a type
+            (``None`` where the body does not carry one) — e.g. ``text`` for
+            Note/SyLg, ``duration`` + ``text`` for EDFA, ``earliest_onset`` ...
+            ``channels`` for Seiz. Body times are absolute uUTC like ``time``.
+            The full per-type list is in the MEF format reference.
+
+        Raises
+        ------
+        mef3io._mef3io.FormatError
+            The segments a channel or the session spans disagree on the
+            recording-time offset, so its records cannot be placed.
+        ValueError
+            A ``segment`` without a ``channel``, or a level outside the scope.
+        IndexError
+            Unknown channel or segment number.
         """
-        return self._ensure_impl().records(channel)
+        return self._ensure_impl().records(channel, segment, level)

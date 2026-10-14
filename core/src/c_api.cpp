@@ -7,6 +7,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <memory>
+#include <optional>
+#include <stdexcept>
+#include <type_traits>
+#include <variant>
 #include <string>
 #include <vector>
 
@@ -52,6 +57,9 @@ int guarded(Fn&& fn) {
   } catch (const std::out_of_range& e) {
     g_last_error = e.what();
     return MEF3IO_ERR_ARGUMENT;
+  } catch (const std::invalid_argument& e) {
+    g_last_error = e.what();
+    return MEF3IO_ERR_ARGUMENT;
   } catch (const std::exception& e) {
     g_last_error = e.what();
     return MEF3IO_ERR_OTHER;
@@ -82,6 +90,22 @@ struct mef3io_writer {
 struct mef3io_records {
   std::vector<mef3io::Record> records;
 };
+// A snapshot of read records plus each one's body fields, so the pointers
+// handed out in mef3io_record_field stay valid until the list is freed.
+struct mef3io_record_list {
+  std::vector<mef3io::Record> records;
+  std::vector<std::vector<mef3io::RecordField>> fields;
+};
+
+namespace {
+const mef3io::RecordField* list_field(const mef3io_record_list* list, int32_t index,
+                                      int32_t field) {
+  if (index < 0 || static_cast<size_t>(index) >= list->records.size()) return nullptr;
+  const auto& fs = list->fields[static_cast<size_t>(index)];
+  if (field < 0 || static_cast<size_t>(field) >= fs.size()) return nullptr;
+  return &fs[static_cast<size_t>(field)];
+}
+}  // namespace
 
 extern "C" {
 
@@ -313,6 +337,109 @@ int mef3io_reader_record(mef3io_reader* r, const char* channel, int32_t index,
     out->duration = rec.duration.value_or(-1);
     copy_str(out->text, sizeof out->text, rec.text.value_or(""));
   });
+}
+
+int mef3io_reader_read_records(mef3io_reader* r, const char* channel, int32_t segment,
+                               int32_t level, mef3io_record_list** out) {
+  if (!r || !out) return fail_argument("NULL argument");
+  *out = nullptr;
+  using L = mef3io::Session::RecordLevels;
+  L levels;
+  switch (level) {
+    case MEF3IO_RECORD_LEVEL_DEFAULT: levels = L::Default; break;
+    case MEF3IO_RECORD_LEVEL_SESSION: levels = L::Session; break;
+    case MEF3IO_RECORD_LEVEL_CHANNEL: levels = L::Channel; break;
+    case MEF3IO_RECORD_LEVEL_SEGMENT: levels = L::Segment; break;
+    case MEF3IO_RECORD_LEVEL_ALL: levels = L::All; break;
+    default: return fail_argument("unknown record level");
+  }
+  return guarded([&] {
+    std::optional<std::string> ch;
+    if (channel) ch = channel;
+    std::optional<int> seg;
+    if (segment >= 0) seg = segment;
+    auto list = std::make_unique<mef3io_record_list>();
+    list->records = r->impl.records(ch, seg, levels);
+    for (const auto& rec : list->records) list->fields.push_back(mef3io::record_fields(rec));
+    *out = list.release();
+  });
+}
+
+void mef3io_record_list_free(mef3io_record_list* list) { delete list; }
+
+int mef3io_record_list_size(const mef3io_record_list* list, int32_t* out) {
+  if (!list || !out) return fail_argument("NULL argument");
+  *out = static_cast<int32_t>(list->records.size());
+  return MEF3IO_OK;
+}
+
+int mef3io_record_list_header(const mef3io_record_list* list, int32_t index,
+                              mef3io_record_header* out) {
+  if (!list || !out) return fail_argument("NULL argument");
+  if (index < 0 || static_cast<size_t>(index) >= list->records.size())
+    return fail_argument("record index out of range");
+  const mef3io::Record& rec = list->records[static_cast<size_t>(index)];
+  copy_str(out->type, sizeof out->type, rec.type);
+  out->time = rec.time;
+  out->level = static_cast<int32_t>(rec.level);
+  out->segment = rec.level == mef3io::RecordLevel::Segment ? rec.segment : -1;
+  copy_str(out->channel, sizeof out->channel, rec.channel);
+  out->version_major = rec.version_major;
+  out->version_minor = rec.version_minor;
+  out->n_fields = static_cast<int32_t>(list->fields[static_cast<size_t>(index)].size());
+  return MEF3IO_OK;
+}
+
+int mef3io_record_list_field(const mef3io_record_list* list, int32_t index, int32_t field,
+                             mef3io_record_field* out) {
+  if (!list || !out) return fail_argument("NULL argument");
+  const mef3io::RecordField* f = list_field(list, index, field);
+  if (!f) return fail_argument("record or field index out of range");
+  *out = mef3io_record_field{};
+  copy_str(out->name, sizeof out->name, f->name);
+  out->kind = MEF3IO_FIELD_ABSENT;
+  if (!f->value) return MEF3IO_OK;
+  std::visit(
+      [&](const auto& v) {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<T, mef3io::si8>) {
+          out->kind = MEF3IO_FIELD_INT64;
+          out->int_value = v;
+        } else if constexpr (std::is_same_v<T, mef3io::sf8>) {
+          out->kind = MEF3IO_FIELD_DOUBLE;
+          out->double_value = v;
+        } else if constexpr (std::is_same_v<T, std::string>) {
+          out->kind = MEF3IO_FIELD_STRING;
+          out->string_value = v.c_str();
+        } else if constexpr (std::is_same_v<T, std::vector<mef3io::si4>>) {
+          out->kind = MEF3IO_FIELD_INT32_ARRAY;
+          out->int32_values = v.data();
+          out->count = static_cast<int64_t>(v.size());
+        } else {
+          out->kind = MEF3IO_FIELD_SEIZURE_CHANNELS;
+          out->count = static_cast<int64_t>(v.size());
+        }
+      },
+      *f->value);
+  return MEF3IO_OK;
+}
+
+int mef3io_record_list_seizure_channel(const mef3io_record_list* list, int32_t index,
+                                       int32_t field, int64_t entry,
+                                       mef3io_seizure_channel* out) {
+  if (!list || !out) return fail_argument("NULL argument");
+  const mef3io::RecordField* f = list_field(list, index, field);
+  if (!f) return fail_argument("record or field index out of range");
+  const auto* chans =
+      f->value ? std::get_if<std::vector<mef3io::SeizureChannel>>(&*f->value) : nullptr;
+  if (!chans) return fail_argument("field is not a seizure channel list");
+  if (entry < 0 || static_cast<size_t>(entry) >= chans->size())
+    return fail_argument("seizure channel index out of range");
+  const auto& c = (*chans)[static_cast<size_t>(entry)];
+  copy_str(out->name, sizeof out->name, c.name);
+  out->onset = c.onset;
+  out->offset = c.offset;
+  return MEF3IO_OK;
 }
 
 /* ----- archive ----------------------------------------------------------- */

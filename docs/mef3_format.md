@@ -20,7 +20,8 @@ session.mefd/                     # session
     ├── ch1-000000.segd/          # segment 0
     │   ├── ch1-000000.tmet       #   metadata     (fixed 16 384 B)
     │   ├── ch1-000000.tidx       #   block index  (1024 B UH + 56 B/block)
-    │   └── ch1-000000.tdat       #   compressed data (1024 B UH + RED blocks)
+    │   ├── ch1-000000.tdat       #   compressed data (1024 B UH + RED blocks)
+    │   └── ch1-000000.rdat/.ridx #   optional segment-level records
     └── ch1-000001.segd/          # segment 1, ...
 ```
 
@@ -39,7 +40,9 @@ quirks matter:
   by storing `rto - t` (a negative number). Readers recover the true time as
   `t >= 0 ? t : -t + rto`, where `rto` (the recording time offset) lives in
   metadata section 3. This applies to universal-header start/end times, block
-  start times, and record times alike. mef3io writes `rto = 0`.
+  start times, and record header times alike (record body times: see
+  [Records](#records-rdat-ridx-annotations)). mef3io writes `rto = 0`. The
+  rule is implemented once, in `core/include/mef3io/time.hpp`.
 - The empty value ("no entry") for a time is `INT64_MIN`.
 
 ## Universal header — 1024 B, prefixes every file
@@ -305,10 +308,72 @@ universal header. Record header (24 B) in `.rdat`:
 | 16 | si8 | record time (negated uUTC) |
 
 The body follows, padded with `0x7e` to a 16-byte multiple (AES block size);
-in encrypted sessions record bodies are **level-2 encrypted**. Body layouts:
-`Note` = text; `EDFA` = si8 duration + text; `Seiz` = si8 earliest onset,
-si8 latest offset, si8 duration. Each `.ridx` entry (24 B): type[4] @ 0,
-version @ 5/6, encryption @ 7, file offset (file-relative) @ 8, time @ 16.
+in encrypted sessions record bodies are **level-2 encrypted**. Each `.ridx`
+entry (24 B): type[4] @ 0, version @ 5/6, encryption @ 7, file offset
+(file-relative) @ 8, time @ 16.
+
+### Where record files live
+
+Record files can exist at **three** levels (meflib.c:6343 / 5660 / 6030), each
+named after its directory:
+
+| Level | Path |
+|---|---|
+| session | `session.mefd/session.rdat` (+ `.ridx`) |
+| channel | `session.mefd/ch1.timd/ch1.rdat` |
+| segment | `session.mefd/ch1.timd/ch1-000000.segd/ch1-000000.rdat` |
+
+`Reader.records()` reads the session level; `Reader.records("ch1")` reads the
+channel level AND every segment level of `ch1`; `records("ch1", segment=0)`
+one segment; `records(level="all")` everything. Every record carries `level`,
+`channel` and `segment` so the source is never ambiguous. mef3io writes only
+the session and channel levels.
+
+### Record times and the recording-time offset
+
+The header time is negated like every other MEF time and is resolved with the
+offset of what the file belongs to: a segment's own section 3; for a channel
+or the session, the offset **all** of their segments agree on. If the
+segments disagree there is no correct single value (meflib marks such a
+session's offset "no entry", meflib.c:6208), so reading that level raises
+`FormatError` instead of placing the records by a guess.
+
+meflib applies the offset to the record **header** only (meflib.c:1846);
+`mefrec.c` never rewrites a body. It does, however, display every body time
+through `remove_recording_time_offset` (via `local_date_time_string`,
+meflib.c:4649), i.e. with the same sign rule. mef3io does the same: **body
+times go through the same conversion as the header time.** A non-negative body
+time — the normal case, even in an offset session — is returned unchanged; a
+negative one is resolved with the record's offset. So every time mef3io
+returns, header or body, is absolute uUTC. The sentinels `INT64_MIN` and a
+Seiz channel's `-1` onset/offset are passed through as-is.
+
+### Body layouts (mefrec.h)
+
+Offsets are relative to the start of the body. meflib decodes the structured
+bodies only at **version 1.0**; another version, or a body shorter than the
+layout, reads back with every body field `None`. The field names are the keys
+`Reader.records()` returns (and the MATLAB struct fields); every record of a
+type always carries all of its type's keys.
+
+| Type | Body (offset: type name) |
+|---|---|
+| `Note`, `SyLg` | 0: utf8 `text` (to the first NUL) |
+| `EDFA` | 0: si8 `duration` (µs); 8: utf8 `text` |
+| `Seiz` (1312 B + 272 B/channel) | 0: si8 `earliest_onset` (uUTC); 8: si8 `latest_offset` (uUTC); 16: si8 `duration`; 24: si4 `number_of_channels`; 28: si4 `onset_code` (−1 none, 0 unknown, 1 focal, 2 generalized, 3 propagated, 4 mixed); 32: utf8[128] `marker_name_1`; 160: utf8[128] `marker_name_2`; 288: utf8[1024] `annotation`; then `channels`: per channel 0: utf8[256] `name`, 256: si8 `onset`, 264: si8 `offset` (uUTC, −1 = none) |
+| `Epoc` (192 B) | 0: si8 `id_number`; 8: si8 `timestamp` (uUTC); 16: si8 `end_timestamp` (uUTC); 24: si8 `duration`; 32: utf8[32] `epoch_type`; 64: utf8[128] `text` |
+| `Curs` (160 B) | 0: si8 `id_number`; 8: si8 `trace_timestamp` (uUTC); 16: si8 `latency`; 24: sf8 `value`; 32: utf8[128] `name` |
+| `CSti` (200 B) | 0: utf8[64] `task_type`; 64: si8 `stimulus_duration`; 72: utf8[64] `stimulus_type`; 136: utf8[64] `patient_response` |
+| `ESti` (416 B) | 0: sf8 `amplitude`; 8: sf8 `frequency`; 16: si8 `pulse_width`; 24: si4 `ampunit_code` (1 mA, 2 V); 28: si4 `mode_code` (1 current, 2 voltage); 32/160/288: utf8[128] `waveform` / `anode` / `catode` |
+| `LNTP` | 0: si8 `length`; 8: si4[`length`] `template` |
+| `UnRc` | no body fields |
+
+`Seiz` returns at most `number_of_channels` channel entries, and fewer when
+the body is shorter than it declares. For `LNTP` mef3io follows the
+`MEFREC_LNTP_1_0_TEMPLATE_OFFSET` define (body offset 8); meflib's own display
+code (mefrec.c:306) applies that offset with `si4*` pointer arithmetic and so
+reads 4× too far. Reading these bodies is supported; writing remains limited to
+`Note`, `SyLg` and `EDFA`.
 
 ## Sentinels and other conventions
 
@@ -329,7 +394,7 @@ version @ 5/6, encryption @ 7, file offset (file-relative) @ 8, time @ 16.
 | Segment triples | `Reader.segments(ch)` — time/sample range per segment |
 | `.tidx` entries | `Reader.toc(ch)` — per-block start time, extrema, discontinuity |
 | RED blocks | decoded transparently by `read` / `read_raw` |
-| Records | `Reader.records(ch)` / `Writer.write_annotations(...)` |
+| Records (session / channel / segment level) | `Reader.records(ch, segment, level)` / `Writer.write_annotations(...)` |
 
 Related: [encryption_model.md](encryption_model.md) (how the two password
 levels derive keys and what they unlock),

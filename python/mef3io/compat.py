@@ -125,6 +125,14 @@ class MefReader:
         return raw * self.get_channel_info(channels)["ufact"][0]
 
     def get_annotations(self, channel: Optional[str] = None):
+        """Records as a list of dicts (legacy ``mef_tools`` signature).
+
+        ``channel=None`` returns session-level records; a channel name returns
+        that channel's channel-level AND segment-level records. Every dict
+        carries ``level`` / ``channel`` / ``segment`` so the two can be told
+        apart; see :meth:`mef3io.Reader.records` for the fields. Returns
+        ``None`` (with a printed warning) on failure, as the legacy API did.
+        """
         try:
             return self._r.records(channel)
         except Exception:
