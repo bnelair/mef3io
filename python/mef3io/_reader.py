@@ -186,11 +186,16 @@ class Reader:
         self._cache_path = _cache.resolve_cache_path(self._path, cache)
         self._infos = None
         self._declaration_issues = []
+        self._cached_problems = []
         if self._cache_path is not None:
             snap = _cache.load_valid(self._cache_path, self._path)
-            if snap is not None:
+            # A snapshot taken by a lenient open that skipped segments describes
+            # the session WITHOUT them; a strict open has to see the failure,
+            # so it ignores the snapshot and opens cold (and raises).
+            if snap is not None and not (self._strict and snap.get("problems")):
                 self._infos = snap["channel_infos"]
                 self._declaration_issues = snap.get("declaration_issues", [])
+                self._cached_problems = snap.get("problems", [])
 
         if self._infos is None:
             self._ensure_impl()
@@ -200,11 +205,12 @@ class Reader:
             if self._cache_path is not None:
                 _cache.save(
                     self._cache_path,
-                    _cache.build_snapshot(self._path, self._infos, self._declaration_issues),
+                    _cache.build_snapshot(self._path, self._infos, self._declaration_issues,
+                                          self.problems),
                 )
 
-        if not self._strict and self._impl is not None:
-            problems = self.problems
+        if not self._strict:
+            problems = self.problems  # from the cache snapshot on a warm open
             if problems:
                 warnings.warn(
                     _unreadable_warning_text(problems, self._path),
@@ -240,7 +246,9 @@ class Reader:
         """
         impl = self._impl
         if impl is None:
-            return []
+            # Warm open: the backend is not built yet, so report what the
+            # snapshot recorded rather than an empty list.
+            return list(self._cached_problems)
         fn = getattr(impl, "problems", None)
         return list(fn()) if fn is not None else []
 
@@ -456,7 +464,14 @@ class Reader:
             One dict per segment (sorted by segment number) with keys
             ``segment``, ``start_time`` / ``end_time`` (uUTC), ``start_sample``
             (channel-wide index of the first sample), ``number_of_samples``,
-            ``number_of_blocks``, and the on-disk ``path``.
+            ``number_of_blocks``, the on-disk ``path``, and ``provenance``:
+            ``None`` for a file from another writer or from mef3io before 1.2,
+            otherwise a dict with ``created_by`` / ``last_modified_by``
+            (version strings, ``""`` if unknown), ``last_operation``,
+            ``operations`` (every operation ever applied: ``"create"``,
+            ``"append"``, ``"header-repair"``, ``"recovery"``, ...),
+            ``modification_count`` and ``layout_version``. Versions and
+            operations only — no times are recorded.
         """
         return self._ensure_impl().segments(channel)
 

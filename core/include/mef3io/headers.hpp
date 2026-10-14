@@ -6,6 +6,7 @@
 #include <array>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "mef3io/types.hpp"
@@ -48,6 +49,106 @@ struct UniversalHeader {
 
   bool is_password_protected() const;
 };
+
+// ---------------------------------------------------------------------------
+// Provenance: which mef3io version created a file, which last modified it,
+// and WHAT was done to it. NO TIMES — deliberately: the universal header is
+// never encrypted, and a write time would date a recording that
+// recording_time_offset exists to hide.
+//
+// Kept in the universal header's 64-byte DISCRETIONARY region (file offset
+// 960), which MEF 3.0 leaves to the writing application: meflib never
+// interprets it, pymef only reports it as raw bytes, and it sits under the
+// header CRC every writer already recomputes. Every file carries its own.
+//
+// FROZEN FORMAT (docs/mef3_format.md, "Provenance region"). Offsets, widths
+// and encodings below never change; operation codes are append-only and never
+// reused; later layout versions may only ASSIGN the reserved bytes. Pinned by
+// a golden-bytes test — moving anything here fails it.
+//
+//   off  len  field
+//     0    4  magic "M3IO"
+//     4    1  layout version (1)
+//     5    1  last operation (code)
+//     6    2  reserved, zero
+//     8   20  created-by version     ASCII, NUL-padded, <= 19 chars + NUL
+//    28   20  last-modified-by       ASCII, NUL-padded, <= 19 chars + NUL
+//    48    4  operations-ever mask   ui4 LE, bit n = code n ever applied
+//    52    4  modification count     ui4 LE, operations after creation;
+//                                    SATURATES at 0xFFFFFFFF, never wraps
+//    56    8  reserved, zero
+//
+// All-zero region = never stamped (meflib, pymef, mef_tools, mef3io <= 1.1):
+// a modification initialises it, leaving created-by empty, so mef3io never
+// claims a file it did not create. Anything else without the magic is another
+// application's data and is NEVER written. A writer preserves every byte it
+// does not own (reserved bytes, a newer layout's fields).
+// ---------------------------------------------------------------------------
+namespace provenance {
+inline constexpr std::size_t REGION_OFFSET = 960;  // within the universal header
+inline constexpr std::size_t REGION_BYTES = 64;
+inline constexpr std::size_t MAGIC_OFFSET = 0, MAGIC_BYTES = 4;
+inline constexpr std::size_t LAYOUT_OFFSET = 4;
+inline constexpr std::size_t LAST_OP_OFFSET = 5;
+inline constexpr std::size_t CREATED_BY_OFFSET = 8, VERSION_BYTES = 20;
+inline constexpr std::size_t MODIFIED_BY_OFFSET = 28;
+inline constexpr std::size_t MASK_OFFSET = 48;
+inline constexpr std::size_t COUNT_OFFSET = 52;
+inline constexpr ui1 MAGIC[MAGIC_BYTES] = {'M', '3', 'I', 'O'};
+inline constexpr ui1 LAYOUT_VERSION = 1;
+inline constexpr ui4 COUNT_MAX = 0xFFFFFFFFu;
+
+// Every field must lie inside the region, and the region inside the header —
+// checked by the compiler, so no edit can make a stamp write out of range.
+static_assert(REGION_OFFSET + REGION_BYTES == static_cast<std::size_t>(UNIVERSAL_HEADER_BYTES));
+static_assert(MAGIC_OFFSET + MAGIC_BYTES <= LAYOUT_OFFSET);
+static_assert(LAYOUT_OFFSET < LAST_OP_OFFSET && LAST_OP_OFFSET < CREATED_BY_OFFSET);
+static_assert(CREATED_BY_OFFSET + VERSION_BYTES <= MODIFIED_BY_OFFSET);
+static_assert(MODIFIED_BY_OFFSET + VERSION_BYTES <= MASK_OFFSET);
+static_assert(MASK_OFFSET + sizeof(ui4) <= COUNT_OFFSET);
+static_assert(COUNT_OFFSET + sizeof(ui4) <= REGION_BYTES);
+
+/// Operation codes. APPEND-ONLY: a code is never renumbered, reused or
+/// redefined. Codes must stay below 32 to have a bit in the operations mask.
+enum class Operation : ui1 {
+  Unset = 0,
+  Create = 1,          ///< file written fresh
+  Append = 2,          ///< samples added to an existing segment
+  HeaderRepair = 3,    ///< repair_session: declarations only, samples untouched
+  Recovery = 4,        ///< recover_session: index and data reconciled
+  MetadataUpdate = 5,  ///< reserved: descriptive metadata rewritten in place
+};
+inline constexpr ui1 MAX_CODE = 5;
+static_assert(MAX_CODE < 32, "every operation code needs a bit in the 32-bit mask");
+
+/// Stable lowercase name of a code ("create", "append", ...); nullptr if unknown.
+const char* operation_name(ui1 code);
+
+struct Provenance {
+  bool present = false;        ///< region carries the magic
+  ui1 layout_version = 0;
+  ui1 last_operation = 0;      ///< raw code; may be newer than this library knows
+  std::string created_by;      ///< "" when unknown
+  std::string last_modified_by;
+  ui4 operations_mask = 0;
+  ui4 modification_count = 0;
+
+  bool ever(Operation op) const {
+    return (operations_mask >> static_cast<unsigned>(op)) & 1u;
+  }
+};
+
+Provenance read(const UniversalHeader& uh);
+/// A NEW file: the region is rewritten whole (created-by = last-modified-by =
+/// this version, last operation create, count 0). `version` defaults to this
+/// library's; it is a parameter only so tests can prove that ANY string —
+/// over-long, non-ASCII — stays inside its 20-byte field.
+void stamp_created(UniversalHeader& uh, std::string_view version = {});
+/// A MODIFIED file: last operation, last-modified-by, mask and count updated;
+/// every other byte preserved. Returns false, writing nothing, when the region
+/// is another application's.
+bool stamp_modified(UniversalHeader& uh, Operation op, std::string_view version = {});
+}  // namespace provenance
 
 // ---------------------------------------------------------------------------
 // Metadata section 1 (1536 B): encryption levels for sections 2 and 3.

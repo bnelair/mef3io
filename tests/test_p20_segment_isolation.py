@@ -148,3 +148,41 @@ def test_a_skipped_segment_is_not_retried_on_every_call(tmp_path):
         r.read("ch1")
         r.segments("ch1")
     assert len(r.problems) == before, "the same segment was reported more than once"
+
+
+def test_a_warm_lenient_open_still_reports_what_it_skipped(tmp_path):
+    """A warm start does not build the backend, so the problem list has to come
+    from the cache snapshot. Before it did, the second open of a damaged
+    session raised no warning and `problems` was empty until the first read —
+    exactly the check the docstring tells a lenient caller to make."""
+    path = tmp_path / "s.mefd"
+    cache = tmp_path / "cache"
+    _write_segments(path)
+    _corrupt_tmet(_segd_dirs(path)[1])
+
+    with pytest.warns(mef3io.UnreadableSegmentWarning):
+        cold = mef3io.Reader(str(path), strict=False, cache=str(cache))
+    expected = cold.problems
+    assert len(expected) == 1
+
+    with pytest.warns(mef3io.UnreadableSegmentWarning, match="SKIPPED"):
+        warm = mef3io.Reader(str(path), strict=False, cache=str(cache))
+    assert warm._impl is None, "the open was not actually served from the cache"
+    assert warm.problems == expected
+    warm.read("ch1")
+    assert warm.problems == expected
+
+
+def test_a_strict_open_is_not_served_a_lenient_snapshot(tmp_path):
+    """The lenient snapshot describes the session with the bad segment left out.
+    Serving it to a strict open would let that open succeed where a cold one
+    raises."""
+    path = tmp_path / "s.mefd"
+    cache = tmp_path / "cache"
+    _write_segments(path)
+    _corrupt_tmet(_segd_dirs(path)[1])
+
+    with pytest.warns(mef3io.UnreadableSegmentWarning):
+        mef3io.Reader(str(path), strict=False, cache=str(cache))
+    with pytest.raises(Exception):
+        mef3io.Reader(str(path), strict=True, cache=str(cache))

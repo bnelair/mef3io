@@ -348,6 +348,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
         uh.number_of_entries = static_cast<si8>(keep.size());
         uh.maximum_entry_size = fmt::TIME_SERIES_INDEX_BYTES;
         if (!keep.empty()) uh.end_time = keep.back().start_time;
+        fmt::provenance::stamp_modified(uh, fmt::provenance::Operation::Recovery);
         uh.serialize(new_index);
         const ui4 body = crc::calculate(
             std::span<const ui1>(new_index).subspan(fmt::UNIVERSAL_HEADER_BYTES));
@@ -371,6 +372,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
         auto uh = fmt::UniversalHeader::parse(head);
         uh.number_of_entries = static_cast<si8>(keep.size());
         if (!keep.empty()) uh.end_time = keep.back().start_time;
+        fmt::provenance::stamp_modified(uh, fmt::provenance::Operation::Recovery);
         uh.serialize(head);
         // The body changed, so the stored body CRC no longer describes it. Say
         // "never computed" rather than leaving a confidently wrong value.
