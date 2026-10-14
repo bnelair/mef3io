@@ -19,10 +19,14 @@ every binding carries the same version number.
 
 ## Why mef3io
 
-- **Fast** — parallel RED encode/decode: **~7–8× faster** than the legacy
-  pymef/mef_tools stack on both write and read, at identical file sizes;
-  MATLAB and Python perform identically (~135 M samples/s reads). See the
-  [measured comparison](legacy_comparison.md).
+- **Fast** — RED blocks are encoded and decoded in parallel. Full reads run
+  **~9× faster** than the legacy pymef/mef_tools stack and whole-session
+  writes **~2× faster**, at identical file sizes. That was measured on a
+  6-core 2013 Xeon; an Apple-silicon Mac measured ~7–8× on both. Each core
+  decodes at the same speed as meflib: the gain comes from using all of
+  them. MATLAB and Python perform identically. See the
+  [benchmarks](benchmarks.md) and the
+  [legacy comparison](legacy_comparison.md).
 - **Correct** — cross-validated in both directions against pymef/mef_tools
   (values, NaN gaps, times, encryption, fractional sampling rates, records),
   with committed golden fixtures, ~100 Python tests, C++ Catch2 tests, and a

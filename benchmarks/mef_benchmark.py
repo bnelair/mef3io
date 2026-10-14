@@ -43,6 +43,8 @@ from pathlib import Path
 
 import numpy as np
 
+from _zarr_compat import blosc_zstd_kwargs  # noqa: E402  (shared NWB-Zarr codec)
+
 MEF3IO_ROOT = Path(__file__).resolve().parent.parent  # mef3io/
 sys.path.insert(0, str(MEF3IO_ROOT / "python"))  # mef3io (dev tree)
 # legacy mef_tools baseline: prefer a local checkout (original repo); otherwise
@@ -190,10 +192,10 @@ def write_mef3io(cfg: Config, path: str):
             del col
 
 
+
 def write_nwb_zarr(cfg: Config, path: str):
     from datetime import datetime, timezone
 
-    import numcodecs
     from hdmf.data_utils import GenericDataChunkIterator
     from hdmf_zarr.backend import ZarrDataIO
     from hdmf_zarr.nwb import NWBZarrIO
@@ -232,7 +234,7 @@ def write_nwb_zarr(cfg: Config, path: str):
 
     wrapped = ZarrDataIO(
         data=SignalIterator(cfg),
-        compressor=numcodecs.Blosc(cname="zstd", clevel=3, shuffle=numcodecs.Blosc.SHUFFLE),
+        **blosc_zstd_kwargs(),
     )
     es = ElectricalSeries("eeg", wrapped, region, starting_time=0.0, rate=cfg.fs)
     nwb.add_acquisition(es)
