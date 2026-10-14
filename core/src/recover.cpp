@@ -4,8 +4,10 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <set>
 
 #include "durability.hpp"
+#include "last_segment.hpp"
 #include "mef3io/byteio.hpp"
 #include "mef3io/crc.hpp"
 #include "mef3io/errors.hpp"
@@ -121,8 +123,9 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
     throw IoError("session directory must end with .mefd: " + path);
   if (!fsys::is_directory(path)) throw IoError("no such session directory: " + path);
 
-  RecoveryReport report;
   const fsys::path root(path);
+  RecoveryReport report;
+  std::set<fsys::path> channels_to_stamp;
   const fsys::path backup_root =
       root.parent_path() / (root.filename().string() + ".recover-backup");
 
@@ -387,7 +390,32 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
         if (!f) throw IoError("header update failed: " + tdat.string());
       }
       (void)detail::fsync_file(tdat.string());
+      if (const auto last = detail::last_segment_dir(ch_entry.path());
+          last && detail::segment_number_of(last->stem().string()) != segment_number)
+        channels_to_stamp.insert(ch_entry.path());
     }
+  }
+
+  // segment-repaired: a NON-last segment changed, so the channel's last
+  // segment records it (last_segment.hpp). Same backup and durability rules
+  // as recovery's own header writes; a stamp that cannot be applied is a note.
+  for (const auto& channel_dir : channels_to_stamp) {
+    const auto stamp = detail::prepare_last_segment_stamp(channel_dir);
+    const std::string channel = channel_dir.stem().string();
+    if (!stamp.ready) {
+      report.notes.push_back(channel + ": a segment was recovered, but the last segment could "
+                                       "not record it: " + stamp.note +
+                             detail::STAMP_SKIPPED_CONSEQUENCE);
+      continue;
+    }
+    if (backup) {
+      report.backup_root = backup_root.string();
+      back_up_bytes(backup_root, channel + "/" + stamp.segment_stem + ".tmet.header",
+                    stamp.old_header);
+    }
+    detail::write_last_segment_stamp(stamp);
+    report.notes.push_back(channel + ": last segment stamped segment-repaired (header only): " +
+                           stamp.tmet.string());
   }
   report.applied = apply;
   return report;

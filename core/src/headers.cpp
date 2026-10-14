@@ -349,6 +349,8 @@ const char* operation_name(ui1 code) {
     case 3: return "header-repair";
     case 4: return "recovery";
     case 5: return "metadata-update";
+    // 6-8 reserved (anonymize #70, rename #72, transform #73): unknown here.
+    case 9: return "segment-repaired";
     default: return nullptr;
   }
 }

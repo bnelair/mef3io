@@ -159,6 +159,9 @@ struct ChannelInfo {
   // Section-3 (level-2) subject metadata: populated only when the password
   // grants L2 access (or the session is unencrypted); section3_available says.
   bool section3_available = false;
+  // Any segment carries password validation fields (metadata is encrypted at
+  // some level). The warm-start cache never snapshots such a session.
+  bool password_protected = false;
   std::string subject_name_1;
   std::string subject_name_2;
   std::string subject_id;

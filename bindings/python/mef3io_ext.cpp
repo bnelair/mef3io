@@ -133,6 +133,11 @@ nb::object provenance_dict(const mef3io::fmt::provenance::Provenance& p) {
 
 NB_MODULE(_mef3io, m) {
   m.attr("__version__") = mef3io::version();
+#ifdef MEF3IO_BUILD_ID
+  m.attr("__build_id__") = MEF3IO_BUILD_ID;  // see the top-level CMakeLists.txt
+#else
+  m.attr("__build_id__") = "";
+#endif
   m.doc() = "mef3io C++ backend (nanobind extension)";
   m.attr("__mef_version_major__") = mef3io::fmt::MEF_VERSION_MAJOR;
   m.attr("__mef_version_minor__") = mef3io::fmt::MEF_VERSION_MINOR;
@@ -207,6 +212,9 @@ NB_MODULE(_mef3io, m) {
         out["segments_examined"] = r.segments_examined;
         out["applied"] = r.applied;
         out["backup_root"] = r.backup_root;
+        nb::list notes;
+        for (const auto& n : r.notes) notes.append(n);
+        out["notes"] = notes;
         return out;
       },
       nb::arg("path"), nb::arg("apply") = false, nb::arg("backup") = true,
@@ -637,6 +645,15 @@ NB_MODULE(_mef3io, m) {
              return out;
            })
       .def_prop_ro("channels", &mef3io::Reader::channels)
+      .def(
+          "password_protected",
+          [](mef3io::Reader& r) {
+            for (const auto& ch : r.channels())
+              if (r.info(ch).password_protected) return true;
+            return false;
+          },
+          "Whether any segment's metadata is encrypted. The warm-start cache "
+          "never snapshots such a session.")
       .def(
           "declaration_issues",
           [](mef3io::Reader& r) {

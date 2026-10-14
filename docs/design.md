@@ -178,7 +178,7 @@ ABI shim (later) converts to codes. Bindings map to Python exceptions.
   under-declaring truncates the buffer it decodes into. The read path never consults these fields — it
   sizes from each block's own header — so older or foreign declarations stay
   readable. See `docs/mef3_format.md` and `docs/legacy_comparison.md`.
-- Any write invalidates caches for the session (see §6).
+- Writes never touch caches; a cached open detects the change (see §6).
 
 ### 4.6 Threading
 
@@ -241,19 +241,53 @@ storage; lazy open + mmap indices already fix the pathological local case).
     a foreign/stale cache file inside a session dir cannot surprise a
     default-configured reader.
   - `cache=None`: off.
-- **Contents:** format version, directory tree, per-file (relpath, size,
-  mtime) fingerprints, and **raw bytes of all `.tmet` files with encrypted
-  sections still encrypted** (decryption happens at load with the user's
-  password — cache never weakens the password scheme). Optional per-channel
-  block-count summaries. No `.tidx` contents (mmap makes that unnecessary).
-- **Correctness:** cache is purely an accelerator. On open, real files are
-  stat'd; any size/mtime/tree mismatch ⇒ affected entries ignored and
-  refreshed. A wrong cache can cost time, never correctness.
-- **Write interaction:** any `Writer` operation on a session **removes** the
-  auto-cache entry and any known persistent cache for it (removal, not
-  in-place update — updating duplicates reader logic and risks silent
-  divergence). Removal is best-effort cleanup; stat validation remains the
-  guarantee for caches the writer couldn't see or delete.
+- **Contents (original plan, not what was built):** per-file fingerprints and
+  the raw, still-encrypted `.tmet` bytes. The built cache stores decoded
+  channel infos instead, which is why it refuses encrypted sessions outright.
+- **As built** (`python/mef3io/cache.py`, cache format 6, issue #64): the
+  snapshot holds the channel infos, the open-time warnings, the exact mef3io
+  version that wrote it, and an O(1)-per-channel signature — no per-file
+  fingerprints and no `.tmet` bytes. A snapshot only makes sense while it is
+  small and cheaper than the open it replaces, so its size and the cost of
+  checking it are independent of the segment count (both test-pinned).
+- **Correctness:** checked only when a cached open happens. Refused (session
+  opened normally, fresh snapshot written) on a different mef3io version, or
+  when, per channel, the segment count, the start time in the first segment's
+  `.tmet` header, the end time and provenance region (offset 960: last
+  operation, version, modification count) in the last segment's `.tmet`
+  header, or the last segment's `.tdat`/`.tidx` sizes differ; or when the set
+  of channel folders or the session-level `.rdat`/`.ridx` sizes differ.
+  The two first/last `.tmet` file UUIDs are compared too (a same-samples
+  `overwrite=True` with new metadata), and the version includes the compiled
+  extension's identity. No snapshot is saved when segments ≤ channels;
+  a metadata-free marker sends later cached opens straight to a plain open.
+  **Blind spot, by design:** an in-place change to a non-last segment that
+  moves none of those is not detected: foreign tools, and mef3io's own repair
+  or recovery when its `segment-repaired` stamp on the last segment was skipped
+  (foreign region, bad CRC, a writer's temp file; the report says so). Opening
+  without `cache=` always re-reads everything. Last-segment sizes and the session-level record sizes
+  are read through `open` + `fstat`, not a bare `stat`, so an NFS client's
+  attribute cache cannot hide another host's append. Each `.timd` is always
+  listed; directory timestamps are never trusted (FUSE/object-store mounts
+  report constant ones).
+- **Encrypted sessions are never cached** (any level). Channel infos hold
+  decrypted metadata, which must not land in a plaintext file. No snapshot or
+  marker is written for one. The order on load is:
+  1. The cache file is parsed as JSON.
+  2. A well-formed marker of this build and session is returned at once. It
+     holds no metadata, and the Reader then opens normally. When that open
+     finds the session encrypted, the Reader deletes the marker.
+  3. For anything else, the encryption check runs **before** format, version
+     and session are compared. A file that parses as a JSON object with a
+     `format` key, meaning any mef3io snapshot or marker of any version
+     (1.1.x format-4 snapshots included), is deleted for an encrypted
+     session. Anything else is left alone, because an explicit `cache=<path>`
+     can name any file.
+- **Session identity:** snapshots and markers store a SHA-256 of the absolute
+  session path (`session_key`), never the path itself. It is only compared
+  for equality, and paths can carry a subject's name.
+- **Write interaction:** none. Write paths are cache-unaware and never touch a
+  snapshot; a stale one is refused at the next cached open.
 
 ## 7. Build & distribution
 

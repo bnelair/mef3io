@@ -117,8 +117,12 @@ enum class Operation : ui1 {
   HeaderRepair = 3,    ///< repair_session: declarations only, samples untouched
   Recovery = 4,        ///< recover_session: index and data reconciled
   MetadataUpdate = 5,  ///< reserved: descriptive metadata rewritten in place
+  // 6, 7, 8: reserved for anonymize (#70), rename (#72) and transform (#73).
+  // Not assigned here, so those issues can define them without a collision.
+  SegmentRepaired = 9, ///< stamped on a channel's LAST segment when repair or
+                       ///< recovery modified ANOTHER segment of that channel
 };
-inline constexpr ui1 MAX_CODE = 5;
+inline constexpr ui1 MAX_CODE = 9;
 static_assert(MAX_CODE < 32, "every operation code needs a bit in the 32-bit mask");
 
 /// Stable lowercase name of a code ("create", "append", ...); nullptr if unknown.

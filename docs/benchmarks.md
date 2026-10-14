@@ -48,9 +48,9 @@ decodes on all cores; mef_tools is single-threaded.
 | reader | open cold | open warm | first data cold | first data warm | 64 × 5-min windows cold | warm | 8 channels full cold | warm |
 |---|---|---|---|---|---|---|---|---|
 | mef3io, directory | 193 ms | 142 ms | 198 ms | 174 ms | 564 ms | 428 ms | 4.97 s | 4.76 s |
-| mef3io, directory + snapshot | 522 ms | 544 ms | 575 ms | 694 ms | 934 ms | 1.01 s | 5.27 s | 5.31 s |
+| mef3io, directory + snapshot¹ | 49 ms | 25 ms | 243 ms | 162 ms | 602 ms | 371 ms | 5.13 s | 4.67 s |
 | mef3io, `.mefd.tar` | 506 ms | 164 ms | 477 ms | 164 ms | 873 ms | 430 ms | 5.26 s | 4.84 s |
-| mef3io, `.mefd.tar` + snapshot | 9 ms | 6 ms | 487 ms | 165 ms | 867 ms | 397 ms | 5.21 s | 4.85 s |
+| mef3io, `.mefd.tar` + snapshot¹ | 15 ms | 11 ms | 563 ms | 143 ms | 969 ms | 398 ms | 6.32 s | 4.70 s |
 | mef_tools, directory | 819 ms | 804 ms | 1.03 s | 747 ms | 2.36 s | 3.45 s | 44.7 s | 42.2 s |
 | mef3io, directory written by mef_tools | 200 ms | 173 ms | 191 ms | 165 ms | 610 ms | 440 ms | 4.97 s | 4.72 s |
 
@@ -61,13 +61,31 @@ decodes on all cores; mef_tools is single-threaded.
 - **A tar archive reads like a directory once open.** A cold *open* is
   ~2.5× slower (0.5 s vs 0.2 s), because the archive's member index has to
   be read from disk. Warm, the two are the same.
-- **The snapshot cache helps tar archives and hurts directories.** On a tar,
-  `Reader(cache=...)` opens in under 10 ms, because validating the snapshot
-  is a single `stat` of the archive. On a directory it is ~2.7× *slower* than
-  no cache, cold and warm. Validating there hashes every segment's `.tmet`
-  (16 KB) and the start of every `.tidx`, which reads at least as much as a
-  plain open, and the JSON parse comes on top. This is a known issue, to be
-  fixed separately.
+- **The snapshot cache makes the *open* cheap; the first data read still pays
+  for the metadata.** A cached open (directory 49/25 ms cold/warm, tar
+  15/11 ms) serves `channels` and `info` without reading the session. Reading
+  data builds the backend, which reads every segment's metadata as an
+  uncached open would. That is why the snapshot rows match the uncached ones
+  from "first data" onward.
+- ¹ The two snapshot rows come from a re-run after issue #64 was fixed
+  (cache format 6). The other rows in that run agreed with the published ones
+  within noise. The original "directory + snapshot" row read **522 ms / 544 ms**
+  to open, ~2.7× *slower* than no cache. Validation then hashed every
+  segment's `.tmet` and the head of every `.tidx`, which is more I/O than the
+  open it replaced. Validation now costs the same whatever the number of
+  segments: per channel, one listing, two 1 KB header reads and two sizes
+  (see [the Python guide](python.md#warm-start-cache-opt-in)).
+
+  Measured on 64 channels with many short segments, each timing in a fresh
+  process:
+
+  | segments per channel | snapshot | plain open cold / warm | cached open cold / warm | bytes read, plain / cached |
+  |---|---|---|---|---|
+  | 150 (9,600 segments) | 60 KB | 3.0 s / 1.26 s | 54 ms / 25 ms | 157 MB / 0.6 MB |
+  | 600 (38,400 segments) | 60 KB | 29.6 s / 6.6 s | 108 ms / 95 ms | 629 MB / 0.6 MB |
+
+  The snapshot does not grow with the segment count. The cached open grows
+  only with the cost of listing each channel folder.
 - Packing the 2.2 GB session into a tar took 2.6–4.2 s.
 
 ## Long session: the real workload
