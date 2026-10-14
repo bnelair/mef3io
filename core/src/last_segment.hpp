@@ -14,7 +14,8 @@
 #pragma once
 
 #include <array>
-#include <chrono>
+#include <limits>
+#include <utility>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -31,65 +32,59 @@ namespace mef3io::detail {
 
 namespace fsys = std::filesystem;
 
-/// A segment whose last file changed this recently, or that holds a writer's
-/// temp file, is taken to be under an active writer. Stamping it then would
-/// race that writer's own header rewrite.
-inline constexpr auto ACTIVE_WRITE_WINDOW = std::chrono::minutes(2);
-
-/// "<channel>-NNNNNN" -> NNNNNN (-1 when there is no number).
+/// "<channel>-NNNNNN" -> NNNNNN; -1 unless everything after the last '-' is
+/// a digit. The SAME rule as the Python side (mef3io/cache.py _segment_key),
+/// ties broken by name, so both agree on which segment is a channel's last.
 inline long long segment_number_of(const std::string& stem) {
   const auto dash = stem.rfind('-');
   if (dash == std::string::npos || dash + 1 >= stem.size()) return -1;
-  try {
-    return std::stoll(stem.substr(dash + 1));
-  } catch (...) {
-    return -1;
+  long long n = 0;
+  for (std::size_t i = dash + 1; i < stem.size(); ++i) {
+    const char c = stem[i];
+    if (c < '0' || c > '9') return -1;
+    if (n > (std::numeric_limits<long long>::max() - 9) / 10) return -1;
+    n = n * 10 + (c - '0');
   }
+  return n;
 }
 
-/// The channel's last segment folder (highest segment number), or nullopt.
+/// The channel's last segment folder: highest segment number, then name.
 inline std::optional<fsys::path> last_segment_dir(const fsys::path& channel_dir) {
   std::optional<fsys::path> best;
-  long long best_n = -1;
+  std::pair<long long, std::string> best_key{-2, {}};
   std::error_code ec;
   for (const auto& e : fsys::directory_iterator(channel_dir, ec)) {
     if (!e.is_directory() || e.path().extension() != ".segd") continue;
-    const long long n = segment_number_of(e.path().stem().string());
-    if (!best || n > best_n) {
+    std::pair<long long, std::string> key{segment_number_of(e.path().stem().string()),
+                                          e.path().filename().string()};
+    if (!best || key > best_key) {
       best = e.path();
-      best_n = n;
+      best_key = std::move(key);
     }
   }
   return best;
 }
 
-/// Whether `channel_dir` looks like it is being written right now; `why` says
-/// what gave it away.
-inline bool channel_looks_active(const fsys::path& channel_dir, std::string& why) {
+/// A writer's temp file in the channel's last segment, if any. The writer
+/// publishes .tmet/.tidx through "<file>.mef3io-tmp" + rename, so one lying
+/// there means a write is in progress — or crashed and left it behind. Either
+/// way only the STAMP is skipped (with a note); the repair itself proceeds.
+/// Nothing is ever refused on "looks active" heuristics: after `cp -r` or
+/// extract_session every mtime is fresh, and a crash leaves the temp file
+/// forever, so a refusal would block exactly the legacy-repair workflow.
+inline std::optional<fsys::path> writer_temp_file(const fsys::path& channel_dir) {
   const auto last = last_segment_dir(channel_dir);
-  if (!last) return false;
-  const auto now = fsys::file_time_type::clock::now();
+  if (!last) return std::nullopt;
   std::error_code ec;
-  for (const auto& e : fsys::directory_iterator(*last, ec)) {
-    const std::string name = e.path().filename().string();
-    // The writer publishes .tmet/.tidx through "<file>.mef3io-tmp" + rename;
-    // one left lying there means a write is in flight (or was interrupted).
-    if (name.ends_with(".mef3io-tmp") || name.ends_with(".partial")) {
-      why = e.path().string() + " is a writer's in-flight file";
-      return true;
-    }
-    std::error_code tec;
-    const auto t = fsys::last_write_time(e.path(), tec);
-    if (!tec && now - t < ACTIVE_WRITE_WINDOW) {
-      why = e.path().string() + " was modified less than " +
-            std::to_string(std::chrono::duration_cast<std::chrono::seconds>(ACTIVE_WRITE_WINDOW)
-                               .count()) +
-            " s ago";
-      return true;
-    }
-  }
-  return false;
+  for (const auto& e : fsys::directory_iterator(*last, ec))
+    if (e.path().filename().string().ends_with(".mef3io-tmp")) return e.path();
+  return std::nullopt;
 }
+
+/// Appended to every note about a skipped stamp: what it means for readers.
+inline constexpr const char* STAMP_SKIPPED_CONSEQUENCE =
+    " Cached opens (Reader(cache=...)) will not see this repair until the channel is next "
+    "written, or until the session is opened without the cache.";
 
 /// A prepared stamp of the channel's last .tmet. `ready` false means nothing
 /// is to be written, and `note` (if set) says why — never an error.
@@ -111,6 +106,13 @@ inline LastSegmentStamp prepare_last_segment_stamp(const fsys::path& channel_dir
   }
   s.segment_stem = last->stem().string();
   s.tmet = *last / (s.segment_stem + ".tmet");
+  if (const auto tmp = writer_temp_file(channel_dir)) {
+    s.note = tmp->string() +
+             " is a writer's temp file, so a write may be in progress, and the last segment "
+             "was not stamped. If no writer is running it is left over from an interrupted "
+             "write and can be removed.";
+    return s;
+  }
   std::vector<ui1> file(fmt::METADATA_FILE_BYTES);
   {
     std::ifstream in(s.tmet, std::ios::binary);

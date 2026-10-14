@@ -52,8 +52,9 @@ struct RecoveryReport {
   si8 segments_examined = 0;
   bool applied = false;
   std::string backup_root;                  ///< empty when nothing was backed up
-  /// Informational, never an error: e.g. a channel's last segment could not
-  /// record a "segment-repaired" provenance stamp (foreign region, bad CRC).
+  /// Informational, never an error: a channel's last segment was stamped
+  /// "segment-repaired" (naming the file), or could not be (foreign region,
+  /// bad CRC, a writer's temp file present).
   std::vector<std::string> notes;
 
   /// True when every segment is self-consistent and nothing needs doing.

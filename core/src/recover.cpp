@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
-#include <map>
 #include <set>
 
 #include "durability.hpp"
@@ -125,34 +124,6 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
   if (!fsys::is_directory(path)) throw IoError("no such session directory: " + path);
 
   const fsys::path root(path);
-  if (apply) {
-    // A recovery that touches a NON-last segment also stamps the channel's
-    // last one; refuse outright if a writer may still be appending there.
-    // The dry run is the plan: it writes nothing.
-    std::map<fsys::path, std::string> active;
-    for (const auto& ch : fsys::directory_iterator(root)) {
-      std::string why;
-      if (ch.is_directory() && ch.path().extension() == ".timd" &&
-          detail::channel_looks_active(ch.path(), why))
-        active[ch.path()] = why;
-    }
-    if (!active.empty()) {
-      const RecoveryReport plan = recover_session(path, false, backup, password);
-      for (const auto& s : plan.segments) {
-        const fsys::path channel_dir = root / (s.channel + ".timd");
-        const auto it = active.find(channel_dir);
-        if (it == active.end()) continue;
-        const auto last = detail::last_segment_dir(channel_dir);
-        if (last && detail::segment_number_of(last->stem().string()) != s.segment_number)
-          throw IoError("refusing to recover " + path + ": segment " +
-                        std::to_string(s.segment_number) + " of channel '" + s.channel +
-                        "' needs recovery, which also stamps the channel's last segment, and "
-                        "that channel looks like it is being written (" + it->second +
-                        "). Re-run once the writer has stopped.");
-      }
-    }
-  }
-
   RecoveryReport report;
   std::set<fsys::path> channels_to_stamp;
   const fsys::path backup_root =
@@ -433,7 +404,8 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
     const std::string channel = channel_dir.stem().string();
     if (!stamp.ready) {
       report.notes.push_back(channel + ": a segment was recovered, but the last segment could "
-                                       "not record it: " + stamp.note);
+                                       "not record it: " + stamp.note +
+                             detail::STAMP_SKIPPED_CONSEQUENCE);
       continue;
     }
     if (backup) {
@@ -442,6 +414,8 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
                     stamp.old_header);
     }
     detail::write_last_segment_stamp(stamp);
+    report.notes.push_back(channel + ": last segment stamped segment-repaired (header only): " +
+                           stamp.tmet.string());
   }
   report.applied = apply;
   return report;

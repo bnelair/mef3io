@@ -10,7 +10,6 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
-#include <map>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -1718,33 +1717,41 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
   // LAST segment's .tmet says so (see last_segment.hpp). Header-only, backed up
   // like the repair's own writes. A stamp that cannot be applied is a note,
   // not an error: the repair itself already succeeded.
+  // Every outcome is reported as an Info finding `provenance.last-segment` on
+  // the last segment, so the report names each file this pass wrote.
   for (const auto& channel : channels_to_stamp) {
     const fsys::path channel_dir = fsys::path(path) / (channel + ".timd");
     const auto stamp = detail::prepare_last_segment_stamp(channel_dir);
     const std::string rel = channel + ".timd/" + stamp.segment_stem + ".segd/" +
                             stamp.segment_stem + ".tmet";
+    Finding note;
+    note.check_id = "provenance.last-segment";
+    note.severity = Severity::Info;
+    note.repairable = false;
+    note.channel = channel;
+    note.segment_number = static_cast<int>(detail::segment_number_of(stamp.segment_stem));
+    note.path = stamp.tmet.string();
+    note.field = "provenance";
     if (!stamp.ready) {
-      Finding note;
-      note.check_id = "provenance.last-segment";
-      note.severity = Severity::Info;
-      note.repairable = false;
-      note.channel = channel;
-      note.segment_number = static_cast<int>(detail::segment_number_of(stamp.segment_stem));
-      note.path = stamp.tmet.string();
-      note.field = "provenance";
       note.message = "a segment of this channel was repaired, but the last segment could not "
-                     "record it: " + stamp.note;
+                     "record it: " + stamp.note + detail::STAMP_SKIPPED_CONSEQUENCE;
       report.findings.push_back(std::move(note));
       continue;
     }
     try {
       if (repair->backup) back_up(stamp.tmet.string(), backup_root_for(path), rel);
       detail::write_last_segment_stamp(stamp);
+      note.stored = "written";
+      note.message = "last segment stamped segment-repaired (header only): " + rel +
+                     " records that an earlier segment of this channel was repaired";
+      report.findings.push_back(std::move(note));
     } catch (const std::exception& e) {
       std::string reason = std::string("aborted stamping segment-repaired: ") + e.what() +
                            " — MAY ALREADY BE MODIFIED: " + rel;
       reason += repair->backup ? "; restore from " + backup_root_for(path).string()
                                : "; no backup was taken (backup=false)";
+      reason += ".";
+      reason += detail::STAMP_SKIPPED_CONSEQUENCE;
       report.skipped.push_back({channel,
                                 static_cast<int>(detail::segment_number_of(stamp.segment_stem)),
                                 stamp.tmet.string(), reason});
@@ -1752,41 +1759,6 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
   }
 
   return report;
-}
-
-// Refuse a repair that would stamp a channel some writer is still appending
-// to. Cheap when no channel looks active (one directory listing per channel);
-// otherwise a read-only pass decides whether any repair would touch a
-// NON-last segment of an active channel — only those need the stamp.
-void refuse_if_being_written(const std::string& path, const RepairSelection& selection,
-                             const ValidateOptions& opts) {
-  std::map<std::string, std::pair<long long, std::string>> active;  // channel -> (last, why)
-  std::error_code ec;
-  for (const auto& e : fsys::directory_iterator(path, ec)) {
-    if (!e.is_directory() || e.path().extension() != ".timd") continue;
-    std::string why;
-    if (!detail::channel_looks_active(e.path(), why)) continue;
-    const auto last = detail::last_segment_dir(e.path());
-    active[e.path().stem().string()] = {
-        last ? detail::segment_number_of(last->stem().string()) : -1, why};
-  }
-  if (active.empty()) return;
-  const Report dry = run(path, opts, nullptr);
-  for (const auto& f : dry.findings) {
-    const auto it = active.find(f.channel);
-    if (it == active.end() || !f.repairable || f.segment_number == it->second.first) continue;
-    if (std::find(selection.check_ids.begin(), selection.check_ids.end(), f.check_id) ==
-        selection.check_ids.end())
-      continue;
-    if (!selected(selection.channels, f.channel) ||
-        !selected(selection.segments, f.segment_number))
-      continue;
-    throw IoError("refusing to repair " + path + ": segment " +
-                  std::to_string(f.segment_number) + " of channel '" + f.channel +
-                  "' would be repaired, which also stamps the channel's last segment, and "
-                  "that channel looks like it is being written (" + it->second.second +
-                  "). Re-run once the writer has stopped.");
-  }
 }
 
 }  // namespace
@@ -1804,7 +1776,6 @@ Report repair_session(const std::string& path, const RepairSelection& selection,
   if (path_has_suffix(path, ".tar"))
     throw IoError("cannot repair a tar session archive in place: " + path +
                   " (extract it first with extract_session)");
-  refuse_if_being_written(path, selection, opts);
   return run(path, opts, &selection);
 }
 

@@ -6,14 +6,15 @@ it was visible from the channel's last segment — the one file a reader that
 looks at one segment per channel (the warm-start snapshot check, for one) sees.
 So repair_session and recover_session also stamp the last segment's `.tmet`
 with the dedicated code `segment-repaired` (9): "a segment of this channel was
-repaired or recovered". Header-only, backed up, and skipped with a note — never
-an error — when the last segment's region belongs to another application or its
-CRC fails. A repair is refused outright while the channel looks like it is
-being written, because the stamp would race the writer.
+repaired or recovered". Header-only, backed up, and listed in the report. It
+is skipped with a note — never an error, never a refusal — when the last
+segment's region belongs to another application, its CRC fails, or a writer's
+temp file sits in it; the note says cached opens will not see the change.
+Nothing is refused on "looks active" heuristics (fresh mtimes after `cp -r` or
+extract_session are the normal legacy-repair workflow).
 """
 from __future__ import annotations
 
-import os
 import struct
 import sys
 from pathlib import Path
@@ -41,7 +42,7 @@ MAX_DIFF_BYTES = 6388
 REGION = 960
 SEGMENT_REPAIRED = 9
 HEADER_REPAIR = 3
-HOUR_NS = 3600 * 10**9
+
 
 
 def _write(path: Path):
@@ -54,15 +55,6 @@ def _write(path: Path):
 
 def _tmets(path: Path):
     return sorted((path / "ch1.timd").glob("*.segd/*.tmet"))
-
-
-def _age(path: Path):
-    """Make the session look idle: a channel touched in the last two minutes
-    counts as being written, and repair refuses to stamp it."""
-    for f in path.rglob("*"):
-        if f.is_file():
-            st = f.stat()
-            os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns - HOUR_NS))
 
 
 def _rewrite_tmet(tmet: Path, edit):
@@ -97,7 +89,6 @@ def session(tmp_path):
 def test_middle_repair_stamps_the_last_segment(session):
     middle, last = _tmets(session)[1], _tmets(session)[-1]
     _break_difference_bytes(middle)
-    _age(session)
     before = _region(last)
     before_bytes = after_bytes(last)
     body = last.read_bytes()[UH:]
@@ -128,7 +119,6 @@ def after_bytes(tmet):
 def test_last_segment_repair_adds_no_second_stamp(session):
     last = _tmets(session)[-1]
     _break_difference_bytes(last)
-    _age(session)
     before = _region(last)
     mef3io.repair_session(str(session), ["sizing.difference-bytes"], backup=False)
     after = _region(last)
@@ -140,7 +130,6 @@ def test_last_segment_repair_adds_no_second_stamp(session):
 def test_cached_open_rebuilds_after_a_middle_repair(session, tmp_path):
     middle = _tmets(session)[1]
     _break_difference_bytes(middle)
-    _age(session)
     cache = tmp_path / "snap.mef3cache"
     mef3io.Reader(str(session), cache=str(cache), warn_declarations=False)
     assert C.load_valid(cache, str(session)) is not None
@@ -153,7 +142,6 @@ def test_cached_open_rebuilds_after_a_middle_repair(session, tmp_path):
 def test_session_stays_valid_and_readable(session):
     middle = _tmets(session)[1]
     _break_difference_bytes(middle)
-    _age(session)
     expected = mef3io.Reader(str(session)).read("ch1")
     mef3io.repair_session(str(session), ["sizing.difference-bytes"], backup=False)
 
@@ -168,28 +156,45 @@ def test_session_stays_valid_and_readable(session):
     assert len(got) == n
 
 
-def test_repair_is_refused_while_the_channel_is_being_written(session):
-    middle = _tmets(session)[1]
-    _break_difference_bytes(middle)
-    _age(session)
-    os.utime(_tmets(session)[-1].with_suffix(".tdat"), None)  # an append just landed
-    raw = middle.read_bytes()
-    with pytest.raises(Exception, match="being written"):
-        mef3io.repair_session(str(session), ["sizing.difference-bytes"], backup=False)
-    assert middle.read_bytes() == raw, "a refused repair wrote something"
+def test_repair_right_after_extract_session_succeeds_and_stamps(session, tmp_path):
+    """The legacy-repair workflow: unpack (or `cp -r`) a session, repair it at
+    once. Every mtime is fresh, and nothing may be refused for that."""
+    _break_difference_bytes(_tmets(session)[1])
+    tar = mef3io.archive_session(str(session))
+    out = Path(mef3io.extract_session(tar, str(tmp_path / "x.mefd")))
+    report = mef3io.repair_session(str(out), ["sizing.difference-bytes"], backup=False)
+    assert report.segments_repaired == 1
+    last = _tmets(out)[-1]
+    assert _region(last)["last_op"] == SEGMENT_REPAIRED
+    stamped = [f for f in report.findings if f.check_id == "provenance.last-segment"]
+    assert len(stamped) == 1 and "stamped" in stamped[0].message
+    assert Path(stamped[0].path).name == last.name
 
 
-def test_repair_is_refused_while_a_writer_temp_file_exists(session):
-    middle = _tmets(session)[1]
+def test_stale_writer_temp_file_skips_only_the_stamp(session, tmp_path):
+    """A crash leaves `<file>.mef3io-tmp` behind for good. The repair must
+    still run; only the stamp is skipped, and the report says why, that the
+    file can be removed when no writer is running, and what cached opens will
+    miss."""
+    middle, last = _tmets(session)[1], _tmets(session)[-1]
     _break_difference_bytes(middle)
-    _age(session)
-    last = _tmets(session)[-1]
     tmp = last.with_name(last.name + ".mef3io-tmp")
     tmp.write_bytes(b"")
-    st = tmp.stat()
-    os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns - HOUR_NS))
-    with pytest.raises(Exception, match="in-flight"):
-        mef3io.repair_session(str(session), ["sizing.difference-bytes"], backup=False)
+    before = after_bytes(last)
+    cache = tmp_path / "snap.mef3cache"
+    mef3io.Reader(str(session), cache=str(cache), warn_declarations=False)
+
+    report = mef3io.repair_session(str(session), ["sizing.difference-bytes"], backup=False)
+    assert report.segments_repaired == 1
+    assert _region(middle)["last_op"] == HEADER_REPAIR
+    assert after_bytes(last) == before, "stamped despite a writer's temp file"
+    notes = [f for f in report.findings if f.check_id == "provenance.last-segment"]
+    assert len(notes) == 1 and notes[0].severity == "info"
+    assert tmp.name in notes[0].message and "can be removed" in notes[0].message
+    assert "Cached opens" in notes[0].message
+    assert not report.skipped
+    # Exactly the documented consequence: the cached open does not see it.
+    assert C.load_valid(cache, str(session)) is not None
 
 
 def test_foreign_region_is_skipped_with_a_note(session):
@@ -200,7 +205,6 @@ def test_foreign_region_is_skipped_with_a_note(session):
         raw[REGION:REGION + 64] = b"XYZW" + bytes(range(60))
 
     _rewrite_tmet(last, foreign)
-    _age(session)
     report = mef3io.repair_session(str(session), ["sizing.difference-bytes"], backup=False)
     assert report.segments_repaired == 1
     assert after_bytes(last) == b"XYZW" + bytes(range(60)), "another application's region"
@@ -214,7 +218,6 @@ def test_recovery_of_a_middle_segment_stamps_the_last(session):
     tdat = next(middle_dir.glob("*.tdat"))
     with open(tdat, "r+b") as f:  # an interrupted write: the last block is torn
         f.truncate(tdat.stat().st_size - 10)
-    _age(session)
     last = _tmets(session)[-1]
     before = _region(last)
     report = mef3io.recover_session(str(session), apply=True, backup=True)
@@ -223,3 +226,37 @@ def test_recovery_of_a_middle_segment_stamps_the_last(session):
     assert after["last_op"] == SEGMENT_REPAIRED
     assert after["count"] == before["count"] + 1
     assert after["mask"] & (1 << SEGMENT_REPAIRED)
+    assert any("stamped segment-repaired" in n and last.name in n for n in report.notes)
+
+
+def test_recovery_with_a_stale_temp_file_skips_only_the_stamp(session):
+    middle_dir = _tmets(session)[1].parent
+    tdat = next(middle_dir.glob("*.tdat"))
+    with open(tdat, "r+b") as f:
+        f.truncate(tdat.stat().st_size - 10)
+    last = _tmets(session)[-1]
+    (last.parent / (last.name + ".mef3io-tmp")).write_bytes(b"")
+    before = after_bytes(last)
+    report = mef3io.recover_session(str(session), apply=True, backup=False)
+    assert report.segments and report.applied
+    assert after_bytes(last) == before
+    assert any("can be removed" in n and "Cached opens" in n for n in report.notes)
+
+
+def test_cache_misses_a_middle_repair_when_the_stamp_is_skipped(session, tmp_path):
+    """Documented, not hidden: a foreign provenance region in the last segment
+    means the stamp is skipped, so a cached open still serves the pre-repair
+    snapshot. A plain open always sees the repair."""
+    middle, last = _tmets(session)[1], _tmets(session)[-1]
+    _break_difference_bytes(middle)
+
+    def foreign(raw):
+        raw[REGION:REGION + 64] = b"XYZW" + bytes(range(60))
+
+    _rewrite_tmet(last, foreign)
+    cache = tmp_path / "snap.mef3cache"
+    mef3io.Reader(str(session), cache=str(cache), warn_declarations=False)
+    report = mef3io.repair_session(str(session), ["sizing.difference-bytes"], backup=False)
+    note = [f for f in report.findings if f.check_id == "provenance.last-segment"][0]
+    assert "Cached opens" in note.message
+    assert C.load_valid(cache, str(session)) is not None
