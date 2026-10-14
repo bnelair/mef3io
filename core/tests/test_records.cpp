@@ -70,6 +70,7 @@ std::vector<ui1> seiz_body(si8 onset, si8 offset, si8 ch_onset, si8 ch_offset) {
 
 std::vector<ui1> rdat_image(const std::vector<std::vector<ui1>>& recs) {
   std::vector<ui1> f(fmt::UNIVERSAL_HEADER_BYTES, 0);
+  byteio::write<si8>(f, 32, static_cast<si8>(recs.size()));  // number_of_entries
   for (const auto& r : recs) f.insert(f.end(), r.begin(), r.end());
   return f;
 }
@@ -380,6 +381,81 @@ TEST_CASE("Record times follow the offset of the level they belong to") {
     REQUIRE(lenient.problems()[0].segment_number == -1);
     REQUIRE(lenient.records(std::nullopt, std::nullopt, Session::RecordLevels::All).size() == 2);
     REQUIRE(lenient.problems().size() == 1);                  // reported once
+    REQUIRE(lenient.problems()[0].kind == "records");
+
+    // The same through the C ABI, which reports the kind separately so
+    // mef3io_segment_problem keeps its layout.
+    mef3io_reader* r = nullptr;
+    REQUIRE(mef3io_reader_open_ex(dir.string().c_str(), "", 1, 0, &r) == MEF3IO_OK);
+    mef3io_record_list* list = nullptr;
+    REQUIRE(mef3io_reader_read_records(r, nullptr, -1, MEF3IO_RECORD_LEVEL_SESSION, &list) ==
+            MEF3IO_OK);
+    mef3io_record_list_free(list);
+    int32_t n = 0, kind = -1;
+    REQUIRE(mef3io_reader_n_problems(r, &n) == MEF3IO_OK);
+    REQUIRE(n == 1);
+    mef3io_segment_problem p{};
+    REQUIRE(mef3io_reader_problem(r, 0, &p) == MEF3IO_OK);
+    REQUIRE(p.segment_number == -1);
+    REQUIRE(mef3io_reader_problem_kind(r, 0, &kind) == MEF3IO_OK);
+    REQUIRE(kind == MEF3IO_PROBLEM_RECORDS);
+    REQUIRE(mef3io_reader_problem_kind(r, 1, &kind) == MEF3IO_ERR_ARGUMENT);
+    mef3io_reader_close(r);
   }
   fsys::remove_all(dir);
+}
+
+TEST_CASE("mef3io stores times plainly when an offset is in play") {
+  constexpr si8 RTO = 3 * 86400 * SEC;
+  REQUIRE(to_stored_time(T0, 0) == -T0);                        // byte-identical to before
+  REQUIRE(to_stored_time(T0, fmt::UUTC_NO_ENTRY) == -T0);
+  for (si8 t : {T0 + RTO - SEC, T0 + RTO, T0 + RTO + SEC}) {    // at, before and after rto
+    REQUIRE(to_stored_time(t, T0 + RTO) == t);
+    REQUIRE(to_user_time(to_stored_time(t, T0 + RTO), T0 + RTO) == t);
+  }
+  REQUIRE(to_stored_time(fmt::UUTC_NO_ENTRY, RTO) == fmt::UUTC_NO_ENTRY);
+}
+
+static std::vector<ui1> text_body(const std::string& s) {
+  std::vector<ui1> b(s.begin(), s.end());
+  b.push_back(0);
+  return b;
+}
+
+TEST_CASE("parse_records fails on damage instead of returning less") {
+  const auto good = rdat_image({make_record("Note", text_body("first"), -T0),
+                                make_record("Note", text_body("second"), -T0)});
+  REQUIRE(parse_records(good, 0).size() == 2);
+
+  SECTION("cut off mid-record") {
+    std::vector<ui1> img(good.begin(), good.end() - 10);
+    REQUIRE_THROWS_AS(parse_records(img, 0), FormatError);
+  }
+  SECTION("a body larger than the file") {
+    auto img = good;
+    byteio::write<ui4>(img, fmt::UNIVERSAL_HEADER_BYTES + 12, 0x7FFFFFF0u);
+    REQUIRE_THROWS_AS(parse_records(img, 0), FormatError);
+  }
+  SECTION("a flipped body byte fails the record CRC (meflib.c:1839)") {
+    auto img = good;
+    img[fmt::UNIVERSAL_HEADER_BYTES + fmt::RECORD_HEADER_BYTES] ^= 0x01;
+    REQUIRE_THROWS_AS(parse_records(img, 0), CrcError);
+  }
+  SECTION("fewer records than the universal header declares") {
+    auto img = good;
+    byteio::write<si8>(img, 32, 3);
+    REQUIRE_THROWS_AS(parse_records(img, 0), FormatError);
+  }
+  SECTION("an unknown count still stops cleanly at zero padding") {
+    auto img = good;
+    byteio::write<si8>(img, 32, -1);
+    img.resize(img.size() + 32, 0);
+    REQUIRE(parse_records(img, 0).size() == 2);
+  }
+  SECTION("a CRC of NO_ENTRY (0) is not checked") {
+    auto img = good;
+    byteio::write<ui4>(img, fmt::UNIVERSAL_HEADER_BYTES, 0u);
+    img[fmt::UNIVERSAL_HEADER_BYTES + fmt::RECORD_HEADER_BYTES] ^= 0x01;
+    REQUIRE(parse_records(img, 0).size() == 2);
+  }
 }

@@ -23,6 +23,8 @@ using byteio::write_fixed_code;
 using byteio::write_string;
 
 constexpr ui1 PAD_BYTE = 0x7e;
+constexpr si8 UNKNOWN_NUMBER_OF_ENTRIES = -1;  // meflib.h:232
+constexpr ui4 CRC_NO_ENTRY = 0;                // meflib.h:234
 
 // ---- body layouts (mefrec.h), offsets relative to the start of the BODY ----
 // Seiz 1.0 (mefrec.h:110-131)
@@ -254,12 +256,38 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
                                   const crypto::AccessKeys& keys, bool* offset_dependent) {
   std::vector<Record> out;
   TimeConv conv{rto};
+  if (rdat.size() < static_cast<std::size_t>(fmt::UNIVERSAL_HEADER_BYTES))
+    throw FormatError("record file smaller than its universal header (truncated?)");
+  // The universal header says how many records follow (meflib walks exactly
+  // that many when it is known, meflib.c:1869). A damaged file must FAIL —
+  // so the caller can contain it (strict raises, lenient skips and reports) —
+  // rather than come back silently short or with corrupted text.
+  const si8 declared = read<si8>(rdat, 32);  // number_of_entries
+  const bool count_known = declared != UNKNOWN_NUMBER_OF_ENTRIES;
   std::size_t off = fmt::UNIVERSAL_HEADER_BYTES;  // records follow the UH
 
-  while (off + fmt::RECORD_HEADER_BYTES <= rdat.size()) {
+  while (true) {
+    if (count_known && static_cast<si8>(out.size()) == declared) break;
+    if (off + fmt::RECORD_HEADER_BYTES > rdat.size()) {
+      // Out of bytes. Fine only when the count is unknown and nothing but
+      // zero padding is left; otherwise a record was cut off.
+      const bool clean_end =
+          !count_known && std::all_of(rdat.begin() + static_cast<std::ptrdiff_t>(off), rdat.end(),
+                                      [](ui1 c) { return c == 0; });
+      if (clean_end) break;
+      throw FormatError("record file truncated: " + std::to_string(out.size()) +
+                        " record(s) read" +
+                        (count_known ? " of " + std::to_string(declared) + " declared" : "") +
+                        ", then " + std::to_string(rdat.size() - off) +
+                        " byte(s), less than a record header");
+    }
     // Record header (24 B).
     std::string type = read_string(rdat, off + 4, 4);
-    if (type.empty()) break;  // padding / end
+    if (type.empty() && !count_known) break;  // zero padding after the last record
+    if (type.empty())
+      throw FormatError("record " + std::to_string(out.size()) + " of " +
+                        std::to_string(declared) + " declared has no type code (corrupt)");
+    const ui4 stored_crc = read<ui4>(rdat, off);
     ui1 vmaj = read<ui1>(rdat, off + 9);
     ui1 vmin = read<ui1>(rdat, off + 10);
     si1 enc = read<si1>(rdat, off + 11);
@@ -267,7 +295,17 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
     si8 time = read<si8>(rdat, off + 16);
 
     std::size_t body_off = off + fmt::RECORD_HEADER_BYTES;
-    if (body_off + body_bytes > rdat.size()) break;  // truncated
+    if (body_bytes > rdat.size() - body_off)
+      throw FormatError("record " + std::to_string(out.size()) + " claims " +
+                        std::to_string(body_bytes) + " body bytes but only " +
+                        std::to_string(rdat.size() - body_off) + " remain (truncated?)");
+    // Per-record CRC over the stored bytes [4, header + body) — the coverage
+    // meflib validates (meflib.c:1839). CRC_NO_ENTRY means "not computed".
+    if (stored_crc != CRC_NO_ENTRY &&
+        crc::calculate(rdat.subspan(off + 4, fmt::RECORD_HEADER_BYTES - 4 + body_bytes)) !=
+            stored_crc)
+      throw CrcError("record " + std::to_string(out.size()) + " (" + type +
+                     ") fails its CRC: the record is corrupt");
 
     // Decrypt the body if encrypted.
     std::vector<ui1> body(rdat.begin() + body_off, rdat.begin() + body_off + body_bytes);
@@ -297,8 +335,7 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
 
     // Advance. Records are laid out contiguously; body may be padded to a
     // 16-byte boundary when the file uses encryption alignment.
-    std::size_t advance = fmt::RECORD_HEADER_BYTES + body_bytes;
-    off += advance;
+    off = body_off + body_bytes;
   }
   if (offset_dependent) *offset_dependent = conv.offset_dependent;
   return out;
@@ -367,7 +404,8 @@ void write_file(const std::string& path, const std::vector<ui1>& bytes) {
 void write_records(const std::string& dir, const std::string& base,
                    const std::string& session_name, const std::string& channel_name,
                    int segment_number, const std::vector<Record>& records, si8 rto,
-                   const std::string& password_1, const std::string& password_2) {
+                   const std::string& password_1, const std::string& password_2,
+                   bool absolute_times) {
   if (records.empty()) return;
   // Reject bad type codes before touching the filesystem, so a rejected batch
   // never leaves a half-written .rdat/.ridx pair behind. Any 4-character code
@@ -419,7 +457,7 @@ void write_records(const std::string& dir, const std::string& base,
   std::vector<ui1> rdat_body;
   std::vector<ui1> ridx_body;
   ui4 max_entry = 0;
-  si8 start_disk = fmt::UUTC_NO_ENTRY, end_disk = fmt::UUTC_NO_ENTRY;
+  si8 min_time = fmt::UUTC_NO_ENTRY, max_time = fmt::UUTC_NO_ENTRY;  // absolute
 
   for (const Record* rp : ordered) {
     const Record& r = *rp;
@@ -436,7 +474,9 @@ void write_records(const std::string& dir, const std::string& base,
       std::copy(e.begin(), e.end(), body.begin());
     }
 
-    si8 disk_time = to_disk_time(r.time, rto);
+    // mef3io's write convention (time.hpp): -t when rto is 0, plain t
+    // otherwise -- or always plain t when the caller asks for it.
+    const si8 disk_time = absolute_times ? r.time : to_stored_time(r.time, rto);
     si8 file_offset = fmt::UNIVERSAL_HEADER_BYTES + static_cast<si8>(rdat_body.size());
 
     // Record header (24 B).
@@ -468,11 +508,16 @@ void write_records(const std::string& dir, const std::string& base,
     write<si8>(ie, 16, disk_time);
     ridx_body.insert(ridx_body.end(), ie.begin(), ie.end());
 
-    if (start_disk == fmt::UUTC_NO_ENTRY || disk_time > start_disk) start_disk = disk_time;
-    if (end_disk == fmt::UUTC_NO_ENTRY || disk_time < end_disk) end_disk = disk_time;
+    if (r.time != fmt::UUTC_NO_ENTRY) {
+      if (min_time == fmt::UUTC_NO_ENTRY || r.time < min_time) min_time = r.time;
+      if (max_time == fmt::UUTC_NO_ENTRY || r.time > max_time) max_time = r.time;
+    }
   }
 
   const si8 n = static_cast<si8>(ordered.size());
+  // Universal-header span, in the same convention as the record times.
+  const si8 start_disk = absolute_times ? min_time : to_stored_time(min_time, rto);
+  const si8 end_disk = absolute_times ? max_time : to_stored_time(max_time, rto);
   // .rdat
   {
     auto file = base_uh_bytes(fmt::FILE_TYPE_RECORD_DATA, session_name, channel_name,

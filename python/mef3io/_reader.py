@@ -234,11 +234,20 @@ class Reader:
 
     @property
     def problems(self) -> list:
-        """Segments that could not be read, when opened ``strict=False``.
+        """What a ``strict=False`` Reader skipped instead of raising.
 
-        A list of ``{"channel", "segment_number", "segment", "reason"}`` dicts,
-        empty when everything loaded. **Always empty in strict mode**, where an
-        unreadable segment raises instead of being skipped.
+        A list of ``{"channel", "segment_number", "segment", "reason",
+        "kind"}`` dicts, empty when everything loaded. **Always empty in strict
+        mode**, where the same failure raises instead. ``kind`` is:
+
+        * ``"segment"`` — a segment that could not be read; its time span
+          reads back as NaN. Found when the session is opened.
+        * ``"records"`` — one record (``.rdat``) file that could not be read
+          or placed, found by :meth:`records` (so the list can grow after the
+          open). Only its annotations are missing; the samples are unaffected.
+          ``segment`` is then the file's path, and ``segment_number`` is -1 for
+          a session- or channel-level file (``channel`` is ``""`` at session
+          level).
 
         Check it before trusting a read from a lenient Reader: a skipped
         segment's samples come back as NaN, exactly like a genuine gap, so the
@@ -248,7 +257,8 @@ class Reader:
         if impl is None:
             # Warm open: the backend is not built yet, so report what the
             # snapshot recorded rather than an empty list.
-            return list(self._cached_problems)
+            # (Snapshots written before "kind" existed only held segments.)
+            return [{"kind": "segment", **p} for p in self._cached_problems]
         fn = getattr(impl, "problems", None)
         return list(fn()) if fn is not None else []
 

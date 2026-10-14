@@ -282,6 +282,7 @@ assert(numel(probs) == 1, 'expected exactly one skipped segment');
 assert(strcmp(probs(1).channel, 'ch1'));
 assert(probs(1).segment == 1, 'the SECOND segment (number 1) is the bad one');
 assert(~isempty(probs(1).reason), 'a skipped segment must say why');
+assert(strcmp(probs(1).kind, 'segment'), 'a skipped segment is kind ''segment''');
 assert(numel(r.segments('ch1')) == 1, 'only the intact segment remains');
 isoGot = r.read('ch1');
 assert(sum(~isnan(isoGot)) == 2000, 'the intact segment must still read');

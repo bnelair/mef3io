@@ -156,6 +156,17 @@ int mef3io_reader_problem(mef3io_reader* r, int32_t index, mef3io_segment_proble
   });
 }
 
+int mef3io_reader_problem_kind(mef3io_reader* r, int32_t index, int32_t* out) {
+  if (!r || !out) return fail_argument("NULL argument");
+  return guarded([&] {
+    const auto& ps = r->impl.problems();
+    if (index < 0 || static_cast<size_t>(index) >= ps.size())
+      throw std::out_of_range("problem index out of range");
+    *out = ps[static_cast<size_t>(index)].kind == "records" ? MEF3IO_PROBLEM_RECORDS
+                                                            : MEF3IO_PROBLEM_SEGMENT;
+  });
+}
+
 int mef3io_reader_n_channels(mef3io_reader* r, int32_t* out) {
   if (!r || !out) return fail_argument("NULL argument");
   return guarded([&] { *out = static_cast<int32_t>(r->impl.channels().size()); });

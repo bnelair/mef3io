@@ -66,9 +66,29 @@ double get_scalar(const mxArray* a, const char* what) {
   return mxGetScalar(a);
 }
 
+// A double -> integer conversion of NaN, Inf or anything out of the target's
+// range is undefined behaviour, not an error, so every numeric argument that
+// becomes an integer is checked here first: finite, integral, in range.
+double checked_integral(const mxArray* a, const char* what, double lo, double hi) {
+  const double v = get_scalar(a, what);
+  if (!std::isfinite(v) || v != std::floor(v) || v < lo || v > hi)
+    fail("expected a finite integer in range for %s", what);
+  return v;
+}
+
 std::int64_t get_int64(const mxArray* a, const char* what) {
   if (mxIsInt64(a) && mxGetNumberOfElements(a) == 1) return *mxGetInt64s(a);
-  return static_cast<std::int64_t>(get_scalar(a, what));
+  // [-2^63, 2^63): the upper bound is exclusive because 2^63 itself is a
+  // double but not an int64.
+  constexpr double TWO63 = 9223372036854775808.0;
+  const double v = checked_integral(a, what, -TWO63, TWO63);
+  if (v >= TWO63) fail("expected a finite integer in range for %s", what);
+  return static_cast<std::int64_t>(v);
+}
+
+int get_int(const mxArray* a, const char* what) {
+  return static_cast<int>(checked_integral(a, what, static_cast<double>(INT32_MIN),
+                                           static_cast<double>(INT32_MAX)));
 }
 
 // [] -> "unset"; otherwise an int64/double uUTC.
@@ -208,7 +228,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     need_args(nrhs, 4, "archive_session");
     std::string session_dir = get_string(prhs[1], "session_dir");
     std::string tar_path = get_string(prhs[2], "tar_path");
-    int overwrite = static_cast<int>(get_scalar(prhs[3], "overwrite"));
+    int overwrite = get_int(prhs[3], "overwrite");
     char out_path[2048] = {0};
     check(mef3io_archive_session(session_dir.c_str(), tar_path.c_str(), overwrite, out_path,
                                  sizeof out_path));
@@ -218,8 +238,8 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
   if (cmd == "recover_session") {
     need_args(nrhs, 5, "recover_session");
     std::string path = get_string(prhs[1], "path");
-    int apply = static_cast<int>(get_scalar(prhs[2], "apply"));
-    int backup = static_cast<int>(get_scalar(prhs[3], "backup"));
+    int apply = get_int(prhs[2], "apply");
+    int backup = get_int(prhs[3], "backup");
     std::string password = get_string(prhs[4], "password");
     std::vector<char> summary(8192, 0);
     int64_t segments = 0;
@@ -233,7 +253,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     need_args(nrhs, 4, "extract_session");
     std::string tar_path = get_string(prhs[1], "tar_path");
     std::string dest_dir = get_string(prhs[2], "dest_dir");
-    int overwrite = static_cast<int>(get_scalar(prhs[3], "overwrite"));
+    int overwrite = get_int(prhs[3], "overwrite");
     char out_path[2048] = {0};
     check(mef3io_extract_session(tar_path.c_str(), dest_dir.c_str(), overwrite, out_path,
                                  sizeof out_path));
@@ -247,8 +267,8 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     if (nrhs < 4) need_args(nrhs, 4, "reader_open");
     std::string path = get_string(prhs[1], "path");
     std::string password = get_string(prhs[2], "password");
-    int n_threads = static_cast<int>(get_scalar(prhs[3], "n_threads"));
-    int strict = nrhs >= 5 ? static_cast<int>(get_scalar(prhs[4], "strict")) : 1;
+    int n_threads = get_int(prhs[3], "n_threads");
+    int strict = nrhs >= 5 ? get_int(prhs[4], "strict") : 1;
     mef3io_reader* r = nullptr;
     check(mef3io_reader_open_ex(path.c_str(), password.c_str(), n_threads, strict, &r));
     track(g_readers, reinterpret_cast<std::uint64_t>(r));
@@ -260,11 +280,15 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     mef3io_reader* r = get_reader(prhs[1]);
     int32_t n = 0;
     check(mef3io_reader_n_problems(r, &n));
-    const char* fields[] = {"channel", "segment", "path", "reason"};
-    plhs[0] = mxCreateStructMatrix(n > 0 ? 1 : 0, n > 0 ? static_cast<mwSize>(n) : 0, 4, fields);
+    const char* fields[] = {"channel", "segment", "path", "reason", "kind"};
+    plhs[0] = mxCreateStructMatrix(n > 0 ? 1 : 0, n > 0 ? static_cast<mwSize>(n) : 0, 5, fields);
     for (int32_t i = 0; i < n; ++i) {
       mef3io_segment_problem p{};
       check(mef3io_reader_problem(r, i, &p));
+      std::int32_t kind = MEF3IO_PROBLEM_SEGMENT;
+      check(mef3io_reader_problem_kind(r, i, &kind));
+      mxSetField(plhs[0], i, "kind",
+                 make_utf8_string(kind == MEF3IO_PROBLEM_RECORDS ? "records" : "segment"));
       mxSetField(plhs[0], i, "channel", make_utf8_string(p.channel));
       mxSetField(plhs[0], i, "segment", mxCreateDoubleScalar(p.segment_number));
       mxSetField(plhs[0], i, "path", make_utf8_string(p.segment));
@@ -565,7 +589,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
   if (cmd == "writer_open") {
     need_args(nrhs, 5, "writer_open");
     std::string path = get_string(prhs[1], "path");
-    int overwrite = static_cast<int>(get_scalar(prhs[2], "overwrite"));
+    int overwrite = get_int(prhs[2], "overwrite");
     std::string p1 = get_string(prhs[3], "password1");
     std::string p2 = get_string(prhs[4], "password2");
     mef3io_writer* w = nullptr;
@@ -584,7 +608,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
   if (cmd == "writer_set_durable") {
     need_args(nrhs, 3, "writer_set_durable");
     check(mef3io_writer_set_durable(get_writer(prhs[1]),
-                                    static_cast<int>(get_scalar(prhs[2], "durable"))));
+                                    get_int(prhs[2], "durable")));
     return;
   }
   if (cmd == "writer_set_units") {
@@ -644,7 +668,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
   if (cmd == "writer_set_threads") {
     need_args(nrhs, 3, "writer_set_threads");
     check(mef3io_writer_set_threads(get_writer(prhs[1]),
-                                    static_cast<int>(get_scalar(prhs[2], "n_threads"))));
+                                    get_int(prhs[2], "n_threads")));
     return;
   }
   if (cmd == "writer_write" || cmd == "writer_write_int32") {
@@ -660,8 +684,8 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
       std::int64_t n = static_cast<std::int64_t>(mxGetNumberOfElements(prhs[3]));
       std::int64_t start = get_int64(prhs[4], "start_uutc");
       double fs = get_scalar(prhs[5], "fs");
-      int precision = static_cast<int>(get_scalar(prhs[6], "precision"));
-      int new_segment = nrhs > 7 ? static_cast<int>(get_scalar(prhs[7], "new_segment")) : 0;
+      int precision = get_int(prhs[6], "precision");
+      int new_segment = nrhs > 7 ? get_int(prhs[7], "new_segment") : 0;
       check(mef3io_writer_write_float(w, ch.c_str(), mxGetDoubles(prhs[3]), n, start, fs,
                                       precision, new_segment, &sum));
     } else {
@@ -690,7 +714,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
       double ufact = get_scalar(prhs[5], "ufact");
       std::int64_t start = get_int64(prhs[6], "start_uutc");
       double fs = get_scalar(prhs[7], "fs");
-      int new_segment = nrhs > 8 ? static_cast<int>(get_scalar(prhs[8], "new_segment")) : 0;
+      int new_segment = nrhs > 8 ? get_int(prhs[8], "new_segment") : 0;
       check(mef3io_writer_write_int32(w, ch.c_str(), mxGetInt32s(prhs[3]), valid, n, ufact,
                                       start, fs, new_segment, &sum));
     }

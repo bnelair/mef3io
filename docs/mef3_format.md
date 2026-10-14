@@ -41,10 +41,22 @@ quirks matter:
   `t >= 0 ? t : -t + rto`, where `rto` (the recording time offset) lives in
   metadata section 3. This applies to universal-header start/end times, block
   start times, and record header times alike (record body times: see
-  [Records](#records-rdat-ridx-annotations)). mef3io writes time-series data
-  with `rto = 0`; records it writes into an existing session use the offset
-  that session's section 3 already holds, so they read back as given. The
-  rule is implemented once, in `core/include/mef3io/time.hpp`.
+  [Records](#records-rdat-ridx-annotations)). The rule is implemented once,
+  in `core/include/mef3io/time.hpp`.
+- **What mef3io writes.** Times are UTC, always; reading returns UTC.
+  - **rto = 0** (every session mef3io creates): times are stored as `−t`, the
+    form shown above. The bytes are unchanged from earlier releases.
+  - **rto ≠ 0** (only in a foreign session that used meflib's anonymization,
+    which mef3io is extending): times — data, index, header and record times
+    alike — are stored as **plain positive absolute UTC**. Every reader takes
+    a non-negative time as absolute (meflib.c:7665), so no offset arithmetic
+    is involved and it cannot be wrong for any `t`. The negated form `rto − t`
+    would be wrong for `t ≤ rto`: it turns non-negative and reads back near
+    1970.
+  - **New segments and channels.** When mef3io adds a segment or channel to a
+    session whose existing segments all agree on a non-zero `rto`, the new
+    segment's section 3 carries that same `rto`. The session keeps agreeing,
+    so its existing (legacy) records stay readable.
 - The empty value ("no entry") for a time is `INT64_MIN`.
 
 ## Universal header — 1024 B, prefixes every file
@@ -351,11 +363,11 @@ the global offset left by whichever `.tmet` it read last (meflib.c:1806 →
 (meflib.c:5529, 6208) is only the metadata aggregate. Following the read order
 would misplace the records by the difference without a word.
 
-**Writing.** mef3io stores the records it writes with the same offset the
-reader will use for that level — 0 for a session mef3io wrote (so those bytes
-are unchanged from earlier releases), section 3's value for, e.g., a legacy
-session written with `record_offset`. If the level's segments disagree, the
-write is refused (`WriteConflictError`).
+**Writing.** Record times follow the rule in [Times](#times):
+- **rto = 0 level:** stored as `−t`, byte-identical to earlier releases.
+- **Non-zero rto, or segments that disagree on it:** stored as plain absolute
+  UTC. The reader places such a file whatever the offset is, so writing to a
+  disputed level succeeds.
 
 meflib applies the offset to the record **header** only (meflib.c:1846);
 `mefrec.c` never rewrites a body. It does, however, display every body time

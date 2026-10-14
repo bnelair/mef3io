@@ -699,6 +699,7 @@ NB_MODULE(_mef3io, m) {
                e["segment_number"] = p.segment_number;
                e["segment"] = p.segment;
                e["reason"] = p.reason;
+               e["kind"] = p.kind;
                out.append(e);
              }
              return out;

@@ -65,10 +65,10 @@ class SessionWriter {
 
   /// Write records (annotations). @p channel nullopt -> session-level (in the
   /// `.mefd` root), otherwise channel-level. Replaces the records at that level.
-  /// Times are stored with the recording-time offset the reader will resolve
-  /// them with (records_rto): 0 for a session mef3io wrote, section 3's value
-  /// for one that carries an offset. Throws WriteConflictError when the
-  /// level's segments disagree on it.
+  /// Times are stored so the reader places them as given: -t (meflib's
+  /// marker) when the level's segments are at offset 0 — every session
+  /// mef3io creates, byte-identical to earlier releases — and plain absolute
+  /// UTC when they carry a non-zero offset or disagree on one.
   void write_records(std::optional<std::string> channel, const std::vector<Record>& records);
 
   // Optional override for the RED block length (samples per block). <= 0 uses
@@ -132,11 +132,13 @@ class SessionWriter {
   // Load fs/ufact/total_samples/last_end_uutc from the channel's last segment
   // on disk (for sessions reopened with overwrite=false). No-op once hydrated.
   void hydrate(const std::string& channel, ChannelState& st);
-  // The recording-time offset records at this level are written with: the
-  // one every on-disk segment of the channel (or session) agrees on, i.e.
-  // what the reader will resolve them with. Throws WriteConflictError when
-  // the segments disagree.
-  si8 records_rto(const std::optional<std::string>& channel) const;
+  // The recording-time offset every on-disk segment of the channel (or the
+  // whole session) agrees on — what the reader resolves that level with.
+  // nullopt when they disagree, 0 when there are none.
+  std::optional<si8> agreed_disk_rto(const std::optional<std::string>& channel) const;
+  // The offset NEW segments are written with (see session_writer.cpp).
+  si8 session_rto();
+  std::optional<si8> session_rto_;  // cached by session_rto()
   WriteSummary write_blocks(const std::string& channel, const std::vector<si4>& samples,
                             std::span<const ui1> valid, sf8 ufact, si8 start_uutc, sf8 fs,
                             bool new_segment);

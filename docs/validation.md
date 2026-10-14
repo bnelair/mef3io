@@ -403,14 +403,24 @@ To salvage the rest:
 ```python
 r = mef3io.Reader("subject.mefd", strict=False)
 for p in r.problems:
-    print(p["channel"], p["segment_number"], p["segment"], p["reason"])
+    print(p["kind"], p["channel"], p["segment_number"], p["segment"], p["reason"])
 x = r.read("ch1")        # the intact segments; the skipped one reads as NaN
 ```
 
 ```matlab
 r = mef3io.Reader(path, '', 0, false);   % path, password, nThreads, strict
-p = r.problems();                         % channel, segment, path, reason
+p = r.problems();                         % channel, segment, path, reason, kind
 ```
+
+`kind` tells the two kinds of skip apart:
+
+- `"segment"` — a segment that could not be read, found on open; its span
+  reads back as NaN.
+- `"records"` — one record (`.rdat`) file that `records()` could not read or
+  place. Only those annotations are missing; the samples are untouched.
+  `segment_number` is -1 for a session- or channel-level file. The list grows
+  when `records()` finds one, and `records()` warns
+  (`UnreadableSegmentWarning`, or `mef3io:unreadableRecords` in MATLAB).
 
 !!! warning "Check `problems` before you trust the data"
     A skipped segment's span comes back as `NaN`, indistinguishable in the

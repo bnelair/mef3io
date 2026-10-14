@@ -56,10 +56,16 @@ classdef Reader < handle
             %PROBLEMS Segments that could not be read, when opened lenient.
             %   p = r.problems()
             %
-            % Struct array with fields channel, segment, path, reason. Always
-            % empty for a Reader opened strict (the default), where such a
-            % segment raises instead of being skipped. Mirrors Python's
-            % Reader.problems.
+            % Struct array with fields channel, segment, path, reason, kind.
+            % Always empty for a Reader opened strict (the default), where the
+            % same failure raises instead of being skipped. kind is:
+            %   'segment' - the segment could not be read; its span reads
+            %               back as NaN (found when the session is opened).
+            %   'records' - one record (.rdat) file was skipped by records();
+            %               only its annotations are missing. path is the
+            %               file, and segment is -1 for a session- or
+            %               channel-level file.
+            % Mirrors Python's Reader.problems.
             p = mef3io_mex('reader_problems', obj.h);
         end
 
@@ -132,10 +138,23 @@ classdef Reader < handle
             % e.g. a Seiz record's channels struct array (name/onset/offset).
             % Body times are absolute uUTC like time. Mirrors Python's
             % Reader.records(channel, segment, level).
+            %
+            % A lenient Reader skips a record file it cannot read or place,
+            % lists it in problems() (kind 'records') and warns with
+            % mef3io:unreadableRecords, as Python does.
             if nargin < 2, channel = []; end
             if nargin < 3, segment = []; end
             if nargin < 4, level = []; end
+            nBefore = numel(mef3io_mex('reader_problems', obj.h));
             s = mef3io_mex('reader_records', obj.h, channel, segment, level);
+            p = mef3io_mex('reader_problems', obj.h);
+            if numel(p) > nBefore
+                added = p(nBefore + 1:end);
+                warning('mef3io:unreadableRecords', ...
+                    ['%d record file(s) could not be read and were SKIPPED. ' ...
+                     'First: %s - %s. Full list in problems().'], ...
+                    numel(added), added(1).path, added(1).reason);
+            end
         end
     end
 end

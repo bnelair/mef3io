@@ -126,12 +126,16 @@ std::vector<Record> parse_records(std::span<const ui1> rdat_bytes, si8 rto,
                                    bool* offset_dependent = nullptr);
 
 // Write records to `<dir>/<base>.rdat` + `<base>.ridx`. `session_name`/
-// `channel_name` populate the universal headers; `rto` sets the on-disk time
-// convention. When `password_1`/`password_2` are set, record bodies are
-// level-2 encrypted (meflib convention: records may hold identifying data).
+// `channel_name` populate the universal headers. Times are stored with
+// to_stored_time(t, rto) (time.hpp): -t when `rto` is 0, plain absolute t
+// otherwise; `absolute_times` forces plain t (for a level whose offset is
+// disputed — a non-negative time needs no offset to read). When
+// `password_1`/`password_2` are set, record bodies are level-2 encrypted
+// (meflib convention: records may hold identifying data).
 void write_records(const std::string& dir, const std::string& base,
                    const std::string& session_name, const std::string& channel_name,
                    int segment_number, const std::vector<Record>& records, si8 rto,
-                   const std::string& password_1 = "", const std::string& password_2 = "");
+                   const std::string& password_1 = "", const std::string& password_2 = "",
+                   bool absolute_times = false);
 
 }  // namespace mef3io

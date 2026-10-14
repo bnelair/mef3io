@@ -48,10 +48,14 @@ struct SegmentReader {
 /// missing data — which is why the list matters: silently returning NaN where
 /// data should be is its own hazard.
 struct SegmentProblem {
-  std::string channel;
+  std::string channel;   ///< "" for a session-level record file
+  /// The segment's number; -1 for a session- or channel-level record file.
   int segment_number = 0;
-  std::string segment;   ///< human-readable segment location
+  std::string segment;   ///< human-readable location (segment dir or record file)
   std::string reason;    ///< the exception that was contained
+  /// "segment": the segment could not be read and its span reads back as a
+  /// gap. "records": one record (.rdat) file was skipped; samples unaffected.
+  std::string kind = "segment";
 };
 
 // A decode job: where a block lives (index into an owned buffer) and where its

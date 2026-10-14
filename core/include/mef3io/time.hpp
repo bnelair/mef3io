@@ -50,4 +50,19 @@ constexpr si8 to_disk_time(si8 absolute, si8 rto) noexcept {
   return saturating_add(effective_rto(rto), -absolute);  // -absolute fits likewise
 }
 
+/// How mef3io WRITES a time (header, index, block and record times alike).
+///
+///   * rto == 0 (every session mef3io creates): meflib's marker, -t. Byte-
+///     identical to every earlier release.
+///   * rto != 0 (only in a foreign session that used meflib's anonymization,
+///     which mef3io extends): plain absolute UTC, t. Every reader takes a
+///     non-negative stored time as absolute (remove_recording_time_offset,
+///     meflib.c:7665), so no offset arithmetic is involved and nothing can go
+///     wrong for any t. The negated form `rto - t` would turn NON-NEGATIVE for
+///     t <= rto and be read back as a time near 1970.
+constexpr si8 to_stored_time(si8 absolute, si8 rto) noexcept {
+  if (absolute == fmt::UUTC_NO_ENTRY) return absolute;
+  return effective_rto(rto) == 0 ? to_disk_time(absolute, 0) : absolute;
+}
+
 }  // namespace mef3io

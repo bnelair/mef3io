@@ -296,7 +296,14 @@ void Session::read_record_file(std::vector<Record>& out, const std::string& rdat
                         "-level records cannot be placed: " + why +
                         " and the file stores offset-dependent (negated) times, so any "
                         "choice would misplace them by the difference: " +
-                        source_->describe(rdat_path));
+                        source_->describe(rdat_path) +
+                        (level == RecordLevel::Channel
+                             ? ". records(\"" + channel + "\", level=\"segment\") still "
+                               "returns this channel's segment-level records"
+                             : std::string(level == RecordLevel::Session
+                                               ? ". records(level=\"channel\") and "
+                                                 "records(level=\"segment\") still read"
+                                               : "")));
     for (auto& rec : recs) {
       rec.level = level;
       rec.channel = channel;
@@ -320,7 +327,7 @@ void Session::read_record_file(std::vector<Record>& out, const std::string& rdat
   } catch (const std::exception& e) {
     if (reported_record_files_.insert(rdat_path).second)
       problems_.push_back(SegmentProblem{channel, segment, source_->describe(rdat_path),
-                                         std::string("records: ") + e.what()});
+                                         std::string("records: ") + e.what(), "records"});
   }
 }
 

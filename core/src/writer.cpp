@@ -275,7 +275,7 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
   parallel_for(nb, n_threads, [&](std::size_t i) {
     // RED data blocks are written unencrypted (matches meflib default), even
     // when metadata is encrypted.
-    encoded[i] = red::encode_block(blocks[i].samples, to_disk_time(blocks[i].start_uutc, rto),
+    encoded[i] = red::encode_block(blocks[i].samples, to_stored_time(blocks[i].start_uutc, rto),
                                    blocks[i].discontinuity, bmin[i], bmax[i]);
   });
 
@@ -296,7 +296,7 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     // file_offset is relative to the start of the .tdat file (i.e. includes the
     // 1024-byte universal header), matching meflib.
     e.file_offset = static_cast<si8>(fmt::UNIVERSAL_HEADER_BYTES + tdat_body.size());
-    e.start_time = to_disk_time(blk.start_uutc, rto);
+    e.start_time = to_stored_time(blk.start_uutc, rto);
     e.start_sample = blk.start_sample;
     e.number_of_samples = static_cast<ui4>(blk.samples.size());
     e.block_bytes = static_cast<ui4>(encoded[i].size());
@@ -321,8 +321,8 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     total_samples += static_cast<si8>(blk.samples.size());
   }
 
-  const si8 start_disk = to_disk_time(first_start, rto);
-  const si8 end_disk = to_disk_time(last_end, rto);
+  const si8 start_disk = to_stored_time(first_start, rto);
+  const si8 end_disk = to_stored_time(last_end, rto);
   const si8 n_blocks = static_cast<si8>(blocks.size());
   const auto level_uuid = random_uuid();
 
@@ -498,7 +498,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   std::vector<std::vector<ui1>> encoded(nb);
   std::vector<si4> bmin(nb, 0), bmax(nb, 0);
   parallel_for(nb, n_threads, [&](std::size_t i) {
-    encoded[i] = red::encode_block(blocks[i].samples, to_disk_time(blocks[i].start_uutc, rto),
+    encoded[i] = red::encode_block(blocks[i].samples, to_stored_time(blocks[i].start_uutc, rto),
                                    blocks[i].discontinuity, bmin[i], bmax[i]);
   });
 
@@ -515,7 +515,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     const auto& blk = blocks[i];
     fmt::TimeSeriesIndex e;
     e.file_offset = running_offset;
-    e.start_time = to_disk_time(blk.start_uutc, rto);
+    e.start_time = to_stored_time(blk.start_uutc, rto);
     e.start_sample = blk.start_sample;
     e.number_of_samples = static_cast<ui4>(blk.samples.size());
     e.block_bytes = static_cast<ui4>(encoded[i].size());
@@ -535,7 +535,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     last_end = blk.start_uutc + static_cast<si8>(std::llround(blk.samples.size() * 1e6 / fs_hz));
     appended_samples += static_cast<si8>(blk.samples.size());
   }
-  const si8 end_disk = to_disk_time(last_end, rto);
+  const si8 end_disk = to_stored_time(last_end, rto);
 
   // --- Read the current .tdat header and advance its resumable body CRC with
   // the new bytes in memory. The Koopman CRC has no final XOR, so the stored

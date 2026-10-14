@@ -280,11 +280,16 @@ class MefWriter:
     @property
     def record_offset(self) -> int:
         """Kept for legacy compatibility; non-zero values are accepted and
-        ignored. mef3io writes its time-series data with a zero
-        recording-time offset, and stores records with whatever offset the
-        session's section 3 already holds (0 for a session mef3io wrote, the
-        legacy value for an older session it appends to), so annotation times
-        always read back as given."""
+        ignored -- mef3io never creates a recording-time offset.
+
+        Times are UTC, always. A new session is written at offset 0 with
+        times stored as -t, as before. A session that already carries a
+        non-zero offset (e.g. one the legacy stack wrote with
+        ``record_offset``) has its offset reused for the segments and
+        channels mef3io adds, so its existing annotations stay readable. All
+        times mef3io writes there -- data and annotations -- are stored as
+        plain absolute UTC, so they read back exactly as given, even at or
+        before the offset."""
         return self._record_offset
 
     @record_offset.setter

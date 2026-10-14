@@ -62,16 +62,25 @@ int mef3io_reader_open_ex(const char* mefd_path, const char* password, int n_thr
 void mef3io_reader_close(mef3io_reader* r);
 
 typedef struct {
-  char channel[256];
-  int32_t segment_number;
-  char segment[1024];  /* human-readable segment location */
-  char reason[512];    /* why it could not be read */
+  char channel[256];      /* "" for a session-level record file */
+  int32_t segment_number; /* -1 for a session- or channel-level record file */
+  char segment[1024];     /* human-readable location (segment dir or record file) */
+  char reason[512];       /* why it could not be read */
 } mef3io_segment_problem;
 
-/* Segments skipped because they could not be read. Always 0 for a reader
- * opened strict, where such a segment fails the open instead. */
+/* What a lenient reader skipped. Always 0 for a reader opened strict, where
+ * the same failure raises instead. Two kinds (mef3io_reader_problem_kind):
+ * a SEGMENT that could not be read (its span reads back as a gap), and a
+ * RECORD (.rdat) file that could not be read or placed (records only; the
+ * samples are unaffected). Record-file problems are added by the records
+ * calls, so the count can grow after the open. */
+#define MEF3IO_PROBLEM_SEGMENT 0
+#define MEF3IO_PROBLEM_RECORDS 1
 int mef3io_reader_n_problems(mef3io_reader* r, int32_t* out);
 int mef3io_reader_problem(mef3io_reader* r, int32_t index, mef3io_segment_problem* out);
+/* MEF3IO_PROBLEM_SEGMENT or MEF3IO_PROBLEM_RECORDS for problem `index`. (A
+ * separate call so mef3io_segment_problem keeps its size and layout.) */
+int mef3io_reader_problem_kind(mef3io_reader* r, int32_t index, int32_t* out);
 
 int mef3io_reader_n_channels(mef3io_reader* r, int32_t* out);
 int mef3io_reader_channel_name(mef3io_reader* r, int32_t index, char* buf, size_t buf_bytes);
