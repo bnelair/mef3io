@@ -28,7 +28,9 @@ release:
 - [ ] `examples/README.md` and the example scripts it lists
 - [ ] `pyproject.toml`: `description`, `keywords`, `classifiers`
 - [ ] `CITATION.cff`
-- [ ] the release-notes draft: what changed, what an upgrading user must do
+- [ ] the release notes: draft what changed and what an upgrading user must
+      do. The release workflow publishes GitHub's generated notes; replace
+      them with the reviewed draft (edit the release) as soon as it is out.
 
 Nothing in these may state a fact that goes stale on its own (test counts,
 "currently", dates of past work); link to the release notes instead.

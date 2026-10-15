@@ -5,7 +5,7 @@ compressed, optionally encrypted format used for long intracranial and scalp
 EEG recordings — from **Python**, **MATLAB** and **C++**. One C++ core does
 the work, so every language reads and writes the same files the same way.
 Sessions written by mef3io open in the established MEF 3.0 tools (pymef,
-mef_tools, meflib-based viewers), and sessions written by those tools open in
+mef_tools, and viewers built on meflib, the reference C library), and sessions written by those tools open in
 mef3io.
 
 [![PyPI](https://img.shields.io/pypi/v/mef3io)](https://pypi.org/project/mef3io/)
@@ -46,8 +46,8 @@ with mef3io.Writer("session.mefd", overwrite=True, units="uV") as w:
 with mef3io.Reader("session.mefd") as r:
     print(r.channels)                     # ['eeg1']
     x = r.read("eeg1", start, start + 10_000_000)  # first 10 s, float64, gaps = NaN
-    r.segments("eeg1")                    # what data is where
-    r.records("eeg1")                     # annotations
+    print(r.segments("eeg1"))             # what data is where
+    print(r.records("eeg1"))              # annotations
 ```
 
 The same session in MATLAB:
@@ -71,8 +71,8 @@ More: the [Python](https://bnelair.github.io/mef3io/python/),
   `NaN` on the sampling grid, never silently stitched together;
   `read_raw` returns the raw integer samples with a validity mask.
 - **Recordings that keep growing.** A session can be appended to for days or
-  months; each append costs time in proportion to the new data only. If a
-  write is interrupted, the session can be checked and recovered —
+  months; with one `Writer` kept open, each append costs time in proportion
+  to the new data, not to the recording so far. If a write is interrupted, the session can be checked and recovered —
   see [Long recordings](https://bnelair.github.io/mef3io/long_recordings/) and
   [Validating and repairing](https://bnelair.github.io/mef3io/validation/).
 - **Existing data and code.** It reads MEF 3.0 sessions from other writers,
@@ -88,9 +88,9 @@ More: the [Python](https://bnelair.github.io/mef3io/python/),
 
 Sessions written by mef3io 1.1.2 and earlier read correctly in mef3io and
 pymef, but declare some buffer sizes as `0`, which can crash meflib-based
-readers. Opening one warns once; appending with a current version repairs it,
-and [Validating and repairing](https://bnelair.github.io/mef3io/validation/)
-shows how to fix it in place. Changes in every version are listed in the
+readers. Opening one warns once. Appending with a current version repairs the
+segment it extends; `mef3io.repair_session` fixes the rest in place — see
+[Validating and repairing](https://bnelair.github.io/mef3io/validation/). Changes in every version are listed in the
 [release notes](https://github.com/bnelair/mef3io/releases).
 
 ## Scope and limitations
@@ -105,16 +105,16 @@ shows how to fix it in place. Changes in every version are listed in the
 - **De-identification**: meflib's recording-time offset does not hide the
   recording date (it stays in every metadata file, in plain text unless the
   session is encrypted), so mef3io never creates such sessions; it reads and
-  extends existing ones. A real de-identified copy is planned (#70) — see
+  extends existing ones. A real de-identified copy is planned
+  ([#70](https://github.com/bnelair/mef3io/issues/70)) — see
   [De-identification](https://bnelair.github.io/mef3io/anonymization/).
 - **Pure-Python backend** is not implemented (`backend="pure"` raises); the
   wheels carry the compiled core.
 
 ## Contributing and support
 
-Bug reports and feature requests go to
-[issues](https://github.com/bnelair/mef3io/issues), questions to
-[discussions](https://github.com/bnelair/mef3io/discussions). To build and
+Bug reports, feature requests and questions go to
+[issues](https://github.com/bnelair/mef3io/issues). To build and
 test from source, see
 [CONTRIBUTING.md](https://github.com/bnelair/mef3io/blob/main/CONTRIBUTING.md);
 the design, the on-disk

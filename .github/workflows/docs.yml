@@ -38,9 +38,11 @@ jobs:
         # Same list as tests/test_p25_public_text.py, encoded so this file
         # does not spell it out; covers the generated API reference too.
         run: |
-          pattern="$(echo Y3liZXJwc2c= | base64 -d)"
-          if grep -rIil -- "$pattern" site; then
-            echo "::error::private product name found in the built site (files above)"
+          test -d site
+          pattern="$(echo 'Y3liZXJbXHNfLV0qcHNn' | base64 -d)"
+          rc=0; grep -rIilE -- "$pattern" site || rc=$?
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::private product name found in the built site (files above), or grep failed (rc=$rc)"
             exit 1
           fi
       - uses: actions/upload-pages-artifact@v3

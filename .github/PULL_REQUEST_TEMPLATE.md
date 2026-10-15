@@ -13,5 +13,5 @@
 - [ ] Docs updated if user-facing (`docs/`, guides, README)
 - [ ] Release-prep PR only: README, docs site, examples README, pyproject
       metadata, CITATION.cff and the release-notes draft revised against the
-      code ([checklist](https://bnelair.github.io/mef3io/releasing/))
+      code ([checklist](https://bnelair.github.io/mef3io/releasing/#before-the-release-revise-the-documentation-required))
 - [ ] CI is green
