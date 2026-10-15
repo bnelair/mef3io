@@ -33,18 +33,24 @@ void parallel_for(std::size_t n, int requested_threads, F body) {
   n_threads = static_cast<unsigned>(std::min<std::size_t>(n_threads, n));
 
   std::atomic<std::size_t> next{0};
+  std::atomic<bool> failed{false};
   std::exception_ptr first_error;
   std::mutex err_mtx;
   auto worker = [&]() {
     for (;;) {
       std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
       if (i >= n) break;
+      // Once any item has thrown the result is discarded, so the rest are
+      // skipped rather than run: a cancelled read stops decoding promptly
+      // instead of finishing every remaining block first. Still drained, so
+      // no worker blocks on a partially-consumed range.
+      if (failed.load(std::memory_order_relaxed)) continue;
       try {
         body(i);
       } catch (...) {
         std::lock_guard<std::mutex> lock(err_mtx);
         if (!first_error) first_error = std::current_exception();
-        // keep draining so no worker blocks on a partially-consumed range
+        failed.store(true, std::memory_order_relaxed);
       }
     }
   };

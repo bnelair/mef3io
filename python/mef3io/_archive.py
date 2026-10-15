@@ -1,10 +1,19 @@
 """Session archiving: pack a ``.mefd`` directory into one uncompressed tar."""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
+
+from ._cancel import CancelToken, _hooks
 
 
-def archive_session(session_path, tar_path: Optional[str] = None, overwrite: bool = False) -> str:
+def archive_session(
+    session_path,
+    tar_path: Optional[str] = None,
+    overwrite: bool = False,
+    *,
+    cancel: Optional[CancelToken] = None,
+    progress: Optional[Callable[[int, int], object]] = None,
+) -> str:
     """Pack a session directory into a single uncompressed tar archive.
 
     The archive (conventionally ``name.mefd.tar``) is a plain ustar file:
@@ -25,6 +34,16 @@ def archive_session(session_path, tar_path: Optional[str] = None, overwrite: boo
     overwrite : bool, optional
         Replace an existing target archive. Default ``False`` (an existing
         target raises).
+    cancel : CancelToken, optional
+        Stop the archive from another thread; checked between 1 MB chunks.
+        The archive is built in a temporary file and renamed into place only
+        when complete, so a cancelled call raises :class:`Cancelled` and leaves
+        no archive and no temporary file (an existing target is untouched).
+    progress : callable, optional
+        ``progress(done, total)`` in bytes of session files copied. Called at a
+        bounded rate, never concurrently; ``(total, total)`` exactly once, when the
+        copy completes. If it raises, the archive is abandoned like a cancel and the
+        exception propagates.
 
     Returns
     -------
@@ -39,17 +58,29 @@ def archive_session(session_path, tar_path: Optional[str] = None, overwrite: boo
     """
     from . import _mef3io
 
-    return _mef3io.archive_session(str(session_path), str(tar_path or ""), bool(overwrite))
+    return _mef3io.archive_session(
+        str(session_path), str(tar_path or ""), bool(overwrite), **_hooks(cancel, progress)
+    )
 
 
-def extract_session(tar_path, dest_dir: Optional[str] = None, overwrite: bool = False) -> str:
+def extract_session(
+    tar_path,
+    dest_dir: Optional[str] = None,
+    overwrite: bool = False,
+    *,
+    cancel: Optional[CancelToken] = None,
+    progress: Optional[Callable[[int, int], object]] = None,
+) -> str:
     """Unpack a session archive back into a ``.mefd`` directory.
 
     The inverse of :func:`archive_session` — after extraction the directory is
     a normal writable session again. The session root inside the archive is
     stripped, so ``dest_dir`` becomes the session directory itself; archives
-    from foreign tar tools work too. A failed extraction never leaves a
-    half-written directory behind.
+    from foreign tar tools work too. The session is unpacked into a temporary
+    sibling directory and moved into place only when complete, so a failed or
+    cancelled extraction never leaves a half-written directory behind — and
+    with ``overwrite=True`` the existing directory survives until the new one
+    is whole.
 
     Parameters
     ----------
@@ -61,6 +92,12 @@ def extract_session(tar_path, dest_dir: Optional[str] = None, overwrite: bool = 
     overwrite : bool, optional
         Replace an existing target directory. Default ``False`` (an existing
         target raises).
+    cancel : CancelToken, optional
+        Stop the extraction from another thread; checked between 1 MB chunks.
+        Raises :class:`Cancelled` and leaves nothing behind.
+    progress : callable, optional
+        ``progress(done, total)`` in bytes of member data written; as in
+        :func:`archive_session`.
 
     Returns
     -------
@@ -75,4 +112,6 @@ def extract_session(tar_path, dest_dir: Optional[str] = None, overwrite: bool = 
     """
     from . import _mef3io
 
-    return _mef3io.extract_session(str(tar_path), str(dest_dir or ""), bool(overwrite))
+    return _mef3io.extract_session(
+        str(tar_path), str(dest_dir or ""), bool(overwrite), **_hooks(cancel, progress)
+    )

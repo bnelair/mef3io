@@ -7,8 +7,10 @@
 
 #include <span>
 #include <optional>
+#include <utility>
 #include <vector>
 
+#include "mef3io/control.hpp"
 #include "mef3io/crc.hpp"
 #include "mef3io/errors.hpp"
 #include "mef3io/crypto.hpp"
@@ -198,6 +200,66 @@ nb::dict record_to_dict(const mef3io::Record& rec) {
 }
 }  // namespace
 
+namespace {
+// The cancel/progress hooks of ONE call (#69), bridged to Python.
+//
+// Built and destroyed with the GIL held, on the binding's stack; the work runs
+// with the GIL released. The std::function handed to the core captures only
+// `this`, so the core may copy it freely without touching a Python refcount.
+//
+// The callback re-acquires the GIL just for the call. It may be invoked from a
+// decode worker thread — the core serialises the calls and never waits on one
+// (see detail::ProgressReporter), so a callback blocked on the GIL cannot
+// deadlock the work. If it raises, the Python exception is kept, the operation
+// is aborted like a cancellation (Cancelled is not a std::exception, so no
+// per-segment containment in the core can swallow it), and the ORIGINAL
+// exception is re-raised to the caller once the GIL is back.
+struct PyHooks {
+  nb::object progress;
+  std::optional<nb::python_error> error;
+  mef3io::Control control;
+
+  PyHooks(const mef3io::CancelToken* token, nb::object progress_fn)
+      : progress(std::move(progress_fn)) {
+    control.cancel = token;
+    if (!progress.is_none()) {
+      if (!PyCallable_Check(progress.ptr()))
+        throw nb::type_error("progress must be a callable taking (done, total)");
+      control.progress = [this](std::uint64_t done, std::uint64_t total) { call(done, total); };
+    }
+  }
+  PyHooks(const PyHooks&) = delete;
+  PyHooks& operator=(const PyHooks&) = delete;
+
+  void call(std::uint64_t done, std::uint64_t total) {
+    nb::gil_scoped_acquire gil;
+    if (error) throw mef3io::Cancelled("progress callback raised");
+    try {
+      progress(done, total);
+    } catch (nb::python_error& e) {
+      error.emplace(std::move(e));
+      throw mef3io::Cancelled("progress callback raised");
+    }
+  }
+
+  /// Run `fn(control)` without the GIL; translate a callback's exception back.
+  template <class F>
+  auto run(F&& fn) {
+    try {
+      nb::gil_scoped_release release;
+      return fn(control);
+    } catch (const mef3io::Cancelled&) {
+      if (error) {
+        nb::python_error e(std::move(*error));
+        error.reset();
+        throw e;
+      }
+      throw;
+    }
+  }
+};
+}  // namespace
+
 NB_MODULE(_mef3io, m) {
   m.attr("__version__") = mef3io::version();
 #ifdef MEF3IO_BUILD_ID
@@ -227,36 +289,52 @@ NB_MODULE(_mef3io, m) {
   static nb::exception<mef3io::IoError> io_error(m, "IoError", mef_error.ptr());
   static nb::exception<mef3io::WriteConflictError> write_conflict_error(
       m, "WriteConflictError", mef_error.ptr());
+  // NOT under MefError/RuntimeError: a cancellation is not a failure, and code
+  // that catches MefError to report a damaged file must not catch it.
+  static nb::exception<mef3io::Cancelled> cancelled_error(m, "Cancelled", PyExc_Exception);
+
+  nb::class_<mef3io::CancelToken>(m, "CancelToken")
+      .def(nb::init<>())
+      .def("cancel", &mef3io::CancelToken::cancel, "Request cancellation (any thread).")
+      .def_prop_ro("cancelled", &mef3io::CancelToken::cancelled);
 
   // Both move the whole session through the filesystem — seconds on a large
   // one — and touch no Python object while doing it, so they release the GIL
   // rather than freezing every other thread in the process.
   m.def(
       "archive_session",
-      [](const std::string& session_dir, const std::string& tar_path, bool overwrite) {
-        nb::gil_scoped_release rel;
-        return mef3io::archive_session(session_dir, tar_path, overwrite);
+      [](const std::string& session_dir, const std::string& tar_path, bool overwrite,
+         const mef3io::CancelToken* cancel, nb::object progress) {
+        PyHooks hooks(cancel, std::move(progress));
+        return hooks.run([&](const mef3io::Control& ctl) {
+          return mef3io::archive_session(session_dir, tar_path, overwrite, ctl);
+        });
       },
       nb::arg("session_dir"), nb::arg("tar_path") = "", nb::arg("overwrite") = false,
+      nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none(),
       "Pack a session directory into a single uncompressed tar archive and "
       "return the archive path.");
   m.def(
       "extract_session",
-      [](const std::string& tar_path, const std::string& dest_dir, bool overwrite) {
-        nb::gil_scoped_release rel;
-        return mef3io::extract_session(tar_path, dest_dir, overwrite);
+      [](const std::string& tar_path, const std::string& dest_dir, bool overwrite,
+         const mef3io::CancelToken* cancel, nb::object progress) {
+        PyHooks hooks(cancel, std::move(progress));
+        return hooks.run([&](const mef3io::Control& ctl) {
+          return mef3io::extract_session(tar_path, dest_dir, overwrite, ctl);
+        });
       },
       nb::arg("tar_path"), nb::arg("dest_dir") = "", nb::arg("overwrite") = false,
+      nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none(),
       "Unpack a session archive back into a directory and return its path.");
 
   m.def(
       "recover_session",
-      [](const std::string& path, bool apply, bool backup, const std::string& password) {
-        mef3io::RecoveryReport r;
-        {
-          nb::gil_scoped_release rel;
-          r = mef3io::recover_session(path, apply, backup, password);
-        }
+      [](const std::string& path, bool apply, bool backup, const std::string& password,
+         const mef3io::CancelToken* cancel, nb::object progress) {
+        PyHooks hooks(cancel, std::move(progress));
+        mef3io::RecoveryReport r = hooks.run([&](const mef3io::Control& ctl) {
+          return mef3io::recover_session(path, apply, backup, password, ctl);
+        });
         nb::list segs;
         for (const auto& s : r.segments) {
           nb::dict d;
@@ -285,7 +363,8 @@ NB_MODULE(_mef3io, m) {
         return out;
       },
       nb::arg("path"), nb::arg("apply") = false, nb::arg("backup") = true,
-      nb::arg("password") = "",
+      nb::arg("password") = "", nb::arg("cancel").none() = nb::none(),
+      nb::arg("progress") = nb::none(),
       "Make each segment's block index and data agree after an interrupted "
       "write. Dry run unless apply=True.");
 
@@ -311,7 +390,8 @@ NB_MODULE(_mef3io, m) {
       "validate_session",
       [](const std::string& path, const std::string& password,
          std::vector<std::string> channels, std::vector<int> segments,
-         std::vector<std::string> check_ids, bool exact_difference_bytes) {
+         std::vector<std::string> check_ids, bool exact_difference_bytes,
+         const mef3io::CancelToken* cancel, nb::object progress) {
         mef3io::ValidateOptions opts;
         opts.password = password;
         opts.channels = std::move(channels);
@@ -320,18 +400,18 @@ NB_MODULE(_mef3io, m) {
         opts.exact_difference_bytes = exact_difference_bytes;
         // Unbounded blocking I/O: with exact_difference_bytes it reads a header
         // per RED block. Holding the GIL would freeze the whole interpreter.
-        mef3io::Report r;
-        {
-          nb::gil_scoped_release release;
-          r = mef3io::validate_session(path, opts);
-        }
+        PyHooks hooks(cancel, std::move(progress));
+        mef3io::Report r = hooks.run([&](const mef3io::Control& ctl) {
+          return mef3io::validate_session(path, opts, ctl);
+        });
         return report_to_dict(r);
       },
       nb::arg("path"), nb::arg("password") = "",
       nb::arg("channels") = std::vector<std::string>{},
       nb::arg("segments") = std::vector<int>{},
       nb::arg("check_ids") = std::vector<std::string>{},
-      nb::arg("exact_difference_bytes") = true,
+      nb::arg("exact_difference_bytes") = true, nb::arg("cancel").none() = nb::none(),
+      nb::arg("progress") = nb::none(),
       "Check a session's declarations against its data. Reads only.");
 
   m.def(
@@ -339,7 +419,8 @@ NB_MODULE(_mef3io, m) {
       [](const std::string& path, std::vector<std::string> repair_check_ids,
          const std::string& password, std::vector<std::string> channels,
          std::vector<int> segments, std::vector<std::string> check_ids,
-         bool exact_difference_bytes, bool backup) {
+         bool exact_difference_bytes, bool backup, const mef3io::CancelToken* cancel,
+         nb::object progress) {
         mef3io::ValidateOptions opts;
         opts.password = password;
         opts.channels = channels;
@@ -351,11 +432,10 @@ NB_MODULE(_mef3io, m) {
         sel.channels = std::move(channels);
         sel.segments = std::move(segments);
         sel.backup = backup;
-        mef3io::Report r;
-        {
-          nb::gil_scoped_release release;
-          r = mef3io::repair_session(path, sel, opts);
-        }
+        PyHooks hooks(cancel, std::move(progress));
+        mef3io::Report r = hooks.run([&](const mef3io::Control& ctl) {
+          return mef3io::repair_session(path, sel, opts, ctl);
+        });
         return report_to_dict(r);
       },
       nb::arg("path"), nb::arg("repair_check_ids"), nb::arg("password") = "",
@@ -363,6 +443,7 @@ NB_MODULE(_mef3io, m) {
       nb::arg("segments") = std::vector<int>{},
       nb::arg("check_ids") = std::vector<std::string>{},
       nb::arg("exact_difference_bytes") = true, nb::arg("backup") = true,
+      nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none(),
       "Validate, then write back only the selected repairs. Never implicit.");
 
   // Exposed for parity tests against the Python oracles.
@@ -820,30 +901,27 @@ NB_MODULE(_mef3io, m) {
       .def(
           "read",
           [opt_time](mef3io::Reader& r, const std::string& ch, nb::object t0, nb::object t1,
-                     int n_threads) {
+                     int n_threads, const mef3io::CancelToken* cancel, nb::object progress) {
             // Resolve the Python arguments BEFORE releasing the GIL —
             // nb::cast is Python C API and crashes without a thread state
             // (bit us with float timestamps, e.g. t0 + 10*1e6).
             auto a = opt_time(t0), b = opt_time(t1);
-            std::vector<mef3io::sf8> v;
-            {
-              nb::gil_scoped_release rel;
-              v = r.read(ch, a, b, n_threads);
-            }
+            PyHooks hooks(cancel, std::move(progress));
+            std::vector<mef3io::sf8> v = hooks.run(
+                [&](const mef3io::Control& ctl) { return r.read(ch, a, b, n_threads, ctl); });
             return vec_to_numpy(std::move(v));
           },
           nb::arg("channel"), nb::arg("t0") = nb::none(), nb::arg("t1") = nb::none(),
-          nb::arg("n_threads") = mef3io::Reader::kUseDefaultThreads)
+          nb::arg("n_threads") = mef3io::Reader::kUseDefaultThreads,
+          nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none())
       .def(
           "read_raw",
           [opt_time](mef3io::Reader& r, const std::string& ch, nb::object t0, nb::object t1,
-                     int n_threads) {
+                     int n_threads, const mef3io::CancelToken* cancel, nb::object progress) {
             auto a = opt_time(t0), b = opt_time(t1);  // see read: cast needs the GIL
-            mef3io::RawData d;
-            {
-              nb::gil_scoped_release rel;
-              d = r.read_raw(ch, a, b, n_threads);
-            }
+            PyHooks hooks(cancel, std::move(progress));
+            mef3io::RawData d = hooks.run(
+                [&](const mef3io::Control& ctl) { return r.read_raw(ch, a, b, n_threads, ctl); });
             nb::dict out;
             out["start_uutc"] = d.start_uutc;
             out["sampling_frequency"] = d.sampling_frequency;
@@ -865,7 +943,8 @@ NB_MODULE(_mef3io, m) {
             return out;
           },
           nb::arg("channel"), nb::arg("t0") = nb::none(), nb::arg("t1") = nb::none(),
-          nb::arg("n_threads") = mef3io::Reader::kUseDefaultThreads)
+          nb::arg("n_threads") = mef3io::Reader::kUseDefaultThreads,
+          nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none())
       .def("segments",
            [](mef3io::Reader& r, const std::string& ch) {
              auto segs = r.segments(ch);
