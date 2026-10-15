@@ -119,7 +119,10 @@ ABI shim (later) converts to codes. Bindings map to Python exceptions.
 - Discontinuity gap length rounds to nearest sample (sub-sample gaps
   tolerated; never accumulate rounded periods — always
   `t = start_uutc + round(n * 1e6 / fs)` with fs as double).
-- `recording_time_offset`: apply per spec (stored = actual − offset). The
+- `recording_time_offset` (superseded: the implemented rule is in
+  [mef3_format.md](mef3_format.md#times), and using the offset as
+  anonymization is deprecated, see [anonymization.md](anonymization.md)):
+  apply per spec (stored = actual − offset). The
   "corrupted" convention observed in the wild (stored = offset − actual,
   handled heuristically in mef3_dump) is behind an opt-in leniency flag, off
   by default, warning when triggered.

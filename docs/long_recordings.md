@@ -155,6 +155,12 @@ rewrites declarations, which is what makes it safe to run on anything; recovery
 may change the index, so it is a dry run by default and backs up what it
 changes first. The CLI re-derives the declarations afterwards for you.
 
+On a session of hundreds of gigabytes, validation (with exact
+`maximum_difference_bytes`) and a recovery that has a long unindexed tail to
+verify can take a while. Both accept `cancel=` and `progress=`; a cancel during
+the read-only pass leaves the session exactly as it was — see
+[Cancelling and progress](python.md#cancelling-and-progress).
+
 !!! warning "It backs up what changes, not the file"
     The `.tdat` may be tens of gigabytes — and that is **one channel**. Recovery
     saves the `.tidx`, the `.tdat`'s 1024-byte header, and any dropped

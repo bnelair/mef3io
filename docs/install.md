@@ -6,7 +6,8 @@ PyPI wheel metadata, `mef3io::version()` in C++, and the MATLAB MEX build.
 ## Python
 
 Prebuilt wheels (no compiler needed) for Linux (x86_64, aarch64), macOS
-(arm64, x86_64), and Windows (AMD64, ARM64), Python 3.10+:
+(arm64, x86_64), and Windows (AMD64, ARM64), Python 3.10+ (3.11+ on Windows
+ARM64; no musllinux/Alpine wheels, which build from the sdist):
 
 ```bash
 pip install mef3io                 # runtime (numpy only)

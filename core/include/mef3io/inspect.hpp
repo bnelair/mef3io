@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "mef3io/control.hpp"
 #include "mef3io/headers.hpp"
 #include "mef3io/records.hpp"
 #include "mef3io/session.hpp"
@@ -214,6 +215,14 @@ struct SessionSummary {
 /// @throws IoError        not a session path
 /// @throws PasswordError  a password was given and is wrong
 /// @throws MefError       (strict only) a segment or record file is unreadable
-SessionSummary inspect_session(const std::string& path, const InspectOptions& options = {});
+/// @throws Cancelled      `control.cancel` was set (checked per segment and per
+///                        record file); nothing is returned.
+/// @param control  optional cancel token and progress callback (#69).
+///                 Progress is in bytes of the files the segment pass reads:
+///                 every .tmet, plus every .tidx with read_index. Record files
+///                 are not counted. Sized (one stat per file) only when a
+///                 progress callback is attached.
+SessionSummary inspect_session(const std::string& path, const InspectOptions& options = {},
+                               const Control& control = {});
 
 }  // namespace mef3io

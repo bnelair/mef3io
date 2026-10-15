@@ -55,7 +55,7 @@ void claim_range(IntervalMap& covered, si8 b, si8 e,
 }  // namespace
 
 RawData Reader::read_raw(const std::string& channel, std::optional<si8> t0_opt,
-                         std::optional<si8> t1_opt, int n_threads) {
+                         std::optional<si8> t1_opt, int n_threads, const Control& ctl) {
   const ChannelInfo& ci = session_.channel_info(channel);
   const sf8 fs = ci.sampling_frequency;
   const si8 t0 = t0_opt.value_or(ci.start_time);
@@ -71,7 +71,7 @@ RawData Reader::read_raw(const std::string& channel, std::optional<si8> t0_opt,
   out.samples.assign(static_cast<std::size_t>(n), 0);
   out.valid.assign(static_cast<std::size_t>(n), 0);
 
-  BlockJobs jobs = session_.collect_blocks(channel, t0, t1);
+  BlockJobs jobs = session_.collect_blocks(channel, t0, t1, ctl);
   out.block_copy_mismatches = std::move(jobs.mismatches);
   const int threads = (n_threads == kUseDefaultThreads) ? n_threads_ : n_threads;
   const std::size_t n_jobs = jobs.jobs.size();
@@ -110,10 +110,23 @@ RawData Reader::read_raw(const std::string& channel, std::optional<si8> t0_opt,
     }
   }
 
+  // Progress counts the compressed bytes of the blocks that will actually be
+  // decoded. Summed only when someone is listening: zero cost otherwise.
+  std::uint64_t decode_bytes = 0;
+  if (ctl.progress)
+    for (std::size_t j = 0; j < n_jobs; ++j)
+      if (count[j] != 0) decode_bytes += jobs.jobs[j].block_bytes;
+  detail::ProgressReporter progress(ctl, decode_bytes);
+  progress.start();
+
   parallel_for(n_jobs, threads, [&](std::size_t j) {
     // A block that owns no output — fully shadowed by a later one, or trimmed
     // away by the window — cannot affect the result, so don't decode it.
     if (count[j] == 0) return;
+    // Between blocks. Every remaining job checks too, so once the token is set
+    // parallel_for drains in microseconds and rethrows the first Cancelled;
+    // `out` is then discarded by the unwinding caller — no partial data.
+    ctl.check();
     const BlockJob& job = jobs.jobs[j];
     std::span<const ui1> block(jobs.buffers[job.buffer_index].data() + job.offset, job.block_bytes);
     auto decoded = red::decode_block(block, job.keys);
@@ -126,13 +139,15 @@ RawData Reader::read_raw(const std::string& channel, std::optional<si8> t0_opt,
         out.valid[static_cast<std::size_t>(idx)] = 1;
       }
     }
+    progress.add(job.block_bytes);
   });
+  progress.finish();
   return out;
 }
 
 std::vector<sf8> Reader::read(const std::string& channel, std::optional<si8> t0,
-                              std::optional<si8> t1, int n_threads) {
-  RawData raw = read_raw(channel, t0, t1, n_threads);
+                              std::optional<si8> t1, int n_threads, const Control& ctl) {
+  RawData raw = read_raw(channel, t0, t1, n_threads, ctl);
   const sf8 uf = raw.units_conversion_factor;
   const sf8 nan = std::numeric_limits<sf8>::quiet_NaN();
   std::vector<sf8> out(raw.samples.size());

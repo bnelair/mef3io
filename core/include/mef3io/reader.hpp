@@ -77,14 +77,24 @@ class Reader {
   /// @param t0,t1      half-open uUTC window; defaults span the whole channel.
   ///                   Returned length is `round((t1 - t0) * fs / 1e6)`.
   /// @param n_threads  per-call thread override (kUseDefaultThreads = default).
+  /// @param ctl        optional hooks. `ctl.cancel` is checked before each
+  ///                   segment is fetched and before each block is decoded; a
+  ///                   cancelled read throws Cancelled and returns no partial
+  ///                   data. `ctl.progress` reports the compressed bytes of the
+  ///                   blocks being decoded (done, total). Each segment's byte
+  ///                   extent is fetched in one read, so during that I/O the
+  ///                   cancel is seen at the next segment or block and
+  ///                   progress counts decoding only.
   /// @returns samples, a validity mask (0 in gaps), and scaling metadata.
   RawData read_raw(const std::string& channel, std::optional<si8> t0 = std::nullopt,
-                   std::optional<si8> t1 = std::nullopt, int n_threads = kUseDefaultThreads);
+                   std::optional<si8> t1 = std::nullopt, int n_threads = kUseDefaultThreads,
+                   const Control& ctl = {});
 
   /// Read `[t0, t1)` as float64 (`= counts * units_conversion_factor`), with
   /// discontinuity gaps filled with NaN. Parameters as in read_raw().
   std::vector<sf8> read(const std::string& channel, std::optional<si8> t0 = std::nullopt,
-                        std::optional<si8> t1 = std::nullopt, int n_threads = kUseDefaultThreads);
+                        std::optional<si8> t1 = std::nullopt, int n_threads = kUseDefaultThreads,
+                        const Control& ctl = {});
 
   /// Sentinel for the per-call @c n_threads argument meaning "use the reader
   /// default".

@@ -31,6 +31,14 @@ See the [Python guide](../python.md#inspecting-a-session-without-reading-its-sam
 
 ::: mef3io.SummaryWarning
 
+## Cancelling and progress
+
+See the [Python guide](../python.md#cancelling-and-progress).
+
+::: mef3io.CancelToken
+
+::: mef3io.Cancelled
+
 ## Validation and repair
 
 See the [validation guide](../validation.md) for what each check means.

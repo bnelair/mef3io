@@ -3,7 +3,7 @@
 // File access, per segment: one .tmet read (the same 16 KB the Reader reads
 // on open), the sizes of .tmet/.tidx/.tdat, and an existence check for the
 // segment's record file. The .tidx is read only with read_index. The .tdat is
-// NEVER opened for reading — tests/test_p25_inspect.py pins that with
+// NEVER opened for reading — tests/test_p26_inspect.py pins that with
 // /proc/self/io.
 #include "mef3io/inspect.hpp"
 
@@ -115,10 +115,27 @@ std::vector<InspectGap> find_gaps(std::vector<std::pair<si8, si8>> spans, double
 
 }  // namespace
 
-SessionSummary inspect_session(const std::string& path, const InspectOptions& opt) {
+SessionSummary inspect_session(const std::string& path, const InspectOptions& opt,
+                               const Control& ctl) {
   SessionSummary out;
   const auto src = open_session_source(path);  // enforces the naming rules
   const auto layout = detail::discover_layout(*src);
+
+  // Progress (#69): bytes of the files the segment pass reads. Sized only for
+  // a listener, so a plain inspect pays nothing for it.
+  std::uint64_t progress_total = 0;
+  if (ctl.progress) {
+    for (const auto& lc : layout.channels)
+      for (const auto& ls : lc.segments) {
+        try {
+          progress_total += src->file_size(ls.tmet);
+          if (opt.read_index) progress_total += src->file_size(ls.tidx);
+        } catch (const std::exception&) { /* reported by the pass itself */ }
+      }
+  }
+  detail::ProgressReporter progress(ctl, progress_total);
+  progress.start();
+  std::uint64_t progress_done = 0;
 
   out.name = src->session_name();
   out.path = path;
@@ -231,6 +248,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     si8 n_samples = 0;
 
     for (const auto& ls : lc->segments) {
+      ctl.check();  // Cancelled is not a std::exception: contain() never swallows it
       InspectSegment is;
       is.segment_number = ls.number;
       is.path = src->describe(ls.dir());
@@ -417,6 +435,8 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
         continue;
       }
 
+      progress_done += is.tmet_bytes + (opt.read_index ? is.tidx_bytes : 0);
+      progress.advance_to(progress_done);
       const auto& md = *st.md;
       if (md.section2_available) {
         if (!ic.sampling_frequency) {
@@ -536,6 +556,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
 
   auto read_file = [&](const std::string& rdat, std::optional<si8> rto, const std::string& why,
                        RecordLevel level, const std::string& channel, int segment) {
+    ctl.check();
     std::vector<InspectRecord> got;
     std::vector<std::string> texts;  // each record's free text, for the identity table
     std::uint64_t file_bytes = 0;
@@ -725,6 +746,8 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
                 RecordLevel::Segment, name, st.layout->number);
     }
   }
+  ctl.check();
+  progress.finish();  // the reading is done; what follows only summarises
   widen(out.first_time, out.last_time, out.start_time);
   widen(out.first_time, out.last_time, out.end_time);
   widen(out.first_time, out.last_time, out.records_start_time);

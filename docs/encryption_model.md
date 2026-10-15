@@ -23,6 +23,9 @@ are supplied.
 Time-series **data blocks** (`.tdat` RED blocks) are written **unencrypted**
 even in an encrypted session — meflib's `RED_ENCRYPTION_LEVEL_DEFAULT` is
 `NO_ENCRYPTION`. Only metadata sections 2/3 and record bodies are encrypted.
+A block that another writer DID encrypt has only the first 16 bytes of its
+statistics table enciphered; see the RED block section of
+[mef3_format.md](mef3_format.md).
 
 ## Why "level-1 only" is not a thing
 
@@ -83,6 +86,14 @@ The two-level scheme still matters for *who can read what*:
 
 This lets a data-sharing workflow hand out the level-1 password for signal
 access while withholding subject identity behind the level-2 password.
+
+!!! note "Section 3 is plain text in an unencrypted session"
+    Without a level-2 password, section 3 is stored unencrypted (level `-2`).
+    It holds the subject fields **and** `recording_time_offset`, which in a
+    session "anonymized" by meflib's recording-time offset is the recording
+    date. Anyone can read it from the bytes, and with the level-2 password
+    anyone can read it from an encrypted session too. See
+    [De-identification and the recording-time offset](anonymization.md).
 
 ## Password/key derivation (for completeness)
 

@@ -810,3 +810,47 @@ def test_seiz_channel_times_are_none_when_the_offset_is_disputed(session):
     assert not seiz.times_known
     assert seiz.fields["channels"][0]["name"] == "LA1"
     assert all(t is None for t in _time_fields(seiz)), seiz.fields
+
+
+# --------------------------------------------------------------------------- cancel / progress (#69)
+
+
+def test_inspect_progress_counts_the_metadata_bytes(session):
+    calls = []
+    plain = mef3io.inspect(session)
+    s = mef3io.inspect(session, progress=lambda d, t: calls.append((d, t)))
+    assert s == plain                                     # the hooks change nothing
+    tmet = sum(p.stat().st_size for p in Path(session).rglob("*.tmet"))
+    assert calls[0] == (0, tmet) and calls[-1] == (tmet, tmet)
+    assert all(a[0] <= b[0] for a, b in zip(calls, calls[1:]))
+    tidx = sum(p.stat().st_size for p in Path(session).rglob("*.tidx"))
+    idx_calls = []
+    mef3io.inspect(session, read_index=True, progress=lambda d, t: idx_calls.append((d, t)))
+    assert idx_calls[-1] == (tmet + tidx, tmet + tidx)
+
+
+def test_inspect_cancel_raises_and_is_never_contained(session):
+    token = mef3io.CancelToken()
+    token.cancel()
+    for strict in (True, False):  # lenient mode must not report a cancel as damage
+        with pytest.raises(mef3io.Cancelled):
+            mef3io.inspect(session, strict=strict, cancel=token)
+
+
+def test_inspect_a_raising_progress_callback_aborts_with_its_own_exception(session):
+    class Boom(Exception):
+        pass
+
+    def cb(done, total):
+        if done:
+            raise Boom("stop")
+
+    with pytest.raises(Boom):
+        mef3io.inspect(session, strict=False, progress=cb)
+
+
+def test_inspect_bad_hook_arguments_are_type_errors(session):
+    with pytest.raises(TypeError):
+        mef3io.inspect(session, cancel=object())
+    with pytest.raises(TypeError):
+        mef3io.inspect(session, progress=3)

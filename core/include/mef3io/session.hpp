@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "mef3io/control.hpp"
 #include "mef3io/headers.hpp"
 #include "mef3io/metadata.hpp"
 #include "mef3io/records.hpp"
@@ -222,9 +223,10 @@ class Session {
 
   // Gather (without decoding) all blocks of `channel` overlapping [t0, t1],
   // loading the needed .tdat images into owned buffers. The high-level Reader
-  // decodes these in parallel.
+  // decodes these in parallel. `ctl.cancel` is checked before each segment;
+  // a cancelled call throws Cancelled and returns nothing.
   BlockJobs collect_blocks(const std::string& channel, std::optional<si8> t0 = std::nullopt,
-                           std::optional<si8> t1 = std::nullopt);
+                           std::optional<si8> t1 = std::nullopt, const Control& ctl = {});
 
   // Section-2 size declarations the session leaves unset, across every channel
   // and segment. Free at this point: every segment's metadata was parsed when

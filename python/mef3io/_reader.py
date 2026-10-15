@@ -4,9 +4,11 @@ delegating all real work to the backend."""
 from __future__ import annotations
 
 import warnings
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
+
+from ._cancel import CancelToken, _hooks
 
 
 class SessionDeclarationWarning(UserWarning):
@@ -16,7 +18,7 @@ class SessionDeclarationWarning(UserWarning):
     filter suppresses a repeat of the same message from the same line). It
     never affects mef3io's own reads —
     mef3io sizes every buffer from the block headers themselves — but
-    meflib-based readers (CyberPSG and most established MEF tooling) allocate
+    meflib-based readers (most established MEF tooling) allocate
     from metadata section 2 before decoding, and cannot tell an unset field
     from a real measurement.
 
@@ -112,7 +114,7 @@ def _declaration_warning_text(issues: list, path: str) -> str:
         f"{len(channels)} channel(s): {listed}. "
         "This does NOT affect reading with mef3io — every buffer is sized from the "
         "block headers themselves, and the data is intact. It does affect "
-        "meflib-based readers (e.g. CyberPSG), which allocate from these fields. "
+        "meflib-based readers, which allocate from these fields. "
         "Run mef3io.Validator(path).validate() for detail, or "
         "python -m mef3io repair <path> --check <check-id> to fix the file."
     )
@@ -421,6 +423,9 @@ class Reader:
         t0: Optional[int] = None,
         t1: Optional[int] = None,
         n_threads: Optional[int] = None,
+        *,
+        cancel: Optional["CancelToken"] = None,
+        progress: Optional[Callable[[int, int], object]] = None,
     ) -> np.ndarray:
         """Read float64 samples on the uniform sampling grid.
 
@@ -435,6 +440,18 @@ class Reader:
         n_threads : int, optional
             Per-call override of the reader's thread count (``0`` = all cores,
             ``1`` = serial). ``None`` (default) uses the reader default.
+        cancel : CancelToken, optional
+            Stop the read from another thread: it is checked before each
+            segment is fetched and before each block is decoded, and a
+            cancelled read raises :class:`Cancelled` and returns nothing.
+        progress : callable, optional
+            ``progress(done, total)`` — compressed bytes of the blocks being
+            decoded. Called at a bounded rate, possibly from a decode worker
+            thread (with the GIL held for the call only), never concurrently.
+            If it raises, the read stops and the exception propagates.
+            A Reader must not be read from two threads at once: after
+            cancelling, wait for the cancelled call to return before the next
+            read on the same Reader (or use one Reader per thread).
 
         Returns
         -------
@@ -448,9 +465,12 @@ class Reader:
         read_raw : the unscaled int32 form with an explicit validity mask.
         """
         impl = self._ensure_impl()
+        hooks = _hooks(cancel, progress)
+        if hooks and self._backend_name != "cpp":
+            raise NotImplementedError("cancel=/progress= need the C++ backend")
         if n_threads is None:
-            return impl.read(channel, t0, t1)
-        return impl.read(channel, t0, t1, int(n_threads))
+            return impl.read(channel, t0, t1, **hooks)
+        return impl.read(channel, t0, t1, int(n_threads), **hooks)
 
     def read_raw(
         self,
@@ -458,6 +478,9 @@ class Reader:
         t0: Optional[int] = None,
         t1: Optional[int] = None,
         n_threads: Optional[int] = None,
+        *,
+        cancel: Optional["CancelToken"] = None,
+        progress: Optional[Callable[[int, int], object]] = None,
     ) -> dict:
         """Read the stored int32 counts with an explicit validity mask.
 
@@ -469,6 +492,8 @@ class Reader:
             Half-open ``[t0, t1)`` window in uUTC; defaults span the channel.
         n_threads : int, optional
             Per-call thread-count override (see :meth:`read`).
+        cancel, progress : optional
+            As in :meth:`read`.
 
         Returns
         -------
@@ -488,10 +513,13 @@ class Reader:
             meflib and pymef do, so the read still matches theirs.
         """
         impl = self._ensure_impl()
+        hooks = _hooks(cancel, progress)
+        if hooks and self._backend_name != "cpp":
+            raise NotImplementedError("cancel=/progress= need the C++ backend")
         if n_threads is None:
-            out = impl.read_raw(channel, t0, t1)
+            out = impl.read_raw(channel, t0, t1, **hooks)
         else:
-            out = impl.read_raw(channel, t0, t1, int(n_threads))
+            out = impl.read_raw(channel, t0, t1, int(n_threads), **hooks)
         mismatches = out.get("block_copy_mismatches") or []
         if mismatches:
             warnings.warn(

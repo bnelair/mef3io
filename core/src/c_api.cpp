@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <type_traits>
@@ -15,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "mef3io/control.hpp"
 #include "mef3io/errors.hpp"
 #include "mef3io/reader.hpp"
 #include "mef3io/records.hpp"
@@ -39,6 +41,9 @@ int guarded(Fn&& fn) {
   try {
     fn();
     return MEF3IO_OK;
+  } catch (const mef3io::Cancelled& e) {  // not a std::exception: catch it by name
+    g_last_error = e.what();
+    return MEF3IO_ERR_CANCELLED;
   } catch (const mef3io::PasswordError& e) {
     g_last_error = e.what();
     return MEF3IO_ERR_PASSWORD;
@@ -96,6 +101,23 @@ struct mef3io_record_list {
   std::vector<mef3io::Record> records;
   std::vector<std::vector<mef3io::RecordField>> fields;
 };
+struct mef3io_cancel_token {
+  mef3io::CancelToken impl;
+};
+
+namespace {
+// The C hooks as a core Control. The lambda captures plain values only.
+mef3io::Control make_control(const mef3io_cancel_token* cancel, mef3io_progress_fn progress,
+                             void* user_data) {
+  mef3io::Control ctl;
+  ctl.cancel = cancel ? &cancel->impl : nullptr;
+  if (progress)
+    ctl.progress = [progress, user_data](std::uint64_t done, std::uint64_t total) {
+      progress(done, total, user_data);
+    };
+  return ctl;
+}
+}  // namespace
 
 namespace {
 const mef3io::RecordField* list_field(const mef3io_record_list* list, int32_t index,
@@ -110,6 +132,17 @@ const mef3io::RecordField* list_field(const mef3io_record_list* list, int32_t in
 extern "C" {
 
 const char* mef3io_version(void) { return mef3io::version(); }
+
+mef3io_cancel_token* mef3io_cancel_token_new(void) {
+  return new (std::nothrow) mef3io_cancel_token{};
+}
+void mef3io_cancel_token_free(mef3io_cancel_token* token) { delete token; }
+void mef3io_cancel_token_cancel(mef3io_cancel_token* token) {
+  if (token) token->impl.cancel();
+}
+int mef3io_cancel_token_is_cancelled(const mef3io_cancel_token* token) {
+  return token && token->impl.cancelled() ? 1 : 0;
+}
 
 const char* mef3io_last_error(void) { return g_last_error.c_str(); }
 
@@ -227,11 +260,21 @@ int mef3io_reader_read_size(mef3io_reader* r, const char* channel, int64_t t0, i
 
 int mef3io_reader_read(mef3io_reader* r, const char* channel, int64_t t0, int64_t t1,
                        double* buf, int64_t buf_len, int64_t* out_n) {
+  return mef3io_reader_read_ex(r, channel, t0, t1, buf, buf_len, out_n, nullptr, nullptr,
+                               nullptr);
+}
+
+int mef3io_reader_read_ex(mef3io_reader* r, const char* channel, int64_t t0, int64_t t1,
+                          double* buf, int64_t buf_len, int64_t* out_n,
+                          const mef3io_cancel_token* cancel, mef3io_progress_fn progress,
+                          void* user_data) {
   // A NULL buffer is fine for a zero-length window (empty reads are legal).
   if (!r || !channel || (!buf && buf_len > 0) || !out_n)
     return fail_argument("NULL argument");
   return guarded([&] {
-    std::vector<mef3io::sf8> v = r->impl.read(channel, opt_time(t0), opt_time(t1));
+    const mef3io::Control ctl = make_control(cancel, progress, user_data);
+    std::vector<mef3io::sf8> v = r->impl.read(channel, opt_time(t0), opt_time(t1),
+                                              mef3io::Reader::kUseDefaultThreads, ctl);
     if (static_cast<int64_t>(v.size()) > buf_len)
       throw std::out_of_range("buffer too small: need " + std::to_string(v.size()));
     std::copy(v.begin(), v.end(), buf);
@@ -242,10 +285,20 @@ int mef3io_reader_read(mef3io_reader* r, const char* channel, int64_t t0, int64_
 int mef3io_reader_read_raw(mef3io_reader* r, const char* channel, int64_t t0, int64_t t1,
                            int32_t* samples, uint8_t* valid, int64_t buf_len, int64_t* out_n,
                            int64_t* out_start_uutc) {
+  return mef3io_reader_read_raw_ex(r, channel, t0, t1, samples, valid, buf_len, out_n,
+                                   out_start_uutc, nullptr, nullptr, nullptr);
+}
+
+int mef3io_reader_read_raw_ex(mef3io_reader* r, const char* channel, int64_t t0, int64_t t1,
+                              int32_t* samples, uint8_t* valid, int64_t buf_len, int64_t* out_n,
+                              int64_t* out_start_uutc, const mef3io_cancel_token* cancel,
+                              mef3io_progress_fn progress, void* user_data) {
   if (!r || !channel || ((!samples || !valid) && buf_len > 0) || !out_n)
     return fail_argument("NULL argument");
   return guarded([&] {
-    mef3io::RawData d = r->impl.read_raw(channel, opt_time(t0), opt_time(t1));
+    const mef3io::Control ctl = make_control(cancel, progress, user_data);
+    mef3io::RawData d = r->impl.read_raw(channel, opt_time(t0), opt_time(t1),
+                                         mef3io::Reader::kUseDefaultThreads, ctl);
     if (static_cast<int64_t>(d.samples.size()) > buf_len)
       throw std::out_of_range("buffer too small: need " + std::to_string(d.samples.size()));
     std::copy(d.samples.begin(), d.samples.end(), samples);
@@ -478,10 +531,19 @@ int mef3io_writer_set_durable(mef3io_writer* w, int durable) {
 
 int mef3io_recover_session(const char* mefd_path, int apply, int backup, const char* password,
                            char* out_summary, size_t out_summary_bytes, int64_t* out_segments) {
+  return mef3io_recover_session_ex(mefd_path, apply, backup, password, out_summary,
+                                   out_summary_bytes, out_segments, nullptr, nullptr, nullptr);
+}
+
+int mef3io_recover_session_ex(const char* mefd_path, int apply, int backup, const char* password,
+                              char* out_summary, size_t out_summary_bytes, int64_t* out_segments,
+                              const mef3io_cancel_token* cancel, mef3io_progress_fn progress,
+                              void* user_data) {
   if (!mefd_path) return fail_argument("mefd_path must not be NULL");
   return guarded([&] {
-    const auto report = mef3io::recover_session(mefd_path, apply != 0, backup != 0,
-                                                password ? password : "");
+    const auto report =
+        mef3io::recover_session(mefd_path, apply != 0, backup != 0, password ? password : "",
+                                make_control(cancel, progress, user_data));
     if (out_segments) *out_segments = static_cast<int64_t>(report.segments.size());
     if (out_summary && out_summary_bytes) {
       std::string text = std::to_string(report.segments_examined) + " segment(s) examined, " +
@@ -499,20 +561,38 @@ int mef3io_recover_session(const char* mefd_path, int apply, int backup, const c
 
 int mef3io_archive_session(const char* session_dir, const char* tar_path, int overwrite,
                            char* out_path, size_t out_path_bytes) {
+  return mef3io_archive_session_ex(session_dir, tar_path, overwrite, out_path, out_path_bytes,
+                                   nullptr, nullptr, nullptr);
+}
+
+int mef3io_archive_session_ex(const char* session_dir, const char* tar_path, int overwrite,
+                              char* out_path, size_t out_path_bytes,
+                              const mef3io_cancel_token* cancel, mef3io_progress_fn progress,
+                              void* user_data) {
   if (!session_dir) return fail_argument("session_dir must not be NULL");
   return guarded([&] {
     const std::string result =
-        mef3io::archive_session(session_dir, tar_path ? tar_path : "", overwrite != 0);
+        mef3io::archive_session(session_dir, tar_path ? tar_path : "", overwrite != 0,
+                                make_control(cancel, progress, user_data));
     if (out_path && out_path_bytes) copy_str(out_path, out_path_bytes, result);
   });
 }
 
 int mef3io_extract_session(const char* tar_path, const char* dest_dir, int overwrite,
                            char* out_path, size_t out_path_bytes) {
+  return mef3io_extract_session_ex(tar_path, dest_dir, overwrite, out_path, out_path_bytes,
+                                   nullptr, nullptr, nullptr);
+}
+
+int mef3io_extract_session_ex(const char* tar_path, const char* dest_dir, int overwrite,
+                              char* out_path, size_t out_path_bytes,
+                              const mef3io_cancel_token* cancel, mef3io_progress_fn progress,
+                              void* user_data) {
   if (!tar_path) return fail_argument("tar_path must not be NULL");
   return guarded([&] {
     const std::string result =
-        mef3io::extract_session(tar_path, dest_dir ? dest_dir : "", overwrite != 0);
+        mef3io::extract_session(tar_path, dest_dir ? dest_dir : "", overwrite != 0,
+                                make_control(cancel, progress, user_data));
     if (out_path && out_path_bytes) copy_str(out_path, out_path_bytes, result);
   });
 }

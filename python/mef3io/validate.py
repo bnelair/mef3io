@@ -3,8 +3,8 @@
 A MEF session declares, in metadata section 2 and the universal headers, a
 number of quantities that are really re-derivable from the data: how many
 blocks there are, how many samples, and how large a buffer a reader must
-allocate. Readers trust those declarations — meflib-based ones (CyberPSG and
-similar) allocate from them *before* decoding anything — so a wrong declaration
+allocate. Readers trust those declarations — meflib-based ones
+allocate from them *before* decoding anything — so a wrong declaration
 is a defect in the file even when every sample on disk is intact.
 
 Three rules shape this API:
@@ -42,7 +42,9 @@ import dataclasses
 import os
 import sys
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
+
+from ._cancel import CancelToken, _hooks
 
 __all__ = [
     "Check",
@@ -494,10 +496,30 @@ class Validator:
 
     # --- checking (read-only) ---------------------------------------------
 
-    def validate(self, check_ids: Iterable[str] | None = None) -> Report:
+    def validate(
+        self,
+        check_ids: Iterable[str] | None = None,
+        *,
+        cancel: CancelToken | None = None,
+        progress: Callable[[int, int], object] | None = None,
+    ) -> Report:
         """Run every check (or only ``check_ids``) and return the full report.
 
         Never modifies the session.
+
+        Parameters
+        ----------
+        check_ids : iterable of str, optional
+            Run only these checks (the integrity checks always run).
+        cancel : CancelToken, optional
+            Stop the pass from another thread. Checked per segment and, with
+            ``exact_difference_bytes``, per block; raises :class:`Cancelled`
+            and returns no report.
+        progress : callable, optional
+            ``progress(done, total)`` in bytes of ``.tmet`` + ``.tidx`` +
+            ``.tdat`` covered. Called at a bounded rate, never concurrently;
+            ``(total, total)`` exactly once, when the pass completes. If it raises, the pass
+            stops and the exception propagates.
         """
         raw = _backend().validate_session(
             self.path,
@@ -509,6 +531,7 @@ class Validator:
             check_ids=_as_filter(check_ids, "check_ids", str),
             segments=self.segments,
             exact_difference_bytes=self.exact_difference_bytes,
+            **_hooks(cancel, progress),
         )
         return _to_report(
             raw,
@@ -526,18 +549,28 @@ class Validator:
         return f"Validator({self.path!r})"
 
 
-def validate_session(path: str, **kwargs) -> Report:
+def validate_session(
+    path: str,
+    *,
+    cancel: CancelToken | None = None,
+    progress: Callable[[int, int], object] | None = None,
+    **kwargs,
+) -> Report:
     """Check a session and return the report. Reads only.
 
-    Accepts the same keyword arguments as :class:`Validator`.
+    Accepts the same keyword arguments as :class:`Validator`, plus ``cancel``
+    and ``progress`` as in :meth:`Validator.validate`.
     """
-    return Validator(path, **kwargs).validate()
+    return Validator(path, **kwargs).validate(cancel=cancel, progress=progress)
 
 
 def repair_session(
     path: str,
     check_ids: Sequence[str],
     backup: bool = True,
+    *,
+    cancel: CancelToken | None = None,
+    progress: Callable[[int, int], object] | None = None,
     **kwargs,
 ) -> Report:
     """Rewrite the declarations named in ``check_ids`` — and only those.
@@ -566,6 +599,16 @@ def repair_session(
         Copy each file before rewriting it, into ``<session>.repair-backup/``
         (outside the session tree, so no reader mistakes a backup for data).
         An existing backup is never overwritten.
+    cancel : CancelToken, optional
+        Stop the repair from another thread. Repairs are decided during the
+        validation pass and written only after it: a cancel during the pass
+        raises :class:`Cancelled` with **nothing written** — no file and no
+        backup directory. The write phase that follows (a ``.tmet`` replaced
+        by rename and at most two 1024-byte header patches per segment) is
+        not interruptible; a cancel arriving then is ignored and the report is
+        returned.
+    progress : callable, optional
+        ``progress(done, total)`` in bytes, as in :meth:`Validator.validate`.
     **kwargs
         The same keyword arguments as :class:`Validator` (``password``,
         ``channels``, ``segments``, ``exact_difference_bytes``).
@@ -597,6 +640,7 @@ def repair_session(
         check_ids=[],
         exact_difference_bytes=v.exact_difference_bytes,
         backup=bool(backup),
+        **_hooks(cancel, progress),
     )
     return _to_report(
         raw,
@@ -674,6 +718,9 @@ def recover_session(
     apply: bool = False,
     backup: bool = True,
     password: str = "",
+    *,
+    cancel: CancelToken | None = None,
+    progress: Callable[[int, int], object] | None = None,
 ) -> RecoveryReport:
     """Make each segment's block index and data agree after an interrupted write.
 
@@ -710,6 +757,17 @@ def recover_session(
         never the whole data file, which may be tens of gigabytes.
     password : str, optional
         Only needed for encrypted sessions.
+    cancel : CancelToken, optional
+        Stop recovery from another thread. Every segment is scanned before
+        anything is written: a cancel during the scan raises
+        :class:`Cancelled` with **nothing written** — no file and no backup.
+        The write phase that follows is not interruptible (whole-file renames
+        and 1024-byte header patches); a cancel arriving then is ignored and
+        the report is returned.
+    progress : callable, optional
+        ``progress(done, total)`` in bytes of ``.tidx`` + ``.tdat`` covered.
+        Called at a bounded rate, never concurrently; ``(total, total)``
+        exactly once, when the scan completes (before anything is written).
 
     Returns
     -------
@@ -720,7 +778,9 @@ def recover_session(
     Declarations are not updated here. Run :func:`repair_session` afterwards —
     ``python -m mef3io recover`` does it for you.
     """
-    raw = _backend().recover_session(str(path), bool(apply), bool(backup), password or "")
+    raw = _backend().recover_session(
+        str(path), bool(apply), bool(backup), password or "", **_hooks(cancel, progress)
+    )
     fields = {f.name for f in dataclasses.fields(RecoveredSegment)}
     return RecoveryReport(
         segments=tuple(

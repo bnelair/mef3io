@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include "mef3io/control.hpp"
 #include "mef3io/headers.hpp"
 #include "mef3io/types.hpp"
 
@@ -133,7 +134,12 @@ struct Report {
 /// Check a session. Reads only — never writes, never throws because a segment
 /// is damaged (those land in `Report::skipped`). Accepts a .mefd directory or
 /// a .mefd.tar archive.
-Report validate_session(const std::string& path, const ValidateOptions& opts = {});
+///
+/// `ctl.cancel` is checked per segment and, with exact_difference_bytes, per
+/// block; a cancelled call throws Cancelled and returns no report.
+/// `ctl.progress` reports the bytes of .tmet + .tidx + .tdat covered.
+Report validate_session(const std::string& path, const ValidateOptions& opts = {},
+                        const Control& ctl = {});
 
 /// Validate, then write back the selected repairs. Returns the full report,
 /// with `repaired` set on the findings that were actually written.
@@ -146,7 +152,16 @@ Report validate_session(const std::string& path, const ValidateOptions& opts = {
 ///
 /// Throws std::invalid_argument when the selection is empty or names an
 /// unknown/unrepairable check.
+///
+/// Repairs are decided during the validation pass and WRITTEN after it. The
+/// pass is cancellable exactly like validate_session, and a cancelled call
+/// throws Cancelled having written nothing — no file, no backup. The write
+/// phase is not interruptible (a .tmet replaced by rename and at most two
+/// 1024-byte header patches per segment): a cancel requested during it is
+/// ignored and the call returns its report. A segment whose files changed
+/// between the pass and the write (a concurrent writer) is skipped, not
+/// rewritten from the stale derivation.
 Report repair_session(const std::string& path, const RepairSelection& selection,
-                      const ValidateOptions& opts = {});
+                      const ValidateOptions& opts = {}, const Control& ctl = {});
 
 }  // namespace mef3io

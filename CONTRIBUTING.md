@@ -10,8 +10,8 @@ identically.
 - **Report a bug** or **request a feature** via
   [GitHub issues](https://github.com/bnelair/mef3io/issues) — please use the
   templates.
-- **Ask a question** in
-  [Discussions](https://github.com/bnelair/mef3io/discussions).
+- **Ask a question** via
+  [GitHub issues](https://github.com/bnelair/mef3io/issues).
 - **Send a pull request** for fixes and features (see below).
 
 ## Development setup

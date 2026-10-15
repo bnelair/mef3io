@@ -1,5 +1,5 @@
 // inspect_session (#67): the C++ entry point. The full behaviour is pinned in
-// tests/test_p25_inspect.py; this covers the core contract without Python.
+// tests/test_p26_inspect.py; this covers the core contract without Python.
 #include <catch2/catch_test_macros.hpp>
 #include <filesystem>
 #include <vector>

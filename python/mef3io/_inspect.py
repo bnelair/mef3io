@@ -12,7 +12,9 @@ import datetime as _dt
 import json
 import sys
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
+
+from ._cancel import CancelToken, _hooks
 
 
 def _fields(cls, d: dict) -> dict:
@@ -322,6 +324,8 @@ def inspect(
     include_values: bool = False,
     read_index: bool = False,
     strict: bool = True,
+    cancel: Optional[CancelToken] = None,
+    progress: Optional[Callable[[int, int], object]] = None,
 ) -> SessionSummary:
     """Describe a session without reading any sample data.
 
@@ -360,6 +364,15 @@ def inspect(
         ``"unreadable-segments"`` / ``"unreadable-records"`` warning, marks
         the segment ``readable=False``, and describes the rest — the mode for
         an explorer that must show a damaged session.
+    cancel : CancelToken, optional
+        Checked before each segment and each record file. Once set, the call
+        raises :class:`mef3io.Cancelled` and returns nothing.
+    progress : callable, optional
+        ``progress(done, total)`` in bytes of the files the segment pass reads
+        (every ``.tmet``, plus every ``.tidx`` with ``read_index=True``;
+        record files are not counted), called at a bounded rate and never
+        concurrently. Sizing the total costs one stat per file, paid only when
+        a callback is given.
 
     Returns
     -------
@@ -373,6 +386,8 @@ def inspect(
         A password was given and is wrong.
     mef3io.MefError
         (strict only) A segment or record file cannot be read.
+    mef3io.Cancelled
+        ``cancel`` was set.
 
     Examples
     --------
@@ -384,7 +399,8 @@ def inspect(
     from . import _mef3io
 
     raw = _mef3io.inspect_session(
-        str(path), password or "", bool(strict), bool(include_values), bool(read_index)
+        str(path), password or "", bool(strict), bool(include_values), bool(read_index),
+        **_hooks(cancel, progress),
     )
     return SessionSummary._from(raw)
 

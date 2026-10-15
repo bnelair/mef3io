@@ -35,7 +35,8 @@ block_length=None, n_threads=0)`
   it the offset is unknown. A Writer opened with only the level-1 password is
   refused (`PasswordError`) for anything that stores times into that
   session, rather than guessing the offset. Earlier releases took it as 0,
-  which in an anonymized session placed appended data decades off.
+  which in a session with a recording-time offset placed appended data
+  decades off.
 - `Writer.unreadable_metadata` lists segment metadata the writer could not
   use (`"path: reason"`):
   - `.tmet` files it could not read while choosing the offset. At offset 0
@@ -122,14 +123,15 @@ with mef3io.Reader("session.mefd") as r:          # password="..." if encrypted
   (`info()["section3_available"] == False`, subject fields `None`) and
   records are unavailable.
 
-### `read(channel, t0=None, t1=None, n_threads=None)`
+### `read(channel, t0=None, t1=None, n_threads=None, *, cancel=None, progress=None)`
 
 Float64 samples on the uniform fs grid over `[t0, t1)` (whole channel by
 default): `N = round((t1 - t0) * fs / 1e6)` samples, discontinuity gaps
 filled with NaN, values scaled by the conversion factor. Windowed reads
-fetch only the needed bytes — cheap on huge sessions.
+fetch only the needed bytes — cheap on huge sessions. `cancel=` /
+`progress=`: see [Cancelling and progress](#cancelling-and-progress).
 
-### `read_raw(channel, t0=None, t1=None, n_threads=None)`
+### `read_raw(channel, t0=None, t1=None, n_threads=None, *, cancel=None, progress=None)`
 
 Dict with the stored `samples` (int32), a `valid` mask (0 in gaps),
 `start_uutc`, `sampling_frequency`, `units_conversion_factor`.
@@ -190,11 +192,15 @@ read is handled the same way. Reading every body type is supported; writing is
 limited to Note, SyLg and EDFA.
 
 Written times are stored as `−t` in a session at offset 0 (every session
-mef3io creates). In a foreign session anonymized with a recording-time offset
-they are stored as `rto − t`, so the real date stays hidden. A segment or
-channel mef3io adds to such a session inherits its offset.
+mef3io creates). In a foreign session "anonymized" with meflib's
+recording-time offset they are stored as `rto − t`, the session's own form,
+so mef3io never writes the date there in plain. A segment or channel mef3io
+adds to such a session inherits its offset. The offset does not
+de-identify the session, though: the date is in section 3 (see
+[De-identification](anonymization.md)).
 
-A write is refused, rather than revealing the date or misplacing times, when:
+A write is refused, rather than misplacing times or breaking the session's own
+`rto − t` form, when:
 - the time is at or before the offset (`WriteConflictError`);
 - the level's segments disagree on the offset (`WriteConflictError`);
 - the offset is locked because only the level-1 password was given
@@ -331,6 +337,8 @@ Options:
 - `strict=False` reports an unreadable segment or record file in `problems`
   and a warning, marks the segment `readable=False`, and describes the rest.
   Strict, the default, raises as a `Reader` does.
+- `cancel=` and `progress=` work as for the other long operations (see
+  [Cancelling and progress](#cancelling-and-progress)).
 
 **Encrypted sessions are described, not refused.** Without a password,
 `inspect` still lists channels, segments, sizes and the plain universal-header
@@ -349,7 +357,8 @@ offset-dependent times are `None` (`RecordSummary.times_known` is `False`,
 and the times in `fields` are `None` too).
 
 **The recording-time offset is reported plainly.** meflib's recording-time
-offset is deprecated as anonymization: the real date stays in section 3.
+offset is deprecated as anonymization: the real date stays in section 3 (see
+[De-identification and the recording-time offset](anonymization.md)).
 `time_offset["status"]` is `"none"`, `"applied"`, `"disputed"`, `"locked"` or
 `"unknown"` (no segment readable). It describes the readable segments;
 `segments_unknown` counts the ones that could not be read, whose offset is
@@ -408,6 +417,99 @@ archiving, extracting, in all language bindings): directories must end
 This is a safety contract: a stray directory or file can never be misread as
 a session, and a session can never be created or overwritten under an
 unmarked name.
+
+## Cancelling and progress
+
+Reads and the long operations take two optional keyword arguments:
+
+| | `cancel=` | `progress=` |
+|---|---|---|
+| `Reader.read`, `Reader.read_raw` | yes | compressed bytes decoded |
+| `archive_session`, `extract_session` | yes | bytes copied |
+| `inspect` | yes (per segment and record file) | bytes of `.tmet` (+ `.tidx` with `read_index=True`) read |
+| `Validator.validate`, `validate_session` | yes | bytes of `.tmet` + `.tidx` + `.tdat` covered |
+| `repair_session` | yes (validation pass only) | as validate |
+| `recover_session` | yes (scan only) | bytes of `.tidx` + `.tdat` covered |
+
+```python
+token = mef3io.CancelToken()
+
+def show(done, total):          # both in bytes
+    bar.set(done / total if total else 1.0)
+
+# on a worker thread:
+try:
+    x = reader.read("ch1", t0, t1, cancel=token, progress=show)
+except mef3io.Cancelled:
+    pass                        # superseded by a newer request
+
+# from any other thread (a UI's Stop button, a newer pan/zoom):
+token.cancel()
+```
+
+**One read at a time per `Reader`.** A `Reader` must not be read from two
+threads at once. When a newer request supersedes a read, cancel it and wait
+for the cancelled call to return (it does so promptly) before reading again
+on the same `Reader` — or give each thread its own `Reader`.
+
+**Cancelling.** `token.cancel()` is safe from any thread. The operation
+notices between units of work — before each segment is fetched and each block
+is decoded on a read, between 1 MB chunks when archiving or extracting,
+per segment (and per block examined) when validating or recovering — and
+raises `mef3io.Cancelled`. Tokens are one-shot: once cancelled they stay
+cancelled, so make a new one per request; one token can be passed to several
+calls to stop them together (`token.raise_if_cancelled()` lets your own loop
+stop at the same points). `Cancelled` subclasses `Exception` directly, not
+`MefError`: stopping on request is not a failure.
+
+**Nothing is left behind.** A cancelled call returns nothing:
+
+- a read returns no partial array;
+- `archive_session` builds the archive in a temporary file and
+  `extract_session` in a temporary sibling directory, renamed into place only
+  when complete — a cancel leaves neither, and with `overwrite=True` the
+  existing target is untouched;
+- `repair_session` and `recover_session` decide everything during a read-only
+  pass and write only after it. A cancel during that pass (which is where the
+  time goes) leaves the session byte-identical and creates no backup
+  directory. The short write phase that follows — a `.tmet` replaced by
+  rename and 1024-byte header patches — is not interruptible: a cancel that
+  arrives then is ignored and the call returns its report, so a session is
+  never left half-repaired.
+
+**Progress.** `progress(done, total)` is called first with `(0, total)`, then
+at a bounded rate (about every 1 % of `total`, otherwise at most every
+250 ms), with `done` never decreasing, and finally with `(total, total)`
+exactly once, when the cancellable work completes (only the short commit
+step after it — a rename, the header patches of a repair — can still fail,
+with an I/O error, never with `Cancelled`). For `repair_session` and
+`recover_session` that final call comes at the end of the read-only pass,
+before anything is written, so a callback that raises there still leaves the
+session untouched. Calls never overlap. The work runs
+with the GIL released; the callback takes the GIL only for its own call and
+may run on a decode worker thread rather than the calling one, so keep it
+short and hand UI updates to your UI thread. If it raises, the operation
+stops as if cancelled and *your* exception propagates. The callback must not
+call back into the same operation.
+
+On a read, progress counts decoding. Each segment's bytes are fetched in one
+read first, so a whole-channel read of a huge segment on slow storage shows
+`(0, total)` until that fetch is done, and a cancel during it takes effect at
+the next segment or block. Windowed (viewer) reads fetch only their window.
+With `total == 0` (an empty window) the single `(0, 0)` call is also the
+final one.
+
+`extract_session(..., overwrite=True)` briefly needs room for both trees. A
+hard kill mid-extract can leave a `<dest>.mef3io-extract-<hex>` staging
+directory, and a replaced tree that could not be deleted is left as
+`<dest>.mef3io-replaced-<hex>`; both are safe to delete.
+
+When neither keyword is given, nothing changes: the hooks cost one pointer
+test per unit of work (see `benchmarks/cancel_overhead_benchmark.py`).
+
+The MATLAB binding does not expose these yet; the C ABI does
+(`mef3io_cancel_token_*` and the `*_ex` functions, see the
+[C++ and C ABI guide](cpp.md#cancelling-and-progress)).
 
 ## Session metadata (subject, acquisition)
 

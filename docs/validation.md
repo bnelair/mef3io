@@ -5,7 +5,7 @@ number of quantities that are really re-derivable from the data: how many
 blocks there are, how many samples, how large a buffer a reader must allocate.
 Readers trust those declarations. meflib itself does not allocate from them,
 but it exposes helpers that take one as a buffer size and validate none of
-them, and applications built on it (CyberPSG among them) pass them in before
+them, and applications built on it pass them in before
 decoding anything — so a wrong declaration is a defect in the file even when
 every sample on disk is intact. The mechanics are spelled out
 [below](#notes-on-individual-checks).
@@ -125,6 +125,25 @@ bytes cannot be trusted, neither can anything derived from them. Tar archives
 can be validated but not repaired; extract one first with
 [`extract_session`](python.md).
 
+### Stopping a run, and watching it
+
+`validate_session`, `Validator.validate`, `repair_session` and
+`recover_session` take `cancel=` (a `mef3io.CancelToken`) and
+`progress=` (`progress(done, total)` in bytes) — see
+[Cancelling and progress](python.md#cancelling-and-progress).
+
+A repair is **decided during the validation pass and written after it**, and
+recovery likewise scans every segment before it writes anything. So a cancel
+during the pass — which is where the time goes, especially with
+`exact_difference_bytes` reading a header per block — raises
+`mef3io.Cancelled` with the session byte-identical and no backup directory
+created. The write phase that follows (a `.tmet` replaced by rename and at
+most two 1024-byte header patches per segment) is not interruptible: a cancel
+then is ignored and the full report is returned, so a session is never left
+partly repaired. If a segment's files change between the pass and the write —
+a writer appended in the meantime — that segment is skipped with a reason
+rather than rewritten from the stale derivation.
+
 ## The warning you get on open
 
 Opening a session that leaves size declarations unset emits a
@@ -135,7 +154,7 @@ SessionDeclarationWarning: subject.mefd: metadata section 2 leaves size
 declarations unset across 254 channel(s): maximum_difference_bytes (254
 segment(s)). This does NOT affect reading with mef3io — every buffer is sized
 from the block headers themselves, and the data is intact. It does affect
-meflib-based readers (e.g. CyberPSG), which allocate from these fields. Run
+meflib-based readers, which allocate from these fields. Run
 mef3io.Validator(path).validate() for detail, or python -m mef3io repair
 <path> --check <check-id> to fix the file.
 ```
@@ -200,8 +219,8 @@ meflib that passes one in. Two such helpers matter here:
   `difference_buffer` NULL for `RED_decode` to write through. meflib ships a
   guard for exactly this, `RED_check_RPS_allocation`, but **never calls it**
   (declared `meflib.h:1186`, defined `meflib.c:6534`, zero call sites), so
-  there is no error path at all — just the NULL write. This is the route the
-  reported CyberPSG crash took.
+  there is no error path at all — just the NULL write. This is the route a
+  crash reproduced against a meflib-based reader took.
 - `find_discontinuity_indices` (`meflib.c:3548`) `malloc`s exactly
   `number_of_discontinuities` entries and then writes one per *flagged block*,
   looping to `number_of_blocks`. A declared `0` with the flags present — which
@@ -225,14 +244,14 @@ errors; only one has a post-mortem.
 ### The fix, confirmed against the affected reader
 
 A session written by the current version, and a legacy session brought up to
-date with `repair_session`, were both opened in CyberPSG and **decoded** —
+date with `repair_session`, were both opened in a meflib-based third-party
+reader and **decoded** —
 traces drawn, no access violation. Decoding is the part that matters: in the
 original failure `ReadSession` succeeded and the crash came later, inside RED
 decoding, so a session that merely *opens* proves nothing.
 
-The recording's gap also rendered in the right place and at the right length
-(3.0 s, at 47–53% of a 49.875 s record), which says block placement by
-timestamp agrees there as well.
+The recording's gap also rendered in the right place and at the right length,
+which says block placement by timestamp agrees there as well.
 
 This covers the repaired file, in which `maximum_contiguous_block_bytes` was
 **lowered** from the legacy writer's whole-file total to the longest run — the
@@ -349,6 +368,9 @@ for s in report.segments:
 - **Tar archives are refused** — extract first.
 - It **streams**: the `.tdat`'s size, plus a 304-byte RED header and the one
   block it describes, at a handful of offsets. It never loads the data file.
+- **Cancellable without leaving anything half-done.** Every segment is scanned
+  before anything is written; `cancel=` during the scan leaves the session
+  untouched (see [Stopping a run](#stopping-a-run-and-watching-it)).
 
 ### When you should need it
 
@@ -386,7 +408,7 @@ A block's start time and sample count are therefore written **twice**, and the
 format has no rule keeping the copies in step.
 
 **mef3io places data by the block header** — the copy that is actually checked,
-and the copy meflib (so pymef, mef_tools and CyberPSG) reads. The index is used
+and the copy meflib (so pymef, mef_tools and meflib-based readers) reads. The index is used
 only to decide which blocks to fetch. On any file mef3io or the legacy stack
 wrote the two copies are identical and none of this is visible.
 
@@ -463,15 +485,15 @@ Both modes are identical, and silent, on a healthy session. After salvaging,
 `recover_session` and `repair_session` (above) are the tools for making the
 damaged segment readable again where that is possible.
 
-## The CyberPSG / meflib check set
+## The meflib reader check set
 
 The defect this validator exists for is **invisible to mef3io and to pymef** —
 both size their buffers from each block's own header rather than from metadata
 section 2 — so neither can confirm a fix. Only a meflib-based reader can.
 
 ```bash
-python scripts/make_cyberpsg_check.py            # -> ~/mef3io_cyberpsg_check
-python scripts/make_cyberpsg_check.py --out /tmp/check --seconds 120
+python scripts/make_reader_compat_check.py       # -> ~/mef3io_reader_compat_check
+python scripts/make_reader_compat_check.py --out /tmp/check --seconds 120
 ```
 
 Nine small sessions covering every way mef3io can produce or touch a session —
