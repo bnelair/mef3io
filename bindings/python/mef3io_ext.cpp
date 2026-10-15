@@ -455,6 +455,36 @@ NB_MODULE(_mef3io, m) {
     return d;
   });
 
+  // Single-block RED encode/decode with block encryption (#80 interop tests).
+  // Keys come from `password` checked against the two universal-header
+  // validation fields (16 B each), exactly as the reader derives them.
+  m.def(
+      "red_encode_block",
+      [](nb::ndarray<const mef3io::si4, nb::ndim<1>, nb::c_contig> samples, mef3io::si8 start_time,
+         bool discontinuity, int encryption_level, const std::string& password, nb::bytes l1_field,
+         nb::bytes l2_field) {
+        std::span<const mef3io::si4> s(samples.data(), samples.size());
+        auto keys = mef3io::crypto::validate_password(password, as_span(l1_field), as_span(l2_field));
+        mef3io::si4 mn = 0, mx = 0;
+        return to_bytes(mef3io::red::encode_block(s, start_time, discontinuity, mn, mx,
+                                                  encryption_level, keys));
+      },
+      nb::arg("samples"), nb::arg("start_time"), nb::arg("discontinuity"),
+      nb::arg("encryption_level"), nb::arg("password"), nb::arg("l1_field"), nb::arg("l2_field"));
+
+  m.def(
+      "red_decode_block",
+      [](nb::bytes block, const std::string& password, nb::bytes l1_field, nb::bytes l2_field) {
+        auto keys = mef3io::crypto::validate_password(password, as_span(l1_field), as_span(l2_field));
+        auto dec = mef3io::red::decode_block(as_span(block), keys);
+        nb::dict d;
+        d["samples"] = vec_to_numpy(std::move(dec.samples));
+        d["start_time"] = dec.start_time;
+        d["discontinuity"] = dec.discontinuity;
+        return d;
+      },
+      nb::arg("block"), nb::arg("password"), nb::arg("l1_field"), nb::arg("l2_field"));
+
   // Write one single-segment time-series channel (P4 validation helper).
   // Splits `samples` into RED blocks of `block_len`; block 0 is marked as a
   // discontinuity (meflib convention for a segment's first block).
