@@ -25,6 +25,23 @@ si4 round_si4(sf8 val) {
   return static_cast<si4>(val);
 }
 
+// Only bytes 0..15 of the table are ciphertext — see the comment on
+// encrypt_statistics in red.hpp (meflib.c:292 / :6676 / :7027). Running the
+// cipher over all 256 bytes (what mef3io did before #80) is self-consistent,
+// so round trips pass, but it scrambles bytes 16..255 of a meflib-encrypted
+// block on read and writes blocks meflib/pymef cannot decode.
+void encrypt_statistics(std::span<ui1, STATISTICS_BYTES> statistics, std::span<const ui1> key) {
+  auto first = statistics.first<ENCRYPTED_STATISTICS_BYTES>();
+  auto enc = crypto::aes128_ecb_encrypt(first, key);
+  std::copy(enc.begin(), enc.end(), first.begin());
+}
+
+void decrypt_statistics(std::span<ui1, STATISTICS_BYTES> statistics, std::span<const ui1> key) {
+  auto first = statistics.first<ENCRYPTED_STATISTICS_BYTES>();
+  auto dec = crypto::aes128_ecb_decrypt(first, key);
+  std::copy(dec.begin(), dec.end(), first.begin());
+}
+
 DecodedBlock decode_block(std::span<const ui1> block, const crypto::AccessKeys& keys,
                           bool validate_crc) {
   using fmt::RED_BLOCK_HEADER_BYTES;
@@ -56,18 +73,17 @@ DecodedBlock decode_block(std::span<const ui1> block, const crypto::AccessKeys& 
   out.start_time = bh.start_time;
   out.discontinuity = (bh.flags & fmt::RedBlockHeader::DISCONTINUITY_MASK) != 0;
 
-  // Decrypt the 256-byte statistics table if the block is encrypted.
+  // Decrypt the statistics table if the block is encrypted: the first 16
+  // bytes only, as meflib RED_decode does (meflib.c:6676).
   std::array<ui1, STATISTICS_BYTES> stats = bh.statistics;
   if (bh.flags & fmt::RedBlockHeader::LEVEL_1_ENCRYPTION_MASK) {
     if (keys.access_level < fmt::LEVEL_1_ACCESS || !keys.level1_key)
       throw PasswordError("RED block is level-1 encrypted; insufficient access");
-    auto dec = crypto::aes128_ecb_decrypt(stats, *keys.level1_key);
-    std::copy(dec.begin(), dec.end(), stats.begin());
+    decrypt_statistics(stats, *keys.level1_key);
   } else if (bh.flags & fmt::RedBlockHeader::LEVEL_2_ENCRYPTION_MASK) {
     if (keys.access_level < fmt::LEVEL_2_ACCESS || !keys.level2_key)
       throw PasswordError("RED block is level-2 encrypted; insufficient access");
-    auto dec = crypto::aes128_ecb_decrypt(stats, *keys.level2_key);
-    std::copy(dec.begin(), dec.end(), stats.begin());
+    decrypt_statistics(stats, *keys.level2_key);
   }
 
   if (bh.number_of_samples == 0) return out;  // empty block
@@ -295,16 +311,16 @@ std::vector<ui1> encode_block(std::span<const si4> samples, si8 start_time, bool
   bh.flags = 0;
   if (discontinuity) bh.flags |= fmt::RedBlockHeader::DISCONTINUITY_MASK;
 
-  // Encrypt the statistics table if requested.
+  // Encrypt the statistics table if requested: the first 16 bytes only, as
+  // meflib RED_encode does (meflib.c:7027). The CRC below is taken after this,
+  // over the ciphertext, matching meflib.c:7045.
   if (encryption_level == fmt::LEVEL_1_ENCRYPTION) {
     if (!keys.level1_key) throw PasswordError("level-1 key required to encrypt block");
-    auto enc = crypto::aes128_ecb_encrypt(bh.statistics, *keys.level1_key);
-    std::copy(enc.begin(), enc.end(), bh.statistics.begin());
+    encrypt_statistics(bh.statistics, *keys.level1_key);
     bh.flags |= fmt::RedBlockHeader::LEVEL_1_ENCRYPTION_MASK;
   } else if (encryption_level == fmt::LEVEL_2_ENCRYPTION) {
     if (!keys.level2_key) throw PasswordError("level-2 key required to encrypt block");
-    auto enc = crypto::aes128_ecb_encrypt(bh.statistics, *keys.level2_key);
-    std::copy(enc.begin(), enc.end(), bh.statistics.begin());
+    encrypt_statistics(bh.statistics, *keys.level2_key);
     bh.flags |= fmt::RedBlockHeader::LEVEL_2_ENCRYPTION_MASK;
   }
 

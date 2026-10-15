@@ -35,7 +35,8 @@ block_length=None, n_threads=0)`
   it the offset is unknown. A Writer opened with only the level-1 password is
   refused (`PasswordError`) for anything that stores times into that
   session, rather than guessing the offset. Earlier releases took it as 0,
-  which in an anonymized session placed appended data decades off.
+  which in a session with a recording-time offset placed appended data
+  decades off.
 - `Writer.unreadable_metadata` lists segment metadata the writer could not
   use (`"path: reason"`):
   - `.tmet` files it could not read while choosing the offset. At offset 0
@@ -191,11 +192,15 @@ read is handled the same way. Reading every body type is supported; writing is
 limited to Note, SyLg and EDFA.
 
 Written times are stored as `−t` in a session at offset 0 (every session
-mef3io creates). In a foreign session anonymized with a recording-time offset
-they are stored as `rto − t`, so the real date stays hidden. A segment or
-channel mef3io adds to such a session inherits its offset.
+mef3io creates). In a foreign session "anonymized" with meflib's
+recording-time offset they are stored as `rto − t`, the session's own form,
+so mef3io never writes the date there in plain. A segment or channel mef3io
+adds to such a session inherits its offset. The offset does not
+de-identify the session, though: the date is in section 3 (see
+[De-identification](anonymization.md)).
 
-A write is refused, rather than revealing the date or misplacing times, when:
+A write is refused, rather than misplacing times or breaking the session's own
+`rto − t` form, when:
 - the time is at or before the offset (`WriteConflictError`);
 - the level's segments disagree on the offset (`WriteConflictError`);
 - the offset is locked because only the level-1 password was given

@@ -154,6 +154,100 @@ TEST_CASE("RED handles int32 extremes") {
   REQUIRE(dec.discontinuity);
 }
 
+// #80: meflib encrypts ONE AES block — bytes 0..15 of the 256-byte RED
+// statistics table (AES_cipher works on a single 4x4 state, meflib.c:292;
+// called from RED_encode meflib.c:7027 and RED_decode meflib.c:6676). mef3io
+// used to cipher all 256 bytes, which is self-consistent and so survived every
+// round trip while being unreadable by meflib/pymef and corrupting their blocks.
+TEST_CASE("RED statistics encryption touches only bytes 0..15 (meflib rule)") {
+  const std::array<ui1, 16> key = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                                   0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+
+  SECTION("helpers: first AES block ciphered, the other 240 bytes untouched") {
+    std::array<ui1, 256> plain{};
+    for (int i = 0; i < 256; ++i) plain[i] = static_cast<ui1>(i * 7 + 3);
+    auto enc = plain;
+    red::encrypt_statistics(enc, key);
+    auto expected_first =
+        crypto::aes128_ecb_encrypt(std::span<const ui1>(plain.data(), 16), key);
+    REQUIRE(std::equal(expected_first.begin(), expected_first.end(), enc.begin()));
+    REQUIRE(std::equal(plain.begin() + 16, plain.end(), enc.begin() + 16));
+    REQUIRE_FALSE(std::equal(plain.begin(), plain.begin() + 16, enc.begin()));
+
+    auto dec = enc;
+    red::decrypt_statistics(dec, key);
+    REQUIRE(dec == plain);
+    // Decrypt alone also leaves 16..255 as they were (a plaintext tail must
+    // never be "decrypted").
+    auto dec_only = plain;
+    red::decrypt_statistics(dec_only, key);
+    REQUIRE(std::equal(plain.begin() + 16, plain.end(), dec_only.begin() + 16));
+  }
+
+  SECTION("encode_block: an encrypted block differs from the plain one only in "
+          "CRC, flags and statistics bytes 0..15") {
+    auto vf = crypto::make_validation_fields("pass1", "pass2");
+    auto keys = crypto::validate_password("pass2", vf.level1, vf.level2);
+    REQUIRE(keys.access_level == fmt::LEVEL_2_ACCESS);
+
+    std::mt19937 rng(80);
+    std::uniform_int_distribution<si4> dist(-400, 400);
+    std::vector<si4> data(3000);
+    si4 acc = 0;
+    for (auto& x : data) x = (acc += dist(rng) % 40);
+
+    si4 mn = 0, mx = 0;
+    const auto plain = red::encode_block(data, -1234567, true, mn, mx);
+    constexpr std::size_t STATS = 48;  // statistics table offset in the header
+    for (int level : {fmt::LEVEL_1_ENCRYPTION, fmt::LEVEL_2_ENCRYPTION}) {
+      CAPTURE(level);
+      auto enc = red::encode_block(data, -1234567, true, mn, mx, level, keys);
+      REQUIRE(enc.size() == plain.size());
+      for (std::size_t i = 0; i < enc.size(); ++i) {
+        const bool may_differ = i < 4 /* CRC */ || i == 4 /* flags */ ||
+                                (i >= STATS && i < STATS + 16);
+        if (!may_differ) {
+          CAPTURE(i);
+          REQUIRE(enc[i] == plain[i]);
+        }
+      }
+      // Bytes 48..63 really are AES(key, plaintext first block).
+      const auto& k = level == fmt::LEVEL_1_ENCRYPTION ? *keys.level1_key : *keys.level2_key;
+      auto first =
+          crypto::aes128_ecb_encrypt(std::span<const ui1>(plain.data() + STATS, 16), k);
+      REQUIRE(std::equal(first.begin(), first.end(), enc.begin() + STATS));
+      const ui1 mask = level == fmt::LEVEL_1_ENCRYPTION
+                           ? fmt::RedBlockHeader::LEVEL_1_ENCRYPTION_MASK
+                           : fmt::RedBlockHeader::LEVEL_2_ENCRYPTION_MASK;
+      REQUIRE(enc[4] == (plain[4] | mask));
+      // CRC is over the ciphertext (meflib.c:7045): decode validates it.
+      auto dec = red::decode_block(enc, keys);
+      REQUIRE(dec.samples == data);
+      REQUIRE(dec.discontinuity);
+      // No key, no decode.
+      REQUIRE_THROWS_AS(red::decode_block(enc), PasswordError);
+    }
+  }
+
+  SECTION("decode: a block encrypted the meflib way (16 bytes, by hand) decodes") {
+    auto vf = crypto::make_validation_fields("pass1", "pass2");
+    auto keys = crypto::validate_password("pass2", vf.level1, vf.level2);
+    std::vector<si4> data(500);
+    for (std::size_t i = 0; i < data.size(); ++i)
+      data[i] = static_cast<si4>(1000 * std::sin(0.01 * static_cast<double>(i)));
+    si4 mn = 0, mx = 0;
+    auto block = red::encode_block(data, 42, false, mn, mx);
+    // Encrypt bytes 48..63 directly with the generic AES primitive, set the L2
+    // flag and re-seal the CRC — no mef3io RED helper involved.
+    auto first = crypto::aes128_ecb_encrypt(std::span<const ui1>(block.data() + 48, 16),
+                                            *keys.level2_key);
+    std::copy(first.begin(), first.end(), block.begin() + 48);
+    block[4] |= fmt::RedBlockHeader::LEVEL_2_ENCRYPTION_MASK;
+    byteio::write<ui4>(block, 0, crc::calculate(std::span<const ui1>(block).subspan(4)));
+    REQUIRE(red::decode_block(block, keys).samples == data);
+  }
+}
+
 TEST_CASE("In-segment append extends the last segment") {
   namespace fsys = std::filesystem;
   const auto dir = fsys::temp_directory_path() / "mef3io_append_test.mefd";

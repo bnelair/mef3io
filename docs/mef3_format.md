@@ -49,19 +49,21 @@ quirks matter:
   - **rto ≠ 0** (only in a foreign session that used meflib's anonymization,
     which mef3io is extending): times are stored as `rto − t`, meflib's own
     offset-applied form. This covers data blocks, index, universal headers and
-    records alike. The real date never reaches the file, which is what the
-    offset is for, and every reader places the time correctly.
+    records alike. mef3io never writes a date there in plain, and every
+    reader places the time correctly. (The date is still in the file: the
+    offset itself sits in section 3, see below.)
   - **New segments and channels** added to a session whose segments all agree
     on a non-zero `rto` carry that same `rto` in section 3, and their times
     follow the same rule. The session keeps agreeing, so its existing
     records stay readable.
   - **Refused writes.** These raise an error and leave the files untouched,
-    rather than store something that would misplace times or reveal the
-    date:
+    rather than store something that would misplace times or break the
+    session's `rto − t` form:
     - **A time at or before a non-zero `rto`** (`WriteConflictError`). `rto − t`
       would be non-negative, and every reader takes a non-negative time as
-      the absolute date (meflib.c:7665). So the only correct encoding is the
-      real date in plain, which the offset exists to hide.
+      the absolute date (meflib.c:7665). So the only correct encoding would be
+      the absolute date, outside the session's own `rto − t` form; mef3io
+      refuses rather than mix the two.
     - **A write to a level whose segments disagree on `rto`**
       (`WriteConflictError`, naming the segments). There is no single offset
       to store against.
@@ -92,6 +94,17 @@ quirks matter:
     real segment number, so such a directory never misplaces an append or a
     new segment.
 - The empty value ("no entry") for a time is `INT64_MIN`.
+
+**The recording-time offset as "anonymization" is deprecated by mef3io.**
+This is not a format change: MEF 3.0 still defines the field, and mef3io
+reads and extends offset sessions exactly as described above. But the
+offset only moves the date into `recording_time_offset` in section 3 of
+every `.tmet`, which is plain text unless the session is encrypted, so
+`−stored + rto` gives the real date back to anyone. mef3io therefore never
+creates an offset session (a new session gets `rto = 0`), and
+de-identification is planned as a separate copy
+([#70](https://github.com/bnelair/mef3io/issues/70)). See
+[De-identification and the recording-time offset](anonymization.md).
 
 ## Universal header — 1024 B, prefixes every file
 
@@ -128,8 +141,9 @@ modifies, to record **which version created the file, which version last
 modified it, and what was done to it**.
 
 **No times are recorded.** The universal header is never encrypted, so a
-write time would reveal when a recording was made, which is exactly what
-`recording_time_offset` exists to hide.
+write time would reveal when a recording was made. (`recording_time_offset`
+was meant to hide that, but does not: see
+[De-identification](anonymization.md).)
 
 | Offset | Bytes | Type | Field |
 |---|---|---|---|
@@ -259,7 +273,7 @@ start/end times and `recording_duration` span the gaps. A gridded read
 The `maximum_*` block of fields at 6376–6424 is not descriptive trivia — it is the
 allocation contract. meflib does not allocate from them itself, but it exposes
 helpers that take one as a buffer size and validate none of them, and
-applications built on it (CyberPSG among them) pass them in before decoding
+applications built on it pass them in before decoding
 anything — so a writer that under-declares hands that reader a buffer too small
 for the data about to go into it.
 
@@ -304,7 +318,7 @@ still read correctly.
 
 | Offset | Type | Field |
 |---|---|---|
-| 0 | si8 | recording time offset (`rto`, used to de-negate times) |
+| 0 | si8 | recording time offset (`rto`, used to de-negate times; holds the recording date, see [De-identification](anonymization.md)) |
 | 8 / 16 | si8 | DST start / end time |
 | 24 | si4 | GMT offset (seconds) |
 | 28 / 156 | char[128] | subject name 1 / 2 |
@@ -351,6 +365,32 @@ the original signal) are represented; nothing is stored for the gap itself.
 RED blocks are written **unencrypted** even in encrypted sessions (meflib
 default): the passwords protect metadata and records, and without section 2 a
 reader has no fs/ufact/counts to interpret the samples with.
+
+**When a block IS encrypted, only bytes 0–15 of the statistics table are
+ciphertext** (header offsets 48–63). Bits 1/2 of the flags select the level-1
+or level-2 key; meflib then runs AES-128 over **one** 16-byte block of the
+256-byte table — `RED_encode` calls `AES_encrypt(block_header->statistics, …)`
+(meflib.c:7027), `RED_decode` calls `AES_decrypt` (meflib.c:6676), and both
+end in `AES_cipher` / `AES_inv_cipher` (meflib.c:292 / :423), which process a
+single 4×4 state. Bytes 16–255 stay in the clear. The block CRC is computed
+**after** encryption (meflib.c:7045), so it covers the ciphertext and can be
+checked without a password. Nothing else in the block — header fields or the
+compressed payload — is encrypted. Ciphering all 256 bytes is self-consistent
+(it round-trips) but cannot read meflib's encrypted blocks and writes blocks
+meflib cannot read; mef3io did exactly that until #80 (1.2.0 and earlier).
+
+Few readers can actually open an encrypted block. pymef's time-series reader
+(`read_mef_ts_data`, behind both `read_ts_channels_sample` and
+`read_ts_channels_uutc`) never gives meflib's RED decoder its password data
+(pymef3_file.c:2151 callocs the processing struct), so `RED_decode`
+dereferences NULL at meflib.c:6675 on the first encrypted block. meflib itself
+needs the LEVEL-2 password even for level-1 blocks: `process_password_data`
+puts a level-1-only password's expanded key in `level_2_encryption_key`
+(meflib.c:5080), leaving the level-1 key slot zero, so it would decrypt a
+level-1 block with the wrong key. mef3io deliberately differs here — a level-1
+password reads level-1 blocks — and its encoder reproduces meflib's encrypted
+blocks byte for byte (`tests/test_p24_red_block_encryption.py`, on a
+fixture whose blocks meflib itself encrypted).
 
 To recover physical units: `value = stored_int32 * units_conversion_factor`.
 
