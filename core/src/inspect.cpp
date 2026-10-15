@@ -167,7 +167,8 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
   // it is listed, unreadable, its files counted, and everything it might hold
   // (identity, an offset) is "unknown" — never "absent".
   std::size_t incomplete_segments = 0;
-  auto describe_incomplete = [&](const detail::IncompleteSegment& bad, std::uint64_t& bytes) {
+  auto describe_incomplete = [&](const std::string& channel, const detail::IncompleteSegment& bad,
+                                 std::uint64_t& bytes) {
     ++incomplete_segments;
     InspectSegment is;
     is.segment_number = bad.number;
@@ -177,7 +178,10 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     is.time_offset = "unknown";
     is.has_records = bad.has_records;
     for (const auto& f : bad.present) {
-      const std::uint64_t n = src->file_size(f);
+      // A half-written folder is where odd entries turn up: a failure to
+      // measure one is contained like any other (strict still raises).
+      std::uint64_t n = 0;
+      contain(channel, bad.number, src->describe(f), "segment", [&] { n = src->file_size(f); });
       if (f.ends_with(".tmet")) is.tmet_bytes = n;
       else if (f.ends_with(".tidx")) is.tidx_bytes = n;
       else if (f.ends_with(".tdat")) is.tdat_bytes = n;
@@ -385,6 +389,13 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
         // Sizes measured before the failure are facts about the disk, so they
         // still count; nothing READ from the segment does.
         bad.tmet_bytes = is.tmet_bytes;  // set once read, before the parse can throw
+        if (bad.tmet_bytes == 0) {         // the read itself failed: measure it now
+          try {
+            bad.tmet_bytes = src->file_size(ls.tmet);
+          } catch (const std::exception&) {
+            // unmeasurable too; the problem is already reported
+          }
+        }
         bad.tidx_bytes = is.tidx_bytes;
         bad.tdat_bytes = is.tdat_bytes;
         bad.record_bytes = is.record_bytes;
@@ -440,9 +451,9 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     }
 
     for (const auto& bad : lc->incomplete) {
-      ic.segments.push_back(describe_incomplete(bad, ic.bytes));
+      ic.segments.push_back(describe_incomplete(lc->name, bad, ic.bytes));
       seg_states.push_back(SegState{nullptr, std::nullopt, std::nullopt});  // offset unknown
-      spans_certain = false;
+      spans_complete = spans_certain = false;  // its index was never read
       n_samples_known = false;
     }
     std::stable_sort(ic.segments.begin(), ic.segments.end(),
@@ -473,7 +484,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     if (lc.incomplete.empty()) continue;  // just records, or an empty folder
     out.incomplete_channels.push_back(lc.name);
     for (const auto& bad : lc.incomplete) {
-      describe_incomplete(bad, out.total_bytes);
+      describe_incomplete(lc.name, bad, out.total_bytes);
       states[lc.name].push_back(SegState{nullptr, std::nullopt, std::nullopt});
     }
   }
@@ -520,6 +531,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     std::string file, why;
   };
   std::vector<Unplaced> unplaced;
+  std::vector<std::string> unread_root_records;  // .rdat at the root that are not the session's
   std::size_t records_failed = 0;
 
   auto read_file = [&](const std::string& rdat, std::optional<si8> rto, const std::string& why,
@@ -663,15 +675,21 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     if (!ambiguity.empty()) {
       contain("", -1, src->describe(""), "records", [&] { throw FormatError(ambiguity); });
       ++records_failed;
-      // None of them is read, but they are on disk and may hold identity.
-      for (const auto& e : src->list_dir("")) {
-        if (e.is_dir || !(e.name.ends_with(".rdat") || e.name.ends_with(".ridx"))) continue;
-        out.total_bytes += src->file_size(e.name);
-        if (e.name.ends_with(".rdat")) {
-          identity.locked("session_name", "universal header");
-          identity.locked("anonymized_name", "universal header");
-          identity.locked("record_text", "record bodies");
-        }
+    }
+    // Root record files other than the session's own: not read (meflib and
+    // the Reader ignore them too), but on disk and possibly holding identity,
+    // so they are counted, their fields reported unknown, and warned about.
+    const std::string chosen_ridx = rdat.empty() ? "" : rdat.substr(0, rdat.size() - 5) + ".ridx";
+    for (const auto& e : src->list_dir("")) {
+      if (e.is_dir || !(e.name.ends_with(".rdat") || e.name.ends_with(".ridx"))) continue;
+      if (e.name == rdat || e.name == chosen_ridx) continue;
+      contain("", -1, src->describe(e.name), "records",
+              [&] { out.total_bytes += src->file_size(e.name); });
+      if (e.name.ends_with(".rdat")) {
+        unread_root_records.push_back(e.name);
+        identity.locked("session_name", "universal header");
+        identity.locked("anonymized_name", "universal header");
+        identity.locked("record_text", "record bodies");
       }
     }
     if (!rdat.empty()) {
@@ -738,6 +756,8 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     to.status = "applied";
   else if (to.segments_locked)
     to.status = "locked";
+  else if (to.segments_unknown && !zero_offset_seen)
+    to.status = "unknown";
   to.ambiguous = any_ambiguous;
   if (!offsets_seen.empty()) {
     to.date_recoverable = true;
@@ -761,6 +781,10 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
         "Segments disagree on the recording-time offset. Each segment's times were resolved "
         "with its own offset; channel- and session-level records that depend on it cannot be "
         "placed.";
+  } else if (to.status == "unknown") {
+    to.interpretation =
+        "No segment could be read, so any recording-time offset is unknown. Times stored "
+        "relative to it are reported as unknown rather than guessed.";
   } else {
     to.interpretation =
         "Metadata section 3 is encrypted and the password does not open it, so any "
@@ -809,6 +833,15 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
              ". A Reader skips them silently; they are listed as unreadable and their files "
              "counted, and what they may hold is reported as unknown.",
          true);
+  if (!unread_root_records.empty()) {
+    std::string list;
+    for (const auto& n : unread_root_records) list += (list.empty() ? "" : ", ") + n;
+    warn("unread-record-files",
+         std::to_string(unread_root_records.size()) + " record file(s) at the session root are "
+             "not the session's own and were not read (" + list + "). meflib and the Reader "
+             "ignore them too, but they may hold annotation text.",
+         true);
+  }
   if (records_failed)
     warn("unreadable-records",
          std::to_string(records_failed) + " record file(s) could not be read; see problems.",

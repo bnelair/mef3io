@@ -350,7 +350,10 @@ and the times in `fields` are `None` too).
 
 **The recording-time offset is reported plainly.** meflib's recording-time
 offset is deprecated as anonymization: the real date stays in section 3.
-`time_offset["status"]` is `"none"`, `"applied"`, `"disputed"` or `"locked"`;
+`time_offset["status"]` is `"none"`, `"applied"`, `"disputed"`, `"locked"` or
+`"unknown"` (no segment readable). It describes the readable segments;
+`segments_unknown` counts the ones that could not be read, whose offset is
+unknown;
 when an offset is set, `date_recoverable` is `True` and `recoverable_by` says
 by whom (`"anyone"` if section 3 is plain, `"level-2 password"` if encrypted),
 with a `legacy-time-offset` warning. The offset's value is itself identifying

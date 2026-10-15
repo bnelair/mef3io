@@ -34,6 +34,8 @@ THREE_DAYS = 3 * 86400 * SECOND
 UH_BYTES = 1024
 METADATA_FILE_BYTES = 16384
 S3_RTO_OFFSET = 13312
+SEIZ_BYTES = 1312                 # Seiz 1.0 fixed part (records.cpp, mefrec.h)
+SEIZ_CHANNEL_BYTES = 272          # one channel entry (records.cpp)
 SUBJECT = mef3io.Subject(name_1="Jane", name_2="Doe", id="MRN-123", recording_location="Ward 9")
 
 
@@ -687,6 +689,8 @@ def test_an_incomplete_segment_folder_is_reported_not_dropped(session):
         assert s.total_bytes == _disk_bytes(session)
         assert not c.gaps_certain and c.number_of_samples is None
         assert "incomplete-segments" in {w.code for w in s.anonymize_blockers}
+    # Its index was never read, so the gaps cannot be complete (F2).
+    assert not mef3io.inspect(session, read_index=True).channel("ch1").gaps_complete
 
 
 def test_a_channel_folder_without_a_complete_segment_is_reported(session):
@@ -723,3 +727,82 @@ def test_negative_sample_counts_are_unknown_not_summed(session):
     _reseal(raw, METADATA_FILE_BYTES)
     tmet.write_bytes(bytes(raw))
     assert mef3io.inspect(session).channel("ch1").number_of_samples is None
+
+
+# --------------------------------------------------------------------------- review round 3
+
+
+def test_an_odd_entry_in_an_incomplete_folder_is_contained(session):
+    """F1: measuring the files of a half-written folder is contained too."""
+    seg = sorted(Path(session).glob("ch1.timd/*.segd"))[0]
+    next(seg.glob("*.tdat")).unlink()
+    (seg / f"{seg.stem}.rdat").mkdir()          # a directory where a file should be
+    s = mef3io.inspect(session, strict=False)
+    assert any(p["kind"] == "segment" for p in s.problems)
+    assert not s.channel("ch1").segments[0].readable
+
+
+def test_a_stray_root_record_file_is_reported(session):
+    """F3: a second .rdat next to <session>.rdat is not read (meflib and the
+    Reader ignore it) but it is on disk and may hold text."""
+    root = Path(session)
+    for ext in ("rdat", "ridx"):
+        shutil.copy(root / f"s.{ext}", root / f"other.{ext}")
+    s = mef3io.inspect(session)
+    assert s.total_bytes == _disk_bytes(session)
+    w = next(w for w in s.warnings if w.code == "unread-record-files")
+    assert w.blocks_anonymize and "other.rdat" in w.message
+    assert s.identity_field("record_text").locked == 1
+    assert [r.level for r in s.records].count("session") == 1
+
+
+def test_no_readable_segment_is_status_unknown(session):
+    """F4: "none" would read as "no offset"; nothing could be read at all."""
+    for f in Path(session).rglob("*.tdat"):
+        f.unlink()
+    s = mef3io.inspect(session)
+    assert s.time_offset["status"] == "unknown"
+    assert s.time_offset["segments_unknown"] == 4
+
+
+def _seiz_record(disk_time, onset):
+    """A Seiz 1.0 record with one channel entry (mefrec.h:141/152)."""
+    body = bytearray(SEIZ_BYTES + SEIZ_CHANNEL_BYTES)
+    struct.pack_into("<q", body, 0, onset)            # earliest_onset
+    struct.pack_into("<q", body, 8, onset + SECOND)   # latest_offset
+    struct.pack_into("<q", body, 16, SECOND)          # duration
+    struct.pack_into("<i", body, 24, 1)               # number_of_channels
+    ch = SEIZ_BYTES
+    body[ch:ch + 3] = b"LA1"
+    struct.pack_into("<q", body, ch + 256, onset)
+    struct.pack_into("<q", body, ch + 264, onset + SECOND)
+    body += b"\x7e" * ((-len(body)) % 16)
+    hdr = bytearray(24)
+    hdr[4:8] = b"Seiz"
+    hdr[9], hdr[10] = 1, 0
+    struct.pack_into("<b", hdr, 11, -1)
+    struct.pack_into("<I", hdr, 12, len(body))
+    struct.pack_into("<q", hdr, 16, disk_time)
+    rec = hdr + body
+    struct.pack_into("<I", rec, 0, m.crc32(bytes(rec[4:])))
+    return bytes(rec)
+
+
+def test_seiz_channel_times_are_none_when_the_offset_is_disputed(session):
+    """F5 / N7: the per-channel onset/offset of a Seiz body must not keep a
+    placeholder when the file's offset is unknown."""
+    rdat = Path(session) / "s.rdat"
+    t = START + 2 * SECOND
+    raw = bytearray(rdat.read_bytes()[:UH_BYTES]) + _seiz_record(-t, -t)  # negated: offset-dependent
+    struct.pack_into("<q", raw, 32, 1)
+    _reseal(raw, len(raw))
+    rdat.write_bytes(bytes(raw))
+    ok = mef3io.inspect(session, include_values=True)
+    seiz = next(r for r in ok.records if r.type == "Seiz")
+    assert seiz.times_known and seiz.fields["channels"][0]["onset"] == t
+    _set_rto(session, THREE_DAYS, channel="ch2")
+    s = mef3io.inspect(session, include_values=True)
+    seiz = next(r for r in s.records if r.type == "Seiz")
+    assert not seiz.times_known
+    assert seiz.fields["channels"][0]["name"] == "LA1"
+    assert all(t is None for t in _time_fields(seiz)), seiz.fields

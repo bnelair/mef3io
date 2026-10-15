@@ -204,8 +204,11 @@ class SessionSummary:
         how many ``record_bodies_locked``.
     time_offset : dict
         meflib's recording-time offset (RTO). ``status``: ``"none"``,
-        ``"applied"``, ``"disputed"`` (segments disagree) or ``"locked"``
-        (section 3 unreadable, so unknown). ``date_recoverable`` is ``True``
+        ``"applied"``, ``"disputed"`` (segments disagree), ``"locked"``
+        (section 3 encrypted and not opened, so unknown) or ``"unknown"`` (no
+        segment could be read). The status describes the READABLE segments;
+        ``segments_unknown`` counts those that could not be read, whose
+        offset is unknown (and which make dependent record times ``None``). ``date_recoverable`` is ``True``
         when an offset is set — the real date is then stored in section 3,
         and ``recoverable_by`` says by whom (``"anyone"`` when section 3 is
         plain, ``"level-2 password"`` when encrypted). ``ambiguous``: a time

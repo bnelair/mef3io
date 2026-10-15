@@ -154,7 +154,9 @@ struct TimeOffsetSummary {
   /// "none": no readable segment sets an offset. "applied": meflib's
   /// recording-time offset is set, and the readable segments agree on it.
   /// "disputed": they disagree. "locked": no offset seen, but some section 3
-  /// could not be read, so there may be one.
+  /// could not be read, so there may be one. "unknown": no segment could be
+  /// read at all. Every status describes the READABLE segments only; see
+  /// segments_unknown for the rest.
   std::string status = "none";
   std::size_t segments_with_offset = 0;
   std::size_t segments_locked = 0;
