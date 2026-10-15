@@ -16,6 +16,27 @@ they are created by the release trigger, so they cannot drift.
 
 ## Releasing
 
+### Before the release: revise the documentation (required)
+
+Every release starts with a **complete documentation revision**, done as its
+own reviewed pull request and **merged before the tag is created**. Check each
+of these against the code that is about to ship, not against the previous
+release:
+
+- [ ] `README.md` (it is also the PyPI project page, so links must be absolute)
+- [ ] the documentation site (`docs/`, built with `mkdocs build --strict`)
+- [ ] `examples/README.md` and the example scripts it lists
+- [ ] `pyproject.toml`: `description`, `keywords`, `classifiers`
+- [ ] `CITATION.cff`
+- [ ] the release notes: draft what changed and what an upgrading user must
+      do. The release workflow publishes GitHub's generated notes; replace
+      them with the reviewed draft (edit the release) as soon as it is out.
+
+Nothing in these may state a fact that goes stale on its own (test counts,
+"currently", dates of past work); link to the release notes instead.
+
+### Cutting the release
+
 One button: run the **bump-version** workflow (GitHub → Actions →
 bump-version → Run workflow), choosing `patch`, `minor`, `major`, or an
 explicit `X.Y.Z`. It commits the bumped `VERSION` as `Release vX.Y.Z`, tags,
@@ -37,6 +58,7 @@ wheels and MEX build as artifacts, publishing is skipped.
 ## CI
 
 `ci.yml` runs on pushes/PRs to `main` and `dev`: the C++ Catch2 suite, the
-full oracle pytest matrix (Ubuntu 3.10/3.12/3.13, macOS 3.13), a Windows
-build + import smoke test, and the version-consistency check. The docs site
+full oracle pytest matrix (Ubuntu 3.10/3.12/3.13, macOS 3.13, Windows
+3.13), a Python 3.14 smoke test, and the version-consistency check. The C++
+suite runs on Linux, macOS and Windows. The docs site
 deploys to GitHub Pages from `main`.

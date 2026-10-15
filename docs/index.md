@@ -29,8 +29,8 @@ every binding carries the same version number.
   [legacy comparison](legacy_comparison.md).
 - **Correct** — cross-validated in both directions against pymef/mef_tools
   (values, NaN gaps, times, encryption, fractional sampling rates, records),
-  with committed golden fixtures, ~100 Python tests, C++ Catch2 tests, and a
-  MATLAB round-trip suite.
+  with committed golden fixtures, Python and C++ test suites, and a MATLAB
+  round-trip suite.
 - **Drop-in** — `from mef3io import MefReader, MefWriter` runs existing
   mef_tools code with only the import changed.
 - **Encryption that works** — the two-level password model is implemented as
@@ -69,21 +69,20 @@ The same session opens in MATLAB (`mef3io.Reader('session.mefd')`) and C++
 | [De-identification](anonymization.md) | why meflib's recording-time offset is not anonymization, and what mef3io does instead |
 | [Performance & legacy comparison](legacy_comparison.md) | measured speed, encryption, and quantization differences |
 
-## Status and scope
+## Scope and limitations
 
-Read + write are complete and released; in-segment append matches legacy
-semantics. Out of scope: MEF video files. Records cover Note, EDFA, SyLg,
-Seiz. The pure-Python fallback backend is not yet implemented.
+- MEF video files are out of scope; a session's video folders are skipped.
+- Encryption is all or nothing per session — see the
+  [encryption model](encryption_model.md).
+- Every record type MEF 3.0 defines is read; `Note`, `SyLg` and `EDFA` can be
+  written with their text.
+- The pure-Python fallback backend is not implemented.
+- Sessions written by mef3io **≤ 1.1.2** declare some buffer sizes as `0`,
+  which can crash meflib-based readers (mef3io and pymef read them fine);
+  [Validating and repairing](validation.md) shows how to fix them.
 
-Sessions written by mef3io **≤ 1.1.2** under-declare the section-2 buffer sizes
-that meflib-based readers (CyberPSG and similar) allocate from; they read
-correctly in mef3io and pymef but can crash such a reader. Since 1.1.3 those
-fields are measured from the blocks written — appending to an older segment
-repairs it in place, and rewriting the session fixes it outright. Opening such
-a session warns once, saying plainly that reading is unaffected; see
-[Validating and repairing](validation.md) to inspect or fix a file, and
-[the format reference](mef3_format.md#the-buffer-sizing-declarations) for what
-the declarations mean.
+What changed in each version is in the
+[release notes](https://github.com/bnelair/mef3io/releases).
 
 mef3io is developed at the Mayo Clinic BNEL (Bioelectronics Neurophysiology
 and Engineering Lab).

@@ -273,7 +273,7 @@ start/end times and `recording_duration` span the gaps. A gridded read
 The `maximum_*` block of fields at 6376–6424 is not descriptive trivia — it is the
 allocation contract. meflib does not allocate from them itself, but it exposes
 helpers that take one as a buffer size and validate none of them, and
-applications built on it (CyberPSG among them) pass them in before decoding
+applications built on it pass them in before decoding
 anything — so a writer that under-declares hands that reader a buffer too small
 for the data about to go into it.
 

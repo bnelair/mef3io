@@ -102,7 +102,7 @@ given file.
 ## Section-2 buffer sizing — mef3io is stricter than pymef
 
 The `maximum_*` fields in metadata section 2 tell a meflib-based reader
-(CyberPSG and most established MEF tooling) how large a buffer to allocate
+(most established MEF tooling) how large a buffer to allocate
 before it decodes anything; see
 [the format reference](mef3_format.md#the-buffer-sizing-declarations).
 Writers disagree about them:
@@ -152,8 +152,8 @@ The whole point of the section-2 work is a defect neither mef3io nor pymef can
 see — both size their buffers from each block's own header rather than from the
 declarations — so it can only be confirmed by the C library.
 
-On 2026-09-21 the nine-session set from `scripts/make_cyberpsg_check.py` was
-opened in CyberPSG and the traces drawn. **Only the deliberate negative control
+On 2026-09-21 the nine-session set from `scripts/make_reader_compat_check.py`
+was opened in a meflib-based third-party reader and the traces drawn. **Only the deliberate negative control
 crashed.**
 
 | session | result |

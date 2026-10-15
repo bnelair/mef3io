@@ -1,0 +1,16 @@
+name: Question
+description: Ask how to do something with mef3io, or about MEF 3.0 files
+labels: ["question"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: What are you trying to do, and what have you tried? Never attach real recordings or patient details; a small synthetic session is always enough.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: mef3io version and language
+      description: e.g. "1.2.0, Python 3.12" or "1.2.0, MATLAB R2025b"
