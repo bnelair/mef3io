@@ -16,7 +16,7 @@ class SessionDeclarationWarning(UserWarning):
     filter suppresses a repeat of the same message from the same line). It
     never affects mef3io's own reads —
     mef3io sizes every buffer from the block headers themselves — but
-    meflib-based readers (CyberPSG and most established MEF tooling) allocate
+    meflib-based readers (most established MEF tooling) allocate
     from metadata section 2 before decoding, and cannot tell an unset field
     from a real measurement.
 
@@ -112,7 +112,7 @@ def _declaration_warning_text(issues: list, path: str) -> str:
         f"{len(channels)} channel(s): {listed}. "
         "This does NOT affect reading with mef3io — every buffer is sized from the "
         "block headers themselves, and the data is intact. It does affect "
-        "meflib-based readers (e.g. CyberPSG), which allocate from these fields. "
+        "meflib-based readers, which allocate from these fields. "
         "Run mef3io.Validator(path).validate() for detail, or "
         "python -m mef3io repair <path> --check <check-id> to fix the file."
     )

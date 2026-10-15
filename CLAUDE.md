@@ -369,7 +369,7 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   inside RED decoding was reproduced against a meflib-based reader, and an
   in-memory-only patch of that single field decoded byte-identically to the
   on-disk repair — which isolates the cause to it. Do not rank (b) above (a).
-  FULL MATRIX CONFIRMED (2026-09-21, `scripts/make_cyberpsg_check.py`): nine
+  FULL MATRIX CONFIRMED (2026-09-21, `scripts/make_reader_compat_check.py`): nine
   sessions opened in CyberPSG, and ONLY 05 CRASHED. 05 is the deliberate
   negative control carrying the 1.1.2 zeros, so the matrix is meaningful rather
   than vacuous; 06 is BYTE-FOR-BYTE THE SAME SAMPLES with only the declarations
@@ -672,8 +672,8 @@ fields where mef3io is RIGHT and the legacy stack is wrong (the filter settings:
 -1.0 IS meflib's NO_ENTRY, meflib.h:431-437, while mef_tools writes made-up
 values).
 
-`scripts/make_cyberpsg_check.py` regenerates the CyberPSG/meflib check set
-(9 sessions + README into `~/mef3io_cyberpsg_check`): fresh write, append,
+`scripts/make_reader_compat_check.py` regenerates the CyberPSG/meflib check set
+(9 sessions + README into `~/mef3io_reader_compat_check`): fresh write, append,
 legacy before/after repair, encrypted, padded-`.tmet`-then-appended,
 recovered-after-interrupted-write, plus TWO DELIBERATELY BROKEN CONTROLS —
 05 (the 1.1.2 zeros, mechanism (a)) and 03 (the legacy stack's own

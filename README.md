@@ -1,188 +1,144 @@
 # mef3io
 
-A single C++ core for MEF 3.0 read/write, wrapped for **Python** (nanobind)
-and **MATLAB** (MEX). The high-level semantics of the legacy `mef_tools` —
-float scaling, NaN discontinuities, precision inference, the int32-counts +
-conversion-factor primitive write path — live in C++, so every language
-binding behaves identically.
+Read and write **MEF 3.0** (Multiscale Electrophysiology Format) — the
+compressed, optionally encrypted format used for long intracranial and scalp
+EEG recordings — from **Python**, **MATLAB** and **C++**. One C++ core does
+the work, so every language reads and writes the same files the same way.
+Sessions written by mef3io open in the established MEF 3.0 tools (pymef,
+mef_tools, meflib-based viewers), and sessions written by those tools open in
+mef3io.
 
-**Documentation: <https://bnelair.github.io/mef3io/>** — install, Python /
-MATLAB / C++ guides, the MEF 3.0 format reference, and measured comparisons
-against the legacy stack.
+[![PyPI](https://img.shields.io/pypi/v/mef3io)](https://pypi.org/project/mef3io/)
+[![Python](https://img.shields.io/python/required-version-toml?tomlFilePath=https%3A%2F%2Fraw.githubusercontent.com%2Fbnelair%2Fmef3io%2Fmain%2Fpyproject.toml)](https://pypi.org/project/mef3io/)
+[![CI](https://img.shields.io/github/actions/workflow/status/bnelair/mef3io/ci.yml?branch=main&label=CI)](https://github.com/bnelair/mef3io/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/github/actions/workflow/status/bnelair/mef3io/docs.yml?branch=main&label=docs)](https://bnelair.github.io/mef3io/)
+[![License](https://img.shields.io/github/license/bnelair/mef3io)](https://github.com/bnelair/mef3io/blob/main/LICENSE)
 
-## Status
-
-Read and write are implemented and cross-validated against the legacy
-`pymef` / `mef_tools` stack in both directions (~253 Python tests + standalone
-C++ tests). Scope notes:
-
-- **Video** (`.vidd/.vmet/.vidx`) is out of scope (traversal skips it).
-- **Encryption** is none or fully-encrypted (section 2 → L1 key, section 3 →
-  L2 key); "level-1 only" is not a valid MEF file — see
-  [docs/encryption_model.md](docs/encryption_model.md). Unlike the legacy
-  reader, an L1 password actually works (signal + technical metadata, subject
-  metadata locked) — see
-  [docs/legacy_comparison.md](docs/legacy_comparison.md).
-- **Records**: read/write Note, EDFA, SyLg, Seiz (others read as header-only).
-- **De-identification**: meflib's recording-time-offset "anonymization" is
-  deprecated in mef3io — the date stays in section 3 of every `.tmet`, in
-  plain text unless the session is encrypted. mef3io never creates such
-  sessions, reads and extends existing ones consistently, and plans a real
-  de-identified copy (#70) — see
-  [docs/anonymization.md](docs/anonymization.md).
-- **Pure-Python backend**: not yet implemented (`backend="pure"` raises).
-- **Append** extends the channel's last segment in place (legacy semantics);
-  `new_segment=True` forces a fresh segment.
-- **Third-party reader compatibility**: metadata section 2 declares the buffer
-  sizes readers built on meflib (CyberPSG and similar) allocate from. How a
-  given stack consumes them varies by meflib build — some pass these fields
-  straight to the decoder, others size from the block's own sample count — so
-  mef3io treats all of them as load-bearing. Versions **≤ 1.1.2** left
-  `maximum_difference_bytes` and `maximum_contiguous_block_bytes` at `0`, which
-  a reader cannot tell from an unset field: a crash from exactly this has been
-  reproduced in the field. (Sessions they wrote still read correctly in mef3io
-  and in pymef, which sizes from the sample count — which is why it went
-  unnoticed for so long.) Since **1.1.3** all of them are measured from the
-  blocks written; appending to an older segment repairs it in place, and
-  rewriting the session fixes it outright. See
-  [docs/mef3_format.md](docs/mef3_format.md#the-buffer-sizing-declarations).
-- **Validation**: `mef3io.Validator` checks a session's declarations against
-  its data and never writes; `mef3io.repair_session` rewrites only the checks
-  you name — see
-  [Validating and repairing](docs/validation.md). Opening a session that leaves
-  those declarations unset warns once, saying plainly that reading is
-  unaffected.
-
-Full docs live at **<https://bnelair.github.io/mef3io/>** (built from
-`docs/` with MkDocs Material, deployed by `.github/workflows/docs.yml`).
-In-repo: [METADATA.md](METADATA.md) (session/subject/acquisition metadata),
-[docs/mef3_format.md](docs/mef3_format.md) (format reference),
-[docs/design.md](docs/design.md) (design),
-[docs/legacy_comparison.md](docs/legacy_comparison.md) (measured performance
-+ encryption comparison), [benchmarks/README.md](benchmarks/README.md),
-runnable [examples/](examples/README.md), and `CLAUDE.md`.
+**Documentation: <https://bnelair.github.io/mef3io/>**
 
 ## Install
 
-**Python** — prebuilt wheels (no compiler needed) for Linux (x86_64/aarch64),
-macOS (arm64/x86_64), and Windows (AMD64/ARM64), Python 3.10+:
-
 ```bash
-pip install mef3io                 # runtime (numpy only)
-pip install "mef3io[test]"         # + oracle tests (pymef, mef-tools, pandas, pytest)
-pip install "mef3io[bench]"        # + NWB-Zarr benchmark stack
+pip install mef3io
 ```
 
-**MATLAB** — download the `mef3io-matlab-vX.Y.Z.zip` bundle from the GitHub
-release (classes + CI-tested MEX for all platforms, one addpath), or compile
-once on your machine (needs a C++20 compiler configured via `mex -setup C++`;
-~30 s). See [matlab/README.md](matlab/README.md):
-
-```matlab
-run('<repo>/matlab/build_mex.m'); addpath('<repo>/matlab')
-r = mef3io.Reader('session.mefd'); x = r.read('ch1');
-```
-
-**From source (Python development)** — needs CMake ≥ 3.26 and a C++20
-compiler; uses the active env's Python:
-
-```bash
-scripts/dev_build.sh            # builds build/dev, symlinks the extension into python/mef3io
-python -m pytest tests          # conftest sets up paths; needs pymef/mef-tools as oracle
-python -m build --wheel         # build a wheel
-```
-
-All bindings share one version: the repo-root `VERSION` file feeds the wheel
-metadata, `mef3io::version()` in C++, and the MEX build.
-
-The legacy `mef-tools` package (PyPI; import name `mef_tools`) is the
-correctness oracle and benchmark baseline: the test/benchmark scripts use a
-local `mef_tools` checkout when run inside the original repo, and otherwise the
-pip-installed `mef-tools` — so a standalone checkout just needs
-`pip install "mef3io[test]"` (or `[bench]`).
+Prebuilt wheels for Linux, macOS and Windows (Python 3.10+); numpy is the only
+dependency. For **MATLAB**, download `mef3io-matlab-vX.Y.Z.zip` from the
+[latest release](https://github.com/bnelair/mef3io/releases/latest) and
+`addpath` it, or build the MEX yourself. For **C++**, add `core/` to your CMake
+project. Details for all three: [Install](https://bnelair.github.io/mef3io/install/).
 
 ## Usage
 
 ```python
-import numpy as np, mef3io
+import numpy as np
+import mef3io
 
-# Write. NaN = discontinuity gap; precision inferred if omitted.
+fs = 256.0
+start = 1_700_000_000_000_000            # microseconds since 1970 (uUTC)
+signal = np.random.randn(60 * int(fs))   # one minute
+signal[1000:1500] = np.nan               # a gap: NaN is stored as missing data
+
 with mef3io.Writer("session.mefd", overwrite=True, units="uV") as w:
-    w.write("eeg1", float_signal, start_uutc, fs=256.0)
-    # amplifier counts + V/bit, stored verbatim:
-    w.write_int32("eeg2", counts_int32, ufact=2.5e-7, start_uutc=start_uutc, fs=256.0)
-    w.write_annotations([{"time": start_uutc, "text": "note"}], channel="eeg1")
+    w.write("eeg1", signal, start, fs=fs)
+    w.write_annotations([{"time": start, "text": "recording start"}], channel="eeg1")
 
-# Read. Partial reads by uUTC; gaps are NaN; scaled by the conversion factor.
-with mef3io.Reader("session.mefd", n_threads=0) as r:   # 0 = all cores
-    r.channels
-    r.info("eeg1")
-    x  = r.read("eeg1", t0, t1)       # float64, NaN gaps
-    xi = r.read_raw("eeg1", t0, t1)   # {samples: int32, valid: mask, ...}
-    r.segments("eeg1")                # per-segment map: what data is where
-    r.toc("eeg1")                     # block index for viewers/seeking
-    r.records("eeg1")                 # annotations
+with mef3io.Reader("session.mefd") as r:
+    print(r.channels)                     # ['eeg1']
+    x = r.read("eeg1", start, start + 10_000_000)  # first 10 s, float64, gaps = NaN
+    r.segments("eeg1")                    # what data is where
+    r.records("eeg1")                     # annotations
 ```
 
-### Warm-start metadata cache (opt-in)
+The same session in MATLAB:
 
-Off by default. `cache="auto"` snapshots channel metadata into the per-user OS
-cache dir (safe for read-only sessions); a path makes it persistent. Warm opens
-serve `channels`/`info` without touching the tree and defer the backend until a
-data read. Invalidated automatically on any size/mtime change or on write.
-
-```python
-mef3io.Reader("session.mefd", cache="auto")          # temp/OS cache dir
-mef3io.Reader("session.mefd", cache="/data/s.cache") # persistent
+```matlab
+r = mef3io.Reader('session.mefd');
+x = r.read('eeg1');
 ```
 
-### Drop-in for existing pipelines
+More: the [Python](https://bnelair.github.io/mef3io/python/),
+[MATLAB](https://bnelair.github.io/mef3io/matlab/) and
+[C++](https://bnelair.github.io/mef3io/cpp/) guides, and runnable
+[examples](https://bnelair.github.io/mef3io/examples/).
 
-```python
-# from mef_tools.io import MefReader, MefWriter
-from mef3io import MefReader, MefWriter
+## What it is built for
+
+- **Recordings far larger than memory.** A single channel of a long
+  recording can be tens of gigabytes. A read loads only the blocks the
+  requested time window needs, and decoding runs on all cores.
+- **Missing data as a first-class value.** Gaps in a recording come back as
+  `NaN` on the sampling grid, never silently stitched together;
+  `read_raw` returns the raw integer samples with a validity mask.
+- **Recordings that keep growing.** A session can be appended to for days or
+  months; each append costs time in proportion to the new data only. If a
+  write is interrupted, the session can be checked and recovered —
+  see [Long recordings](https://bnelair.github.io/mef3io/long_recordings/) and
+  [Validating and repairing](https://bnelair.github.io/mef3io/validation/).
+- **Existing data and code.** It reads MEF 3.0 sessions from other writers,
+  and `from mef3io import MefReader, MefWriter` runs code written for the
+  legacy `mef_tools` package with only the import changed.
+- **Protected recordings.** Both MEF 3.0 password levels work as specified:
+  the level-1 password opens the signal while the subject's identity stays
+  behind the level-2 password.
+- **One file instead of a folder.** A session can be packed into a single
+  `.mefd.tar` and read in place, without unpacking.
+
+## Upgrading from mef3io 1.1.2 or earlier
+
+Sessions written by mef3io 1.1.2 and earlier read correctly in mef3io and
+pymef, but declare some buffer sizes as `0`, which can crash meflib-based
+readers. Opening one warns once; appending with a current version repairs it,
+and [Validating and repairing](https://bnelair.github.io/mef3io/validation/)
+shows how to fix it in place. Changes in every version are listed in the
+[release notes](https://github.com/bnelair/mef3io/releases).
+
+## Scope and limitations
+
+- **Video** files (`.vidd`) are out of scope; a session's video folders are
+  skipped.
+- **Encryption** is all or nothing per session: unencrypted, or both password
+  levels set. See the
+  [encryption model](https://bnelair.github.io/mef3io/encryption_model/).
+- **Records** (annotations): every record type MEF 3.0 defines is read;
+  `Note`, `SyLg` and `EDFA` can be written with their text.
+- **De-identification**: meflib's recording-time offset does not hide the
+  recording date (it stays in every metadata file, in plain text unless the
+  session is encrypted), so mef3io never creates such sessions; it reads and
+  extends existing ones. A real de-identified copy is planned (#70) — see
+  [De-identification](https://bnelair.github.io/mef3io/anonymization/).
+- **Pure-Python backend** is not implemented (`backend="pure"` raises); the
+  wheels carry the compiled core.
+
+## Contributing and support
+
+Bug reports and feature requests go to
+[issues](https://github.com/bnelair/mef3io/issues), questions to
+[discussions](https://github.com/bnelair/mef3io/discussions). To build and
+test from source, see
+[CONTRIBUTING.md](https://github.com/bnelair/mef3io/blob/main/CONTRIBUTING.md);
+the design, the on-disk
+[format reference](https://bnelair.github.io/mef3io/mef3_format/) and
+architecture notes for contributors (including
+[`CLAUDE.md`](https://github.com/bnelair/mef3io/blob/main/CLAUDE.md)) are in the
+repository. Report vulnerabilities privately as described in
+[SECURITY.md](https://github.com/bnelair/mef3io/blob/main/SECURITY.md).
+
+```
+core/        C++ library (the format, read, write, validation) + Catch2 tests
+bindings/    Python extension (nanobind)
+python/      the mef3io Python package
+matlab/      MEX gateway over the C ABI + the +mef3io MATLAB classes
+examples/    runnable scripts
+tests/       pytest suites, cross-checked against pymef / mef_tools
+benchmarks/  performance comparisons
+docs/        documentation site source
 ```
 
-Same call shapes and semantics as the legacy classes (NaN-gap splitting,
-precision inference, int32 arrays via the primitive path, in-segment appends).
-See [examples/07](examples/07_legacy_mef_tools_style.py) and
-[docs/legacy_comparison.md](docs/legacy_comparison.md).
+## Citing and license
 
-## Parallelism
-
-RED block decode and encode run on an internal thread pool (`n_threads`: 0 =
-hardware concurrency, 1 = serial; per-call override on reads). Output is
-byte-identical regardless of thread count. Bindings release the GIL, so
-external dataloader parallelism is safe too.
-
-## Layout
-
-```
-core/        C++17/20 library (types, byteio, crc, crypto, headers, metadata,
-             red, session, reader, records, writer, session_writer, validate)
-             + Catch2 tests
-bindings/    nanobind extension (_mef3io)
-python/mef3io/  Reader, Writer, Validator, compat (mef_tools.io shim), cache, pure
-matlab/      MEX gateway over the C ABI (core/include/mef3io/c_api.h),
-             +mef3io Reader/Writer classes, build_mex.m, test_mef3io.m
-examples/    runnable scripts: write/read, int32, append, segment map,
-             annotations, encryption, legacy drop-in, replicability checks
-tests/       golden fixture generator + P1–P18 pytest suites (pymef oracle)
-benchmarks/  bindings + legacy/NWB-Zarr comparison scripts
-docs/        MkDocs site source (guides, format reference, legacy comparison)
-scripts/     dev_build.sh (dev build + extension symlink)
-```
-
-## Contributing & support
-
-Bug reports and feature requests via
-[issues](https://github.com/bnelair/mef3io/issues), questions via
-[discussions](https://github.com/bnelair/mef3io/discussions). See
-[CONTRIBUTING.md](CONTRIBUTING.md) to build and test locally, and
-[SECURITY.md](SECURITY.md) to report vulnerabilities privately. Please cite
-via [CITATION.cff](CITATION.cff).
-
-## License
-
-[Apache 2.0](LICENSE). Developed at the Mayo Clinic Bioelectronics
-Neurophysiology and Engineering Lab (BNEL).
+If you use mef3io in published work, please cite it via
+[CITATION.cff](https://github.com/bnelair/mef3io/blob/main/CITATION.cff).
+Licensed under [Apache 2.0](https://github.com/bnelair/mef3io/blob/main/LICENSE).
+Developed at the Mayo Clinic Bioelectronics Neurophysiology and Engineering
+Lab (BNEL).

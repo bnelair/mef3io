@@ -5,11 +5,29 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "mef3io"
 dynamic = ["version"]
-description = "MEF 3.0 read/write — one C++ core with Python bindings (MATLAB via MEX)"
+description = "Read and write MEF 3.0 electrophysiology recordings: one C++ core for Python, MATLAB and C++"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "Mayo Clinic — BNEL" }]
+keywords = ["MEF", "MEF3", "EEG", "iEEG", "electrophysiology", "neuroscience", "meflib", "pymef"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: C++",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
 dependencies = ["numpy>=1.23"]
 
 [project.urls]

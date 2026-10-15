@@ -3,8 +3,8 @@
 A MEF session declares, in metadata section 2 and the universal headers, a
 number of quantities that are really re-derivable from the data: how many
 blocks there are, how many samples, and how large a buffer a reader must
-allocate. Readers trust those declarations — meflib-based ones (CyberPSG and
-similar) allocate from them *before* decoding anything — so a wrong declaration
+allocate. Readers trust those declarations — meflib-based ones
+allocate from them *before* decoding anything — so a wrong declaration
 is a defect in the file even when every sample on disk is intact.
 
 Three rules shape this API:
