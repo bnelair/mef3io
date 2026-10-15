@@ -33,6 +33,12 @@ encryption, the offset hides nothing. Even with it, other parts of the
 session can still give the date away (see
 [What else the offset leaves in place](#what-else-the-offset-leaves-in-place)).
 
+MEF encryption itself is no substitute for de-identification either: it
+hides the subject fields and annotation text, but the signal and its timing
+stay readable without any password (in an offset session, as times of day).
+See
+[What encryption protects](encryption_model.md#what-encryption-protects).
+
 **What this means for you.**
 
 - Treat a session "anonymized" this way as **identifiable** data: it holds
