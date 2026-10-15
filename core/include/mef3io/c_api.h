@@ -50,7 +50,9 @@ typedef struct mef3io_records mef3io_records; /* record list builder (write side
  *  - a progress callback `progress(done, total, user_data)`, both in bytes.
  *    Called first with (0, total), then at a bounded rate (about every 1% of
  *    total or 250 ms), with `done` never decreasing, and finally with
- *    (total, total) exactly once if the call succeeds. Never called
+ *    (total, total) exactly once when the cancellable work completes (a
+ *    short commit step after it — a rename, a header patch — can still
+ *    fail with an I/O error). Never called
  *    concurrently with itself, but possibly from a worker thread rather than
  *    the caller's; it must not call back into the same handle.
  */

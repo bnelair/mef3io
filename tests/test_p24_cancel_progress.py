@@ -364,7 +364,7 @@ def test_a_cancel_after_repair_started_writing_is_ignored(session):
     token = mef3io.CancelToken()
 
     def progress(done, total):
-        if done == total:  # reported after every write has landed
+        if done == total:  # the end of the pass: no later check() honours it
             token.cancel()
 
     report = mef3io.repair_session(str(session), ["sizing.difference-bytes"],

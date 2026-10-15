@@ -41,8 +41,8 @@ def archive_session(
         no archive and no temporary file (an existing target is untouched).
     progress : callable, optional
         ``progress(done, total)`` in bytes of session files copied. Called at a
-        bounded rate, never concurrently; ``(total, total)`` exactly once, on
-        success. If it raises, the archive is abandoned like a cancel and the
+        bounded rate, never concurrently; ``(total, total)`` exactly once, when the
+        copy completes. If it raises, the archive is abandoned like a cancel and the
         exception propagates.
 
     Returns

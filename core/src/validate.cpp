@@ -1786,8 +1786,10 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
         // uses to decide what to restore. Naming a file that turned out
         // untouched costs nothing; omitting one that was modified sends them to
         // restore the wrong set. Same reasoning as the append's wrote_* flags.
-        files_written.push_back(files.tmet_rel);
+        // (The .tmet is replaced atomically — temp + rename — so unlike the
+        // header patches below it is only "written" once the call returns.)
         write_all_atomic(tmet_path, file);
+        files_written.push_back(files.tmet_rel);
       }
       if (buffer.tidx_dirty) {
         files_written.push_back(files.tidx_rel);

@@ -478,8 +478,12 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
     // Between segments, OUTSIDE with_segment: a cancellation is not a damaged
     // segment, and (Cancelled being no std::exception) a lenient session could
     // not contain it anyway. Nothing has been appended for this segment yet, so
-    // there is nothing to roll back; the caller discards `out` whole.
-    ctl.check();
+    // there is nothing to roll back; the caller discards `out` whole. No span
+    // into the index cache is held here, so trimming on the way out is safe.
+    if (ctl.cancel && ctl.cancel->cancelled()) {
+      trim_index_cache();
+      throw Cancelled();
+    }
     const std::size_t mark_buf = out.buffers.size(), mark_job = out.jobs.size(),
                       mark_mm = out.mismatches.size();
     if (!with_segment(channel, seg, [&] {

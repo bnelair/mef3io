@@ -129,7 +129,7 @@ Taking it: `Reader::read` / `read_raw`, `Session::collect_blocks`,
 `recover_session`. The guarantees are the ones in the
 [Python guide](python.md#cancelling-and-progress) — nothing is left behind,
 repair/recover write only after a cancellable read-only pass, progress is
-`(0, total)` … monotonic … `(total, total)` once on success, at a bounded
+`(0, total)` … monotonic … `(total, total)` once when the cancellable work completes, at a bounded
 rate, never concurrently, possibly from a worker thread.
 
 `mef3io::Cancelled` is deliberately **not** a `std::exception`. The core

@@ -518,7 +518,7 @@ class Validator:
         progress : callable, optional
             ``progress(done, total)`` in bytes of ``.tmet`` + ``.tidx`` +
             ``.tdat`` covered. Called at a bounded rate, never concurrently;
-            ``(total, total)`` exactly once, on success. If it raises, the pass
+            ``(total, total)`` exactly once, when the pass completes. If it raises, the pass
             stops and the exception propagates.
         """
         raw = _backend().validate_session(
@@ -767,7 +767,7 @@ def recover_session(
     progress : callable, optional
         ``progress(done, total)`` in bytes of ``.tidx`` + ``.tdat`` covered.
         Called at a bounded rate, never concurrently; ``(total, total)``
-        exactly once, on success.
+        exactly once, when the scan completes (before anything is written).
 
     Returns
     -------

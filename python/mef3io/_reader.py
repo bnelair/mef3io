@@ -449,6 +449,9 @@ class Reader:
             decoded. Called at a bounded rate, possibly from a decode worker
             thread (with the GIL held for the call only), never concurrently.
             If it raises, the read stops and the exception propagates.
+            A Reader must not be read from two threads at once: after
+            cancelling, wait for the cancelled call to return before the next
+            read on the same Reader (or use one Reader per thread).
 
         Returns
         -------

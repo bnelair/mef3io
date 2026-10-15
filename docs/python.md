@@ -335,6 +335,11 @@ except mef3io.Cancelled:
 token.cancel()
 ```
 
+**One read at a time per `Reader`.** A `Reader` must not be read from two
+threads at once. When a newer request supersedes a read, cancel it and wait
+for the cancelled call to return (it does so promptly) before reading again
+on the same `Reader` — or give each thread its own `Reader`.
+
 **Cancelling.** `token.cancel()` is safe from any thread. The operation
 notices between units of work — before each segment is fetched and each block
 is decoded on a read, between 1 MB chunks when archiving or extracting,
@@ -363,7 +368,9 @@ stop at the same points). `Cancelled` subclasses `Exception` directly, not
 **Progress.** `progress(done, total)` is called first with `(0, total)`, then
 at a bounded rate (about every 1 % of `total`, otherwise at most every
 250 ms), with `done` never decreasing, and finally with `(total, total)`
-exactly once — only if the call succeeds. For `repair_session` and
+exactly once, when the cancellable work completes (only the short commit
+step after it — a rename, the header patches of a repair — can still fail,
+with an I/O error, never with `Cancelled`). For `repair_session` and
 `recover_session` that final call comes at the end of the read-only pass,
 before anything is written, so a callback that raises there still leaves the
 session untouched. Calls never overlap. The work runs

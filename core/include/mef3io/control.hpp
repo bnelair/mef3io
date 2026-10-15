@@ -87,7 +87,7 @@ namespace detail {
 ///
 /// Guarantees to the callback:
 ///   * called once with (0, total) by start(), and once with (total, total)
-///     by finish() when — and only when — the operation completes (for
+///     by finish() when — and only when — the cancellable work completes (for
 ///     total == 0 the single (0, 0) from start() is that report);
 ///   * the callback must not drive the same operation (no re-entry: the
 ///     reporter's mutex is not recursive);
@@ -135,8 +135,8 @@ class ProgressReporter {
     maybe_report(v > cur ? v : cur);
   }
 
-  /// The operation completed: report (total, total). Call exactly once, on
-  /// the success path only.
+  /// The cancellable work completed: report (total, total). Call exactly once,
+  /// after the last check() and BEFORE any irreversible write.
   void finish() {
     if (!fn_ || total_ == 0) return;  // start() already said (0, 0)
     std::lock_guard<std::mutex> lock(mutex_);
