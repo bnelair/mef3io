@@ -47,6 +47,8 @@ def test_bindings_reject_short_validation_fields():
         m.red_decode_block(_blocks("l1_blocks")[0], "pass2", b"\0" * 4, b"\0" * 16)
     with pytest.raises(ValueError):
         m.red_encode_block(np.arange(10, dtype=np.int32), 0, True, 0, "", b"\0" * 16, b"")
+    with pytest.raises(ValueError):
+        m.validate_password("pass2", b"\0" * 15, b"\0" * 16)
 
 
 def _fields(ch: str) -> tuple[bytes, bytes]:

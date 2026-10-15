@@ -35,12 +35,15 @@
 
 extern MEF_GLOBALS *MEF_globals;  /* defined in meflib.c, not declared in meflib.h */
 
+/* Reads a whole MEF file; anything shorter than its universal header is refused
+ * (reseal and the block walk assume one is there). */
 static ui1 *slurp(const char *path, si8 *size_out) {
 	FILE *f = fopen(path, "rb");
 	if (!f) { fprintf(stderr, "cannot open %s\n", path); exit(2); }
 	fseek(f, 0, SEEK_END);
 	si8 n = ftell(f);
 	fseek(f, 0, SEEK_SET);
+	if (n < UNIVERSAL_HEADER_BYTES) { fprintf(stderr, "%s is shorter than a universal header\n", path); exit(2); }
 	ui1 *buf = (ui1 *) malloc((size_t) n);
 	if (fread(buf, 1, (size_t) n, f) != (size_t) n) { fprintf(stderr, "short read %s\n", path); exit(2); }
 	fclose(f);
@@ -101,9 +104,9 @@ int main(int argc, char **argv) {
 		si8 n_entries = (tidx_n - UNIVERSAL_HEADER_BYTES) / TIME_SERIES_INDEX_BYTES;
 		for (si8 e = 0; e < n_entries; ++e) {
 			TIME_SERIES_INDEX *tsi = (TIME_SERIES_INDEX *) (tidx + UNIVERSAL_HEADER_BYTES + e * TIME_SERIES_INDEX_BYTES);
-			if (tsi->file_offset < UNIVERSAL_HEADER_BYTES || tsi->file_offset + RED_BLOCK_HEADER_BYTES > tdat_n) { fprintf(stderr, "index entry %lld points outside the .tdat\n", (long long) e); return 1; }
+			if (tsi->file_offset < UNIVERSAL_HEADER_BYTES || tsi->file_offset > tdat_n - RED_BLOCK_HEADER_BYTES) { fprintf(stderr, "index entry %lld points outside the .tdat\n", (long long) e); return 1; }
 			RED_BLOCK_HEADER *orig = (RED_BLOCK_HEADER *) (tdat + tsi->file_offset);
-			if (orig->block_bytes < RED_BLOCK_HEADER_BYTES || tsi->file_offset + orig->block_bytes > tdat_n) { fprintf(stderr, "block %lld runs past the .tdat\n", (long long) e); return 1; }
+			if (orig->block_bytes < RED_BLOCK_HEADER_BYTES || (si8) orig->block_bytes > tdat_n - tsi->file_offset) { fprintf(stderr, "block %lld runs past the .tdat\n", (long long) e); return 1; }
 			if (orig->flags & (RED_LEVEL_1_ENCRYPTION_MASK | RED_LEVEL_2_ENCRYPTION_MASK)) { fprintf(stderr, "block %lld already encrypted\n", (long long) e); return 1; }
 			require_crc(orig, "encrypt input");
 			ui4 ns = orig->number_of_samples, bb = orig->block_bytes;
@@ -153,10 +156,10 @@ int main(int argc, char **argv) {
 		if (!out) { fprintf(stderr, "cannot write %s\n", argv[5]); return 2; }
 		si8 off = UNIVERSAL_HEADER_BYTES, blocks = 0;
 		while (off < tdat_n) {
-			if (off + RED_BLOCK_HEADER_BYTES > tdat_n) { fprintf(stderr, "truncated block header at %lld\n", (long long) off); return 1; }
+			if (off > tdat_n - RED_BLOCK_HEADER_BYTES) { fprintf(stderr, "truncated block header at %lld\n", (long long) off); return 1; }
 			RED_BLOCK_HEADER *bh = (RED_BLOCK_HEADER *) (tdat + off);
 			ui4 ns = bh->number_of_samples, bb = bh->block_bytes;
-			if (bb < RED_BLOCK_HEADER_BYTES || off + bb > tdat_n) { fprintf(stderr, "block at %lld runs past the .tdat\n", (long long) off); return 1; }
+			if (bb < RED_BLOCK_HEADER_BYTES || (si8) bb > tdat_n - off) { fprintf(stderr, "block at %lld runs past the .tdat\n", (long long) off); return 1; }
 			require_crc(bh, "decode input");
 			RED_PROCESSING_STRUCT *dec = decoder(ns, pwd);
 			dec->block_header = bh;

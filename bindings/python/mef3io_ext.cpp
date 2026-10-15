@@ -398,7 +398,9 @@ NB_MODULE(_mef3io, m) {
   });
 
   // validate_password reads 16 bytes from each validation field; a shorter
-  // Python bytes object would be an out-of-bounds read, so refuse it here.
+  // Python bytes object would be an out-of-bounds read, so these test helpers
+  // require exactly 16 bytes per field ALWAYS (even for an empty password or
+  // level 0, where nothing would be read) and raise ValueError otherwise.
   auto checked_keys = [](const std::string& password, nb::bytes l1, nb::bytes l2) {
     constexpr std::size_t n = mef3io::fmt::PASSWORD_VALIDATION_FIELD_BYTES;
     if (l1.size() != n || l2.size() != n)
