@@ -117,11 +117,10 @@ Bug reports, feature requests and questions go to
 [issues](https://github.com/bnelair/mef3io/issues). To build and
 test from source, see
 [CONTRIBUTING.md](https://github.com/bnelair/mef3io/blob/main/CONTRIBUTING.md);
-the design, the on-disk
-[format reference](https://bnelair.github.io/mef3io/mef3_format/) and
-architecture notes for contributors (including
-[`CLAUDE.md`](https://github.com/bnelair/mef3io/blob/main/CLAUDE.md)) are in the
-repository. Report vulnerabilities privately as described in
+the on-disk
+[format reference](https://bnelair.github.io/mef3io/mef3_format/) and the
+[design](https://bnelair.github.io/mef3io/design/) are on the documentation
+site. Report vulnerabilities privately as described in
 [SECURITY.md](https://github.com/bnelair/mef3io/blob/main/SECURITY.md).
 
 ```
