@@ -92,9 +92,14 @@ class IdentityCollector {
 struct SegState {
   const detail::LayoutSegment* layout = nullptr;
   std::optional<TimeSeriesMetadata> md;  ///< nullopt: unreadable (lenient)
-  /// The segment's recording-time offset (0 = none); nullopt when section 3
-  /// is locked.
+  /// The offset the segment's times are resolved with (0 = none); nullopt
+  /// only when the segment could not be read.
   std::optional<si8> rto;
+  /// Section 3 is locked, so `rto` is an ASSUMED 0 — what the Reader uses
+  /// too (segment_rto). Right for every file mef3io or pymef wrote; for
+  /// meflib's deprecated date masking it gives the masked times. Never
+  /// called verified.
+  bool rto_assumed = false;
   bool has_records = false;  ///< its .rdat exists (checked once, in the segment pass)
 };
 
@@ -274,9 +279,9 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
         // Everything that can still throw comes FIRST, before this segment
         // touches any session-wide tally: in lenient mode a segment that fails
         // part-way must contribute nothing at all.
+        // Section 3 locked: assume offset 0, as the Reader does, and flag it.
         const std::optional<si8> seg_rto =
-            md.section3_available ? std::optional<si8>(effective_rto(md.section3.recording_time_offset))
-                                  : std::nullopt;
+            md.section3_available ? effective_rto(md.section3.recording_time_offset) : 0;
         std::string index_ambiguous;  // first .tidx time stored non-negative under an offset
         bool index_complete = true;
         // Block index (opt-in): spans of the blocks, for gaps inside segments.
@@ -354,6 +359,9 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
           }
         } else {
           is.time_offset = "locked";
+          st.rto = 0;
+          st.rto_assumed = true;
+          is.offset_assumed_zero = true;
         }
 
         is.start_time = resolve(uh.start_time, st.rto);
@@ -456,6 +464,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
       }
       widen(ic.start_time, ic.end_time, is.start_time);
       widen(ic.start_time, ic.end_time, is.end_time);
+      if (is.offset_assumed_zero) ic.offset_assumed_zero = out.offset_assumed_zero = true;
       if (opt.read_index) {
         spans.insert(spans.end(), seg_spans.begin(), seg_spans.end());
       } else if (is.start_time && is.end_time) {
@@ -514,9 +523,11 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
   // The offset a channel- or session-level record file is read with: the one
   // every readable segment of the scope agrees on (Session::agreed_rto). Any
   // locked or disagreeing segment makes it unknown; `why` says which.
-  auto agreed = [&](const std::string* channel, std::string& why) -> std::optional<si8> {
+  auto agreed = [&](const std::string* channel, std::string& why,
+                    bool& assumed) -> std::optional<si8> {
     std::optional<si8> value;
     bool any = false, unreadable = false;
+    assumed = false;
     for (const auto& [name, segs] : states) {
       if (channel && name != *channel) continue;
       for (const auto& st : segs) {
@@ -524,10 +535,10 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
           unreadable = true;
           continue;
         }
-        if (!st.rto) {
-          why = "the recording-time offset is locked in section 3";
-          return std::nullopt;
-        }
+        // A locked section 3 counts as its assumed 0, exactly as the Reader's
+        // segment_rto does: against a readable non-zero offset that is a
+        // dispute, never a silent choice.
+        if (st.rto_assumed) assumed = true;
         if (any && *value != *st.rto) {
           why = "segments disagree on the recording-time offset";
           return std::nullopt;
@@ -554,14 +565,15 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
   std::vector<std::string> unread_root_records;  // .rdat at the root that are not the session's
   std::size_t records_failed = 0;
 
-  auto read_file = [&](const std::string& rdat, std::optional<si8> rto, const std::string& why,
-                       RecordLevel level, const std::string& channel, int segment) {
+  auto read_file = [&](const std::string& rdat, std::optional<si8> rto, bool rto_assumed,
+                       const std::string& why, RecordLevel level, const std::string& channel,
+                       int segment) {
     ctl.check();
     std::vector<InspectRecord> got;
     std::vector<std::string> texts;  // each record's free text, for the identity table
     std::uint64_t file_bytes = 0;
     fmt::UniversalHeader uh;
-    bool placeable = true, ambiguous = false;
+    bool placeable = true, ambiguous = false, offset_dependent = false;
     const std::string failure =
         contain(channel, segment, src->describe(rdat), "records", [&] {
           file_bytes = src->file_size(rdat);
@@ -584,6 +596,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
           // and a file that failed must contribute nothing but its size.
           // Placed only if the times do not depend on an offset we lack.
           placeable = rto.has_value() || !info.offset_dependent;
+          offset_dependent = info.offset_dependent;
           ambiguous = rto && *rto != 0 && info.header_time_non_negative;
           std::set<std::size_t> locked(info.locked.begin(), info.locked.end());
           for (std::size_t i = 0; i < recs.size(); ++i) {
@@ -680,7 +693,14 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
         identity.add("record_text", "record bodies", texts[i]);
       }
     }
+    // Placed with an assumed offset: flag what actually depended on it.
+    const bool assumed = rto_assumed && offset_dependent && placeable;
+    if (assumed) out.offset_assumed_zero = true;
     for (auto& ir : got) {
+      ir.offset_assumed_zero = assumed;
+      if (assumed && !ir.channel.empty())
+        for (auto& ic : out.channels)
+          if (ic.name == ir.channel) ic.offset_assumed_zero = true;
       widen(out.records_start_time, out.records_end_time, ir.first_time);
       widen(out.records_start_time, out.records_end_time, ir.last_time);
       if (!ir.channel.empty())
@@ -715,8 +735,9 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     }
     if (!rdat.empty()) {
       std::string why;
-      const auto rto = agreed(nullptr, why);
-      read_file(rdat, rto, why, RecordLevel::Session, "", -1);
+      bool assumed = false;
+      const auto rto = agreed(nullptr, why, assumed);
+      read_file(rdat, rto, assumed, why, RecordLevel::Session, "", -1);
     }
   }
   std::vector<std::string> record_channels;
@@ -733,8 +754,9 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
       // failed does not: agreed() says unknown for it.
       const auto st_it = states.find(name);
       const bool has_segments = st_it != states.end() && !st_it->second.empty();
-      const auto rto = has_segments ? agreed(&name, why) : agreed(nullptr, why);
-      read_file(cand, rto, why, RecordLevel::Channel, name, -1);
+      bool assumed = false;
+      const auto rto = has_segments ? agreed(&name, why, assumed) : agreed(nullptr, why, assumed);
+      read_file(cand, rto, assumed, why, RecordLevel::Channel, name, -1);
     }
     auto it = states.find(name);
     if (it == states.end()) continue;
@@ -742,8 +764,8 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
       if (!st.md) continue;
       const std::string rdat = st.layout->rdat();
       if (!st.has_records) continue;  // checked once, in the segment pass
-      read_file(rdat, st.rto, "the recording-time offset is locked in section 3",
-                RecordLevel::Segment, name, st.layout->number);
+      read_file(rdat, st.rto, st.rto_assumed, "", RecordLevel::Segment, name,
+                st.layout->number);
     }
   }
   ctl.check();
@@ -810,9 +832,11 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
         "relative to it are reported as unknown rather than guessed.";
   } else {
     to.interpretation =
-        "Metadata section 3 is encrypted and the password does not open it, so any "
-        "recording-time offset is unknown. Times stored relative to it are reported as "
-        "unknown rather than guessed.";
+        "Metadata section 3 is encrypted and the password does not open it, so the "
+        "recording-time offset cannot be read. Times were resolved ASSUMING offset 0, as the "
+        "Reader does (offset_assumed_zero): right for every session mef3io or pymef wrote, which "
+        "always use 0; under meflib's deprecated date masking they are the masked times, which "
+        "is what meflib meant a level-1 user to see. They are not verified.";
   }
   if (to.segments_unknown)
     to.interpretation += " " + std::to_string(to.segments_unknown) +
@@ -820,7 +844,8 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
                          "so this description covers the readable ones only.";
   if (to.segments_locked && to.status != "locked")
     to.interpretation += " " + std::to_string(to.segments_locked) +
-                         " segment(s) keep section 3 locked; their times may be unknown.";
+                         " segment(s) keep section 3 locked; their times assume offset 0 and "
+                         "are not verified.";
 
   out.identity = identity.finish();
 
@@ -896,6 +921,14 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
              ambiguous_where +
              "). Such a value cannot be told apart from an absolute time, so where it really "
              "lies is uncertain.",
+         true);
+  if (out.offset_assumed_zero)
+    warn("offset-assumed-zero",
+         "Metadata section 3 is locked in " + std::to_string(to.segments_locked) +
+             " segment(s), so their recording-time offset cannot be read. Their times (and the "
+             "records that depend on it) assume offset 0, as the Reader does: right for "
+             "sessions mef3io and pymef wrote, the masked times under meflib's deprecated date "
+             "masking. Not verified; the level-2 password resolves them.",
          true);
   bool times_unknown = false;
   for (const auto& ic : out.channels)

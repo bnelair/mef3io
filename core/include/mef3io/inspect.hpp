@@ -49,8 +49,8 @@ struct InspectSegment {
   bool section2_available = false;  ///< section 2 could be decrypted (or was plain)
   bool section3_available = false;  ///< section 3 could be decrypted (or was plain)
   /// Absolute uUTC of the first sample / just past the last (as the
-  /// universal header states them). nullopt when the time was stored relative
-  /// to a recording-time offset that could not be read.
+  /// universal header states them). With section 3 locked they assume offset
+  /// 0 (offset_assumed_zero); nullopt only for a segment that could not be read.
   std::optional<si8> start_time, end_time;
   std::optional<si8> start_sample, number_of_samples, number_of_blocks;
   /// As DECLARED in section 2 (legacy writers leave 0 here even with gaps).
@@ -61,6 +61,9 @@ struct InspectSegment {
   /// folder missing one of its files).
   std::string time_offset = "none";
   std::optional<si8> recording_time_offset;  ///< include_values only
+  /// Section 3 is locked, so the times above were resolved ASSUMING offset 0,
+  /// as the Reader does. Not verified (see TimeOffsetSummary::interpretation).
+  bool offset_assumed_zero = false;
   std::uint64_t tmet_bytes = 0, tidx_bytes = 0, tdat_bytes = 0;
   std::uint64_t record_bytes = 0;  ///< this segment's .rdat + .ridx
   bool has_records = false;
@@ -91,6 +94,8 @@ struct InspectChannel {
   /// read or placed (lenient mode, locked offset) may hold data there.
   bool gaps_certain = true;
   std::uint64_t bytes = 0;  ///< every file of the channel, .tdat included (sizes only)
+  /// Some of its times (segments or records) assume offset 0: not verified.
+  bool offset_assumed_zero = false;
   std::size_t records = 0;  ///< channel- and segment-level records
 };
 
@@ -100,11 +105,14 @@ struct InspectRecord {
   int segment = -1;
   std::string type;
   /// Header time, absolute uUTC. nullopt when it was stored relative to an
-  /// offset that is locked or disputed.
+  /// offset that is disputed or belongs to an unreadable segment.
   std::optional<si8> time;
   /// false when the file's times depend on an offset that is locked or
   /// disputed: then every time here (and in `full`) is unset, never guessed.
   bool times_known = true;
+  /// The times were resolved with an ASSUMED offset 0 (a section 3 in their
+  /// scope is locked), as the Reader does. Not verified.
+  bool offset_assumed_zero = false;
   std::optional<si8> duration;
   /// Earliest and latest time the record mentions: the header time, the body
   /// times (Seiz onsets/offsets, Epoc timestamp/end, Curs trace timestamp) and
@@ -207,6 +215,9 @@ struct SessionSummary {
   std::vector<SegmentProblem> problems;            ///< lenient mode only
   std::vector<DeclarationIssue> declaration_issues;
   bool index_read = false;
+  /// Some time in this summary assumes offset 0 because a section 3 is
+  /// locked (level-1 password or none). Not verified.
+  bool offset_assumed_zero = false;
 };
 
 /// Describe the session at `path` (.mefd directory or .mefd.tar archive).

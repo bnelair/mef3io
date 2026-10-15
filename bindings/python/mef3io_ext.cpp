@@ -222,6 +222,7 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
   d["total_bytes"] = s.total_bytes;
   d["archive_bytes"] = opt_obj(s.archive_bytes);
   d["index_read"] = s.index_read;
+  d["offset_assumed_zero"] = s.offset_assumed_zero;
 
   nb::dict enc;
   enc["encrypted"] = s.encryption.encrypted;
@@ -268,6 +269,7 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
     cd["number_of_samples"] = opt_obj(c.number_of_samples);
     cd["gaps_complete"] = c.gaps_complete;
     cd["gaps_certain"] = c.gaps_certain;
+    cd["offset_assumed_zero"] = c.offset_assumed_zero;
     cd["bytes"] = c.bytes;
     cd["records"] = c.records;
     nb::list gaps;
@@ -290,6 +292,7 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
       sd["number_of_discontinuities"] = opt_obj(g.number_of_discontinuities);
       sd["time_offset"] = g.time_offset;
       sd["recording_time_offset"] = opt_obj(g.recording_time_offset);
+      sd["offset_assumed_zero"] = g.offset_assumed_zero;
       sd["tmet_bytes"] = g.tmet_bytes;
       sd["tidx_bytes"] = g.tidx_bytes;
       sd["tdat_bytes"] = g.tdat_bytes;
@@ -323,6 +326,7 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
                                                             : nb::object(nb::none());
     rd["time"] = opt_obj(r.time);
     rd["times_known"] = r.times_known;
+    rd["offset_assumed_zero"] = r.offset_assumed_zero;
     rd["duration"] = opt_obj(r.duration);
     rd["first_time"] = opt_obj(r.first_time);
     rd["last_time"] = opt_obj(r.last_time);

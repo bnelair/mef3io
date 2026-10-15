@@ -315,14 +315,17 @@ def test_encrypted_without_password_is_described_not_refused(encrypted):
     assert e["record_bodies_locked"] == 2
     c = s.channel("ch1")
     assert c.sampling_frequency is None and c.number_of_samples is None
-    # Times were stored relative to an offset that is locked: unknown, not guessed.
-    assert c.start_time is None and s.start_time is None
+    # The offset is locked: times assume 0, as the Reader does — and say so.
+    assert c.start_time == START and s.start_time == START
+    assert s.offset_assumed_zero and c.offset_assumed_zero
+    assert all(g.offset_assumed_zero for g in c.segments)
     assert s.time_offset["status"] == "locked"
     assert s.identity_field("subject_id").present is None   # may be there; locked
     assert s.identity_field("session_name").present is True  # universal header is plain
     assert all(r.body_locked and r.text_bytes == 0 for r in s.records)
     codes = {w.code for w in s.anonymize_blockers}
-    assert {"locked", "times-unresolved"} <= codes
+    assert {"locked", "offset-assumed-zero"} <= codes
+    assert "times-unresolved" not in codes
 
 
 def test_level_1_password_leaves_section_3_locked(encrypted):
@@ -331,7 +334,7 @@ def test_level_1_password_leaves_section_3_locked(encrypted):
     c = s.channel("ch1")
     assert c.sampling_frequency == FS and c.number_of_samples == 5120
     assert s.encryption["section3_locked"] == 4 and s.encryption["section2_locked"] == 0
-    assert c.start_time is None and s.time_offset["status"] == "locked"
+    assert s.time_offset["status"] == "locked"
     assert s.identity_field("session_description").present is True
 
 
@@ -485,13 +488,88 @@ def test_fields_never_carry_a_guessed_time_when_the_offset_is_disputed(session):
     assert edfa.times_known and edfa.fields["time"] == START + 65 * SECOND
 
 
-def test_fields_never_carry_a_guessed_time_when_the_offset_is_locked(tmp_path):
+def test_locked_offset_times_are_flagged_wherever_they_appear(tmp_path):
+    """Section 3 locked: record times assume offset 0 like the Reader's, and
+    every record (and the fields inside it) is flagged, never silently."""
     path = _write(tmp_path / "e.mefd", password1="pw1", password2="pw2")
-    for pw in ("", "pw1"):
-        s = mef3io.inspect(path, pw, include_values=True)
-        for r in s.records:
-            assert r.time is None and not r.times_known
-            assert all(t is None for t in _time_fields(r)), (pw, r.fields)
+    s = mef3io.inspect(path, "pw1", include_values=True)
+    # (Reader.records refuses level-2 bodies with level 1; the headers are plain.)
+    assert [(x.type, x.time) for x in s.records] == [("Note", START + SECOND),
+                                                     ("EDFA", START + 65 * SECOND)]
+    for rec in s.records:
+        assert rec.times_known and rec.offset_assumed_zero and rec.body_locked
+        assert rec.fields["time"] == rec.time
+    full = mef3io.inspect(path, "pw2")
+    assert not full.offset_assumed_zero
+    assert not any(x.offset_assumed_zero for x in full.records)
+    assert not any(g.offset_assumed_zero for c in full.channels for g in c.segments)
+
+
+def _legacy_locked_session(path, rto):
+    """A session the legacy stack wrote with record_offset = rto and both
+    passwords: section 3 (and so the offset) is level-2 encrypted."""
+    pytest.importorskip("mef_tools", reason="legacy oracle not installed")
+    pd = pytest.importorskip("pandas")
+    from mef_tools.io import MefWriter
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        w = MefWriter(str(path), overwrite=True, password1="l1", password2="l2")
+        w.record_offset = rto
+        w.write_data(np.arange(5000, dtype=np.int32) * 1.0, "ch1", START, FS, precision=0)
+        w.write_annotations(pd.DataFrame([{"time": START + SECOND, "type": "Note", "text": "n"}]))
+        del w
+    return str(path)
+
+
+def test_level_1_on_an_offset_zero_session_gives_the_right_times_unverified(tmp_path):
+    """User decision for #88: align with the Reader. rto = 0 (what mef3io and
+    pymef always write): the assumed 0 is right — but never called verified."""
+    path = _legacy_locked_session(tmp_path / "z.mefd", 0)
+    one, two = mef3io.inspect(path, "l1"), mef3io.inspect(path, "l2")
+    assert two.time_offset["status"] == "none" and not two.offset_assumed_zero
+    assert one.start_time == two.start_time == START
+    assert [r.time for r in one.records] == [r.time for r in two.records] == [START + SECOND]
+    assert one.offset_assumed_zero and one.time_offset["status"] == "locked"
+    assert all(r.offset_assumed_zero for r in one.records)
+    assert "offset-assumed-zero" in {w.code for w in one.anonymize_blockers}
+    with mef3io.Reader(path, "l1") as r:
+        assert r.info("ch1")["start_time"] == one.start_time
+
+
+def test_level_1_on_an_offset_session_gives_the_masked_times_unverified(tmp_path):
+    """rto != 0 (meflib's deprecated date masking): level 1 sees the MASKED
+    times, as meflib intended and as the Reader shows — flagged, and
+    date_recoverable stays what section 1 says: by the level-2 password."""
+    rto = START - 3600 * SECOND
+    path = _legacy_locked_session(tmp_path / "m.mefd", rto)
+    one, two = mef3io.inspect(path, "l1"), mef3io.inspect(path, "l2")
+    assert two.start_time == START and two.time_offset["status"] == "applied"
+    assert two.time_offset["recoverable_by"] == "level-2 password"
+    assert one.start_time == START - rto                  # the masked time of day
+    assert one.records[0].time == START + SECOND - rto
+    assert one.offset_assumed_zero and one.records[0].offset_assumed_zero
+    assert one.time_offset["status"] == "locked"
+    assert "not verified" in one.time_offset["interpretation"]
+    with mef3io.Reader(path, "l1") as r:
+        assert r.info("ch1")["start_time"] == one.start_time
+    assert "offset-assumed-zero" in {w.code for w in one.anonymize_blockers}
+
+
+def test_a_locked_segment_against_a_readable_offset_is_a_dispute_not_a_choice(tmp_path):
+    """A locked section 3 takes part with its assumed 0 (as the Reader's
+    segment_rto does): next to a readable non-zero offset, a session-level
+    record that depends on the offset is unplaced, not placed with either."""
+    path = _write(tmp_path / "e.mefd", password1="pw1", password2="pw2")
+    plain = _write(tmp_path / "p.mefd")
+    _set_rto(plain, THREE_DAYS, channel="ch2")
+    # Swap ch1 of the plain session for the encrypted one's: ch1 locked at
+    # level 1, ch2 readable with an offset.
+    shutil.rmtree(Path(plain) / "ch1.timd")
+    shutil.copytree(Path(path) / "ch1.timd", Path(plain) / "ch1.timd")
+    s = mef3io.inspect(plain, "pw1")
+    note = next(r for r in s.records if r.level == "session")
+    assert note.time is None and not note.times_known
 
 
 def test_an_unreadable_segment_leaves_identity_unknown_not_absent(session):

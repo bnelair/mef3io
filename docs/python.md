@@ -347,14 +347,26 @@ fields. What the password does not open is reported as locked:
 sections and record bodies are counted, and values that live there are `None`.
 A password that is given and wrong raises `PasswordError`.
 
-**Times are never guessed.** Every time is absolute UTC. A segment's times
-are resolved with its own offset. A time stored relative to an offset that
-cannot be read (section 3 locked, or the segment unreadable) is `None`, with
-a `times-unresolved` warning, rather than read as if the offset were 0. A
+**Times are never guessed silently.** Every time is absolute UTC. A
+segment's times are resolved with its own offset.
+
+- **Section 3 locked** (the level-1 password, or none on an encrypted
+  session): the offset cannot be read, so times are resolved **assuming
+  offset 0**, as a `Reader` does, and flagged `offset_assumed_zero=True` on
+  the session, the channel, the segment and each record concerned, with an
+  `offset-assumed-zero` warning. mef3io and pymef always write offset 0, so
+  these times are right for almost every file. Under meflib's deprecated date
+  masking they are the masked times, which is what meflib meant a level-1
+  user to see. They are never called verified, and the warning blocks
+  anonymization (which needs the level-2 password anyway).
+- **Segment unreadable** (lenient mode): its times are `None`, with a
+  `times-unresolved` warning. A
 channel- or session-level record file is read with the offset all the
 segments in its scope share; when they disagree, or one is locked, its
 offset-dependent times are `None` (`RecordSummary.times_known` is `False`,
-and the times in `fields` are `None` too).
+and the times in `fields` are `None` too). A locked segment takes part with its
+assumed 0, exactly as in a `Reader`, so against a readable non-zero offset it
+is a dispute, never a silent choice.
 
 **The recording-time offset is reported plainly.** meflib's recording-time
 offset is deprecated as anonymization: the real date stays in section 3 (see

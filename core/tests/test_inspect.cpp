@@ -97,7 +97,10 @@ TEST_CASE("inspect_session describes an encrypted session it cannot open") {
   REQUIRE(s.encryption.section2_locked == 2);
   REQUIRE(s.encryption.section3_locked == 2);
   REQUIRE_FALSE(s.channels[0].sampling_frequency.has_value());
-  REQUIRE_FALSE(s.channels[0].start_time.has_value());  // offset locked: not guessed
+  // Offset locked: times assume 0, as the Reader does, and are flagged.
+  REQUIRE(s.channels[0].start_time == START);
+  REQUIRE(s.offset_assumed_zero);
+  REQUIRE(s.channels[0].segments[0].offset_assumed_zero);
   REQUIRE(s.records[0].body_locked);
   REQUIRE(s.time_offset.status == "locked");
 
@@ -111,4 +114,5 @@ TEST_CASE("inspect_session describes an encrypted session it cannot open") {
   REQUIRE(f.encryption.access == "full");
   REQUIRE(f.channels[0].start_time == START);
   REQUIRE(f.records[0].text_bytes == 5);
+  REQUIRE_FALSE(f.offset_assumed_zero);
 }

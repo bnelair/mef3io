@@ -26,8 +26,10 @@ def _fields(cls, d: dict) -> dict:
 class SegmentSummary:
     """One segment, from its metadata only.
 
-    Times are absolute uUTC (UTC) or ``None`` when they were stored relative
-    to a recording-time offset that could not be read. ``time_offset`` is
+    Times are absolute uUTC (UTC). With section 3 locked (level-1 password,
+    or none) they are resolved ASSUMING offset 0, as :class:`mef3io.Reader`
+    does, and ``offset_assumed_zero`` is ``True``: not verified. They are
+    ``None`` only for a segment that could not be read. ``time_offset`` is
     ``"none"``, ``"applied"`` (meflib's offset is set), ``"locked"`` (section
     3 encrypted and not opened) or ``"unknown"`` (the segment is unreadable);
     ``recording_time_offset`` holds its value only with
@@ -52,6 +54,7 @@ class SegmentSummary:
     number_of_discontinuities: Optional[int]
     time_offset: str
     recording_time_offset: Optional[int]
+    offset_assumed_zero: bool
     tmet_bytes: int
     tidx_bytes: int
     tdat_bytes: int
@@ -90,6 +93,7 @@ class ChannelSummary:
     gaps: list
     gaps_complete: bool
     gaps_certain: bool
+    offset_assumed_zero: bool
     bytes: int
     records: int
     segments: list
@@ -111,8 +115,11 @@ class RecordSummary:
     times (Seiz onsets/offsets, Epoc timestamp/end, Curs trace timestamp) and
     ``time + duration`` — which is what a time range must cover. They are
     ``None`` when the file's times depend on an offset that is locked or
-    disputed; ``times_known`` is then ``False``, and the times inside
-    ``fields`` are ``None`` too — never a placeholder. ``text_bytes`` is the length of its free text; the text itself
+    disputed or belongs to an unreadable segment; ``times_known`` is then
+    ``False``, and the times inside ``fields`` are ``None`` too — never a
+    placeholder. ``offset_assumed_zero`` is ``True`` when they were placed
+    with an assumed offset 0 because a section 3 in their scope is locked
+    (as the Reader does): not verified. ``text_bytes`` is the length of its free text; the text itself
     is in ``fields`` only with ``include_values=True`` (the full record, as
     :meth:`mef3io.Reader.records` returns it). ``body_locked`` means the body
     is encrypted and the password does not open it.
@@ -124,6 +131,7 @@ class RecordSummary:
     segment: Optional[int]
     time: Optional[int]
     times_known: bool
+    offset_assumed_zero: bool
     duration: Optional[int]
     first_time: Optional[int]
     last_time: Optional[int]
@@ -251,6 +259,15 @@ class SessionSummary:
         :attr:`mef3io.Reader.declaration_issues`).
     index_read : bool
         Whether the block indices were read (``read_index=True``).
+    offset_assumed_zero : bool
+        Some time here assumes recording-time offset 0 because a section 3
+        is locked (level-1 password, or none). The same flag is on every
+        channel, segment and record it concerns. mef3io and pymef always
+        write offset 0, so such times are right for almost every file; under
+        meflib's deprecated date masking they are the masked times, which is
+        what meflib meant a level-1 user to see. They are never called
+        verified, and an ``"offset-assumed-zero"`` warning blocks
+        anonymization (which needs the level-2 password anyway).
     """
 
     name: str
@@ -259,6 +276,7 @@ class SessionSummary:
     total_bytes: int
     archive_bytes: Optional[int]
     index_read: bool
+    offset_assumed_zero: bool
     encryption: dict
     time_offset: dict
     gmt_offset: Optional[int]
