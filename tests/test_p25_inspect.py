@@ -408,7 +408,13 @@ def test_not_a_session_path_raises(tmp_path):
 
 
 def _cli(*args):
-    env = {"PYTHONPATH": str(REPO / "python"), "PATH": "/usr/bin:/bin"}
+    import os
+
+    # The whole environment (Windows needs SYSTEMROOT etc.), with the package
+    # under test first on the path — the same one this process imported.
+    env = dict(os.environ)
+    pkg_root = str(Path(mef3io.__file__).resolve().parent.parent)
+    env["PYTHONPATH"] = os.pathsep.join([pkg_root, env.get("PYTHONPATH", "")])
     return subprocess.run([sys.executable, "-m", "mef3io", "inspect", *args],
                           capture_output=True, text=True, env=env)
 
