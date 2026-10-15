@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <optional>
 #include <span>
@@ -65,7 +66,22 @@ class SessionWriter {
 
   /// Write records (annotations). @p channel nullopt -> session-level (in the
   /// `.mefd` root), otherwise channel-level. Replaces the records at that level.
+  /// Times are stored the way the reader resolves the level: -t at offset 0
+  /// (every session mef3io creates; byte-identical to earlier releases) and
+  /// rto - t under an anonymization offset, which keeps the real date hidden.
+  /// Refused (WriteConflictError) when the level's segments disagree on the
+  /// offset or a time is at or before it, and (PasswordError) when the
+  /// offset is locked in a level-2 section 3.
   void write_records(std::optional<std::string> channel, const std::vector<Record>& records);
+
+  /// Segment metadata this writer could not use ("path: reason"): `.tmet`
+  /// files that could not be read while working out a recording-time offset,
+  /// and empty segment directories it ignored on open. In a session at offset
+  /// 0 an unreadable one is skipped so it does not block unrelated writes;
+  /// where the offset is non-zero or nothing else is readable, the write is
+  /// refused instead. Listed here either way so the damage is not silent.
+  /// Grows over the writer's life; deduplicated.
+  const std::vector<std::string>& unreadable_metadata() const { return unreadable_metadata_; }
 
   // Optional override for the RED block length (samples per block). <= 0 uses
   // the fs-derived heuristic.
@@ -104,7 +120,8 @@ class SessionWriter {
   struct ChannelState {
     sf8 sampling_frequency = 0.0;
     sf8 units_conversion_factor = 1.0;
-    int n_segments = 0;
+    int n_segments = 0;      // real segments (with metadata) on disk
+    int last_segment = -1;   // highest real segment NUMBER (-1: none)
     si8 total_samples = 0;   // channel-wide sample count so far
     si8 last_end_uutc = 0;   // for append-time validation
     bool hydrated = true;    // false for channels adopted from disk until their
@@ -122,12 +139,41 @@ class SessionWriter {
     // reuses it, which is what keeps a months-long recording's appends O(new
     // data) instead of O(session length). Reset whenever a new segment starts.
     AppendIndexCache index_cache;
+    // Offset for this channel's next NEW segment, once worked out
+    // (new_segment_rto); unset until the channel first needs one.
+    std::optional<si8> new_segment_rto;
   };
 
   si8 block_length_for(sf8 fs) const;
   // Load fs/ufact/total_samples/last_end_uutc from the channel's last segment
   // on disk (for sessions reopened with overwrite=false). No-op once hydrated.
   void hydrate(const std::string& channel, ChannelState& st);
+  // What the on-disk segments of a level (one channel, or the whole session)
+  // say about the recording-time offset (see session_writer.cpp).
+  struct LevelOffset {
+    enum class State { Agreed, Disputed, Unknown } state = State::Agreed;
+    si8 rto = 0;         // the agreed offset (0 when nothing readable)
+    int readable = 0;    // segments whose metadata could be read
+    int unreadable = 0;  // segments whose .tmet could not be read at all
+    std::string detail;  // which segments disagree / which section 3 is locked
+    std::string unreadable_example;
+    std::string where;   // a segment carrying the agreed offset
+  };
+  LevelOffset scan_channel_offset(const std::filesystem::path& timd);
+  // Memoized per channel; the session combines the channels' answers.
+  LevelOffset level_offset(const std::optional<std::string>& channel);
+  void note_new_segment(const std::string& channel, const std::string& tmet, si8 rto);
+  std::map<std::string, LevelOffset> channel_offsets_;
+  // The offset a write at this level stores times against, or a refusal
+  // (see session_writer.cpp for the rule). Channel scope falls back to the
+  // session when the channel has no segment.
+  si8 resolve_offset(const std::optional<std::string>& channel, const std::string& what);
+  // The offset a NEW segment of `channel` is written with.
+  si8 new_segment_rto(const std::string& channel, ChannelState& st);
+  void note_unreadable(const std::string& what);
+  std::optional<si8> session_rto_;  // the session's resolved offset, once known
+  std::vector<std::string> unreadable_metadata_;
+  std::map<std::string, std::string> empty_segment_dirs_;  // dir -> its report entry
   WriteSummary write_blocks(const std::string& channel, const std::vector<si4>& samples,
                             std::span<const ui1> valid, sf8 ufact, si8 start_uutc, sf8 fs,
                             bool new_segment);

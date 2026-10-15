@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <vector>
@@ -47,10 +48,14 @@ struct SegmentReader {
 /// missing data — which is why the list matters: silently returning NaN where
 /// data should be is its own hazard.
 struct SegmentProblem {
-  std::string channel;
+  std::string channel;   ///< "" for a session-level record file
+  /// The segment's number; -1 for a session- or channel-level record file.
   int segment_number = 0;
-  std::string segment;   ///< human-readable segment location
+  std::string segment;   ///< human-readable location (segment dir or record file)
   std::string reason;    ///< the exception that was contained
+  /// "segment": the segment could not be read and its span reads back as a
+  /// gap. "records": one record (.rdat) file was skipped; samples unaffected.
+  std::string kind = "segment";
 };
 
 // A decode job: where a block lives (index into an owned buffer) and where its
@@ -235,9 +240,38 @@ class Session {
   void set_index_cache_bytes(std::size_t n) { index_budget_ = n; }
   std::size_t index_cache_bytes() const;
 
-  // Read records (annotations). channel == nullopt -> session-level records;
-  // otherwise the given channel's records. Empty if none.
-  std::vector<Record> read_records(std::optional<std::string> channel = std::nullopt);
+  /// Which record levels read_records returns.
+  ///
+  /// `Default` keeps the historical meaning of each scope: no channel ->
+  /// session-level records only; a channel -> that channel's channel-level
+  /// records AND those of its segments; a channel + segment -> that segment's.
+  /// `All` widens the no-channel scope to every record in the session.
+  enum class RecordLevels { Default, Session, Channel, Segment, All };
+
+  /// Read records (annotations), each tagged with the level, channel and
+  /// segment it was found at, grouped session -> channel -> its segments
+  /// (channels by name, segments by number), each file in its own order.
+  ///
+  /// Times are resolved with the offset of what the file belongs to: a
+  /// segment's own section 3; for a channel or the session, the offset ALL of
+  /// its readable segments agree on. When they disagree AND the file stores
+  /// an offset-dependent (negated) time, there is no correct answer, so that
+  /// file fails with FormatError rather than guess (a deliberate divergence
+  /// from meflib, which uses whichever offset it read last — see
+  /// read_record_file). Other files, including the segment-level ones, are
+  /// unaffected by that.
+  ///
+  /// A record file that cannot be read throws when strict; when lenient it is
+  /// skipped and reported in problems() (segment_number -1 for a session- or
+  /// channel-level file) without marking any segment's data unreadable.
+  ///
+  /// @throws std::invalid_argument  a segment without a channel, or a level
+  ///         outside the scope (Session within a channel; Session/Channel
+  ///         within a segment).
+  /// @throws std::out_of_range      unknown channel or segment number.
+  std::vector<Record> read_records(std::optional<std::string> channel = std::nullopt,
+                                   std::optional<int> segment = std::nullopt,
+                                   RecordLevels levels = RecordLevels::Default);
 
  private:
   struct Channel {
@@ -250,6 +284,16 @@ class Session {
 
   void discover();
   void load_channel_basic_info(const std::string& name, Channel& ch);
+  /// The offset every readable segment of `channel` (or of the whole session
+  /// when null) agrees on; nullopt, with `why` set, when they disagree.
+  std::optional<si8> agreed_rto(const std::string* channel, std::string& why);
+  /// Parse one record file and append its records, tagged with where they
+  /// came from. `rto` nullopt = disputed (see agreed_rto): the file is still
+  /// read if none of its times depends on the offset. Throws when strict;
+  /// when lenient a failure is reported in problems() and the file skipped.
+  void read_record_file(std::vector<Record>& out, const std::string& rdat_path,
+                        std::optional<si8> rto, const std::string& why, RecordLevel level,
+                        const std::string& channel, int segment);
   TimeSeriesMetadata& segment_metadata(SegmentReader& seg);
   /// Run `fn` for one segment, containing its failure when lenient.
   ///
@@ -293,6 +337,8 @@ class Session {
   std::map<std::string, Channel> channels_;
   bool strict_ = true;
   std::vector<SegmentProblem> problems_;
+  std::set<std::string> reported_record_files_;  // record files already in problems_
+  std::vector<std::string> record_only_channels_;  // records but no segments (yet)
 };
 
 }  // namespace mef3io

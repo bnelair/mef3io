@@ -55,6 +55,7 @@ classdef Writer < handle
             if ~isempty(opts.Metadata)
                 obj.setMetadata(opts.Metadata);
             end
+            obj.warnUnreadable({});   % what opening the session already found
         end
 
         function setMetadata(obj, md)
@@ -91,8 +92,15 @@ classdef Writer < handle
                 opts.Precision (1, 1) double = -1
                 opts.NewSegment (1, 1) logical = false
             end
-            s = mef3io_mex('writer_write', obj.h, channel, double(data(:)), ...
-                           startUutc, fs, opts.Precision, double(opts.NewSegment));
+            before = obj.unreadableMetadata();
+            try
+                s = mef3io_mex('writer_write', obj.h, channel, double(data(:)), ...
+                               startUutc, fs, opts.Precision, double(opts.NewSegment));
+            catch err
+                obj.warnUnreadable(before);   % report even when the write failed
+                rethrow(err);
+            end
+            obj.warnUnreadable(before);
         end
 
         function s = writeInt32(obj, channel, data, ufact, startUutc, fs, opts)
@@ -121,8 +129,15 @@ classdef Writer < handle
                       'range and would be altered; rescale them or use write().']);
             end
             if ~isempty(opts.Valid), opts.Valid = logical(opts.Valid(:)); end
-            s = mef3io_mex('writer_write_int32', obj.h, channel, int32(data(:)), ...
-                           opts.Valid, ufact, startUutc, fs, double(opts.NewSegment));
+            before = obj.unreadableMetadata();
+            try
+                s = mef3io_mex('writer_write_int32', obj.h, channel, int32(data(:)), ...
+                               opts.Valid, ufact, startUutc, fs, double(opts.NewSegment));
+            catch err
+                obj.warnUnreadable(before);   % report even when the write failed
+                rethrow(err);
+            end
+            obj.warnUnreadable(before);
         end
 
         function writeAnnotations(obj, records, channel)
@@ -131,7 +146,44 @@ classdef Writer < handle
             %   session-level records. Replaces records at that level.
             if nargin < 3, channel = []; end
             if istable(records), records = table2struct(records); end
-            mef3io_mex('writer_write_records', obj.h, channel, records);
+            before = obj.unreadableMetadata();
+            try
+                mef3io_mex('writer_write_records', obj.h, channel, records);
+            catch err
+                obj.warnUnreadable(before);   % report even when the write failed
+                rethrow(err);
+            end
+            obj.warnUnreadable(before);
+        end
+
+        function u = unreadableMetadata(obj)
+            %UNREADABLEMETADATA Segment metadata this writer could not use.
+            %   u = w.unreadableMetadata()   % cellstr of 'path: reason'
+            %
+            % .tmet files that could not be read while choosing the
+            % recording-time offset, and empty segment directories ignored
+            % on open. In a session at offset 0 such a file is skipped so it
+            % does not block unrelated writes (with a mef3io:unreadableMetadata
+            % warning); with a non-zero offset, or nothing else readable, the
+            % write is refused instead. Mirrors Python's
+            % Writer.unreadable_metadata.
+            u = mef3io_mex('writer_unreadable_metadata', obj.h);
+        end
+    end
+
+    methods (Access = private)
+        function warnUnreadable(obj, before)
+            % `before`: the list before the call ({} on open). Compared by
+            % content: an entry is dropped once its slot is filled, so the
+            % list can shrink and grow within one call.
+            u = setdiff(obj.unreadableMetadata(), before, 'stable');
+            if ~isempty(u)
+                warning('mef3io:unreadableMetadata', ...
+                    ['%d segment metadata problem(s) were skipped by the writer ' ...
+                     '(unreadable .tmet, or a segment directory without metadata): %s. ' ...
+                     'Full list in unreadableMetadata().'], ...
+                    numel(u), u{1});
+            end
         end
     end
 end

@@ -20,7 +20,8 @@ session.mefd/                     # session
     ├── ch1-000000.segd/          # segment 0
     │   ├── ch1-000000.tmet       #   metadata     (fixed 16 384 B)
     │   ├── ch1-000000.tidx       #   block index  (1024 B UH + 56 B/block)
-    │   └── ch1-000000.tdat       #   compressed data (1024 B UH + RED blocks)
+    │   ├── ch1-000000.tdat       #   compressed data (1024 B UH + RED blocks)
+    │   └── ch1-000000.rdat/.ridx #   optional segment-level records
     └── ch1-000001.segd/          # segment 1, ...
 ```
 
@@ -39,7 +40,57 @@ quirks matter:
   by storing `rto - t` (a negative number). Readers recover the true time as
   `t >= 0 ? t : -t + rto`, where `rto` (the recording time offset) lives in
   metadata section 3. This applies to universal-header start/end times, block
-  start times, and record times alike. mef3io writes `rto = 0`.
+  start times, and record header times alike (record body times: see
+  [Records](#records-rdat-ridx-annotations)). The rule is implemented once,
+  in `core/include/mef3io/time.hpp`.
+- **What mef3io writes.** Times are UTC, always; reading returns UTC.
+  - **rto = 0** (every session mef3io creates): times are stored as `−t`, the
+    form shown above. The bytes are unchanged from earlier releases.
+  - **rto ≠ 0** (only in a foreign session that used meflib's anonymization,
+    which mef3io is extending): times are stored as `rto − t`, meflib's own
+    offset-applied form. This covers data blocks, index, universal headers and
+    records alike. The real date never reaches the file, which is what the
+    offset is for, and every reader places the time correctly.
+  - **New segments and channels** added to a session whose segments all agree
+    on a non-zero `rto` carry that same `rto` in section 3, and their times
+    follow the same rule. The session keeps agreeing, so its existing
+    records stay readable.
+  - **Refused writes.** These raise an error and leave the files untouched,
+    rather than store something that would misplace times or reveal the
+    date:
+    - **A time at or before a non-zero `rto`** (`WriteConflictError`). `rto − t`
+      would be non-negative, and every reader takes a non-negative time as
+      the absolute date (meflib.c:7665). So the only correct encoding is the
+      real date in plain, which the offset exists to hide.
+    - **A write to a level whose segments disagree on `rto`**
+      (`WriteConflictError`, naming the segments). There is no single offset
+      to store against.
+    - **A write that needs the offset while it is locked**: section 3 of an
+      L2-encrypted session opened with only the level-1 password
+      (`PasswordError`; open the writer with the level-2 password). A locked
+      offset is unknown, never assumed to be 0.
+  - **Unreadable metadata.** Section 3 has no CRC of its own, so mef3io
+    trusts a segment's offset only after the same checks the full loader
+    makes: the header CRC, and the body CRC over the fixed 16 384-byte record
+    (never to EOF). Without them a damaged, e.g. zeroed, offset would read as
+    0, "no offset", and a write would store the real date. A `.tmet` that
+    fails either check, or is truncated, is unreadable. That is always
+    reported (`Writer.unreadable_metadata`, plus a warning). What happens next
+    depends on the readable segments:
+    - **They agree on rto 0:** the damaged file is skipped, so one damaged
+      segment in an ordinary session does not block unrelated writes.
+    - **They agree on a non-zero rto:** the write is refused, because the
+      agreement is unverified.
+    - **None are readable:** the write is refused, because the offset is
+      unknown.
+  - **A channel with no segment yet** takes the session's offset for its
+    records, under the same rules.
+  - **A refused write changes nothing.** Every check (record type, time,
+    offset) runs before any directory or file is created. A segment
+    directory without metadata left by an earlier crash is ignored (and
+    reported) instead of being adopted. Segments are numbered by the highest
+    real segment number, so such a directory never misplaces an append or a
+    new segment.
 - The empty value ("no entry") for a time is `INT64_MIN`.
 
 ## Universal header — 1024 B, prefixes every file
@@ -318,10 +369,127 @@ universal header. Record header (24 B) in `.rdat`:
 | 16 | si8 | record time (negated uUTC) |
 
 The body follows, padded with `0x7e` to a 16-byte multiple (AES block size);
-in encrypted sessions record bodies are **level-2 encrypted**. Body layouts:
-`Note` = text; `EDFA` = si8 duration + text; `Seiz` = si8 earliest onset,
-si8 latest offset, si8 duration. Each `.ridx` entry (24 B): type[4] @ 0,
-version @ 5/6, encryption @ 7, file offset (file-relative) @ 8, time @ 16.
+in encrypted sessions record bodies are **level-2 encrypted**. Each `.ridx`
+entry (24 B): type[4] @ 0, version @ 5/6, encryption @ 7, file offset
+(file-relative) @ 8, time @ 16.
+
+**Damaged record files fail.** Rather than returning fewer records or
+corrupted text, a record file is rejected for any of:
+- a record cut off mid-way, or a header claiming more `body_bytes` than the
+  file holds;
+- a per-record CRC mismatch (the coverage meflib checks, meflib.c:1839; a CRC
+  of 0, meflib's "no entry", is not checked);
+- a universal header that declares **more** records than are present.
+
+A file that declares fewer records than it holds is tolerated, as in meflib:
+only the declared records are read (meflib.c:1869). A rejected file is
+contained like any other: strict raises, lenient skips it and lists it in
+`Reader.problems` with kind `"records"`.
+
+### Where record files live
+
+Record files can exist at **three** levels (meflib.c:6343 / 5660 / 6030), each
+named after its directory:
+
+| Level | Path |
+|---|---|
+| session | `session.mefd/session.rdat` (+ `.ridx`) |
+| channel | `session.mefd/ch1.timd/ch1.rdat` |
+| segment | `session.mefd/ch1.timd/ch1-000000.segd/ch1-000000.rdat` |
+
+`Reader.records()` reads the session level; `Reader.records("ch1")` reads the
+channel level AND every segment level of `ch1`; `records("ch1", segment=0)`
+one segment; `records(level="all")` everything, including a channel that has
+records but no segments yet. Every record carries `level`,
+`channel` and `segment` so the source is never ambiguous. mef3io writes only
+the session and channel levels.
+
+The session-level file is `<session name>.rdat`, the only name meflib reads
+(meflib.c:6335). The session name is the `.mefd` directory's name without
+its suffix. For a `.mefd.tar` archive it is the session folder inside the
+archive, so the archive file itself can be renamed freely. A differently named `.rdat` at the root is used only
+when it is the only one there. With several and none matching the name, the
+session-level records are ambiguous: strict raises, lenient reports it in
+`problems` and returns none.
+
+### Record times and the recording-time offset
+
+The header time is negated like every other MEF time and is resolved with the
+offset of what the file belongs to: a segment's own section 3; for a channel
+or the session, the offset **all** of their segments agree on.
+
+If those segments disagree, there is no correct single value. Only times
+stored negated depend on the offset, so a file holding none is read normally.
+One that does is refused with `FormatError` (strict), or skipped and listed in
+`Reader.problems` with an `UnreadableSegmentWarning` (lenient). Either way only
+that one file is affected: the segment-level files carry their own segment's
+offset and still read (`records(ch, level="segment")` in strict mode).
+
+This is a **deliberate divergence from meflib**. In its default
+`RTO_REMOVE_ON_INPUT` mode (meflib.h:278) meflib resolves record times with
+the global offset left by whichever `.tmet` it read last (meflib.c:1806 →
+1846); the "no entry" it records for a disagreeing channel or session
+(meflib.c:5529, 6208) is only the metadata aggregate. Following the read order
+would misplace the records by the difference without a word.
+
+**Writing.** Record times follow the rule in [Times](#times):
+- **rto = 0 level:** stored as `−t`, byte-identical to earlier releases.
+- **Non-zero rto:** stored as `rto − t`. A record at or before the offset is
+  refused.
+- **A level whose segments disagree, or whose offset is locked:** the write
+  is refused.
+
+meflib applies the offset to the record **header** only (meflib.c:1846);
+`mefrec.c` never rewrites a body. It does, however, display every body time
+through `remove_recording_time_offset` (via `local_date_time_string`,
+meflib.c:4649), i.e. with the same sign rule. mef3io does the same: **body
+times go through the same conversion as the header time.** A non-negative body
+time — the normal case, even in an offset session — is returned unchanged; a
+negative one is resolved with the record's offset. So every time mef3io
+returns, header or body, is absolute uUTC. The sentinels `INT64_MIN` and a
+Seiz channel's `-1` onset/offset are passed through as-is.
+
+### Body layouts (mefrec.h)
+
+Offsets are relative to the start of the body. **Every** body type is
+version-gated: meflib decodes each one only at version 1.0 (mefrec.c:201, 232,
+540, …), so mef3io reads a body only when the header says 1.0 — which is what
+mef3io, pymef and mef_tools write. Another version, or a body shorter than the
+fixed part of its layout (e.g. an EDFA body without its 8-byte duration),
+reads back with every body field `None`. The field names are the keys
+`Reader.records()` returns (and the MATLAB struct fields); every record of a
+type always carries all of its type's keys.
+
+| Type | Body (offset: type name) |
+|---|---|
+| `Note`, `SyLg` | 0: utf8 `text` (to the first NUL) |
+| `EDFA` | 0: si8 `duration` (µs); 8: utf8 `text` |
+| `Seiz` (1312 B + 272 B/channel) | 0: si8 `earliest_onset` (uUTC); 8: si8 `latest_offset` (uUTC); 16: si8 `duration`; 24: si4 `number_of_channels`; 28: si4 `onset_code` (−1 none, 0 unknown, 1 focal, 2 generalized, 3 propagated, 4 mixed); 32: utf8[128] `marker_name_1`; 160: utf8[128] `marker_name_2`; 288: utf8[1024] `annotation`; then `channels`: per channel 0: utf8[256] `name`, 256: si8 `onset`, 264: si8 `offset` (uUTC, −1 = none) |
+| `Epoc` (192 B) | 0: si8 `id_number`; 8: si8 `timestamp` (uUTC); 16: si8 `end_timestamp` (uUTC); 24: si8 `duration`; 32: utf8[32] `epoch_type`; 64: utf8[128] `text` |
+| `Curs` (160 B) | 0: si8 `id_number`; 8: si8 `trace_timestamp` (uUTC); 16: si8 `latency`; 24: sf8 `value`; 32: utf8[128] `name` |
+| `CSti` (200 B) | 0: utf8[64] `task_type`; 64: si8 `stimulus_duration`; 72: utf8[64] `stimulus_type`; 136: utf8[64] `patient_response` |
+| `ESti` (416 B) | 0: sf8 `amplitude`; 8: sf8 `frequency`; 16: si8 `pulse_width`; 24: si4 `ampunit_code` (−1 none, 0 unknown, 1 mA, 2 V); 28: si4 `mode_code` (−1 none, 0 unknown, 1 current, 2 voltage; mefrec.h:242-250); 32/160/288: utf8[128] `waveform` / `anode` / `catode` |
+| `LNTP` | 0: si8 `length`; 8: si4[`length`] `template` (pymef: si8, see below) |
+| `UnRc` | no body fields |
+
+`Seiz` returns at most `number_of_channels` channel entries, and fewer when
+the body is shorter than it declares. For `LNTP` mef3io follows the
+`MEFREC_LNTP_1_0_TEMPLATE_OFFSET` define (body offset 8); meflib's own display
+code (mefrec.c:306) applies that offset with `si4*` pointer arithmetic and so
+reads 4× too far.
+
+**LNTP incompatibility.** pymef (and so the legacy `mef_tools`) writes the
+template as **si8** (pymef3_file.c:4159-4160; its reader notes the discrepancy
+at :3729), not the si4 `mefrec.h` defines, and the header cannot say which.
+mef3io reads si4 by default and takes the pymef layout only when the body
+holds at least 8 × `length` bytes after the length AND every high 4 bytes are
+the sign extension of the low 4 — which a si4 template followed by meflib's
+`0x7e` padding never is. The values are returned as integers either way.
+(A si4 file padded with zeros instead of `0x7e`, whose template happens to
+alternate value / sign-extension, would be misread; no known writer does that.)
+
+Reading these bodies is supported; writing remains limited to `Note`, `SyLg`
+and `EDFA`.
 
 ## Sentinels and other conventions
 
@@ -342,7 +510,7 @@ version @ 5/6, encryption @ 7, file offset (file-relative) @ 8, time @ 16.
 | Segment triples | `Reader.segments(ch)` — time/sample range per segment |
 | `.tidx` entries | `Reader.toc(ch)` — per-block start time, extrema, discontinuity |
 | RED blocks | decoded transparently by `read` / `read_raw` |
-| Records | `Reader.records(ch)` / `Writer.write_annotations(...)` |
+| Records (session / channel / segment level) | `Reader.records(ch, segment, level)` / `Writer.write_annotations(...)` |
 
 Related: [encryption_model.md](encryption_model.md) (how the two password
 levels derive keys and what they unlock),

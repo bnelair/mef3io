@@ -29,6 +29,40 @@ block_length=None, n_threads=0)`
   state is recovered from disk, so this works across program runs.
 - Encryption: pass **both** passwords (MEF has no "level-1 only" files; see
   the [encryption model](encryption_model.md)).
+- **Appending to an encrypted session needs the level-2 password.** That
+  includes sessions at offset 0. Section 3, which holds the recording-time
+  offset every new time is stored against, is level-2 encrypted, and without
+  it the offset is unknown. A Writer opened with only the level-1 password is
+  refused (`PasswordError`) for anything that stores times into that
+  session, rather than guessing the offset. Earlier releases took it as 0,
+  which in an anonymized session placed appended data decades off.
+- `Writer.unreadable_metadata` lists segment metadata the writer could not
+  use (`"path: reason"`):
+  - `.tmet` files it could not read while choosing the offset. At offset 0
+    such a file is skipped, so one damaged segment does not block unrelated
+    writes. Where the offset is non-zero, or nothing else is readable, the
+    write is refused instead.
+  - Segment directories without metadata (what a crashed write can leave
+    behind). These are ignored, never adopted. Segments are numbered by the
+    highest real segment number, so such a directory is neither appended to
+    nor collides with a new segment. An entry is dropped once a new segment
+    fills that directory.
+
+  Every entry raises an `UnreadableSegmentWarning`, when the Writer opens or
+  during the write that finds it (`mef3io:unreadableMetadata` in MATLAB).
+- **A refused write leaves the session exactly as it was.** Every check runs
+  before any directory or file is created: the record type, the time, and the
+  offset (known and agreed). A write that fails later anyway removes the
+  directories it created.
+- **Cost of choosing the offset.** A session-level annotation or a new
+  channel needs the offset that every segment of the session agrees on. The
+  first one in a Writer reads and CRC-checks each segment's `.tmet` record
+  (16 KB; the offset in section 3 has no CRC of its own, so it is trusted
+  only after the body CRC), e.g. 1.4–1.8 s and 157 MB at 64 channels × 150
+  segments. A channel-level annotation reads only that channel's
+  segments. Each answer is kept for the Writer's lifetime, so every later
+  one costs nothing. Keep one Writer open across an acquisition, as for
+  appends.
 - `block_length` overrides the RED block size (default: `fs` samples for
   fs ≥ 5000, else `10*fs`). `n_threads=0` uses all cores.
 
@@ -77,7 +111,8 @@ with mef3io.Reader("session.mefd") as r:          # password="..." if encrypted
     xi = r.read_raw("ch1", t0, t1)                # int32 + validity mask
     r.segments("ch1")                             # per-segment map
     r.toc("ch1")                                  # block-level index
-    r.records("ch1")                              # annotations (None -> session level)
+    r.records()                                   # session-level annotations
+    r.records("ch1")                              # ch1's channel- + segment-level ones
 ```
 
 `Reader(path, password="", backend="cpp", n_threads=0, cache=None)`
@@ -118,6 +153,64 @@ for files from another writer or from mef3io before 1.2; see the
 [provenance region](mef3_format.md#provenance-region-mef3io-12-frozen-format)) — from metadata only (nothing decoded), so it is
 cheap even for huge, gap-riddled sessions. `toc` is the finer per-RED-block
 view (start time, sample counts, extrema, discontinuity flags).
+
+### `records(channel=None, segment=None, level=None)`
+
+MEF keeps record (annotation) files at three levels — session, channel and
+segment — and every returned dict says which: `level`
+(`"session"`/`"channel"`/`"segment"`), `channel` (`None` at session level) and
+`segment` (`None` unless segment level).
+
+```python
+r.records()                       # session-level records
+r.records("ch1")                  # ch1's channel-level AND segment-level records
+r.records("ch1", segment=0)       # only segment 0's
+r.records("ch1", level="channel") # only the channel file
+r.records(level="all")            # every record in the session (see below)
+```
+
+Each dict has `type`, `time` (absolute uUTC), the three location keys,
+`version_major`/`version_minor`, then the body fields of its type, always the
+same keys for a type and `None` where the body does not carry one: `text`
+(Note, SyLg); `duration` + `text` (EDFA); `earliest_onset`, `latest_offset`,
+`duration`, `number_of_channels`, `onset_code`, `marker_name_1/2`,
+`annotation` and `channels` (a list of `{"name", "onset", "offset"}`) for Seiz;
+and the Epoc, Curs, CSti, ESti and LNTP fields listed in the
+[format reference](mef3_format.md#body-layouts-mefrech). Body times
+(`earliest_onset`, `latest_offset`, a Seiz channel's `onset`/`offset`, Epoc
+`timestamp` / `end_timestamp`, Curs `trace_timestamp`) are absolute uUTC like
+`time`; the
+[format reference](mef3_format.md#record-times-and-the-recording-time-offset)
+explains how they are resolved. If a channel's (or the session's) segments
+disagree on the recording-time offset and its record file stores
+offset-dependent times, that one file raises `FormatError` rather than
+misplacing its records (a lenient Reader skips it, lists it in `problems` and
+warns; the segment-level records are unaffected). A record file that cannot be
+read is handled the same way. Reading every body type is supported; writing is
+limited to Note, SyLg and EDFA.
+
+Written times are stored as `−t` in a session at offset 0 (every session
+mef3io creates). In a foreign session anonymized with a recording-time offset
+they are stored as `rto − t`, so the real date stays hidden. A segment or
+channel mef3io adds to such a session inherits its offset.
+
+A write is refused, rather than revealing the date or misplacing times, when:
+- the time is at or before the offset (`WriteConflictError`);
+- the level's segments disagree on the offset (`WriteConflictError`);
+- the offset is locked because only the level-1 password was given
+  (`PasswordError`);
+- the offset cannot be verified because segment metadata in scope is
+  unreadable, and the readable segments use a non-zero offset or none are
+  readable at all (`WriteConflictError`).
+
+A channel that has no data yet takes the session's offset for its
+annotations. Its records are listed: `records("chNew")` and
+`records(level="all")` include it. It is not added to `Reader.channels`,
+which lists channels with samples.
+
+The `mef_tools`-compatible `MefReader.get_annotations(channel)` keeps the
+legacy meaning — that channel's channel-level records only — while
+`Reader.records(channel)` also includes its segment-level records.
 
 ### Warm-start cache (opt-in)
 

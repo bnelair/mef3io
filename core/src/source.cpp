@@ -1,6 +1,7 @@
 // mef3io — filesystem-backed session source + source dispatch.
 #include "mef3io/source.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -56,6 +57,23 @@ std::vector<ui1> DirectorySource::read_range(const std::string& rel, std::size_t
 }
 
 std::string DirectorySource::describe(const std::string& rel) const { return join(rel); }
+
+std::string DirectorySource::session_name() const { return session_name_from_path(root_); }
+
+std::string session_name_from_path(std::string path) {
+  while (!path.empty() && (path.back() == '/' || path.back() == '\\')) path.pop_back();
+  const auto slash = path.find_last_of("/\\");
+  std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+  for (const std::string suffix : {".tar", ".mefd"}) {
+    if (name.size() >= suffix.size()) {
+      std::string tail = name.substr(name.size() - suffix.size());
+      std::transform(tail.begin(), tail.end(), tail.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      if (tail == suffix) name.resize(name.size() - suffix.size());
+    }
+  }
+  return name;
+}
 
 bool path_has_suffix(const std::string& path, const std::string& suffix) {
   std::size_t end = path.size();

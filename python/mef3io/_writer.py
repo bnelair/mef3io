@@ -8,6 +8,8 @@ Two write paths:
 """
 from __future__ import annotations
 
+import contextlib
+import warnings
 from typing import Optional
 
 import numpy as np
@@ -36,6 +38,38 @@ def _as_int32_counts(data):
             f"range and would wrap; rescale them or use write()"
         )
     return np.ascontiguousarray(a, dtype=np.int32)
+
+
+def warn_unreadable_metadata(entries, stacklevel=3):
+    """One warning for segment metadata a writer could not use (or [] = none)."""
+    if entries:
+        from ._reader import UnreadableSegmentWarning
+
+        warnings.warn(
+            f"{len(entries)} segment metadata problem(s) were skipped by the writer "
+            f"(unreadable .tmet, or a segment directory without metadata): {entries[0]}. "
+            "Full list in Writer.unreadable_metadata.",
+            UnreadableSegmentWarning, stacklevel=stacklevel)
+
+
+@contextlib.contextmanager
+def reporting_unreadable_metadata(impl):
+    """Warn about segment metadata the core skipped during one write call.
+
+    Choosing the recording-time offset reads other segments' ``.tmet`` files;
+    in a session at offset 0 one that cannot be read is skipped so the write
+    can go ahead (a damaged segment must not block unrelated writes). It is
+    still damage, so it is reported, never silent. Shared by
+    :class:`Writer` and the ``mef_tools``-compatible ``MefWriter``.
+    """
+    before = set(impl.unreadable_metadata)
+    try:
+        yield
+    finally:
+        # By content, not position: an entry is dropped once its slot is
+        # filled, so the list can shrink and grow within one call.
+        warn_unreadable_metadata(
+            [e for e in impl.unreadable_metadata if e not in before], stacklevel=5)
 
 
 class Writer:
@@ -126,6 +160,7 @@ class Writer:
             )
         self._path = str(path)
         self._impl = _mef3io.SessionWriter(str(path), overwrite, password1 or "", password2 or "")
+        warn_unreadable_metadata(self._impl.unreadable_metadata)
         # Deliberately cache-unaware: a snapshot is judged only when a cached
         # open happens (mef3io.cache), never maintained by write paths.
         if units is not None:
@@ -201,9 +236,10 @@ class Writer:
             starting before the segment's end).
         """
         data = np.atleast_1d(np.ascontiguousarray(data, dtype=np.float64))
-        return self._impl.write_float(
-            channel, data, start_uutc, float(fs), int(precision), bool(new_segment)
-        )
+        with self._reporting_unreadable_metadata():
+            return self._impl.write_float(
+                channel, data, start_uutc, float(fs), int(precision), bool(new_segment)
+            )
 
     def write_int32(
         self,
@@ -259,9 +295,10 @@ class Writer:
             valid = np.ascontiguousarray(
                 np.atleast_1d(np.asarray(valid)) != 0, dtype=np.uint8
             )
-        return self._impl.write_int32(
-            channel, data, float(ufact), start_uutc, float(fs), valid, bool(new_segment)
-        )
+        with self._reporting_unreadable_metadata():
+            return self._impl.write_int32(
+                channel, data, float(ufact), start_uutc, float(fs), valid, bool(new_segment)
+            )
 
     def write_annotations(self, annotations, channel: Optional[str] = None) -> None:
         """Write records (annotations).
@@ -287,4 +324,21 @@ class Writer:
             if r.get("duration") is not None:
                 rec["duration"] = int(r["duration"])
             norm.append(rec)
-        self._impl.write_records(channel, norm)
+        with self._reporting_unreadable_metadata():
+            self._impl.write_records(channel, norm)
+
+    @property
+    def unreadable_metadata(self) -> list[str]:
+        """Segment metadata this writer could not use, as ``"path: reason"``.
+
+        ``.tmet`` files that could not be read while choosing the
+        recording-time offset, and empty segment directories ignored on open
+        (what a crashed write can leave behind). In a session at offset 0 an
+        unreadable file is skipped so it does not block unrelated writes (with
+        an :class:`UnreadableSegmentWarning`); where the offset is non-zero,
+        or nothing else is readable, the write is refused instead.
+        """
+        return list(self._impl.unreadable_metadata)
+
+    def _reporting_unreadable_metadata(self):
+        return reporting_unreadable_metadata(self._impl)

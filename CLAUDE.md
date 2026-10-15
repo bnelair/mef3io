@@ -511,13 +511,17 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   `meflib-multiplatform/` (authoritative C), `pymef-develop/`, `mef_tools/`,
   `mef3_dump-main/`. Settle every format question against it — do not reason
   from memory, and do not trust a doc comment that cites it.
-- **Sign conventions are MIXED WITHIN ONE FILE.** For a pymef/mef_tools
-  session: `.tmet` universal-header times are NEGATED, `.tidx`/`.tdat`
-  universal-header times are NOT, and index block times ARE. So every time
-  comparison must go through `to_user_time` first. Worse, with a non-zero
-  `rto` the legacy stack stores a POSITIVE delta where meflib negates — the two
-  are indistinguishable from the bytes, so the validator's time checks stand
-  down entirely when `rto != 0` rather than risk rewriting a correct file.
+- **Sign conventions can be MIXED WITHIN ONE FILE — always compare via
+  `to_user_time`.** Verified 2026-10-14 against the installed legacy stack
+  (mef-tools 1.2.3 / pymef 1.4.8): it stores EVERY time meflib-style as
+  −(t − rto) — `.tmet`/`.tidx`/`.tdat` universal headers, index entries, RED
+  block headers and record headers alike (−t at rto 0). Older fixtures were
+  seen with `.tidx`/`.tdat` universal-header times NOT negated, and files that
+  passed through other writers can mix conventions, so never assume one. What
+  makes `rto != 0` hazardous is that a time at or before `rto` cannot be stored
+  as −(t − rto) (it turns non-negative and every reader takes it as absolute).
+  So the validator's time checks still stand down entirely when `rto != 0`
+  rather than risk rewriting a correct file.
 - **Oracle**: use `pymef` `read_ts_channels_sample([ch],[0,nsamp])` for decoded
   int32 (no gap NaN) and `read_ts_channels_uutc` for gap-filled. `mef3_dump` is
   NOT usable (reads the encryption sentinel byte unsigned). Manifest `nsamp` !=
@@ -576,11 +580,32 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
 - **Do NOT `pip install -e .` for C++ dev** — scikit-build-core's editable hook
   loads an install-time extension snapshot that shadows the dev_build symlink
   (meta-path beats sys.path). Keep mef3io uninstalled; use scripts/dev_build.sh.
-- Pure-Python backend is a stub. Records write builds bodies for Note/SyLg
-  (text) and EDFA (duration+text) only; Seiz is read-only (`parse_records`
-  decodes onset/offset/duration, `record_body` has no Seiz branch, and the
-  bindings expose no onset/offset fields). Any other 4-char type writes a
-  header with an empty body. `write_records` rejects a record carrying a
+- Pure-Python backend is a stub. Records are READ at all three levels
+  (session / channel / segment, each with its own on-disk offset) and every
+  mefrec.h body type is decoded read-only (Seiz fully, incl. per-channel
+  entries; Epoc, Curs, CSti, ESti, LNTP, UnRc), gated on version 1.0 like
+  meflib. Records WRITE builds bodies for Note/SyLg (text) and EDFA
+  (duration+text) only; any other 4-char type writes a header with an empty
+  body. TIMES ARE UTC (reading always returns UTC). Every written time goes
+  through `to_stored_time` (time.hpp): −(t − rto), i.e. −t at rto 0
+  (byte-identical to earlier releases) and rto − t in a foreign ANONYMIZED
+  session, which keeps the real date hidden (user decision, 2026-10-14). A
+  write is REFUSED rather than reveal or misplace a date: t ≤ rto
+  (WriteConflictError), a level whose segments disagree on rto
+  (WriteConflictError), or a locked section 3 (L1 password only →
+  PasswordError; an unknown rto is never treated as 0). New
+  segments/channels inherit the agreed rto (own channel first, then the
+  session); an unreadable .tmet is skipped and reported
+  (`SessionWriter::unreadable_metadata`), never thrown. The reader refuses
+  only offset-dependent record files whose segments disagree — a deliberate
+  divergence from meflib, which uses the last-read global offset.
+  Session-level records are `<session>.rdat` (meflib.c:6335); another name
+  only if it is the sole .rdat, else ambiguous. A damaged record file
+  (mid-record truncation, declaring MORE records than present — fewer is
+  tolerated as in meflib — or a per-record CRC mismatch) fails and is
+  contained: strict raises; lenient skips it and lists it in problems() with
+  kind "records" (segment_number −1 at session/channel level), samples still
+  readable. `write_records` rejects a record carrying a
   payload its type cannot store, so the gap fails loudly instead of silently.
   Cache is Python-level (a C++ warm-start is future).
 - **MATLAB binding implemented**: flat C ABI (`core/include/mef3io/c_api.h`,
@@ -616,7 +641,10 @@ appended before it threw (`out.resize(mark)`; collect_blocks restores buffers,
 jobs AND mismatches; read_runs also drops `current`, which points into the
 vector it resizes) — a half-written segment is worse than a skipped one. Note
 `continue` inside those lambdas means the inner loop; use `return` for "this
-segment contributes nothing". `info.n_segments` counts READABLE segments so it
+segment contributes nothing". problems() entries carry `kind` = "segment" |
+"records" (C ABI: `mef3io_reader_problem_kind`, struct layout unchanged);
+record-file problems have segment_number −1 at session/channel level and
+never mark a segment's data unreadable. `info.n_segments` counts READABLE segments so it
 cannot out-count `segment_map`. Surfaced as Python `Reader(strict=False)` /
 `Reader.problems` / `UnreadableSegmentWarning`, C ABI
 `mef3io_reader_open_ex` + `mef3io_reader_n_problems`/`_problem` (the original

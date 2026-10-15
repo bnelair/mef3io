@@ -280,11 +280,20 @@ class Reader:
 
     @property
     def problems(self) -> list:
-        """Segments that could not be read, when opened ``strict=False``.
+        """What a ``strict=False`` Reader skipped instead of raising.
 
-        A list of ``{"channel", "segment_number", "segment", "reason"}`` dicts,
-        empty when everything loaded. **Always empty in strict mode**, where an
-        unreadable segment raises instead of being skipped.
+        A list of ``{"channel", "segment_number", "segment", "reason",
+        "kind"}`` dicts, empty when everything loaded. **Always empty in strict
+        mode**, where the same failure raises instead. ``kind`` is:
+
+        * ``"segment"`` — a segment that could not be read; its time span
+          reads back as NaN. Found when the session is opened.
+        * ``"records"`` — one record (``.rdat``) file that could not be read
+          or placed, found by :meth:`records` (so the list can grow after the
+          open). Only its annotations are missing; the samples are unaffected.
+          ``segment`` is then the file's path, and ``segment_number`` is -1 for
+          a session- or channel-level file (``channel`` is ``""`` at session
+          level).
 
         Check it before trusting a read from a lenient Reader: a skipped
         segment's samples come back as NaN, exactly like a genuine gap, so the
@@ -294,7 +303,8 @@ class Reader:
         if impl is None:
             # Warm open: the backend is not built yet, so report what the
             # snapshot recorded rather than an empty list.
-            return list(self._cached_problems)
+            # (Snapshots written before "kind" existed only held segments.)
+            return [{"kind": "segment", **p} for p in self._cached_problems]
         fn = getattr(impl, "problems", None)
         return list(fn()) if fn is not None else []
 
@@ -539,19 +549,76 @@ class Reader:
         """
         return self._ensure_impl().toc(channel)
 
-    def records(self, channel: Optional[str] = None) -> list[dict]:
-        """Read records (annotations).
+    def records(
+        self,
+        channel: Optional[str] = None,
+        segment: Optional[int] = None,
+        level: Optional[str] = None,
+    ) -> list[dict]:
+        """Read records (annotations) at the session, channel or segment level.
+
+        MEF 3.0 keeps record files at three levels: the session
+        (``<session>.mefd``), each channel (``<ch>.timd``) and each segment
+        (``<ch>-NNNNNN.segd``). Every returned record says where it came from.
 
         Parameters
         ----------
         channel : str or None, optional
-            Channel name for channel-level records, or ``None`` (default) for
-            session-level records.
+            ``None`` (default) for the session scope; a channel name for that
+            channel's records.
+        segment : int or None, optional
+            A segment number (requires ``channel``): only that segment's
+            records.
+        level : {None, "session", "channel", "segment", "all"}, optional
+            Which levels to return. ``None`` (default) keeps each scope's
+            natural meaning: session-level records when ``channel`` is
+            ``None``; the channel's channel-level AND segment-level records
+            when it is given; the segment's when ``segment`` is given.
+            ``"all"`` without a channel returns every record in the session,
+            including channels that have records but no data yet (not in
+            :attr:`channels`, which lists channels with samples).
+            A level outside the scope (``"session"`` with a channel) raises
+            ``ValueError``.
 
         Returns
         -------
         list of dict
-            One dict per record with ``type`` (e.g. ``"Note"``, ``"EDFA"``),
-            ``time`` (uUTC), optional ``text`` and ``duration``.
+            One dict per record, grouped session -> channel -> its segments.
+            Every dict has ``type`` (e.g. ``"Note"``), ``time`` (absolute
+            uUTC), ``level`` (``"session"``/``"channel"``/``"segment"``),
+            ``channel`` (``None`` at session level), ``segment`` (``None``
+            unless segment level), ``version_major`` and ``version_minor``,
+            then the body fields of its type, always the same keys for a type
+            (``None`` where the body does not carry one) — e.g. ``text`` for
+            Note/SyLg, ``duration`` + ``text`` for EDFA, ``earliest_onset`` ...
+            ``channels`` for Seiz. Body times are absolute uUTC like ``time``.
+            The full per-type list is in the MEF format reference.
+
+        Raises
+        ------
+        mef3io._mef3io.FormatError
+            A record file cannot be read, or the segments a channel or the
+            session spans disagree on the recording-time offset AND its file
+            stores offset-dependent (negated) times, so they cannot be placed.
+            Only when strict: a lenient Reader skips that file, lists it in
+            :attr:`problems` and emits :class:`UnreadableSegmentWarning`; the
+            other files (e.g. the segment-level ones) are still returned.
+        ValueError
+            A ``segment`` without a ``channel``, or a level outside the scope.
+        IndexError
+            Unknown channel or segment number.
         """
-        return self._ensure_impl().records(channel)
+        impl = self._ensure_impl()
+        before = len(impl.problems())
+        out = impl.records(channel, segment, level)
+        added = impl.problems()[before:]
+        if added:
+            # Lenient only (strict raises): a record file that could not be
+            # read was skipped. Say so — a missing annotation is otherwise
+            # indistinguishable from one that was never written.
+            warnings.warn(
+                f"{self._path}: {len(added)} record file(s) could not be read and were "
+                f"SKIPPED. First: {added[0]['segment']} — {added[0]['reason']}. "
+                "Full list in Reader.problems. Open with strict=True to fail instead.",
+                UnreadableSegmentWarning, stacklevel=2)
+        return out

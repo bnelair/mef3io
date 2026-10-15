@@ -7,8 +7,13 @@
 #include <mex.h>
 #include <matrix.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <stdexcept>
+#include <memory>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -42,9 +47,23 @@ void untrack(std::unordered_set<std::uint64_t>& set, std::uint64_t h) {
   if (g_readers.empty() && g_writers.empty()) mexUnlock();
 }
 
+// Every argument / library error in this file is a C++ exception of this
+// type, thrown from wherever it is detected and turned into a MATLAB error in
+// exactly ONE place: mexFunction, after the whole C++ call has unwound.
+//
+// Calling mexErrMsgIdAndTxt from a helper is NOT equivalent. It raises
+// MATLAB's own C++ exception from MATLAB's libstdc++, and on Linux this MEX
+// links its own static libstdc++ (see build_mex.m), so unwinding that
+// exception through the MEX's frames — any frame with a destructor to run —
+// can abort MATLAB inside __cxa_throw. That is what a fractional time did.
+struct MexError : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
+
 [[noreturn]] void fail(const char* fmt, const char* detail = "") {
-  mexErrMsgIdAndTxt("mef3io:error", fmt, detail);
-  throw 0;  // unreachable; mexErrMsgIdAndTxt does not return
+  char buf[2048];
+  std::snprintf(buf, sizeof buf, fmt, detail);
+  throw MexError(buf);
 }
 
 void check(int code) {
@@ -64,15 +83,48 @@ double get_scalar(const mxArray* a, const char* what) {
   return mxGetScalar(a);
 }
 
+// A double -> integer conversion of NaN, Inf or anything out of the target's
+// range is undefined behaviour, not an error, so every numeric argument that
+// becomes an integer is checked here first: finite, integral, in range.
+double checked_integral(const mxArray* a, const char* what, double lo, double hi) {
+  const double v = get_scalar(a, what);
+  if (!std::isfinite(v) || v != std::floor(v) || v < lo || v > hi)
+    fail("expected a finite integer in range for %s", what);
+  return v;
+}
+
+// [-2^63, 2^63): the upper bound is exclusive because 2^63 itself is a
+// double but not an int64.
+constexpr double TWO63 = 9223372036854775808.0;
+
 std::int64_t get_int64(const mxArray* a, const char* what) {
   if (mxIsInt64(a) && mxGetNumberOfElements(a) == 1) return *mxGetInt64s(a);
-  return static_cast<std::int64_t>(get_scalar(a, what));
+  const double v = checked_integral(a, what, -TWO63, TWO63);
+  if (v >= TWO63) fail("expected a finite integer in range for %s", what);
+  return static_cast<std::int64_t>(v);
+}
+
+// A time or duration in microseconds. Fractions are ROUNDED to the nearest
+// microsecond rather than rejected: pure-double MATLAB code computing
+// t0 + n/fs*1e6 produces them routinely, and a microsecond is the format's
+// resolution. Non-finite and out-of-range values are still errors.
+std::int64_t get_time(const mxArray* a, const char* what) {
+  if (mxIsInt64(a) && mxGetNumberOfElements(a) == 1) return *mxGetInt64s(a);
+  const double v = std::nearbyint(get_scalar(a, what));
+  if (!std::isfinite(v) || v < -TWO63 || v >= TWO63)
+    fail("expected a finite time in microseconds for %s", what);
+  return static_cast<std::int64_t>(v);
+}
+
+int get_int(const mxArray* a, const char* what) {
+  return static_cast<int>(checked_integral(a, what, static_cast<double>(INT32_MIN),
+                                           static_cast<double>(INT32_MAX)));
 }
 
 // [] -> "unset"; otherwise an int64/double uUTC.
 std::int64_t get_opt_time(const mxArray* a, const char* what) {
   if (mxIsEmpty(a)) return MEF3IO_TIME_UNSET;
-  return get_int64(a, what);
+  return get_time(a, what);
 }
 
 mef3io_reader* get_reader(const mxArray* a) {
@@ -93,6 +145,51 @@ mxArray* make_handle(void* p) {
   mxArray* out = mxCreateNumericMatrix(1, 1, mxUINT64_CLASS, mxREAL);
   *mxGetUint64s(out) = reinterpret_cast<std::uint64_t>(p);
   return out;
+}
+
+// A MATLAB char array from UTF-8 bytes. mxCreateString interprets its input
+// in the user's locale codepage (not UTF-8 on Windows), while this binding
+// reads strings with mxArrayToUTF8String — so non-ASCII text (a record, a
+// subject name, a path) would not round-trip. Every string this MEX returns
+// goes through here: decode to UTF-16 (MATLAB's mxChar) ourselves; an invalid
+// byte becomes U+FFFD, so one malformed record cannot fail the whole call.
+mxArray* make_utf8_string(const std::string& s) {
+  std::u16string out;
+  out.reserve(s.size());
+  const auto* p = reinterpret_cast<const unsigned char*>(s.data());
+  const std::size_t n = s.size();
+  std::size_t i = 0;
+  while (i < n) {
+    std::uint32_t cp = 0xFFFD;
+    std::size_t len = 1;
+    const unsigned char c = p[i];
+    if (c < 0x80) {
+      cp = c;
+    } else if (c >= 0xC2 && c <= 0xF4) {
+      len = c < 0xE0 ? 2 : (c < 0xF0 ? 3 : 4);
+      std::uint32_t v = c & (0x7F >> len);
+      bool ok = i + len <= n;
+      for (std::size_t k = 1; ok && k < len; ++k) {
+        if ((p[i + k] & 0xC0) != 0x80) ok = false;
+        else v = (v << 6) | (p[i + k] & 0x3F);
+      }
+      const std::uint32_t min = len == 2 ? 0x80 : (len == 3 ? 0x800 : 0x10000);
+      if (ok && v >= min && v <= 0x10FFFF && !(v >= 0xD800 && v <= 0xDFFF)) cp = v;
+      else len = 1;  // resynchronise on the next byte
+    }
+    if (cp >= 0x10000) {
+      cp -= 0x10000;
+      out.push_back(static_cast<char16_t>(0xD800 + (cp >> 10)));
+      out.push_back(static_cast<char16_t>(0xDC00 + (cp & 0x3FF)));
+    } else {
+      out.push_back(static_cast<char16_t>(cp));
+    }
+    i += len;
+  }
+  const mwSize dims[2] = {1, static_cast<mwSize>(out.size())};
+  mxArray* a = mxCreateCharArray(2, dims);
+  if (!out.empty()) std::memcpy(mxGetChars(a), out.data(), out.size() * sizeof(char16_t));
+  return a;
 }
 
 mxArray* make_int64(std::int64_t v) {
@@ -135,50 +232,50 @@ static mxArray* provenance_struct(const mef3io_provenance& p) {
                      "operations", "modification_count"};
   mxArray* s = mxCreateStructMatrix(1, 1, 6, f);
   mxSetField(s, 0, "layout_version", mxCreateDoubleScalar(p.layout_version));
-  mxSetField(s, 0, "created_by", mxCreateString(p.created_by));
-  mxSetField(s, 0, "last_modified_by", mxCreateString(p.last_modified_by));
-  mxSetField(s, 0, "last_operation", mxCreateString(name(p.last_operation).c_str()));
+  mxSetField(s, 0, "created_by", make_utf8_string(p.created_by));
+  mxSetField(s, 0, "last_modified_by", make_utf8_string(p.last_modified_by));
+  mxSetField(s, 0, "last_operation", make_utf8_string(name(p.last_operation).c_str()));
   int n_ops = 0;
   for (int b = 0; b < 32; ++b) n_ops += (p.operations_mask >> b) & 1u;
   mxArray* ops = mxCreateCellMatrix(1, static_cast<mwSize>(n_ops));
   for (int b = 0, k = 0; b < 32; ++b)
-    if ((p.operations_mask >> b) & 1u) mxSetCell(ops, k++, mxCreateString(name(b).c_str()));
+    if ((p.operations_mask >> b) & 1u) mxSetCell(ops, k++, make_utf8_string(name(b).c_str()));
   mxSetField(s, 0, "operations", ops);
   mxSetField(s, 0, "modification_count", mxCreateDoubleScalar(p.modification_count));
   return s;
 }
 
-void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
+static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
   if (nrhs < 1) fail("usage: mef3io_mex(command, ...)");
   const std::string cmd = get_string(prhs[0], "command");
 
   // ---- misc -----------------------------------------------------------
   if (cmd == "version") {
-    plhs[0] = mxCreateString(mef3io_version());
+    plhs[0] = make_utf8_string(mef3io_version());
     return;
   }
   if (cmd == "archive_session") {
     need_args(nrhs, 4, "archive_session");
     std::string session_dir = get_string(prhs[1], "session_dir");
     std::string tar_path = get_string(prhs[2], "tar_path");
-    int overwrite = static_cast<int>(get_scalar(prhs[3], "overwrite"));
+    int overwrite = get_int(prhs[3], "overwrite");
     char out_path[2048] = {0};
     check(mef3io_archive_session(session_dir.c_str(), tar_path.c_str(), overwrite, out_path,
                                  sizeof out_path));
-    plhs[0] = mxCreateString(out_path);
+    plhs[0] = make_utf8_string(out_path);
     return;
   }
   if (cmd == "recover_session") {
     need_args(nrhs, 5, "recover_session");
     std::string path = get_string(prhs[1], "path");
-    int apply = static_cast<int>(get_scalar(prhs[2], "apply"));
-    int backup = static_cast<int>(get_scalar(prhs[3], "backup"));
+    int apply = get_int(prhs[2], "apply");
+    int backup = get_int(prhs[3], "backup");
     std::string password = get_string(prhs[4], "password");
     std::vector<char> summary(8192, 0);
     int64_t segments = 0;
     check(mef3io_recover_session(path.c_str(), apply, backup, password.c_str(), summary.data(),
                                  summary.size(), &segments));
-    plhs[0] = mxCreateString(summary.data());
+    plhs[0] = make_utf8_string(summary.data());
     if (nlhs > 1) plhs[1] = mxCreateDoubleScalar(static_cast<double>(segments));
     return;
   }
@@ -186,11 +283,11 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     need_args(nrhs, 4, "extract_session");
     std::string tar_path = get_string(prhs[1], "tar_path");
     std::string dest_dir = get_string(prhs[2], "dest_dir");
-    int overwrite = static_cast<int>(get_scalar(prhs[3], "overwrite"));
+    int overwrite = get_int(prhs[3], "overwrite");
     char out_path[2048] = {0};
     check(mef3io_extract_session(tar_path.c_str(), dest_dir.c_str(), overwrite, out_path,
                                  sizeof out_path));
-    plhs[0] = mxCreateString(out_path);
+    plhs[0] = make_utf8_string(out_path);
     return;
   }
 
@@ -200,8 +297,8 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     if (nrhs < 4) need_args(nrhs, 4, "reader_open");
     std::string path = get_string(prhs[1], "path");
     std::string password = get_string(prhs[2], "password");
-    int n_threads = static_cast<int>(get_scalar(prhs[3], "n_threads"));
-    int strict = nrhs >= 5 ? static_cast<int>(get_scalar(prhs[4], "strict")) : 1;
+    int n_threads = get_int(prhs[3], "n_threads");
+    int strict = nrhs >= 5 ? get_int(prhs[4], "strict") : 1;
     mef3io_reader* r = nullptr;
     check(mef3io_reader_open_ex(path.c_str(), password.c_str(), n_threads, strict, &r));
     track(g_readers, reinterpret_cast<std::uint64_t>(r));
@@ -213,15 +310,19 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     mef3io_reader* r = get_reader(prhs[1]);
     int32_t n = 0;
     check(mef3io_reader_n_problems(r, &n));
-    const char* fields[] = {"channel", "segment", "path", "reason"};
-    plhs[0] = mxCreateStructMatrix(n > 0 ? 1 : 0, n > 0 ? static_cast<mwSize>(n) : 0, 4, fields);
+    const char* fields[] = {"channel", "segment", "path", "reason", "kind"};
+    plhs[0] = mxCreateStructMatrix(n > 0 ? 1 : 0, n > 0 ? static_cast<mwSize>(n) : 0, 5, fields);
     for (int32_t i = 0; i < n; ++i) {
       mef3io_segment_problem p{};
       check(mef3io_reader_problem(r, i, &p));
-      mxSetField(plhs[0], i, "channel", mxCreateString(p.channel));
+      std::int32_t kind = MEF3IO_PROBLEM_SEGMENT;
+      check(mef3io_reader_problem_kind(r, i, &kind));
+      mxSetField(plhs[0], i, "kind",
+                 make_utf8_string(kind == MEF3IO_PROBLEM_RECORDS ? "records" : "segment"));
+      mxSetField(plhs[0], i, "channel", make_utf8_string(p.channel));
       mxSetField(plhs[0], i, "segment", mxCreateDoubleScalar(p.segment_number));
-      mxSetField(plhs[0], i, "path", mxCreateString(p.segment));
-      mxSetField(plhs[0], i, "reason", mxCreateString(p.reason));
+      mxSetField(plhs[0], i, "path", make_utf8_string(p.segment));
+      mxSetField(plhs[0], i, "reason", make_utf8_string(p.reason));
     }
     return;
   }
@@ -241,7 +342,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     char name[512];
     for (std::int32_t i = 0; i < n; ++i) {
       check(mef3io_reader_channel_name(r, i, name, sizeof name));
-      mxSetCell(plhs[0], i, mxCreateString(name));
+      mxSetCell(plhs[0], i, make_utf8_string(name));
     }
     return;
   }
@@ -269,7 +370,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     mxSetField(plhs[0], 0, "recording_time_offset", make_int64(ci.recording_time_offset));
     mxSetField(plhs[0], 0, "n_segments", mxCreateDoubleScalar(ci.n_segments));
     mxSetField(plhs[0], 0, "section3_available", mxCreateLogicalScalar(ci.section3_available != 0));
-    mxSetField(plhs[0], 0, "units_description", mxCreateString(ci.units_description));
+    mxSetField(plhs[0], 0, "units_description", make_utf8_string(ci.units_description));
     mxSetField(plhs[0], 0, "acquisition_channel_number",
                make_int64(ci.acquisition_channel_number));
     mxSetField(plhs[0], 0, "low_frequency_filter", mxCreateDoubleScalar(ci.low_frequency_filter));
@@ -277,13 +378,13 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     mxSetField(plhs[0], 0, "notch_filter", mxCreateDoubleScalar(ci.notch_filter));
     mxSetField(plhs[0], 0, "line_frequency", mxCreateDoubleScalar(ci.line_frequency));
     mxSetField(plhs[0], 0, "gmt_offset", mxCreateDoubleScalar(ci.gmt_offset));
-    mxSetField(plhs[0], 0, "session_description", mxCreateString(ci.session_description));
-    mxSetField(plhs[0], 0, "channel_description", mxCreateString(ci.channel_description));
-    mxSetField(plhs[0], 0, "reference_description", mxCreateString(ci.reference_description));
-    mxSetField(plhs[0], 0, "subject_name_1", mxCreateString(ci.subject_name_1));
-    mxSetField(plhs[0], 0, "subject_name_2", mxCreateString(ci.subject_name_2));
-    mxSetField(plhs[0], 0, "subject_id", mxCreateString(ci.subject_id));
-    mxSetField(plhs[0], 0, "recording_location", mxCreateString(ci.recording_location));
+    mxSetField(plhs[0], 0, "session_description", make_utf8_string(ci.session_description));
+    mxSetField(plhs[0], 0, "channel_description", make_utf8_string(ci.channel_description));
+    mxSetField(plhs[0], 0, "reference_description", make_utf8_string(ci.reference_description));
+    mxSetField(plhs[0], 0, "subject_name_1", make_utf8_string(ci.subject_name_1));
+    mxSetField(plhs[0], 0, "subject_name_2", make_utf8_string(ci.subject_name_2));
+    mxSetField(plhs[0], 0, "subject_id", make_utf8_string(ci.subject_id));
+    mxSetField(plhs[0], 0, "recording_location", make_utf8_string(ci.recording_location));
     return;
   }
   if (cmd == "reader_read") {
@@ -346,7 +447,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
       mxSetField(plhs[0], i, "start_sample", make_int64(s.start_sample));
       mxSetField(plhs[0], i, "number_of_samples", make_int64(s.number_of_samples));
       mxSetField(plhs[0], i, "number_of_blocks", make_int64(s.number_of_blocks));
-      mxSetField(plhs[0], i, "path", mxCreateString(s.path));
+      mxSetField(plhs[0], i, "path", make_utf8_string(s.path));
       mef3io_provenance pv{};
       check(mef3io_reader_segment_provenance(r, ch.c_str(), i, &pv));
       mxSetField(plhs[0], i, "provenance", provenance_struct(pv));
@@ -387,21 +488,129 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     return;
   }
   if (cmd == "reader_records") {
+    // reader_records(h, channel, [segment], [level]); [] = not given.
     need_args(nrhs, 3, "reader_records");
     mef3io_reader* r = get_reader(prhs[1]);
     OptChannel ch = get_opt_channel(prhs[2]);
+    std::int32_t segment = -1;
+    if (nrhs >= 4 && !mxIsEmpty(prhs[3])) {
+      const double s = get_scalar(prhs[3], "segment");
+      // Range-check BEFORE converting: a double -> int conversion of NaN, Inf
+      // or anything outside int32 is undefined behaviour, not an error.
+      if (!std::isfinite(s) || s < 0 || s > static_cast<double>(INT32_MAX) ||
+          s != std::floor(s))
+        fail("segment must be a non-negative integer");
+      segment = static_cast<std::int32_t>(s);
+    }
+    std::int32_t level = MEF3IO_RECORD_LEVEL_DEFAULT;
+    if (nrhs >= 5 && !mxIsEmpty(prhs[4])) {
+      const std::string l = get_string(prhs[4], "level");
+      if (l == "session") level = MEF3IO_RECORD_LEVEL_SESSION;
+      else if (l == "channel") level = MEF3IO_RECORD_LEVEL_CHANNEL;
+      else if (l == "segment") level = MEF3IO_RECORD_LEVEL_SEGMENT;
+      else if (l == "all") level = MEF3IO_RECORD_LEVEL_ALL;
+      else fail("level must be 'session', 'channel', 'segment' or 'all'; got '%s'", l.c_str());
+    }
+    mef3io_record_list* list = nullptr;
+    check(mef3io_reader_read_records(r, ch.c_str(), segment, level, &list));
+
+    // Copy everything out and free the list BEFORE building mxArrays, so no
+    // error path can leak it. Indices below are in range by construction.
+    struct Field {
+      std::string name;
+      int kind = MEF3IO_FIELD_ABSENT;
+      std::int64_t i = 0;
+      double d = 0;
+      std::string s;
+      std::vector<std::int32_t> arr;
+      std::vector<mef3io_seizure_channel> chans;
+    };
+    struct Rec {
+      mef3io_record_header h{};
+      std::vector<Field> fields;
+    };
+    std::vector<Rec> recs;
     std::int32_t n = 0;
-    check(mef3io_reader_n_records(r, ch.c_str(), &n));
-    const char* fields[] = {"type", "time", "text", "duration"};
-    plhs[0] = mxCreateStructMatrix(n, 1, 4, fields);
+    mef3io_record_list_size(list, &n);
     for (std::int32_t i = 0; i < n; ++i) {
-      mef3io_record_info rec{};
-      check(mef3io_reader_record(r, ch.c_str(), i, &rec));
-      mxSetField(plhs[0], i, "type", mxCreateString(rec.type));
-      mxSetField(plhs[0], i, "time", make_int64(rec.time));
-      mxSetField(plhs[0], i, "text", mxCreateString(rec.text));
-      mxSetField(plhs[0], i, "duration",
-                 rec.duration >= 0 ? make_int64(rec.duration) : mxCreateDoubleMatrix(0, 0, mxREAL));
+      Rec rec;
+      mef3io_record_list_header(list, i, &rec.h);
+      for (std::int32_t k = 0; k < rec.h.n_fields; ++k) {
+        mef3io_record_field f{};
+        mef3io_record_list_field(list, i, k, &f);
+        Field out;
+        out.name = f.name;
+        out.kind = f.kind;
+        out.i = f.int_value;
+        out.d = f.double_value;
+        if (f.kind == MEF3IO_FIELD_STRING) out.s = f.string_value;
+        if (f.kind == MEF3IO_FIELD_INT32_ARRAY)
+          out.arr.assign(f.int32_values, f.int32_values + f.count);
+        for (std::int64_t c = 0; f.kind == MEF3IO_FIELD_SEIZURE_CHANNELS && c < f.count; ++c) {
+          mef3io_seizure_channel sc{};
+          mef3io_record_list_seizure_channel(list, i, k, c, &sc);
+          out.chans.push_back(sc);
+        }
+        rec.fields.push_back(std::move(out));
+      }
+      recs.push_back(std::move(rec));
+    }
+    mef3io_record_list_free(list);
+
+    // A struct array needs one field set: the common fields (text/duration
+    // kept for every record, as before), then every body field any record
+    // carries, in first-seen order. A field a record does not have is [].
+    std::vector<std::string> names = {"type",          "time",          "level", "channel",
+                                      "segment",       "version_major", "version_minor",
+                                      "text",          "duration"};
+    for (const auto& rec : recs)
+      for (const auto& f : rec.fields)
+        if (std::find(names.begin(), names.end(), f.name) == names.end()) names.push_back(f.name);
+    std::vector<const char*> cnames;
+    for (const auto& s : names) cnames.push_back(s.c_str());
+    plhs[0] = mxCreateStructMatrix(static_cast<mwSize>(recs.size()), 1,
+                                   static_cast<int>(cnames.size()), cnames.data());
+    auto empty = [] { return mxCreateDoubleMatrix(0, 0, mxREAL); };
+    static const char* const level_names[] = {"session", "channel", "segment"};
+    for (std::size_t i = 0; i < recs.size(); ++i) {
+      const auto& h = recs[i].h;
+      const auto idx = static_cast<mwIndex>(i);
+      mxSetField(plhs[0], idx, "type", make_utf8_string(h.type));
+      mxSetField(plhs[0], idx, "time", make_int64(h.time));
+      mxSetField(plhs[0], idx, "level",
+                 make_utf8_string(h.level >= 0 && h.level <= 2 ? level_names[h.level] : "session"));
+      mxSetField(plhs[0], idx, "channel", make_utf8_string(h.channel));
+      mxSetField(plhs[0], idx, "segment",
+                 h.segment >= 0 ? mxCreateDoubleScalar(h.segment) : empty());
+      mxSetField(plhs[0], idx, "version_major", mxCreateDoubleScalar(h.version_major));
+      mxSetField(plhs[0], idx, "version_minor", mxCreateDoubleScalar(h.version_minor));
+      for (const auto& f : recs[i].fields) {
+        mxArray* v = nullptr;
+        switch (f.kind) {
+          case MEF3IO_FIELD_INT64: v = make_int64(f.i); break;
+          case MEF3IO_FIELD_DOUBLE: v = mxCreateDoubleScalar(f.d); break;
+          case MEF3IO_FIELD_STRING: v = make_utf8_string(f.s); break;
+          case MEF3IO_FIELD_INT32_ARRAY: {
+            v = mxCreateNumericMatrix(static_cast<mwSize>(f.arr.size()), 1, mxINT32_CLASS, mxREAL);
+            if (!f.arr.empty())
+              std::memcpy(mxGetInt32s(v), f.arr.data(), f.arr.size() * sizeof(std::int32_t));
+            break;
+          }
+          case MEF3IO_FIELD_SEIZURE_CHANNELS: {
+            const char* cf[] = {"name", "onset", "offset"};
+            v = mxCreateStructMatrix(static_cast<mwSize>(f.chans.size()), 1, 3, cf);
+            for (std::size_t c = 0; c < f.chans.size(); ++c) {
+              const auto ci = static_cast<mwIndex>(c);
+              mxSetField(v, ci, "name", make_utf8_string(f.chans[c].name));
+              mxSetField(v, ci, "onset", make_int64(f.chans[c].onset));
+              mxSetField(v, ci, "offset", make_int64(f.chans[c].offset));
+            }
+            break;
+          }
+          default: v = empty(); break;
+        }
+        mxSetField(plhs[0], idx, f.name.c_str(), v);
+      }
     }
     return;
   }
@@ -410,7 +619,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
   if (cmd == "writer_open") {
     need_args(nrhs, 5, "writer_open");
     std::string path = get_string(prhs[1], "path");
-    int overwrite = static_cast<int>(get_scalar(prhs[2], "overwrite"));
+    int overwrite = get_int(prhs[2], "overwrite");
     std::string p1 = get_string(prhs[3], "password1");
     std::string p2 = get_string(prhs[4], "password2");
     mef3io_writer* w = nullptr;
@@ -429,7 +638,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
   if (cmd == "writer_set_durable") {
     need_args(nrhs, 3, "writer_set_durable");
     check(mef3io_writer_set_durable(get_writer(prhs[1]),
-                                    static_cast<int>(get_scalar(prhs[2], "durable"))));
+                                    get_int(prhs[2], "durable")));
     return;
   }
   if (cmd == "writer_set_units") {
@@ -476,7 +685,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     const mxArray* fa = mxGetField(s, 0, "acquisition_channel_number");
     if (fa && !mxIsEmpty(fa)) md.acquisition_channel_number = get_int64(fa, "acq num");
     const mxArray* fg = mxGetField(s, 0, "gmt_offset");
-    if (fg && !mxIsEmpty(fg)) md.gmt_offset = static_cast<std::int32_t>(get_int64(fg, "gmt"));
+    if (fg && !mxIsEmpty(fg)) md.gmt_offset = static_cast<std::int32_t>(get_int(fg, "gmt_offset"));
     check(mef3io_writer_set_metadata(w, &md));
     return;
   }
@@ -489,7 +698,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
   if (cmd == "writer_set_threads") {
     need_args(nrhs, 3, "writer_set_threads");
     check(mef3io_writer_set_threads(get_writer(prhs[1]),
-                                    static_cast<int>(get_scalar(prhs[2], "n_threads"))));
+                                    get_int(prhs[2], "n_threads")));
     return;
   }
   if (cmd == "writer_write" || cmd == "writer_write_int32") {
@@ -503,10 +712,10 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     if (is_float) {
       if (!mxIsDouble(prhs[3]) || mxIsComplex(prhs[3])) fail("data must be a real double vector");
       std::int64_t n = static_cast<std::int64_t>(mxGetNumberOfElements(prhs[3]));
-      std::int64_t start = get_int64(prhs[4], "start_uutc");
+      std::int64_t start = get_time(prhs[4], "start_uutc");
       double fs = get_scalar(prhs[5], "fs");
-      int precision = static_cast<int>(get_scalar(prhs[6], "precision"));
-      int new_segment = nrhs > 7 ? static_cast<int>(get_scalar(prhs[7], "new_segment")) : 0;
+      int precision = get_int(prhs[6], "precision");
+      int new_segment = nrhs > 7 ? get_int(prhs[7], "new_segment") : 0;
       check(mef3io_writer_write_float(w, ch.c_str(), mxGetDoubles(prhs[3]), n, start, fs,
                                       precision, new_segment, &sum));
     } else {
@@ -533,9 +742,9 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         }
       }
       double ufact = get_scalar(prhs[5], "ufact");
-      std::int64_t start = get_int64(prhs[6], "start_uutc");
+      std::int64_t start = get_time(prhs[6], "start_uutc");
       double fs = get_scalar(prhs[7], "fs");
-      int new_segment = nrhs > 8 ? static_cast<int>(get_scalar(prhs[8], "new_segment")) : 0;
+      int new_segment = nrhs > 8 ? get_int(prhs[8], "new_segment") : 0;
       check(mef3io_writer_write_int32(w, ch.c_str(), mxGetInt32s(prhs[3]), valid, n, ufact,
                                       start, fs, new_segment, &sum));
     }
@@ -547,38 +756,67 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     mxSetField(plhs[0], 0, "segment", mxCreateDoubleScalar(sum.segment));
     return;
   }
+  if (cmd == "writer_unreadable_metadata") {
+    need_args(nrhs, 2, "writer_unreadable_metadata");
+    mef3io_writer* w = get_writer(prhs[1]);
+    std::int32_t n = 0;
+    check(mef3io_writer_n_unreadable_metadata(w, &n));
+    plhs[0] = mxCreateCellMatrix(static_cast<mwSize>(n), 1);
+    for (std::int32_t i = 0; i < n; ++i) {
+      char buf[4096] = {0};
+      check(mef3io_writer_unreadable_metadata(w, i, buf, sizeof buf));
+      mxSetCell(plhs[0], static_cast<mwIndex>(i), make_utf8_string(buf));
+    }
+    return;
+  }
   if (cmd == "writer_write_records") {
     need_args(nrhs, 4, "writer_write_records");
     mef3io_writer* w = get_writer(prhs[1]);
     OptChannel ch = get_opt_channel(prhs[2]);
     const mxArray* recs = prhs[3];
     if (!mxIsStruct(recs)) fail("records must be a struct array");
-    mef3io_records* list = mef3io_records_create();
+    // Owned by a guard: any argument error below throws, and the list must
+    // not leak on the way out.
+    std::unique_ptr<mef3io_records, decltype(&mef3io_records_free)> list(
+        mef3io_records_create(), &mef3io_records_free);
     const size_t n = mxGetNumberOfElements(recs);
     for (size_t i = 0; i < n; ++i) {
       const mxArray* f_time = mxGetField(recs, i, "time");
-      if (!f_time) {
-        mef3io_records_free(list);
-        fail("each record needs a 'time' field");
-      }
-      std::int64_t time = get_int64(f_time, "record time");
+      if (!f_time) fail("each record needs a 'time' field");
+      std::int64_t time = get_time(f_time, "record time");
       const mxArray* f_type = mxGetField(recs, i, "type");
       std::string type = f_type && !mxIsEmpty(f_type) ? get_string(f_type, "type") : "Note";
       const mxArray* f_text = mxGetField(recs, i, "text");
       std::string text = f_text && !mxIsEmpty(f_text) ? get_string(f_text, "text") : "";
       const mxArray* f_dur = mxGetField(recs, i, "duration");
-      std::int64_t dur = f_dur && !mxIsEmpty(f_dur) ? get_int64(f_dur, "duration") : -1;
-      int code = mef3io_records_add(list, type.c_str(), time, text.c_str(), dur);
-      if (code != MEF3IO_OK) {
-        mef3io_records_free(list);
-        fail("%s", mef3io_last_error());
-      }
+      std::int64_t dur = f_dur && !mxIsEmpty(f_dur) ? get_time(f_dur, "duration") : -1;
+      check(mef3io_records_add(list.get(), type.c_str(), time, text.c_str(), dur));
     }
-    int code = mef3io_writer_write_records(w, ch.c_str(), list);
-    mef3io_records_free(list);
+    int code = mef3io_writer_write_records(w, ch.c_str(), list.get());
     check(code);
     return;
   }
 
   fail("unknown command: %s", cmd.c_str());
+}
+
+// Message of the error dispatch() threw. Static, so that by the time
+// mexErrMsgIdAndTxt runs no C++ object with a destructor is alive in this
+// MEX's frames (see MexError).
+static char g_error_message[4096];
+
+static bool run(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
+  try {
+    dispatch(nlhs, plhs, nrhs, prhs);
+    return true;
+  } catch (const std::exception& e) {
+    std::snprintf(g_error_message, sizeof g_error_message, "%s", e.what());
+  } catch (...) {
+    std::snprintf(g_error_message, sizeof g_error_message, "%s", "unknown error");
+  }
+  return false;
+}
+
+void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
+  if (!run(nlhs, plhs, nrhs, prhs)) mexErrMsgIdAndTxt("mef3io:error", "%s", g_error_message);
 }

@@ -104,6 +104,9 @@ PREAMBLE = "p = 'x.mefd';\nx = 1:10;\nok = true;\nitems = dir('.');\nmc = meta.c
         ("words in a string literal", "assert(ok, 'the archive must be left alone');\n"),
         # A continuation is one statement, so depth still separates the two.
         ("continued statement", "w = mef3io.Writer(p, ...\n                  Overwrite=true);\n"),
+        # `catch err` binds the exception without an `=`.
+        ("catch variable",
+         "try w = mef3io.Writer(p); catch err, ok = strcmp(err.identifier, 'x'); end\n"),
     ],
 )
 def test_stays_silent_on_real_matlab(tmp_path, label, code):

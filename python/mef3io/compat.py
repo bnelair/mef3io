@@ -17,6 +17,7 @@ from __future__ import annotations
 import warnings
 from typing import Optional, Union
 
+from ._writer import reporting_unreadable_metadata, warn_unreadable_metadata
 from ._reader import SessionDeclarationWarning, _declaration_warning_text
 
 import numpy as np
@@ -125,8 +126,21 @@ class MefReader:
         return raw * self.get_channel_info(channels)["ufact"][0]
 
     def get_annotations(self, channel: Optional[str] = None):
+        """Records as a list of dicts (legacy ``mef_tools`` signature).
+
+        ``channel=None`` returns session-level records; a channel name returns
+        that channel's CHANNEL-level records only, as the legacy reader did.
+        Segment-level records are not included here (the native
+        :meth:`mef3io.Reader.records` does include them for a channel, or use
+        ``Reader.records(channel, level="segment")``). Every dict carries
+        ``level`` / ``channel`` / ``segment``; see :meth:`mef3io.Reader.records`
+        for the fields. Returns ``None`` (with a printed warning) on failure,
+        as the legacy API did.
+        """
         try:
-            return self._r.records(channel)
+            if channel is None:
+                return self._r.records()
+            return self._r.records(channel, level="channel")
         except Exception:
             print("WARNING: read of annotations record failed, no annotations returned")
             return None
@@ -173,6 +187,7 @@ class MefWriter:
             raise ValueError(f"durability must be 'full' or 'fast', not {durability!r}")
         self._path = str(session_path)
         self._w = _mef3io.SessionWriter(self._path, overwrite, password1 or "", password2 or "")
+        warn_unreadable_metadata(self._w.unreadable_metadata)
         # "fast" by default, matching mef3io.Writer and the legacy stack this
         # class stands in for — meflib flushes nothing at all. See
         # mef3io.Writer for what an unclean shutdown costs and how
@@ -266,9 +281,19 @@ class MefWriter:
 
     @property
     def record_offset(self) -> int:
-        """Kept for legacy compatibility. mef3io writes records with a zero
-        recording-time offset (annotation times round-trip unchanged either
-        way); non-zero values are accepted and ignored."""
+        """Kept for legacy compatibility; non-zero values are accepted and
+        ignored -- mef3io never creates a recording-time offset.
+
+        Times are UTC, always. A new session is written at offset 0 with
+        times stored as -t, as before. A session that already carries a
+        non-zero offset (e.g. one the legacy stack wrote with
+        ``record_offset``) keeps it: segments and channels mef3io adds reuse
+        it, and every time mef3io writes there -- data and annotations -- is
+        stored as rto - t, so the real date stays hidden and the existing
+        annotations stay readable. A time at or before the offset cannot be
+        stored that way and is refused, as is any write while the session's
+        segments disagree on the offset or it is locked (level-1 password
+        only)."""
         return self._record_offset
 
     @record_offset.setter
@@ -295,16 +320,18 @@ class MefWriter:
 
             counts = _as_int32_counts(data)
             ufact = 10.0 ** -(precision if precision is not None else 0)
-            self._w.write_int32(
-                channel, counts, ufact, int(start_uutc),
-                float(sampling_freq), None, bool(new_segment),
-            )
+            with reporting_unreadable_metadata(self._w):
+                self._w.write_int32(
+                    channel, counts, ufact, int(start_uutc),
+                    float(sampling_freq), None, bool(new_segment),
+                )
         else:
-            self._w.write_float(
-                channel, np.ascontiguousarray(data, np.float64), int(start_uutc),
-                float(sampling_freq), int(precision) if precision is not None else -1,
-                bool(new_segment),
-            )
+            with reporting_unreadable_metadata(self._w):
+                self._w.write_float(
+                    channel, np.ascontiguousarray(data, np.float64), int(start_uutc),
+                    float(sampling_freq), int(precision) if precision is not None else -1,
+                    bool(new_segment),
+                )
         return True
 
     def write_annotations(self, annotations, channel: Optional[str] = None):
@@ -319,7 +346,8 @@ class MefWriter:
             if "duration" in r and r["duration"] is not None:
                 rec["duration"] = int(r["duration"])
             norm.append(rec)
-        self._w.write_records(channel, norm)
+        with reporting_unreadable_metadata(self._w):
+            self._w.write_records(channel, norm)
 
     def close(self):
         self._w = None

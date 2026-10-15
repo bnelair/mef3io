@@ -159,7 +159,7 @@ def assign_targets(code: str) -> set[str]:
 
     Only at bracket depth 0, which is what separates a real assignment from a
     `Name=value` argument: `w = Writer(p, Overwrite=true)` assigns `w`, not
-    `Overwrite`. Covers `x = ...`, `for x = ...` and `[~, n] = f(...)`.
+    `Overwrite`. Covers `x = ...`, `for x = ...`, `[~, n] = f(...)` and `catch err`.
     """
     found: set[str] = set()
     depth = depth_at(code)
@@ -174,6 +174,9 @@ def assign_targets(code: str) -> set[str]:
             found.add(m.group(1))
 
     for m in re.finditer(r"for\s+([A-Za-z]\w*)\s*=", code):
+        found.add(m.group(1))
+    # `catch err` binds the caught MException to `err` (no `=` involved).
+    for m in re.finditer(r"\bcatch\s+([A-Za-z]\w*)", code):
         found.add(m.group(1))
     return found
 

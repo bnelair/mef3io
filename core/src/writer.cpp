@@ -27,24 +27,12 @@
 #include "mef3io/metadata.hpp"
 #include "mef3io/parallel.hpp"
 #include "mef3io/red.hpp"
+#include "mef3io/time.hpp"
 
 namespace fs = std::filesystem;
 
 namespace mef3io {
 namespace {
-
-// Store an absolute uUTC as meflib does: negated, offset removed.
-// to_user_time inverts this: -stored + rto == absolute.
-si8 to_disk_time(si8 absolute, si8 rto) {
-  if (absolute == fmt::UUTC_NO_ENTRY) return absolute;
-  return rto - absolute;  // negative (absolute > rto)
-}
-
-si8 to_user_time(si8 stored, si8 rto) {
-  if (stored == fmt::UUTC_NO_ENTRY) return stored;
-  if (stored >= 0) return stored;
-  return -stored + rto;
-}
 
 std::string segment_base_name(const SegmentSpec& spec) {
   char buf[8];
@@ -271,6 +259,9 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
   const sf8 fs_hz = spec.sampling_frequency;
   const si8 rto = spec.recording_time_offset;
   const bool encrypt = !spec.password_1.empty();
+  // With an anonymization offset, only times after it can be stored without
+  // writing the real date (time.hpp). Refuse before any file is touched.
+  for (const auto& b : blocks) require_storable_time(b.start_uutc, rto, "block start time");
 
   crypto::ValidationFields vf =
       encrypt ? crypto::make_validation_fields(spec.password_1, spec.password_2)
@@ -287,7 +278,7 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
   parallel_for(nb, n_threads, [&](std::size_t i) {
     // RED data blocks are written unencrypted (matches meflib default), even
     // when metadata is encrypted.
-    encoded[i] = red::encode_block(blocks[i].samples, to_disk_time(blocks[i].start_uutc, rto),
+    encoded[i] = red::encode_block(blocks[i].samples, to_stored_time(blocks[i].start_uutc, rto),
                                    blocks[i].discontinuity, bmin[i], bmax[i]);
   });
 
@@ -308,7 +299,7 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     // file_offset is relative to the start of the .tdat file (i.e. includes the
     // 1024-byte universal header), matching meflib.
     e.file_offset = static_cast<si8>(fmt::UNIVERSAL_HEADER_BYTES + tdat_body.size());
-    e.start_time = to_disk_time(blk.start_uutc, rto);
+    e.start_time = to_stored_time(blk.start_uutc, rto);
     e.start_sample = blk.start_sample;
     e.number_of_samples = static_cast<ui4>(blk.samples.size());
     e.block_bytes = static_cast<ui4>(encoded[i].size());
@@ -333,8 +324,8 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     total_samples += static_cast<si8>(blk.samples.size());
   }
 
-  const si8 start_disk = to_disk_time(first_start, rto);
-  const si8 end_disk = to_disk_time(last_end, rto);
+  const si8 start_disk = to_stored_time(first_start, rto);
+  const si8 end_disk = to_stored_time(last_end, rto);
   const si8 n_blocks = static_cast<si8>(blocks.size());
   const auto level_uuid = random_uuid();
 
@@ -480,8 +471,16 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   if (encrypt && md.access_level < fmt::LEVEL_1_ACCESS)
     throw PasswordError("appending to an encrypted segment requires level-1 access: " + tmet_path);
 
-  si8 rto = md.section3_available ? md.section3.recording_time_offset : 0;
-  if (rto == fmt::UUTC_NO_ENTRY) rto = 0;
+  // The offset is in section 3. Locked (an L2-encrypted session opened with
+  // only the level-1 password) it is UNKNOWN, not 0: taking it as 0 would
+  // store the new times against the wrong baseline, decades off.
+  if (!md.section3_available)
+    throw PasswordError("appending to " + tmet_path +
+                        " needs the full-access (level-2) password: its section 3, which holds "
+                        "the recording-time offset the new times must be stored against, is "
+                        "locked with the level-1 password alone");
+  const si8 rto = segment_rto(md);
+  for (const auto& b : blocks) require_storable_time(b.start_uutc, rto, "block start time");
   const sf8 fs_hz = md.section2.sampling_frequency;
 
   if (std::abs(fs_hz - spec.sampling_frequency) > 1e-9 * std::max(1.0, std::abs(fs_hz)))
@@ -511,7 +510,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   std::vector<std::vector<ui1>> encoded(nb);
   std::vector<si4> bmin(nb, 0), bmax(nb, 0);
   parallel_for(nb, n_threads, [&](std::size_t i) {
-    encoded[i] = red::encode_block(blocks[i].samples, to_disk_time(blocks[i].start_uutc, rto),
+    encoded[i] = red::encode_block(blocks[i].samples, to_stored_time(blocks[i].start_uutc, rto),
                                    blocks[i].discontinuity, bmin[i], bmax[i]);
   });
 
@@ -528,7 +527,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     const auto& blk = blocks[i];
     fmt::TimeSeriesIndex e;
     e.file_offset = running_offset;
-    e.start_time = to_disk_time(blk.start_uutc, rto);
+    e.start_time = to_stored_time(blk.start_uutc, rto);
     e.start_sample = blk.start_sample;
     e.number_of_samples = static_cast<ui4>(blk.samples.size());
     e.block_bytes = static_cast<ui4>(encoded[i].size());
@@ -548,7 +547,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     last_end = blk.start_uutc + static_cast<si8>(std::llround(blk.samples.size() * 1e6 / fs_hz));
     appended_samples += static_cast<si8>(blk.samples.size());
   }
-  const si8 end_disk = to_disk_time(last_end, rto);
+  const si8 end_disk = to_stored_time(last_end, rto);
 
   // --- Read the current .tdat header and advance its resumable body CRC with
   // the new bytes in memory. The Koopman CRC has no final XOR, so the stored

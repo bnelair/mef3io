@@ -1,6 +1,7 @@
 // mef3io — .tmet loader with CRC validation, password check, decryption.
 #include "mef3io/metadata.hpp"
 
+#include <optional>
 #include <vector>
 #include <algorithm>
 
@@ -9,6 +10,68 @@
 #include "mef3io/errors.hpp"
 
 namespace mef3io {
+namespace {
+// The universal-header CRC rule shared by the full loader and the offset
+// probe (see load_time_series_metadata for why CRC_NO_ENTRY is accepted only
+// on an otherwise self-consistent header).
+void check_tmet_universal_header(const fmt::UniversalHeader& uh, std::span<const ui1> bytes) {
+  using namespace fmt;
+  const bool header_unverifiable = uh.header_crc == CRC_NO_ENTRY &&
+                                   uh.file_type_string == FILE_TYPE_TS_METADATA &&
+                                   uh.byte_order_code == MEF_LITTLE_ENDIAN;
+  if (!header_unverifiable && !uh.header_crc_valid(bytes))
+    throw CrcError("tmet universal header CRC mismatch");
+}
+
+// The body CRC rule shared by both: sections 1-3, bounded by the record's
+// fixed size — NOT by EOF, since some writers leave trailing bytes past the
+// record and hashing them rejects intact metadata. CRC_NO_ENTRY = never
+// computed (meflib's own marker).
+void check_tmet_body(const fmt::UniversalHeader& uh, std::span<const ui1> bytes) {
+  using namespace fmt;
+  if (uh.body_crc == CRC_NO_ENTRY) return;
+  const ui4 body = crc::calculate(
+      bytes.subspan(UNIVERSAL_HEADER_BYTES, METADATA_FILE_BYTES - UNIVERSAL_HEADER_BYTES));
+  if (body != uh.body_crc) throw CrcError("tmet body CRC mismatch (metadata sections corrupted)");
+}
+}  // namespace
+
+std::optional<si8> probe_recording_time_offset(std::span<const ui1> tmet_bytes,
+                                               const std::string& password) {
+  using namespace fmt;
+  if (tmet_bytes.size() < static_cast<std::size_t>(METADATA_FILE_BYTES))
+    throw FormatError("tmet file too small: expected " + std::to_string(METADATA_FILE_BYTES) +
+                      " bytes, got " + std::to_string(tmet_bytes.size()));
+  const auto uh = UniversalHeader::parse(tmet_bytes);
+  check_tmet_universal_header(uh, tmet_bytes);
+  // The SAME body check as the full loader, bounded by the fixed record size
+  // (never to EOF: foreign writers pad past it). Section 3 has no CRC of its
+  // own, so this is the only thing standing between a damaged offset and a
+  // write that stores the real date: a zeroed rto reads as 0 = "no offset".
+  check_tmet_body(uh, tmet_bytes);
+  const auto s1 = MetadataSection1::parse(
+      tmet_bytes.subspan(METADATA_SECTION_1_OFFSET, METADATA_SECTION_1_BYTES));
+  const int s2_enc = s1.section_2_encryption > 0 ? s1.section_2_encryption : 0;
+  const int s3_enc = s1.section_3_encryption > 0 ? s1.section_3_encryption : 0;
+  std::vector<ui1> s3(tmet_bytes.begin() + METADATA_SECTION_3_OFFSET,
+                      tmet_bytes.begin() + METADATA_SECTION_3_OFFSET + METADATA_SECTION_3_BYTES);
+  if (s2_enc > 0 || s3_enc > 0) {
+    const auto keys = crypto::validate_password(password, uh.level_1_password_validation_field,
+                                                uh.level_2_password_validation_field);
+    if (keys.access_level == LEVEL_0_ACCESS)
+      throw PasswordError("tmet is encrypted and the password is missing or incorrect");
+    if (s3_enc > 0) {
+      std::span<const ui1> key;
+      if (s3_enc == LEVEL_1_ENCRYPTION && keys.level1_key) key = *keys.level1_key;
+      if (s3_enc == LEVEL_2_ENCRYPTION && keys.level2_key) key = *keys.level2_key;
+      if (key.empty()) return std::nullopt;  // locked: the offset is unknown, not 0
+      auto dec = crypto::aes128_ecb_decrypt(s3, key);
+      std::copy(dec.begin(), dec.end(), s3.begin());
+    }
+  }
+  const si8 rto = MetadataSection3::parse(s3).recording_time_offset;
+  return rto == UUTC_NO_ENTRY ? 0 : rto;
+}
 
 TimeSeriesMetadata load_time_series_metadata(std::span<const ui1> tmet_bytes,
                                              const std::string& password) {
@@ -32,12 +95,7 @@ TimeSeriesMetadata load_time_series_metadata(std::span<const ui1> tmet_bytes,
   // the universal header to be self-consistent first. A zeroed or garbled
   // header fails this and is rejected as it was before; a genuine meflib file
   // carries a correct type string and byte-order code and passes.
-  const bool header_unverifiable =
-      md.universal_header.header_crc == CRC_NO_ENTRY &&
-      md.universal_header.file_type_string == FILE_TYPE_TS_METADATA &&
-      md.universal_header.byte_order_code == MEF_LITTLE_ENDIAN;
-  if (!header_unverifiable && !md.universal_header.header_crc_valid(tmet_bytes))
-    throw CrcError("tmet universal header CRC mismatch");
+  check_tmet_universal_header(md.universal_header, tmet_bytes);
   // The body CRC covers sections 1-3 (encryption flags, fs/ufact/counts,
   // subject metadata) — 15/16 of the file. Without this check, body
   // corruption silently yields garbage scaling.
@@ -47,12 +105,7 @@ TimeSeriesMetadata load_time_series_metadata(std::span<const ui1> tmet_bytes,
   // some writers leave trailing bytes past its end. Those bytes are not part
   // of the record the stored CRC was computed over, so hashing to EOF rejects
   // intact metadata as corrupt — and every read of such a session fails.
-  if (md.universal_header.body_crc != CRC_NO_ENTRY) {
-    ui4 body = crc::calculate(
-        tmet_bytes.subspan(UNIVERSAL_HEADER_BYTES, METADATA_FILE_BYTES - UNIVERSAL_HEADER_BYTES));
-    if (body != md.universal_header.body_crc)
-      throw CrcError("tmet body CRC mismatch (metadata sections corrupted)");
-  }
+  check_tmet_body(md.universal_header, tmet_bytes);
 
   // Section 1 is never encrypted.
   auto s1_bytes = tmet_bytes.subspan(METADATA_SECTION_1_OFFSET, METADATA_SECTION_1_BYTES);

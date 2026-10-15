@@ -58,6 +58,9 @@ class TarSource : public SessionSource {
   std::vector<ui1> read_range(const std::string& rel, std::size_t offset,
                               std::size_t length) const override;
   std::string describe(const std::string& rel) const override;
+  /// The in-archive session folder's name; the archive file's name only when
+  /// the archive has no single root folder.
+  std::string session_name() const override;
 
  private:
   const TarMember& member(const std::string& rel) const;

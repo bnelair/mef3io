@@ -62,16 +62,25 @@ int mef3io_reader_open_ex(const char* mefd_path, const char* password, int n_thr
 void mef3io_reader_close(mef3io_reader* r);
 
 typedef struct {
-  char channel[256];
-  int32_t segment_number;
-  char segment[1024];  /* human-readable segment location */
-  char reason[512];    /* why it could not be read */
+  char channel[256];      /* "" for a session-level record file */
+  int32_t segment_number; /* -1 for a session- or channel-level record file */
+  char segment[1024];     /* human-readable location (segment dir or record file) */
+  char reason[512];       /* why it could not be read */
 } mef3io_segment_problem;
 
-/* Segments skipped because they could not be read. Always 0 for a reader
- * opened strict, where such a segment fails the open instead. */
+/* What a lenient reader skipped. Always 0 for a reader opened strict, where
+ * the same failure raises instead. Two kinds (mef3io_reader_problem_kind):
+ * a SEGMENT that could not be read (its span reads back as a gap), and a
+ * RECORD (.rdat) file that could not be read or placed (records only; the
+ * samples are unaffected). Record-file problems are added by the records
+ * calls, so the count can grow after the open. */
+#define MEF3IO_PROBLEM_SEGMENT 0
+#define MEF3IO_PROBLEM_RECORDS 1
 int mef3io_reader_n_problems(mef3io_reader* r, int32_t* out);
 int mef3io_reader_problem(mef3io_reader* r, int32_t index, mef3io_segment_problem* out);
+/* MEF3IO_PROBLEM_SEGMENT or MEF3IO_PROBLEM_RECORDS for problem `index`. (A
+ * separate call so mef3io_segment_problem keeps its size and layout.) */
+int mef3io_reader_problem_kind(mef3io_reader* r, int32_t index, int32_t* out);
 
 int mef3io_reader_n_channels(mef3io_reader* r, int32_t* out);
 int mef3io_reader_channel_name(mef3io_reader* r, int32_t index, char* buf, size_t buf_bytes);
@@ -191,10 +200,86 @@ typedef struct {
   char text[1024];       /* truncated if longer */
 } mef3io_record_info;
 
-/* channel == NULL -> session-level records. */
+/* channel == NULL -> session-level records; otherwise the channel's channel-
+ * AND segment-level records (the default levels of mef3io_reader_read_records).
+ * Kept for compatibility: each call re-reads the record files, and only the
+ * fields above are exposed. New code should use mef3io_reader_read_records. */
 int mef3io_reader_n_records(mef3io_reader* r, const char* channel, int32_t* out);
 int mef3io_reader_record(mef3io_reader* r, const char* channel, int32_t index,
                          mef3io_record_info* out);
+
+/* ----- records: every level, every body field --------------------------- */
+
+/* Record levels. MEF 3.0 keeps record files at the session (.mefd), channel
+ * (.timd) and segment (.segd) level. */
+#define MEF3IO_RECORD_LEVEL_DEFAULT (-1) /* query only: the scope's natural levels */
+#define MEF3IO_RECORD_LEVEL_SESSION 0
+#define MEF3IO_RECORD_LEVEL_CHANNEL 1
+#define MEF3IO_RECORD_LEVEL_SEGMENT 2
+#define MEF3IO_RECORD_LEVEL_ALL 3        /* query only */
+
+typedef struct mef3io_record_list mef3io_record_list; /* a snapshot, read once */
+
+/* Read records into a list the caller frees with mef3io_record_list_free.
+ *  channel  NULL -> session scope; else that channel.
+ *  segment  < 0 -> none; else that segment number (requires channel).
+ *  level    MEF3IO_RECORD_LEVEL_*. DEFAULT: session-level for the session
+ *           scope, channel+segment level for a channel, the segment's for a
+ *           segment. ALL with no channel: every record in the session.
+ * A level outside the scope, a segment without a channel, or an unknown
+ * channel/segment -> MEF3IO_ERR_ARGUMENT. Segments of the channel / session
+ * disagreeing on the recording-time offset -> MEF3IO_ERR_FORMAT. */
+int mef3io_reader_read_records(mef3io_reader* r, const char* channel, int32_t segment,
+                               int32_t level, mef3io_record_list** out);
+void mef3io_record_list_free(mef3io_record_list* list);
+int mef3io_record_list_size(const mef3io_record_list* list, int32_t* out);
+
+typedef struct {
+  char type[8];
+  int64_t time;          /* absolute uUTC */
+  int32_t level;         /* MEF3IO_RECORD_LEVEL_SESSION / _CHANNEL / _SEGMENT */
+  int32_t segment;       /* segment number at segment level, else -1 */
+  char channel[256];     /* "" at session level */
+  int32_t version_major;
+  int32_t version_minor;
+  int32_t n_fields;      /* body fields; same names/order for every record of a type */
+} mef3io_record_header;
+
+int mef3io_record_list_header(const mef3io_record_list* list, int32_t index,
+                              mef3io_record_header* out);
+
+/* Kind of a body field's value. ABSENT: the record does not carry it (body
+ * too short, or a version meflib does not decode). */
+#define MEF3IO_FIELD_ABSENT 0
+#define MEF3IO_FIELD_INT64 1
+#define MEF3IO_FIELD_DOUBLE 2
+#define MEF3IO_FIELD_STRING 3
+#define MEF3IO_FIELD_INT32_ARRAY 4      /* LNTP "template" */
+#define MEF3IO_FIELD_SEIZURE_CHANNELS 5 /* Seiz "channels"; see below */
+
+typedef struct {
+  char name[32];
+  int32_t kind;                 /* MEF3IO_FIELD_* */
+  int64_t int_value;            /* INT64 (times are absolute uUTC) */
+  double double_value;          /* DOUBLE */
+  const char* string_value;     /* STRING; owned by the list, valid until it is freed */
+  const int32_t* int32_values;  /* INT32_ARRAY; owned by the list */
+  int64_t count;                /* INT32_ARRAY elements / SEIZURE_CHANNELS entries */
+} mef3io_record_field;
+
+int mef3io_record_list_field(const mef3io_record_list* list, int32_t index, int32_t field,
+                             mef3io_record_field* out);
+
+typedef struct {
+  char name[256];
+  int64_t onset;   /* absolute uUTC; -1 = no entry (mefrec.h) */
+  int64_t offset;  /* absolute uUTC; -1 = no entry */
+} mef3io_seizure_channel;
+
+/* Entry `entry` of field `field` (a SEIZURE_CHANNELS field) of record `index`. */
+int mef3io_record_list_seizure_channel(const mef3io_record_list* list, int32_t index,
+                                       int32_t field, int64_t entry,
+                                       mef3io_seizure_channel* out);
 
 /* ----- archive ----------------------------------------------------------- */
 
@@ -243,6 +328,15 @@ int mef3io_writer_set_threads(mef3io_writer* w, int n_threads);
  * block headers. Non-zero makes each append all-or-nothing across the three
  * files, with no recovery step needed. */
 int mef3io_writer_set_durable(mef3io_writer* w, int durable);
+
+/* Segment metadata the writer could not use: .tmet files it could not read
+ * while choosing a recording-time offset, and empty segment directories it
+ * ignored. Each entry is "path: reason". In a session at offset 0 such a file
+ * is skipped so it does not block unrelated writes; with a non-zero offset, or
+ * nothing else readable, the write is refused instead. */
+int mef3io_writer_n_unreadable_metadata(mef3io_writer* w, int32_t* out);
+int mef3io_writer_unreadable_metadata(mef3io_writer* w, int32_t index, char* buf,
+                                      size_t buf_bytes);
 
 typedef struct {
   int64_t samples_written;

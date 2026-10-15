@@ -36,7 +36,10 @@ mef3io::RawData raw = r.read_raw("ch1", t0, t1);
 
 auto segs = r.segments("ch1");    // per-segment map: what data is where
 auto toc  = r.toc("ch1");         // per-RED-block index entries
-auto recs = r.records("ch1");     // annotations (std::nullopt -> session level)
+auto recs = r.records("ch1");     // ch1's channel- + segment-level annotations
+// r.records() = session level; r.records("ch1", 0) = segment 0 only;
+// r.records(std::nullopt, std::nullopt, mef3io::Session::RecordLevels::All) = all.
+// mef3io::record_fields(rec) lists a record's body fields in a stable order.
 ```
 
 `Reader` wraps `mef3io::Session` (`session.hpp`), which exposes the lower
