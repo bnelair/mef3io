@@ -34,9 +34,20 @@ struct LayoutSegment {
   std::string dir() const { return tmet.substr(0, tmet.rfind('/')); }
 };
 
+/// A .segd folder missing one of its three files. The Session skips it
+/// silently (as it always has); inspect_session reports it.
+struct IncompleteSegment {
+  int number = 0;
+  std::string dir;                        ///< source-relative .segd path
+  std::vector<std::string> present;       ///< source-relative paths of the files that exist
+  std::string missing;                    ///< e.g. ".tdat" or ".tmet, .tidx"
+  bool has_records = false;               ///< its .rdat exists
+};
+
 struct LayoutChannel {
   std::string name;
   std::vector<LayoutSegment> segments;  ///< sorted by number
+  std::vector<IncompleteSegment> incomplete;  ///< sorted by number
   /// `<ch>.timd/<ch>.rdat` (meflib.c:5660); not checked for existence here.
   std::string rdat() const { return name + ".timd/" + name + ".rdat"; }
 };
@@ -52,6 +63,10 @@ struct SessionLayout {
   /// `.vidd` folders at the root. Video is out of scope for mef3io; the
   /// Session skips them silently, inspect reports them.
   std::vector<std::string> video_channels;
+  /// `.timd` folders with no complete segment (their incomplete segments in
+  /// `incomplete`), whether or not they also count as record-only. The
+  /// Session ignores them; inspect reports them.
+  std::vector<LayoutChannel> incomplete_channels;
 };
 
 /// Walk the root and every `.timd`. One listing per channel; three existence
@@ -77,11 +92,39 @@ inline SessionLayout discover_layout(const SessionSource& src) {
       seg.tmet = dir + "/" + stem + ".tmet";
       seg.tidx = dir + "/" + stem + ".tidx";
       seg.tdat = dir + "/" + stem + ".tdat";
-      if (src.exists(seg.tmet) && src.exists(seg.tidx) && src.exists(seg.tdat))
+      const bool has[3] = {src.exists(seg.tmet), src.exists(seg.tidx), src.exists(seg.tdat)};
+      if (has[0] && has[1] && has[2]) {
         ch.segments.push_back(std::move(seg));
+        continue;
+      }
+      IncompleteSegment bad;
+      bad.number = seg.number;
+      bad.dir = dir;
+      const std::string* files[3] = {&seg.tmet, &seg.tidx, &seg.tdat};
+      const char* exts[3] = {".tmet", ".tidx", ".tdat"};
+      for (int i = 0; i < 3; ++i) {
+        if (has[i]) {
+          bad.present.push_back(*files[i]);
+        } else {
+          bad.missing += (bad.missing.empty() ? "" : ", ") + std::string(exts[i]);
+        }
+      }
+      for (const char* ext : {".rdat", ".ridx"}) {
+        const std::string f = dir + "/" + stem + ext;
+        if (src.exists(f)) {
+          bad.present.push_back(f);
+          if (std::string(ext) == ".rdat") bad.has_records = true;
+        }
+      }
+      ch.incomplete.push_back(std::move(bad));
     }
+    std::sort(ch.incomplete.begin(), ch.incomplete.end(),
+              [](const IncompleteSegment& a, const IncompleteSegment& b) {
+                return a.number < b.number;
+              });
     if (ch.segments.empty()) {
       if (src.exists(ch.rdat())) out.record_only_channels.push_back(ch.name);
+      out.incomplete_channels.push_back(std::move(ch));
       continue;
     }
     std::sort(ch.segments.begin(), ch.segments.end(),

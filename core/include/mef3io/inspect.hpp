@@ -56,7 +56,8 @@ struct InspectSegment {
   std::optional<si8> number_of_discontinuities;
   /// "none" (no offset), "applied" (meflib's recording-time offset is set),
   /// "locked" (section 3 is encrypted and the password does not open it) or
-  /// "unknown" (the segment could not be read at all; lenient mode).
+  /// "unknown" (the segment could not be read: lenient mode, or a segment
+  /// folder missing one of its files).
   std::string time_offset = "none";
   std::optional<si8> recording_time_offset;  ///< include_values only
   std::uint64_t tmet_bytes = 0, tidx_bytes = 0, tdat_bytes = 0;
@@ -157,6 +158,9 @@ struct TimeOffsetSummary {
   std::string status = "none";
   std::size_t segments_with_offset = 0;
   std::size_t segments_locked = 0;
+  /// Segments that could not be read at all (lenient mode, incomplete
+  /// folders): whatever offset they carry is unknown.
+  std::size_t segments_unknown = 0;
   /// The offset is set, so the real recording date is stored in section 3
   /// and can be recovered (docs/anonymization.md).
   bool date_recoverable = false;
@@ -191,6 +195,9 @@ struct SessionSummary {
   std::vector<InspectChannel> channels;            ///< by name
   std::vector<std::string> record_only_channels;   ///< records but no segments yet
   std::vector<std::string> video_channels;         ///< .vidd: out of scope, reported
+  /// .timd folders without one complete segment (no .tmet/.tidx/.tdat set).
+  /// A Reader does not list them; their files are counted and reported.
+  std::vector<std::string> incomplete_channels;
   std::vector<InspectRecord> records;              ///< session -> channel -> segment
   std::vector<IdentityField> identity;
   std::vector<InspectWarning> warnings;

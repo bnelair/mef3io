@@ -163,6 +163,37 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     }
   };
 
+  // A .segd missing one of its three files. A Reader skips it silently; here
+  // it is listed, unreadable, its files counted, and everything it might hold
+  // (identity, an offset) is "unknown" — never "absent".
+  std::size_t incomplete_segments = 0;
+  auto describe_incomplete = [&](const detail::IncompleteSegment& bad, std::uint64_t& bytes) {
+    ++incomplete_segments;
+    InspectSegment is;
+    is.segment_number = bad.number;
+    is.path = src->describe(bad.dir);
+    is.readable = false;
+    is.problem = "incomplete segment folder: missing " + bad.missing;
+    is.time_offset = "unknown";
+    is.has_records = bad.has_records;
+    for (const auto& f : bad.present) {
+      const std::uint64_t n = src->file_size(f);
+      if (f.ends_with(".tmet")) is.tmet_bytes = n;
+      else if (f.ends_with(".tidx")) is.tidx_bytes = n;
+      else if (f.ends_with(".tdat")) is.tdat_bytes = n;
+      else is.record_bytes += n;
+    }
+    bytes += is.tmet_bytes + is.tidx_bytes + is.tdat_bytes + is.record_bytes;
+    for (const char* n : {"subject_name_1", "subject_name_2", "subject_id", "recording_location"})
+      identity.locked(n, "metadata section 3");
+    for (const char* n : {"session_description", "channel_description", "reference_description"})
+      identity.locked(n, "metadata section 2");
+    for (const char* n : {"session_name", "anonymized_name"})
+      identity.locked(n, "universal header");
+    if (bad.has_records) identity.locked("record_text", "record bodies");
+    return is;
+  };
+
   bool any_ambiguous = false;
   std::string ambiguous_where;
   auto note_ambiguous = [&](std::optional<si8> rto, si8 stored, const std::string& where) {
@@ -353,11 +384,12 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
         bad.time_offset = "unknown";
         // Sizes measured before the failure are facts about the disk, so they
         // still count; nothing READ from the segment does.
+        bad.tmet_bytes = is.tmet_bytes;  // set once read, before the parse can throw
         bad.tidx_bytes = is.tidx_bytes;
         bad.tdat_bytes = is.tdat_bytes;
         bad.record_bytes = is.record_bytes;
         bad.has_records = is.has_records;
-        ic.bytes += bad.tidx_bytes + bad.tdat_bytes + bad.record_bytes;
+        ic.bytes += bad.tmet_bytes + bad.tidx_bytes + bad.tdat_bytes + bad.record_bytes;
         // Its identity fields were never read: "unknown", not "absent".
         for (const char* n : {"subject_name_1", "subject_name_2", "subject_id", "recording_location"})
           identity.locked(n, "metadata section 3");
@@ -381,7 +413,11 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
           ic.units_conversion_factor = md.section2.units_conversion_factor;
           ic.units_description = md.section2.units_description;
         }
-        n_samples += md.section2.number_of_samples;
+        // File-derived: a negative count is nonsense, and the sum must not overflow.
+        if (md.section2.number_of_samples < 0)
+          n_samples_known = false;
+        else
+          n_samples = saturating_add(n_samples, md.section2.number_of_samples);
         for (const auto& f : is.unset_declarations)
           out.declaration_issues.push_back({lc->name, ls.number, f});
       } else {
@@ -403,6 +439,17 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
       ic.segments.push_back(std::move(is));
     }
 
+    for (const auto& bad : lc->incomplete) {
+      ic.segments.push_back(describe_incomplete(bad, ic.bytes));
+      seg_states.push_back(SegState{nullptr, std::nullopt, std::nullopt});  // offset unknown
+      spans_certain = false;
+      n_samples_known = false;
+    }
+    std::stable_sort(ic.segments.begin(), ic.segments.end(),
+                     [](const InspectSegment& a, const InspectSegment& b) {
+                       return a.segment_number < b.segment_number;
+                     });
+
     if (n_samples_known) ic.number_of_samples = n_samples;
     if (ic.sampling_frequency && *ic.sampling_frequency > 0) {
       const double period = 1e6 / *ic.sampling_frequency;
@@ -420,6 +467,18 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     out.channels.push_back(std::move(ic));
   }
 
+  // Channel folders without one complete segment: no channel to describe,
+  // but their files are counted and their segments' offsets are unknown.
+  for (const auto& lc : layout.incomplete_channels) {
+    if (lc.incomplete.empty()) continue;  // just records, or an empty folder
+    out.incomplete_channels.push_back(lc.name);
+    for (const auto& bad : lc.incomplete) {
+      describe_incomplete(bad, out.total_bytes);
+      states[lc.name].push_back(SegState{nullptr, std::nullopt, std::nullopt});
+    }
+  }
+  std::sort(out.incomplete_channels.begin(), out.incomplete_channels.end());
+
   // ------------------------------------------------------------------ offsets
   // The offset a channel- or session-level record file is read with: the one
   // every readable segment of the scope agrees on (Session::agreed_rto). Any
@@ -430,7 +489,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     for (const auto& [name, segs] : states) {
       if (channel && name != *channel) continue;
       for (const auto& st : segs) {
-        if (!st.md) {  // unreadable: already reported, has no say
+        if (!st.md) {  // unreadable: its offset is unknown, so the scope's is too
           unreadable = true;
           continue;
         }
@@ -446,15 +505,14 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
         any = true;
       }
     }
-    if (any) return value;
-    // Segments exist but none could be read: their offset is unknown, and
-    // guessing 0 is how a wrong date is born. Only a scope with no segments
-    // at all has nothing to disagree with.
+    // A segment that could not be read may carry a different offset, so the
+    // readable ones cannot speak for the scope: unknown, never guessed. Only a
+    // scope with no segments at all has nothing to disagree with.
     if (unreadable) {
-      why = "no readable segment states the recording-time offset";
+      why = "a segment of this scope could not be read, so its recording-time offset is unknown";
       return std::nullopt;
     }
-    return std::optional<si8>(0);
+    return any ? value : std::optional<si8>(0);
   };
 
   // ------------------------------------------------------------------ records
@@ -605,6 +663,16 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     if (!ambiguity.empty()) {
       contain("", -1, src->describe(""), "records", [&] { throw FormatError(ambiguity); });
       ++records_failed;
+      // None of them is read, but they are on disk and may hold identity.
+      for (const auto& e : src->list_dir("")) {
+        if (e.is_dir || !(e.name.ends_with(".rdat") || e.name.ends_with(".ridx"))) continue;
+        out.total_bytes += src->file_size(e.name);
+        if (e.name.ends_with(".rdat")) {
+          identity.locked("session_name", "universal header");
+          identity.locked("anonymized_name", "universal header");
+          identity.locked("record_text", "record bodies");
+        }
+      }
     }
     if (!rdat.empty()) {
       std::string why;
@@ -621,11 +689,12 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     const std::string cand = name + ".timd/" + name + ".rdat";
     if (src->exists(cand)) {
       std::string why;
-      // A channel with no readable segment uses the session's (as written).
-      bool has_readable = false;
-      if (auto it = states.find(name); it != states.end())
-        for (const auto& st : it->second) has_readable |= st.md.has_value();
-      const auto rto = has_readable ? agreed(&name, why) : agreed(nullptr, why);
+      // A channel with NO segments uses the session's offset, as the writer
+      // did (SessionWriter::resolve_offset). One whose segments exist but
+      // failed does not: agreed() says unknown for it.
+      const auto st_it = states.find(name);
+      const bool has_segments = st_it != states.end() && !st_it->second.empty();
+      const auto rto = has_segments ? agreed(&name, why) : agreed(nullptr, why);
       read_file(cand, rto, why, RecordLevel::Channel, name, -1);
     }
     auto it = states.find(name);
@@ -657,6 +726,9 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
 
   auto& to = out.time_offset;
   to.segments_locked = out.encryption.section3_locked;
+  for (const auto& [name, segs] : states)
+    for (const auto& st : segs)
+      if (!st.md) ++to.segments_unknown;
   for (const auto& [name, segs] : states)
     for (const auto& st : segs)
       if (st.rto && *st.rto != 0) ++to.segments_with_offset;
@@ -695,6 +767,10 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
         "recording-time offset is unknown. Times stored relative to it are reported as "
         "unknown rather than guessed.";
   }
+  if (to.segments_unknown)
+    to.interpretation += " " + std::to_string(to.segments_unknown) +
+                         " segment(s) could not be read; whatever offset they carry is unknown, "
+                         "so this description covers the readable ones only.";
   if (to.segments_locked && to.status != "locked")
     to.interpretation += " " + std::to_string(to.segments_locked) +
                          " segment(s) keep section 3 locked; their times may be unknown.";
@@ -721,6 +797,17 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     warn("unreadable-segments",
          std::to_string(bad_segments) +
              " segment(s) could not be read; see problems. Their spans are not described.",
+         true);
+  if (incomplete_segments)
+    warn("incomplete-segments",
+         std::to_string(incomplete_segments) +
+             " segment folder(s) lack one of .tmet / .tidx / .tdat" +
+             (out.incomplete_channels.empty()
+                  ? std::string()
+                  : " (channel folder(s) with no complete segment: " +
+                        std::to_string(out.incomplete_channels.size()) + ")") +
+             ". A Reader skips them silently; they are listed as unreadable and their files "
+             "counted, and what they may hold is reported as unknown.",
          true);
   if (records_failed)
     warn("unreadable-records",

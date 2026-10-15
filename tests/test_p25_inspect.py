@@ -460,8 +460,15 @@ def _set_record_time(rdat, stored):
 
 def _time_fields(rec):
     f = rec.fields or {}
-    return [f.get(k) for k in ("time", "earliest_onset", "latest_offset", "timestamp",
-                               "end_timestamp", "trace_timestamp")]
+    out = [f.get(k) for k in ("time", "earliest_onset", "latest_offset", "timestamp",
+                              "end_timestamp", "trace_timestamp")]
+    for c in f.get("channels") or []:
+        out += [c["onset"], c["offset"]]
+    return out
+
+
+def _disk_bytes(path):
+    return sum(p.stat().st_size for p in Path(path).rglob("*") if p.is_file())
 
 
 def test_fields_never_carry_a_guessed_time_when_the_offset_is_disputed(session):
@@ -498,8 +505,10 @@ def test_an_unreadable_segment_leaves_identity_unknown_not_absent(session):
     # And no offset is guessed for the records of segments nobody could read.
     assert all(r.time is None for r in s.records)
     assert "times-unresolved" in {w.code for w in s.warnings}
-    # Sizes are facts about the disk and still count.
-    assert all(g.tdat_bytes > 0 for c in s.channels for g in c.segments)
+    # Sizes are facts about the disk and still count — the .tmet included.
+    assert all(g.tdat_bytes > 0 and g.tmet_bytes > 0 for c in s.channels for g in c.segments)
+    assert s.total_bytes == _disk_bytes(session)
+    assert s.time_offset["segments_unknown"] == 4
 
 
 def test_a_failed_record_file_contributes_nothing_but_its_size(session):
@@ -627,3 +636,90 @@ def test_cli_password_from_the_environment(tmp_path):
                          capture_output=True, text=True, env=env)
     assert out.returncode == 0, out.stderr
     assert json.loads(out.stdout)["encryption"]["access"] == "full"
+
+
+# --------------------------------------------------------------------------- review round 2
+
+
+def test_a_channel_whose_segments_all_failed_does_not_borrow_another_offset(session):
+    """N1: ch2 says 3 days, ch1's segments are unreadable. ch1's records must
+    not be placed with ch2's offset — ch1 may carry another one."""
+    _set_rto(session, THREE_DAYS, channel="ch2")
+    for tmet in _tmets(session, "ch1"):
+        _corrupt(tmet)
+    s = mef3io.inspect(session, strict=False)
+    for r in s.records:
+        if r.level in ("session", "channel"):
+            assert r.time is None and not r.times_known, r
+    assert "times-unresolved" in {w.code for w in s.anonymize_blockers}
+    assert s.time_offset["segments_unknown"] == 2
+    assert "could not be read" in s.time_offset["interpretation"]
+
+
+def test_an_unreadable_segment_makes_a_zero_offset_session_unknown_too(session):
+    """N1: the readable segments say 0, but a failed one may not."""
+    _corrupt(_tmets(session, "ch2")[1])
+    s = mef3io.inspect(session, strict=False)
+    note = next(r for r in s.records if r.level == "session")
+    assert note.time is None and not note.times_known
+    assert s.time_offset["segments_unknown"] == 1
+    # ch1's own records are unaffected: all of ch1's segments were read.
+    assert next(r for r in s.records if r.type == "EDFA").times_known
+
+
+def test_an_incomplete_segment_folder_is_reported_not_dropped(session):
+    """N2: a .segd missing its .tdat used to vanish without a trace, taking its
+    records' free text out of the identity table."""
+    seg = sorted(Path(session).glob("ch1.timd/*.segd"))[0]
+    for ext in ("rdat", "ridx"):
+        shutil.copy(Path(session) / "ch1.timd" / f"ch1.{ext}", seg / f"{seg.stem}.{ext}")
+    next(seg.glob("*.tdat")).unlink()
+    with mef3io.Reader(session) as r:  # the Reader still skips it, as before
+        assert len(r.segments("ch1")) == 1
+    for strict in (True, False):
+        s = mef3io.inspect(session, strict=strict)
+        c = s.channel("ch1")
+        assert [g.segment for g in c.segments] == [0, 1]
+        bad = c.segments[0]
+        assert not bad.readable and ".tdat" in bad.problem and bad.time_offset == "unknown"
+        assert bad.has_records and bad.tdat_bytes == 0 and bad.tmet_bytes > 0
+        assert s.identity_field("record_text").locked >= 1
+        assert s.total_bytes == _disk_bytes(session)
+        assert not c.gaps_certain and c.number_of_samples is None
+        assert "incomplete-segments" in {w.code for w in s.anonymize_blockers}
+
+
+def test_a_channel_folder_without_a_complete_segment_is_reported(session):
+    for f in Path(session).glob("ch2.timd/*.segd/*.tdat"):
+        f.unlink()
+    s = mef3io.inspect(session)
+    assert [c.name for c in s.channels] == ["ch1"]
+    assert s.incomplete_channels == ["ch2"]
+    assert s.total_bytes == _disk_bytes(session)
+    assert s.identity_field("subject_id").locked == 2
+    assert "incomplete-segments" in {w.code for w in s.anonymize_blockers}
+
+
+def test_ambiguous_session_records_still_count_and_stay_unknown(session):
+    """N4: several .rdat at the root and no <session>.rdat — none is read."""
+    root = Path(session)
+    for ext in ("rdat", "ridx"):
+        shutil.copy(root / f"s.{ext}", root / f"a.{ext}")
+        (root / f"s.{ext}").rename(root / f"b.{ext}")
+    s = mef3io.inspect(session, strict=False)
+    assert [p["kind"] for p in s.problems] == ["records"]
+    assert s.total_bytes == _disk_bytes(session)
+    assert s.identity_field("record_text").locked == 2
+    assert s.identity_field("session_name").locked == 2
+
+
+def test_negative_sample_counts_are_unknown_not_summed(session):
+    """N5: a hostile section 2 count must not overflow or go negative."""
+    tmet = _tmets(session, "ch1")[0]
+    raw = bytearray(tmet.read_bytes())
+    s2 = UH_BYTES + 1536
+    n_samples_off = s2 + 6360            # number_of_samples (headers.cpp)
+    struct.pack_into("<q", raw, n_samples_off, -5)
+    _reseal(raw, METADATA_FILE_BYTES)
+    tmet.write_bytes(bytes(raw))
+    assert mef3io.inspect(session).channel("ch1").number_of_samples is None

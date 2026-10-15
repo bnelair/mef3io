@@ -225,6 +225,12 @@ class SessionSummary:
         Channels with records but no data yet.
     video_channels : list of str
         ``.vidd`` channels. mef3io does not read video; listed only.
+    incomplete_channels : list of str
+        Channel folders without one complete segment (a segment needs its
+        ``.tmet``, ``.tidx`` and ``.tdat``). A :class:`mef3io.Reader` does not
+        list them. Incomplete segment folders of other channels appear in
+        their channel's ``segments`` as ``readable=False``; both raise an
+        ``"incomplete-segments"`` warning.
     records : list of RecordSummary
         Session, then channel and segment records.
     identity : list of IdentityField
@@ -262,6 +268,7 @@ class SessionSummary:
     channels: list
     record_only_channels: list
     video_channels: list
+    incomplete_channels: list
     records: list
     identity: list
     warnings: list
@@ -424,7 +431,8 @@ def _render(s: SessionSummary) -> str:
                    f"{_t(c.start_time)} -> {_t(c.end_time)}")
     out.append("  identity fields:")
     for f in s.identity:
-        state = {True: "present", False: "empty", None: "locked"}[f.present]
+        state = {True: "present", False: "empty",
+                 None: "unknown (locked or unreadable)"}[f.present]
         line = f"    {f.name:<22} {state}"
         if f.occurrences:
             line += f" ({f.occurrences} place(s), up to {f.max_length} bytes)"
@@ -475,7 +483,7 @@ def _main(argv: Sequence[str]) -> int:
             ap.error(f"environment variable {a.password_env} is not set")
         if password == "":
             ap.error(f"environment variable {a.password_env} is set but empty; "
-                     "unset it to inspect without a password")
+                     "drop --password-env to inspect without a password")
     try:
         s = inspect(a.path, password, include_values=a.values, read_index=a.index,
                     strict=not a.lenient)

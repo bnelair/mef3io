@@ -235,6 +235,7 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
   to["status"] = s.time_offset.status;
   to["segments_with_offset"] = s.time_offset.segments_with_offset;
   to["segments_locked"] = s.time_offset.segments_locked;
+  to["segments_unknown"] = s.time_offset.segments_unknown;
   to["date_recoverable"] = s.time_offset.date_recoverable;
   to["recoverable_by"] = opt_str(s.time_offset.recoverable_by);
   to["ambiguous"] = s.time_offset.ambiguous;
@@ -305,6 +306,9 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
   for (const auto& n : s.video_channels) video.append(record_str(n));
   d["record_only_channels"] = rec_only;
   d["video_channels"] = video;
+  nb::list incomplete;
+  for (const auto& n : s.incomplete_channels) incomplete.append(record_str(n));
+  d["incomplete_channels"] = incomplete;
 
   nb::list recs;
   for (const auto& r : s.records) {
@@ -326,6 +330,14 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
       nb::dict fd = record_to_dict(*r.full);
       // A time inspect could not resolve is NO_ENTRY in the record: None here.
       if (r.full->time == mef3io::fmt::UUTC_NO_ENTRY) fd["time"] = nb::none();
+      // Seiz per-channel onset/offset: -1 is meflib's NO_ENTRY there; when the
+      // times are unknown, say None like every other time.
+      if (!r.times_known && fd.contains("channels") && !fd["channels"].is_none())
+        for (auto c : nb::borrow<nb::list>(fd["channels"])) {
+          nb::dict cd = nb::borrow<nb::dict>(c);
+          cd["onset"] = nb::none();
+          cd["offset"] = nb::none();
+        }
       rd["fields"] = fd;
     } else {
       rd["fields"] = nb::none();
