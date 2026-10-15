@@ -105,7 +105,8 @@ std::vector<InspectGap> find_gaps(std::vector<std::pair<si8, si8>> spans, double
   std::sort(spans.begin(), spans.end());
   std::optional<si8> covered;  // end of everything seen so far
   for (const auto& [s, e] : spans) {
-    if (covered && static_cast<double>(s - *covered) > tolerance_us)
+    // In double: two file-derived si8 times can differ by more than si8 holds.
+    if (covered && static_cast<double>(s) - static_cast<double>(*covered) > tolerance_us)
       out.push_back(InspectGap{*covered, s});
     covered = covered ? std::max(*covered, e) : e;
   }
@@ -190,6 +191,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     auto& seg_states = states[lc->name];
     std::vector<std::pair<si8, si8>> spans;
     bool spans_complete = true;
+    bool spans_certain = true;  // false: a listed gap may hold an unreadable segment's data
     bool n_samples_known = true;
     si8 n_samples = 0;
 
@@ -235,6 +237,14 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
               (idx.size() - fmt::UNIVERSAL_HEADER_BYTES) / fmt::TIME_SERIES_INDEX_BYTES;
           const sf8 fs = md.section2_available ? md.section2.sampling_frequency : 0.0;
           const std::span<const ui1> all(idx);
+          // Legacy writers left .tidx (and .tdat) universal-header times
+          // non-negated (CLAUDE.md); under an offset that is ambiguous too.
+          // The .tdat header is never checked: inspect never opens a .tdat.
+          const auto idx_uh = fmt::UniversalHeader::parse(all);
+          for (si8 t : {idx_uh.start_time, idx_uh.end_time})
+            if (seg_rto && *seg_rto != 0 && t != fmt::UUTC_NO_ENTRY && t >= 0 &&
+                index_ambiguous.empty())
+              index_ambiguous = src->describe(ls.tidx);
           for (std::size_t i = 0; i < n; ++i) {
             const auto e = fmt::TimeSeriesIndex::parse(
                 all.subspan(fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES,
@@ -244,15 +254,17 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
                 e.start_time >= 0 && index_ambiguous.empty())
               index_ambiguous = src->describe(ls.tidx);
             const auto t = resolve(e.start_time, seg_rto);
-            if (!t || !(fs > 0)) {
+            // fs and the count come from the file: a zero, NaN, denormal or
+            // absurd value must not reach llround (UB outside si8's range).
+            const double dur_us = std::isfinite(fs) && fs > 0 ? e.number_of_samples * 1e6 / fs : -1.0;
+            if (!t || !(dur_us >= 0 && dur_us < 9e18)) {
               index_complete = false;
               continue;
             }
-            seg_spans.emplace_back(
-                *t, *t + static_cast<si8>(std::llround(e.number_of_samples * 1e6 / fs)));
+            seg_spans.emplace_back(*t, saturating_add(*t, static_cast<si8>(std::llround(dur_us))));
           }
         }
-        if (!index_complete) spans_complete = false;
+        if (!index_complete) spans_complete = spans_certain = false;
         if (!index_ambiguous.empty()) note_ambiguous(seg_rto, 0, index_ambiguous);
 
         const bool encrypted =
@@ -338,10 +350,26 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
         bad.path = is.path;
         bad.readable = false;
         bad.problem = failure;
-        bad.time_offset = "locked";
+        bad.time_offset = "unknown";
+        // Sizes measured before the failure are facts about the disk, so they
+        // still count; nothing READ from the segment does.
+        bad.tidx_bytes = is.tidx_bytes;
+        bad.tdat_bytes = is.tdat_bytes;
+        bad.record_bytes = is.record_bytes;
+        bad.has_records = is.has_records;
+        ic.bytes += bad.tidx_bytes + bad.tdat_bytes + bad.record_bytes;
+        // Its identity fields were never read: "unknown", not "absent".
+        for (const char* n : {"subject_name_1", "subject_name_2", "subject_id", "recording_location"})
+          identity.locked(n, "metadata section 3");
+        for (const char* n : {"session_description", "channel_description", "reference_description"})
+          identity.locked(n, "metadata section 2");
+        for (const char* n : {"session_name", "anonymized_name"})
+          identity.locked(n, "universal header");
+        if (is.has_records) identity.locked("record_text", "record bodies");
         ic.segments.push_back(std::move(bad));
         seg_states.push_back(SegState{&ls, std::nullopt, std::nullopt});
         spans_complete = false;
+        spans_certain = false;
         n_samples_known = false;
         continue;
       }
@@ -367,6 +395,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
         spans.emplace_back(*is.start_time, *is.end_time);
       } else {
         spans_complete = false;
+        spans_certain = false;  // a segment we cannot place may fill a "gap"
       }
       ic.bytes += is.tmet_bytes + is.tidx_bytes + is.tdat_bytes + is.record_bytes;
       st.has_records = is.has_records;
@@ -383,6 +412,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
       // so a gap there must exceed one and a half periods to count.
       ic.gaps = find_gaps(std::move(spans), opt.read_index ? 0.5 * period : 1.5 * period);
       ic.gaps_complete = opt.read_index && spans_complete;
+      ic.gaps_certain = spans_certain;
     }
     out.total_bytes += ic.bytes;
     widen(out.start_time, out.end_time, ic.start_time);
@@ -396,11 +426,14 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
   // locked or disagreeing segment makes it unknown; `why` says which.
   auto agreed = [&](const std::string* channel, std::string& why) -> std::optional<si8> {
     std::optional<si8> value;
-    bool any = false;
+    bool any = false, unreadable = false;
     for (const auto& [name, segs] : states) {
       if (channel && name != *channel) continue;
       for (const auto& st : segs) {
-        if (!st.md) continue;  // unreadable: already reported, has no say
+        if (!st.md) {  // unreadable: already reported, has no say
+          unreadable = true;
+          continue;
+        }
         if (!st.rto) {
           why = "the recording-time offset is locked in section 3";
           return std::nullopt;
@@ -413,7 +446,15 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
         any = true;
       }
     }
-    return any ? value : std::optional<si8>(0);
+    if (any) return value;
+    // Segments exist but none could be read: their offset is unknown, and
+    // guessing 0 is how a wrong date is born. Only a scope with no segments
+    // at all has nothing to disagree with.
+    if (unreadable) {
+      why = "no readable segment states the recording-time offset";
+      return std::nullopt;
+    }
+    return std::optional<si8>(0);
   };
 
   // ------------------------------------------------------------------ records
@@ -426,21 +467,18 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
   auto read_file = [&](const std::string& rdat, std::optional<si8> rto, const std::string& why,
                        RecordLevel level, const std::string& channel, int segment) {
     std::vector<InspectRecord> got;
+    std::vector<std::string> texts;  // each record's free text, for the identity table
+    std::uint64_t file_bytes = 0;
+    fmt::UniversalHeader uh;
+    bool placeable = true, ambiguous = false;
     const std::string failure =
         contain(channel, segment, src->describe(rdat), "records", [&] {
-          std::uint64_t bytes = src->file_size(rdat);
+          file_bytes = src->file_size(rdat);
           const std::string ridx = rdat.substr(0, rdat.size() - 5) + ".ridx";
-          if (src->exists(ridx)) bytes += src->file_size(ridx);
-          if (level != RecordLevel::Segment) out.total_bytes += bytes;  // segments counted above
-          if (level == RecordLevel::Channel) {
-            for (auto& ic : out.channels)
-              if (ic.name == channel) ic.bytes += bytes;
-          }
+          if (src->exists(ridx)) file_bytes += src->file_size(ridx);
 
           const auto raw = src->read_all(rdat);
-          const auto uh = fmt::UniversalHeader::parse(raw);
-          identity.add("session_name", "universal header", uh.session_name);
-          identity.add("anonymized_name", "universal header", uh.anonymized_name);
+          uh = fmt::UniversalHeader::parse(raw);
           const auto keys = crypto::validate_password(opt.password,
                                                       uh.level_1_password_validation_field,
                                                       uh.level_2_password_validation_field);
@@ -451,13 +489,11 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
           RecordParseInfo info;
           info.skip_locked_bodies = true;
           auto recs = parse_records(raw, rto.value_or(0), keys, info);
+          // NOTHING above may touch a session-wide tally: it can all throw,
+          // and a file that failed must contribute nothing but its size.
           // Placed only if the times do not depend on an offset we lack.
-          const bool placeable = rto.has_value() || !info.offset_dependent;
-          if (!placeable) unplaced.push_back({src->describe(rdat), why});
-          if (rto && *rto != 0 && info.header_time_non_negative) {
-            if (!any_ambiguous) ambiguous_where = src->describe(rdat);
-            any_ambiguous = true;
-          }
+          placeable = rto.has_value() || !info.offset_dependent;
+          ambiguous = rto && *rto != 0 && info.header_time_non_negative;
           std::set<std::size_t> locked(info.locked.begin(), info.locked.end());
           for (std::size_t i = 0; i < recs.size(); ++i) {
             const Record& r = recs[i];
@@ -468,11 +504,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
             ir.type = r.type;
             ir.body_locked = locked.count(i) != 0;
             ir.duration = r.duration;
-            if (ir.body_locked) {
-              ++out.encryption.record_bodies_locked;
-              out.encryption.encrypted = true;
-              identity.locked("record_text", "record bodies");
-            }
+
             std::size_t text = 0;
             std::string joined;
             for (const auto& f : record_fields(r)) {
@@ -483,7 +515,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
               }
             }
             ir.text_bytes = text;
-            if (!joined.empty()) identity.add("record_text", "record bodies", joined);
+            texts.push_back(std::move(joined));
             if (placeable) {
               ir.time = resolve(r.time, 0);  // already absolute; drops NO_ENTRY
               std::optional<si8> lo, hi;
@@ -506,18 +538,56 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
               ir.first_time = lo;
               ir.last_time = hi;
             }
+            ir.times_known = placeable;
             if (opt.include_values) {
               ir.full = r;
               ir.full->level = level;
               ir.full->channel = channel;
               ir.full->segment = segment;
+              if (!placeable) {
+                // The parse resolved these with offset 0 as a placeholder.
+                // Never hand that out: the full record must not carry a date
+                // the summary itself refuses to state.
+                ir.full->time = fmt::UUTC_NO_ENTRY;  // shown as None
+                ir.full->earliest_onset.reset();
+                ir.full->latest_offset.reset();
+                ir.full->timestamp.reset();
+                ir.full->end_timestamp.reset();
+                ir.full->trace_timestamp.reset();
+                for (auto& c : ir.full->seizure_channels) c.onset = c.offset = -1;  // NO_ENTRY
+              }
             }
             got.push_back(std::move(ir));
           }
         });
+    // Its size is a fact about the disk, whether or not it could be read.
+    if (level != RecordLevel::Segment) out.total_bytes += file_bytes;  // segments counted above
+    if (level == RecordLevel::Channel)
+      for (auto& ic : out.channels)
+        if (ic.name == channel) ic.bytes += file_bytes;
     if (!failure.empty()) {
       ++records_failed;
+      // Never read: its identity fields are unknown, not absent.
+      identity.locked("session_name", "universal header");
+      identity.locked("anonymized_name", "universal header");
+      identity.locked("record_text", "record bodies");
       return;
+    }
+    identity.add("session_name", "universal header", uh.session_name);
+    identity.add("anonymized_name", "universal header", uh.anonymized_name);
+    if (!placeable) unplaced.push_back({src->describe(rdat), why});
+    if (ambiguous) {
+      if (!any_ambiguous) ambiguous_where = src->describe(rdat);
+      any_ambiguous = true;
+    }
+    for (std::size_t i = 0; i < got.size(); ++i) {
+      if (got[i].body_locked) {
+        ++out.encryption.record_bodies_locked;
+        out.encryption.encrypted = true;
+        identity.locked("record_text", "record bodies");
+      } else if (!texts[i].empty()) {
+        identity.add("record_text", "record bodies", texts[i]);
+      }
     }
     for (auto& ir : got) {
       widen(out.records_start_time, out.records_end_time, ir.first_time);

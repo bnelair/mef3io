@@ -314,12 +314,19 @@ Options:
 - `include_values=True` returns identity values: subject fields, descriptions,
   record text and the full records (`RecordSummary.fields`, as
   `Reader.records()` returns them), and the recording-time offset. Off by
-  default: a summary is safe to log or show without them.
+  default. **Names and paths are not de-identified either way**: the session's
+  folder name (MEF names it after the session, so it usually *is* the
+  `session_name`), channel names and file paths, also inside warning and
+  problem messages, are always returned. A summary of an identifiable session
+  is itself identifiable.
 - `read_index=True` also reads every segment's block index (about 2% of the
   data), which finds gaps **inside** a segment. Without it, `gaps` lists only
   the gaps between segments and `gaps_complete` is `False`. An appended
   recording is usually one segment per channel, so ask for the index when
-  the gaps matter.
+  the gaps matter. Gaps come from the index's copy of each block's time and
+  sample count; the authoritative copy, the RED block header, is in the
+  `.tdat` and is never read. `gaps_certain` is `False` when a listed gap
+  might hold data from a segment that could not be read or placed.
 - `strict=False` reports an unreadable segment or record file in `problems`
   and a warning, marks the segment `readable=False`, and describes the rest.
   Strict, the default, raises as a `Reader` does.
@@ -331,10 +338,14 @@ fields. What the password does not open is reported as locked:
 sections and record bodies are counted, and values that live there are `None`.
 A password that is given and wrong raises `PasswordError`.
 
-**Times are never guessed.** Every time is absolute UTC. A time stored
-relative to a recording-time offset that cannot be read (section 3 locked, or
-the segments of a channel disagree) is `None`, with a `times-unresolved`
-warning, rather than read as if the offset were 0.
+**Times are never guessed.** Every time is absolute UTC. A segment's times
+are resolved with its own offset. A time stored relative to an offset that
+cannot be read (section 3 locked, or the segment unreadable) is `None`, with
+a `times-unresolved` warning, rather than read as if the offset were 0. A
+channel- or session-level record file is read with the offset all the
+segments in its scope share; when they disagree, or one is locked, its
+offset-dependent times are `None` (`RecordSummary.times_known` is `False`,
+and the times in `fields` are `None` too).
 
 **The recording-time offset is reported plainly.** meflib's recording-time
 offset is deprecated as anonymization: the real date stays in section 3.
@@ -345,7 +356,10 @@ with a `legacy-time-offset` warning. The offset's value is itself identifying
 (it is the local midnight of the recording day), so it is returned only with
 `include_values=True`. `ambiguous` is `True` when a time is stored
 non-negative under a non-zero offset, where it cannot be told apart from an
-absolute time; that blocks anonymization.
+absolute time; that blocks anonymization. It is checked on the metadata
+universal headers, record header times and, with `read_index=True`, the block
+index (header and entries). The `.tdat` universal header is never checked,
+because `inspect` never opens a `.tdat`.
 
 !!! note "Python first"
     `inspect` is available in Python and C++ (`mef3io/inspect.hpp`,

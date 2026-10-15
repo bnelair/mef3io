@@ -34,7 +34,9 @@ struct InspectOptions {
   bool include_values = false;
   /// Also read every segment's block index (.tidx, ~2% of the data) to find
   /// the gaps INSIDE segments. Off by default: gaps are then the ones between
-  /// segments only, and ChannelSummary::gaps_complete is false.
+  /// segments only, and ChannelSummary::gaps_complete is false. Gaps come from
+  /// the index's copy of each block's start time and count; the RED block
+  /// header (the authoritative copy) is inside the .tdat and is never read.
   bool read_index = false;
 };
 
@@ -52,8 +54,9 @@ struct InspectSegment {
   std::optional<si8> start_sample, number_of_samples, number_of_blocks;
   /// As DECLARED in section 2 (legacy writers leave 0 here even with gaps).
   std::optional<si8> number_of_discontinuities;
-  /// "none" (no offset), "applied" (meflib's recording-time offset is set) or
-  /// "locked" (section 3 could not be read, so it is unknown).
+  /// "none" (no offset), "applied" (meflib's recording-time offset is set),
+  /// "locked" (section 3 is encrypted and the password does not open it) or
+  /// "unknown" (the segment could not be read at all; lenient mode).
   std::string time_offset = "none";
   std::optional<si8> recording_time_offset;  ///< include_values only
   std::uint64_t tmet_bytes = 0, tidx_bytes = 0, tdat_bytes = 0;
@@ -82,6 +85,9 @@ struct InspectChannel {
   /// and every segment could be placed; otherwise `gaps` holds the gaps
   /// BETWEEN segments and may miss ones inside a segment.
   bool gaps_complete = false;
+  /// false when a listed gap may not be one: a segment that could not be
+  /// read or placed (lenient mode, locked offset) may hold data there.
+  bool gaps_certain = true;
   std::uint64_t bytes = 0;  ///< every file of the channel, .tdat included (sizes only)
   std::size_t records = 0;  ///< channel- and segment-level records
 };
@@ -94,6 +100,9 @@ struct InspectRecord {
   /// Header time, absolute uUTC. nullopt when it was stored relative to an
   /// offset that is locked or disputed.
   std::optional<si8> time;
+  /// false when the file's times depend on an offset that is locked or
+  /// disputed: then every time here (and in `full`) is unset, never guessed.
+  bool times_known = true;
   std::optional<si8> duration;
   /// Earliest and latest time the record mentions: the header time, the body
   /// times (Seiz onsets/offsets, Epoc timestamp/end, Curs trace timestamp) and
@@ -112,7 +121,9 @@ struct IdentityField {
   std::string name;       ///< e.g. "subject_name_1", "session_name", "record_text"
   std::string location;   ///< e.g. "metadata section 3", "universal header"
   std::size_t occurrences = 0;  ///< places (files or records) where it is non-empty
-  std::size_t locked = 0;       ///< places it could not be read (encrypted)
+  /// places it could not be read: encrypted, or (lenient mode) a file that
+  /// failed. Either way it MAY be set there, so it is not "absent".
+  std::size_t locked = 0;
   std::size_t max_length = 0;   ///< longest value, in bytes
   std::size_t distinct = 0;     ///< distinct non-empty values
   std::vector<std::string> values;  ///< distinct values; include_values only

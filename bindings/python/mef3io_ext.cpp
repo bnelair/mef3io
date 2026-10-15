@@ -264,6 +264,7 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
     cd["end_time"] = opt_obj(c.end_time);
     cd["number_of_samples"] = opt_obj(c.number_of_samples);
     cd["gaps_complete"] = c.gaps_complete;
+    cd["gaps_certain"] = c.gaps_certain;
     cd["bytes"] = c.bytes;
     cd["records"] = c.records;
     nb::list gaps;
@@ -315,12 +316,20 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
     rd["segment"] = r.level == mef3io::RecordLevel::Segment ? nb::object(nb::int_(r.segment))
                                                             : nb::object(nb::none());
     rd["time"] = opt_obj(r.time);
+    rd["times_known"] = r.times_known;
     rd["duration"] = opt_obj(r.duration);
     rd["first_time"] = opt_obj(r.first_time);
     rd["last_time"] = opt_obj(r.last_time);
     rd["text_bytes"] = r.text_bytes;
     rd["body_locked"] = r.body_locked;
-    rd["fields"] = r.full ? nb::object(record_to_dict(*r.full)) : nb::object(nb::none());
+    if (r.full) {
+      nb::dict fd = record_to_dict(*r.full);
+      // A time inspect could not resolve is NO_ENTRY in the record: None here.
+      if (r.full->time == mef3io::fmt::UUTC_NO_ENTRY) fd["time"] = nb::none();
+      rd["fields"] = fd;
+    } else {
+      rd["fields"] = nb::none();
+    }
     recs.append(rd);
   }
   d["records"] = recs;

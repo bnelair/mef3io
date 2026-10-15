@@ -26,7 +26,8 @@ class SegmentSummary:
 
     Times are absolute uUTC (UTC) or ``None`` when they were stored relative
     to a recording-time offset that could not be read. ``time_offset`` is
-    ``"none"``, ``"applied"`` (meflib's offset is set) or ``"locked"``;
+    ``"none"``, ``"applied"`` (meflib's offset is set), ``"locked"`` (section
+    3 encrypted and not opened) or ``"unknown"`` (the segment is unreadable);
     ``recording_time_offset`` holds its value only with
     ``include_values=True`` (the value is itself identifying: it is the local
     midnight of the recording day). ``number_of_discontinuities`` is the
@@ -69,7 +70,10 @@ class ChannelSummary:
     ``gaps`` are ``(start, end)`` uUTC spans with no samples. Without
     ``read_index=True`` they are only the gaps BETWEEN segments and
     ``gaps_complete`` is ``False``: a gap inside a segment is found only in the
-    block index. ``number_of_samples`` counts stored samples (gaps excluded).
+    block index (whose copy of each block's time and count is used; the
+    authoritative RED block header lives in the ``.tdat``, which is never
+    read). ``gaps_certain`` is ``False`` when a listed gap may not be one,
+    because a segment that could not be read or placed may hold data there. ``number_of_samples`` counts stored samples (gaps excluded).
     ``bytes`` is every file of the channel; ``records`` counts its channel-
     and segment-level records.
     """
@@ -83,6 +87,7 @@ class ChannelSummary:
     number_of_samples: Optional[int]
     gaps: list
     gaps_complete: bool
+    gaps_certain: bool
     bytes: int
     records: int
     segments: list
@@ -104,7 +109,8 @@ class RecordSummary:
     times (Seiz onsets/offsets, Epoc timestamp/end, Curs trace timestamp) and
     ``time + duration`` — which is what a time range must cover. They are
     ``None`` when the file's times depend on an offset that is locked or
-    disputed. ``text_bytes`` is the length of its free text; the text itself
+    disputed; ``times_known`` is then ``False``, and the times inside
+    ``fields`` are ``None`` too — never a placeholder. ``text_bytes`` is the length of its free text; the text itself
     is in ``fields`` only with ``include_values=True`` (the full record, as
     :meth:`mef3io.Reader.records` returns it). ``body_locked`` means the body
     is encrypted and the password does not open it.
@@ -115,6 +121,7 @@ class RecordSummary:
     channel: Optional[str]
     segment: Optional[int]
     time: Optional[int]
+    times_known: bool
     duration: Optional[int]
     first_time: Optional[int]
     last_time: Optional[int]
@@ -132,10 +139,13 @@ class IdentityField:
     """Whether one identifying field holds anything, and where.
 
     ``occurrences`` is the number of places (files, or records for
-    ``record_text``) where it is non-empty, ``locked`` the number it could not
-    be read (encrypted), ``max_length`` the longest value in bytes and
-    ``distinct`` the number of different values. ``values`` lists them only
-    with ``include_values=True``; otherwise it is empty.
+    ``record_text``) where it is non-empty, ``locked`` the number of places
+    it could not be read (encrypted, or a file that failed in lenient mode),
+    ``max_length`` the longest value in bytes and ``distinct`` the number of
+    different values. ``values`` lists them only with
+    ``include_values=True``; otherwise it is empty. ``present`` is ``True``
+    if it is set anywhere, ``False`` if it is set nowhere, and ``None`` if it
+    may be set somewhere that could not be read.
     """
 
     name: str
@@ -145,17 +155,12 @@ class IdentityField:
     max_length: int
     distinct: int
     values: list
-
-    @property
-    def present(self) -> Optional[bool]:
-        """``True`` if set anywhere, ``False`` if nowhere, ``None`` if it may
-        be set where the password does not reach."""
-        if self.occurrences:
-            return True
-        return None if self.locked else False
+    present: Optional[bool]  # a stored field, so to_dict() / JSON carries it
 
     @classmethod
     def _from(cls, d: dict) -> "IdentityField":
+        d = dict(d)
+        d["present"] = True if d["occurrences"] else (None if d["locked"] else False)
         return cls(**_fields(cls, d))
 
 
@@ -332,7 +337,10 @@ def inspect(
         Return identity VALUES: subject name/ID/location, descriptions,
         ``session_name``/``anonymized_name``, record text and the full
         records, and the recording-time offset. Off by default, when identity
-        fields report presence and length only.
+        fields report presence and length only. Names and paths are NOT
+        de-identified either way: the session's folder name (usually the same
+        as ``session_name``), channel names and file paths are always
+        returned, so a summary of an identifiable session is identifiable.
     read_index : bool, default False
         Also read every segment's block index (about 2% of the data) to find
         gaps inside segments. Off by default.
@@ -410,7 +418,8 @@ def _render(s: SessionSummary) -> str:
                + (f"; video: {', '.join(s.video_channels)}" if s.video_channels else ""))
     for c in s.channels:
         fs = "?" if c.sampling_frequency is None else f"{c.sampling_frequency:g} Hz"
-        gaps = f"{len(c.gaps)} gap(s)" + ("" if c.gaps_complete else " between segments")
+        gaps = f"{len(c.gaps)} gap(s)" + ("" if c.gaps_complete else " between segments") \
+            + ("" if c.gaps_certain else " (uncertain)")
         out.append(f"    {c.name}: {fs}, {len(c.segments)} segment(s), {gaps}, "
                    f"{_t(c.start_time)} -> {_t(c.end_time)}")
     out.append("  identity fields:")
@@ -443,6 +452,9 @@ def _main(argv: Sequence[str]) -> int:
     )
     ap.add_argument("path", help="a .mefd directory or .mefd.tar archive")
     ap.add_argument("--password", default="", help="opens encrypted sections")
+    ap.add_argument("--password-env", metavar="VAR",
+                    help="read the password from this environment variable instead of the "
+                         "command line, which is visible in ps output and shell history")
     ap.add_argument("--values", action="store_true",
                     help="show identity values (subject fields, descriptions, record text, "
                          "the recording-time offset); off by default")
@@ -452,8 +464,20 @@ def _main(argv: Sequence[str]) -> int:
                     help="report unreadable segments instead of failing")
     ap.add_argument("--json", action="store_true", help="print JSON instead of text")
     a = ap.parse_args(list(argv))
+    password = a.password
+    if a.password_env:
+        import os
+
+        if a.password:
+            ap.error("pass --password or --password-env, not both")
+        password = os.environ.get(a.password_env)
+        if password is None:
+            ap.error(f"environment variable {a.password_env} is not set")
+        if password == "":
+            ap.error(f"environment variable {a.password_env} is set but empty; "
+                     "unset it to inspect without a password")
     try:
-        s = inspect(a.path, a.password, include_values=a.values, read_index=a.index,
+        s = inspect(a.path, password, include_values=a.values, read_index=a.index,
                     strict=not a.lenient)
     except Exception as e:  # noqa: BLE001 - one plain line, not a traceback
         print(f"{type(e).__name__}: {e}", file=sys.stderr)

@@ -79,7 +79,8 @@ else:  # pragma: no cover - only without the extension
 __all__ = [
     "Reader", "Writer", "Metadata", "Subject", "Acquisition",
     "MefReader", "MefWriter", "archive_session", "extract_session",
-    "inspect", "SessionSummary", "ChannelSummary", "SegmentSummary",
+    # Not "inspect": `from mef3io import *` would shadow the standard library's.
+    "SessionSummary", "ChannelSummary", "SegmentSummary",
     "RecordSummary", "IdentityField", "SummaryWarning",
     "Validator", "Check", "Finding", "Report", "SkippedSegment",
     "available_checks", "describe_check",

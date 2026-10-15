@@ -225,8 +225,13 @@ def test_inspect_never_reads_a_tdat(tmp_path, read_index):
     s = mef3io.inspect(path, read_index=read_index)
     read = _rchar() - before
     assert s.channel("ch1").segments[0].tdat_bytes == tdat
-    assert read <= rest + 64 * 1024, (
-        f"inspect read {read:,} B; everything but the .tdat is {rest:,} B — a .tdat was read")
+    # Without the index it reads the .tmet and record files ONLY; with it, the
+    # .tidx too. Never the .tdat.
+    allowed = sum(p.stat().st_size for p in path.rglob("*")
+                  if p.is_file() and p.suffix in ((".tmet", ".rdat", ".ridx", ".tidx")
+                                                  if read_index else (".tmet", ".rdat", ".ridx")))
+    assert read <= allowed + 64 * 1024, (
+        f"inspect read {read:,} B; the files it may read are {allowed:,} B")
 
 
 # --------------------------------------------------------------------------- tar
@@ -428,3 +433,197 @@ def test_cli_text_and_json(session):
     assert json.loads(out.stdout)["identity"][2]["values"] == ["MRN-123"]
     bad = _cli(str(Path(session).parent / "missing.mefd"))
     assert bad.returncode == 1 and bad.stderr
+
+
+# --------------------------------------------------------------------------- review round 1
+
+
+def _rdat_record_offsets(raw):
+    """(offset, body_bytes) of each record in a .rdat image."""
+    out, off = [], UH_BYTES
+    n = struct.unpack_from("<q", raw, 32)[0]
+    for _ in range(n):
+        body = struct.unpack_from("<I", raw, off + 12)[0]
+        out.append((off, body))
+        off += 24 + body
+    return out
+
+
+def _set_record_time(rdat, stored):
+    raw = bytearray(rdat.read_bytes())
+    off, body = _rdat_record_offsets(raw)[0]
+    struct.pack_into("<q", raw, off + 16, stored)
+    struct.pack_into("<I", raw, off, m.crc32(bytes(raw[off + 4:off + 24 + body])))
+    _reseal(raw, len(raw))
+    rdat.write_bytes(bytes(raw))
+
+
+def _time_fields(rec):
+    f = rec.fields or {}
+    return [f.get(k) for k in ("time", "earliest_onset", "latest_offset", "timestamp",
+                               "end_timestamp", "trace_timestamp")]
+
+
+def test_fields_never_carry_a_guessed_time_when_the_offset_is_disputed(session):
+    _set_rto(session, THREE_DAYS, channel="ch2")
+    s = mef3io.inspect(session, include_values=True)
+    note = next(r for r in s.records if r.level == "session")
+    assert note.time is None and not note.times_known
+    assert note.fields["text"] == "seizure?"            # the record is still there
+    assert all(t is None for t in _time_fields(note))   # but no placeholder date
+    # ch1's channel-level record: ch1's segments agree (offset 0), so it is placed.
+    edfa = next(r for r in s.records if r.type == "EDFA")
+    assert edfa.times_known and edfa.fields["time"] == START + 65 * SECOND
+
+
+def test_fields_never_carry_a_guessed_time_when_the_offset_is_locked(tmp_path):
+    path = _write(tmp_path / "e.mefd", password1="pw1", password2="pw2")
+    for pw in ("", "pw1"):
+        s = mef3io.inspect(path, pw, include_values=True)
+        for r in s.records:
+            assert r.time is None and not r.times_known
+            assert all(t is None for t in _time_fields(r)), (pw, r.fields)
+
+
+def test_an_unreadable_segment_leaves_identity_unknown_not_absent(session):
+    for tmet in _tmets(session):
+        _corrupt(tmet)
+    s = mef3io.inspect(session, strict=False)
+    assert all(not g.readable and g.time_offset == "unknown"
+               for c in s.channels for g in c.segments)
+    for name in ("subject_id", "subject_name_1", "session_description", "anonymized_name"):
+        assert s.identity_field(name).present is None, name
+    # session_name is still SEEN in the record files' universal headers.
+    assert s.identity_field("session_name").present is True
+    # And no offset is guessed for the records of segments nobody could read.
+    assert all(r.time is None for r in s.records)
+    assert "times-unresolved" in {w.code for w in s.warnings}
+    # Sizes are facts about the disk and still count.
+    assert all(g.tdat_bytes > 0 for c in s.channels for g in c.segments)
+
+
+def test_a_failed_record_file_contributes_nothing_but_its_size(session):
+    rdat = Path(session) / "s.rdat"
+    healthy = mef3io.inspect(session)
+    raw = bytearray(rdat.read_bytes())
+    off, body = _rdat_record_offsets(raw)[0]
+    raw[off + 30] ^= 0xFF                      # inside the body: the record CRC fails
+    rdat.write_bytes(bytes(raw))
+    with pytest.raises(mef3io.CrcError):
+        mef3io.inspect(session)
+    s = mef3io.inspect(session, strict=False)
+    assert [p["kind"] for p in s.problems] == ["records"]
+    assert "unreadable-records" in {w.code for w in s.anonymize_blockers}
+    assert [r.level for r in s.records] == ["channel"]          # only the healthy file
+    name = s.identity_field("session_name")
+    assert name.occurrences == healthy.identity_field("session_name").occurrences - 1
+    assert name.locked == 1
+    assert s.total_bytes == healthy.total_bytes                 # still on disk
+    assert s.records_start_time == START + 65 * SECOND          # the failed note is gone
+
+
+def test_ambiguity_from_a_record_header_time(session):
+    _set_rto(session, THREE_DAYS)
+    assert not mef3io.inspect(session).time_offset["ambiguous"]
+    _set_record_time(Path(session) / "s.rdat", START)  # non-negated under an offset
+    s = mef3io.inspect(session)
+    assert s.time_offset["ambiguous"]
+    assert "s.rdat" in next(w for w in s.warnings if w.code == "ambiguous-time-convention").message
+
+
+@pytest.mark.parametrize("where", ["header", "entry"])
+def test_ambiguity_from_the_block_index_needs_the_index(session, where):
+    _set_rto(session, THREE_DAYS)
+    tidx = sorted(Path(session).glob("ch1.timd/*.segd/*.tidx"))[0]
+    raw = bytearray(tidx.read_bytes())
+    struct.pack_into("<q", raw, 16 if where == "header" else UH_BYTES + 8, START)
+    tidx.write_bytes(bytes(raw))
+    assert not mef3io.inspect(session).time_offset["ambiguous"]     # the index is not read
+    s = mef3io.inspect(session, read_index=True)
+    assert s.time_offset["ambiguous"]
+    assert tidx.name in next(w for w in s.warnings if w.code == "ambiguous-time-convention").message
+
+
+def test_gap_tolerance(tmp_path):
+    fs = 1000.0 / 3.0                           # fractional rate: block ends are not whole us
+    path = tmp_path / "t.mefd"
+    with mef3io.Writer(str(path)) as w:
+        w.write("ch1", np.zeros(3000), START, fs)
+        # Back to back on the grid: not a gap.
+        w.write("ch1", np.zeros(3000), START + round(3000 * 1e6 / fs), fs)
+        # One whole missing second later: a gap.
+        w.write("ch1", np.zeros(3000), START + round(6000 * 1e6 / fs) + SECOND, fs)
+    c = mef3io.inspect(path, read_index=True).channel("ch1")
+    assert c.gaps_complete and c.gaps_certain
+    assert len(c.gaps) == 1
+    a, b = c.gaps[0]
+    assert abs((b - a) - SECOND) <= 3 and abs(a - (START + round(6000 * 1e6 / fs))) <= 3
+
+
+def test_gaps_next_to_an_unreadable_segment_are_uncertain(session):
+    _corrupt(_tmets(session, "ch1")[0])
+    s = mef3io.inspect(session, strict=False)
+    assert not s.channel("ch1").gaps_certain
+    assert s.channel("ch2").gaps_certain is True
+
+
+def test_tar_of_an_encrypted_session(tmp_path):
+    path = _write(tmp_path / "e.mefd", password1="pw1", password2="pw2")
+    tar = mef3io.archive_session(path)
+    for pw in ("", "pw1", "pw2"):
+        d, t = mef3io.inspect(path, pw), mef3io.inspect(tar, pw)
+        assert t.encryption == d.encryption
+        assert t.start_time == d.start_time and t.records_end_time == d.records_end_time
+
+
+def test_present_is_in_the_json(session):
+    d = mef3io.inspect(session).to_dict()
+    assert {f["name"]: f["present"] for f in d["identity"]}["subject_id"] is True
+
+
+def test_where_an_identifying_session_name_can_appear(tmp_path):
+    """The session folder is named after the session, so its name IS the
+    session_name. Without include_values it may appear only where paths and
+    names are returned — never as an identity value."""
+    secret = "JaneDoeMRN123"
+    path = _write(tmp_path / f"{secret}.mefd")
+    s = mef3io.inspect(path)
+    assert s.identity_field("session_name").values == []
+    hits = []
+
+    def walk(x, where):
+        if isinstance(x, dict):
+            for k, v in x.items():
+                walk(v, where + [k])
+        elif isinstance(x, (list, tuple)):
+            for v in x:
+                walk(v, where)
+        elif isinstance(x, str) and secret in x:
+            hits.append(where[-1])
+
+    walk(s.to_dict(), [])
+    assert set(hits) <= {"name", "path"}, hits
+
+
+def test_star_import_does_not_shadow_the_standard_library_inspect():
+    ns = {}
+    exec("import inspect\nfrom mef3io import *", ns)
+    import inspect as stdlib_inspect
+
+    assert ns["inspect"] is stdlib_inspect
+    assert callable(mef3io.inspect) and mef3io.inspect is not stdlib_inspect
+
+
+def test_cli_password_from_the_environment(tmp_path):
+    import os
+
+    path = _write(tmp_path / "e.mefd", password1="pw1", password2="pw2")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(Path(mef3io.__file__).resolve().parent.parent),
+                                         env.get("PYTHONPATH", "")])
+    env["MEF3IO_TEST_PW"] = "pw2"
+    out = subprocess.run([sys.executable, "-m", "mef3io", "inspect", path, "--json",
+                          "--password-env", "MEF3IO_TEST_PW"],
+                         capture_output=True, text=True, env=env)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout)["encryption"]["access"] == "full"
