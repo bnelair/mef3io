@@ -57,8 +57,10 @@ def _public_files():
 
 def test_pattern_matches_the_spellings_it_guards():
     name = base64.b64decode(b"Y3liZXJwc2c=").decode()  # the plain name, lower case
-    for variant in (name, name.upper(), name[:5] + " " + name[5:], name[:5] + "-" + name[5:]):
+    for sep in ("", " ", "-", "_"):
+        variant = name[:5] + sep + name[5:]
         assert _PATTERN.search(variant), variant
+        assert _PATTERN.search(variant.upper()), variant
 
 
 def test_public_text_names_no_private_product():
