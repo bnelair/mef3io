@@ -18,9 +18,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 # Kept encoded so this file does not itself spell out the name it guards; the
-# pattern also matches spaced/hyphenated/underscored spellings. Same value as
+# pattern also matches spaced/hyphenated/underscored spellings ([ _-]: the same
+# in Python re and grep -E). Same value as
 # the "Check the built site" step in .github/workflows/docs.yml.
-_PATTERN = re.compile(base64.b64decode(b"Y3liZXJbXHNfLV0qcHNn").decode(), re.IGNORECASE)
+_PATTERN = re.compile(base64.b64decode(b"Y3liZXJbIF8tXSpwc2c=").decode(), re.IGNORECASE)
 
 PUBLIC = [
     "README.md",

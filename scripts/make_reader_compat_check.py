@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the CyberPSG / meflib compatibility check set.
+"""Generate the meflib reader compatibility check set.
 
 Nine small sessions that between them exercise every way mef3io can produce or
 touch a MEF 3 session, plus two deliberately broken controls. They exist because
@@ -14,7 +14,7 @@ Every session is verified through both mef3io and pymef before the script
 exits, and the parameters used are written into the README next to the files so
 a future run can be compared against an earlier one.
 
-RESULT, 2026-09-21, CyberPSG: **only 05 crashed** — the deliberate negative
+RESULT, 2026-09-21, a meflib-based third-party reader: **only 05 crashed** — the deliberate negative
 control carrying the 1.1.2 declarations. 06 is byte-for-byte the same samples
 with only the declarations repaired and it decoded, which isolates the cause to
 metadata section 2. Everything else decoded, including 08 (foreign `.tmet`

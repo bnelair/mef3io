@@ -5,8 +5,8 @@ compressed, optionally encrypted format used for long intracranial and scalp
 EEG recordings — from **Python**, **MATLAB** and **C++**. One C++ core does
 the work, so every language reads and writes the same files the same way.
 Sessions written by mef3io open in the established MEF 3.0 tools (pymef,
-mef_tools, and viewers built on meflib, the reference C library), and sessions written by those tools open in
-mef3io.
+mef_tools, and viewers built on meflib, the reference C library), and
+sessions written by those tools open in mef3io.
 
 [![PyPI](https://img.shields.io/pypi/v/mef3io)](https://pypi.org/project/mef3io/)
 [![Python](https://img.shields.io/python/required-version-toml?tomlFilePath=https%3A%2F%2Fraw.githubusercontent.com%2Fbnelair%2Fmef3io%2Fmain%2Fpyproject.toml)](https://pypi.org/project/mef3io/)
@@ -72,8 +72,8 @@ More: the [Python](https://bnelair.github.io/mef3io/python/),
   `read_raw` returns the raw integer samples with a validity mask.
 - **Recordings that keep growing.** A session can be appended to for days or
   months; with one `Writer` kept open, each append costs time in proportion
-  to the new data, not to the recording so far. If a write is interrupted, the session can be checked and recovered —
-  see [Long recordings](https://bnelair.github.io/mef3io/long_recordings/) and
+  to the new data, not to the recording so far. If a write is interrupted,
+  the session can be checked and recovered — see [Long recordings](https://bnelair.github.io/mef3io/long_recordings/) and
   [Validating and repairing](https://bnelair.github.io/mef3io/validation/).
 - **Existing data and code.** It reads MEF 3.0 sessions from other writers,
   and `from mef3io import MefReader, MefWriter` runs code written for the
@@ -90,8 +90,8 @@ Sessions written by mef3io 1.1.2 and earlier read correctly in mef3io and
 pymef, but declare some buffer sizes as `0`, which can crash meflib-based
 readers. Opening one warns once. Appending with a current version repairs the
 segment it extends; `mef3io.repair_session` fixes the rest in place — see
-[Validating and repairing](https://bnelair.github.io/mef3io/validation/). Changes in every version are listed in the
-[release notes](https://github.com/bnelair/mef3io/releases).
+[Validating and repairing](https://bnelair.github.io/mef3io/validation/).
+Changes in every version are listed in the [release notes](https://github.com/bnelair/mef3io/releases).
 
 ## Scope and limitations
 

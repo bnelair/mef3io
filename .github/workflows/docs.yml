@@ -39,7 +39,7 @@ jobs:
         # does not spell it out; covers the generated API reference too.
         run: |
           test -d site
-          pattern="$(echo 'Y3liZXJbXHNfLV0qcHNn' | base64 -d)"
+          pattern="$(echo 'Y3liZXJbIF8tXSpwc2c=' | base64 -d)"
           rc=0; grep -rIilE -- "$pattern" site || rc=$?
           if [ "$rc" -ne 1 ]; then
             echo "::error::private product name found in the built site (files above), or grep failed (rc=$rc)"
