@@ -23,6 +23,9 @@ are supplied.
 Time-series **data blocks** (`.tdat` RED blocks) are written **unencrypted**
 even in an encrypted session — meflib's `RED_ENCRYPTION_LEVEL_DEFAULT` is
 `NO_ENCRYPTION`. Only metadata sections 2/3 and record bodies are encrypted.
+A block that another writer DID encrypt has only the first 16 bytes of its
+statistics table enciphered; see the RED block section of
+[mef3_format.md](mef3_format.md).
 
 ## Why "level-1 only" is not a thing
 
