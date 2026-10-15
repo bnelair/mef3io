@@ -30,12 +30,41 @@ typedef enum {
   MEF3IO_ERR_PASSWORD = 4,
   MEF3IO_ERR_CONFLICT = 5,   /* append fs/ufact/time conflict */
   MEF3IO_ERR_ARGUMENT = 6,   /* bad argument, unknown channel, buffer too small */
+  MEF3IO_ERR_CANCELLED = 7,  /* stopped through a mef3io_cancel_token; nothing left behind */
   MEF3IO_ERR_OTHER = 99
 } mef3io_error;
 
 typedef struct mef3io_reader mef3io_reader;
 typedef struct mef3io_writer mef3io_writer;
 typedef struct mef3io_records mef3io_records; /* record list builder (write side) */
+
+/* ----- cancellation and progress ----------------------------------------
+ *
+ * The *_ex functions below take two optional hooks (pass NULL for either):
+ *
+ *  - a cancel token. mef3io_cancel_token_cancel() may be called from ANY
+ *    thread while the operation runs on another; the operation notices
+ *    between units of work (a decoded block, a 1 MB copy chunk, a segment)
+ *    and returns MEF3IO_ERR_CANCELLED. A cancelled call writes no output and
+ *    leaves no partial file. Tokens are one-shot (no reset).
+ *  - a progress callback `progress(done, total, user_data)`, both in bytes.
+ *    Called first with (0, total), then at a bounded rate (about every 1% of
+ *    total or 250 ms), with `done` never decreasing, and finally with
+ *    (total, total) exactly once if the call succeeds. Never called
+ *    concurrently with itself, but possibly from a worker thread rather than
+ *    the caller's; it must not call back into the same handle.
+ */
+typedef struct mef3io_cancel_token mef3io_cancel_token;
+typedef void (*mef3io_progress_fn)(uint64_t done, uint64_t total, void* user_data);
+
+/* NULL on allocation failure. Free with mef3io_cancel_token_free (NULL ok)
+ * only after every call it was passed to has returned. */
+mef3io_cancel_token* mef3io_cancel_token_new(void);
+void mef3io_cancel_token_free(mef3io_cancel_token* token);
+/* Request cancellation. Thread-safe, idempotent; NULL is ignored. */
+void mef3io_cancel_token_cancel(mef3io_cancel_token* token);
+/* 1 once cancelled, else 0 (also 0 for NULL). */
+int mef3io_cancel_token_is_cancelled(const mef3io_cancel_token* token);
 
 const char* mef3io_version(void);
 /* Message for the last failing call on this thread ("" if none). */
@@ -144,6 +173,16 @@ int mef3io_reader_read(mef3io_reader* r, const char* channel, int64_t t0, int64_
 int mef3io_reader_read_raw(mef3io_reader* r, const char* channel, int64_t t0, int64_t t1,
                            int32_t* samples, uint8_t* valid, int64_t buf_len, int64_t* out_n,
                            int64_t* out_start_uutc);
+/* The same reads, cancellable and with progress (compressed bytes decoded).
+ * On MEF3IO_ERR_CANCELLED the buffers are left untouched. */
+int mef3io_reader_read_ex(mef3io_reader* r, const char* channel, int64_t t0, int64_t t1,
+                          double* buf, int64_t buf_len, int64_t* out_n,
+                          const mef3io_cancel_token* cancel, mef3io_progress_fn progress,
+                          void* user_data);
+int mef3io_reader_read_raw_ex(mef3io_reader* r, const char* channel, int64_t t0, int64_t t1,
+                              int32_t* samples, uint8_t* valid, int64_t buf_len, int64_t* out_n,
+                              int64_t* out_start_uutc, const mef3io_cancel_token* cancel,
+                              mef3io_progress_fn progress, void* user_data);
 
 typedef struct {
   int32_t segment_number;
@@ -308,6 +347,25 @@ int mef3io_recover_session(const char* mefd_path, int apply, int backup, const c
 
 int mef3io_extract_session(const char* tar_path, const char* dest_dir, int overwrite,
                            char* out_path, size_t out_path_bytes);
+
+/* Cancellable / progress-reporting versions (see "cancellation and progress").
+ * archive/extract: build in a temporary file/directory and rename into place
+ * only when complete, so a cancel leaves nothing (and an existing target is
+ * untouched). recover: every segment is SCANNED before anything is written; a
+ * cancel during the scan writes nothing at all, and the short write phase that
+ * follows is not interruptible (a cancel then is ignored). */
+int mef3io_archive_session_ex(const char* session_dir, const char* tar_path, int overwrite,
+                              char* out_path, size_t out_path_bytes,
+                              const mef3io_cancel_token* cancel, mef3io_progress_fn progress,
+                              void* user_data);
+int mef3io_extract_session_ex(const char* tar_path, const char* dest_dir, int overwrite,
+                              char* out_path, size_t out_path_bytes,
+                              const mef3io_cancel_token* cancel, mef3io_progress_fn progress,
+                              void* user_data);
+int mef3io_recover_session_ex(const char* mefd_path, int apply, int backup, const char* password,
+                              char* out_summary, size_t out_summary_bytes, int64_t* out_segments,
+                              const mef3io_cancel_token* cancel, mef3io_progress_fn progress,
+                              void* user_data);
 
 /* ----- writer ------------------------------------------------------------ */
 

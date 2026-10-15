@@ -28,6 +28,7 @@
 #include <string>
 #include <vector>
 
+#include "mef3io/control.hpp"
 #include "mef3io/types.hpp"
 
 namespace mef3io {
@@ -68,10 +69,20 @@ struct RecoveryReport {
 /// @param backup    copy each file to `<session>.recover-backup/` before writing.
 /// @param password  needed only to read encrypted metadata.
 ///
+/// @param ctl       optional hooks. Recovery SCANS every segment first and
+///                  writes only afterwards. `ctl.cancel` is honoured
+///                  throughout the scan (per segment, and per block examined
+///                  past the end of the index); a cancelled call throws
+///                  Cancelled having written NOTHING — no file, no backup. The
+///                  write phase that follows is not interruptible (whole-file
+///                  renames and 1024-byte header patches): a cancel requested
+///                  during it is ignored and the call returns its report.
+///                  `ctl.progress` reports bytes of .tidx + .tdat covered.
+///
 /// Declarations are NOT updated here — run `repair_session` afterwards, which
 /// is what the CLI does. Keeping the two apart means the dangerous operation
 /// stays small and the safe one stays reusable.
 RecoveryReport recover_session(const std::string& path, bool apply = false, bool backup = true,
-                               const std::string& password = "");
+                               const std::string& password = "", const Control& ctl = {});
 
 }  // namespace mef3io

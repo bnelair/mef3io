@@ -125,6 +125,25 @@ bytes cannot be trusted, neither can anything derived from them. Tar archives
 can be validated but not repaired; extract one first with
 [`extract_session`](python.md).
 
+### Stopping a run, and watching it
+
+`validate_session`, `Validator.validate`, `repair_session` and
+`recover_session` take `cancel=` (a `mef3io.CancelToken`) and
+`progress=` (`progress(done, total)` in bytes) — see
+[Cancelling and progress](python.md#cancelling-and-progress).
+
+A repair is **decided during the validation pass and written after it**, and
+recovery likewise scans every segment before it writes anything. So a cancel
+during the pass — which is where the time goes, especially with
+`exact_difference_bytes` reading a header per block — raises
+`mef3io.Cancelled` with the session byte-identical and no backup directory
+created. The write phase that follows (a `.tmet` replaced by rename and at
+most two 1024-byte header patches per segment) is not interruptible: a cancel
+then is ignored and the full report is returned, so a session is never left
+partly repaired. If a segment's files change between the pass and the write —
+a writer appended in the meantime — that segment is skipped with a reason
+rather than rewritten from the stale derivation.
+
 ## The warning you get on open
 
 Opening a session that leaves size declarations unset emits a
@@ -349,6 +368,9 @@ for s in report.segments:
 - **Tar archives are refused** — extract first.
 - It **streams**: the `.tdat`'s size, plus a 304-byte RED header and the one
   block it describes, at a handful of offsets. It never loads the data file.
+- **Cancellable without leaving anything half-done.** Every segment is scanned
+  before anything is written; `cancel=` during the scan leaves the session
+  untouched (see [Stopping a run](#stopping-a-run-and-watching-it)).
 
 ### When you should need it
 

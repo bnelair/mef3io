@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "mef3io/control.hpp"
 #include "mef3io/source.hpp"
 #include "mef3io/types.hpp"
 
@@ -78,8 +79,14 @@ class TarSource : public SessionSource {
 /// `tar -x` reproduces the tree. Output is deterministic (sorted entries,
 /// zeroed mtimes/owners) — archiving the same session twice yields identical
 /// bytes. Refuses an existing target unless `overwrite`.
+///
+/// `ctl.cancel` is checked between 1 MB copy chunks; `ctl.progress` reports the
+/// member bytes copied out of their total. The archive is written to a
+/// temporary file and renamed into place only once complete, so a cancelled
+/// (or failed) call leaves neither a partial archive nor the temporary file,
+/// and an existing target is untouched.
 std::string archive_session(const std::string& session_dir, const std::string& tar_path = "",
-                            bool overwrite = false);
+                            bool overwrite = false, const Control& ctl = {});
 
 /// Inverse of archive_session: unpack a session archive back into a directory
 /// and return its path. `dest_dir` empty strips the archive's ".tar" suffix
@@ -87,7 +94,13 @@ std::string archive_session(const std::string& session_dir, const std::string& t
 /// the archive is stripped, so `dest_dir` becomes the session directory
 /// itself; foreign archives (GNU/bsdtar/tarfile) work too. Refuses an
 /// existing target unless `overwrite`; a failed extraction is cleaned up.
+///
+/// The session is unpacked into a temporary sibling directory and moved into
+/// place only once complete, so a cancelled (`ctl.cancel`, checked between
+/// 1 MB chunks) or failed extraction leaves nothing behind — and, with
+/// `overwrite`, the existing target survives untouched until the new tree is
+/// whole. `ctl.progress` reports member bytes written out of their total.
 std::string extract_session(const std::string& tar_path, const std::string& dest_dir = "",
-                            bool overwrite = false);
+                            bool overwrite = false, const Control& ctl = {});
 
 }  // namespace mef3io

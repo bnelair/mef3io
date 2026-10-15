@@ -229,9 +229,13 @@ def test_validator_has_no_way_to_write(tmp_path):
     # ...and no write can be smuggled in through a parameter either.
     import inspect
 
+    # `cancel` / `progress` (#69) only stop or observe the pass; neither can
+    # make it write. Listed explicitly so anything else still fails here.
     assert set(inspect.signature(mef3io.Validator.validate).parameters) == {
         "self",
         "check_ids",
+        "cancel",
+        "progress",
     }
     assert set(inspect.signature(mef3io.Validator.check).parameters) == {"self", "check_id"}
     assert callable(mef3io.repair_session)

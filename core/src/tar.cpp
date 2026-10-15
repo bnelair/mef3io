@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <random>
 
 #include "mef3io/errors.hpp"
 
@@ -370,17 +372,20 @@ std::array<char, BLOCK> make_header(const std::string& member_path, std::uint64_
   return h;
 }
 
-void write_member_data(std::ofstream& out, const std::string& file_path, std::uint64_t size) {
+void write_member_data(std::ofstream& out, const std::string& file_path, std::uint64_t size,
+                       const Control& ctl, detail::ProgressReporter& progress) {
   std::ifstream in(file_path, std::ios::binary);
   if (!in) throw IoError("cannot open file: " + file_path);
   std::vector<char> buf(1 << 20);
   std::uint64_t remaining = size;
   while (remaining) {
+    ctl.check();
     const auto chunk = static_cast<std::streamsize>(std::min<std::uint64_t>(buf.size(), remaining));
     if (!in.read(buf.data(), chunk))
       throw IoError("file changed while archiving (short read): " + file_path);
     out.write(buf.data(), chunk);
     remaining -= static_cast<std::uint64_t>(chunk);
+    progress.add(static_cast<std::uint64_t>(chunk));
   }
   const std::uint64_t pad = round_up_block(size) - size;
   static const std::array<char, BLOCK> zeros{};
@@ -390,7 +395,7 @@ void write_member_data(std::ofstream& out, const std::string& file_path, std::ui
 }  // namespace
 
 std::string archive_session(const std::string& session_dir, const std::string& tar_path,
-                            bool overwrite) {
+                            bool overwrite, const Control& ctl) {
   fs::path src(session_dir);
   if (src.filename().empty()) src = src.parent_path();  // tolerate a trailing '/'
   if (!fs::is_directory(src)) throw IoError("session path is not a directory: " + session_dir);
@@ -419,30 +424,46 @@ std::string archive_session(const std::string& session_dir, const std::string& t
     entries.emplace_back(fs::relative(e.path(), src).generic_string(), e.is_directory());
   }
   std::sort(entries.begin(), entries.end());
+  ctl.check();
+
+  // The total costs one stat per file, so it is taken only for a listener.
+  std::uint64_t total = 0;
+  if (ctl.progress)
+    for (const auto& [rel, is_dir] : entries)
+      if (!is_dir) total += static_cast<std::uint64_t>(fs::file_size(src / rel));
+  detail::ProgressReporter progress(ctl, total);
 
   const std::string tmp_path = out_path + ".tmp";
   try {
+    progress.start();
     std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
     if (!out) throw IoError("cannot create archive: " + tmp_path);
 
     auto root_header = make_header(root_name, 0, true);
     out.write(root_header.data(), BLOCK);
     for (const auto& [rel, is_dir] : entries) {
+      ctl.check();
       const std::string member = root_name + "/" + rel;
       const std::string abs = (src / rel).string();
       const std::uint64_t size = is_dir ? 0 : static_cast<std::uint64_t>(fs::file_size(abs));
       auto header = make_header(member, size, is_dir);
       out.write(header.data(), BLOCK);
-      if (!is_dir) write_member_data(out, abs, size);
+      if (!is_dir) write_member_data(out, abs, size, ctl, progress);
     }
     static const std::array<char, BLOCK> zeros{};
     out.write(zeros.data(), BLOCK);
     out.write(zeros.data(), BLOCK);
     out.flush();
     if (!out) throw IoError("write failed: " + tmp_path);
+    // Last chance to stop: after this the old target is replaced. `out` is
+    // destroyed (closed) before the handler runs, so the remove below works on
+    // Windows too. finish() is inside the try for the same reason: a progress
+    // callback that throws there must not leave a finished-looking archive.
+    ctl.check();
+    progress.finish();
   } catch (...) {
     std::error_code ec;
-    fs::remove(tmp_path, ec);
+    fs::remove(tmp_path, ec);  // includes Cancelled: no partial archive left behind
     throw;
   }
   if (overwrite && fs::exists(out_path)) fs::remove(out_path);  // Windows rename won't replace
@@ -451,7 +472,7 @@ std::string archive_session(const std::string& session_dir, const std::string& t
 }
 
 std::string extract_session(const std::string& tar_path, const std::string& dest_dir,
-                            bool overwrite) {
+                            bool overwrite, const Control& ctl) {
   if (!path_has_suffix(tar_path, ".mefd.tar"))
     throw IoError("session archive must end with .mefd.tar: " + tar_path);
   if (!dest_dir.empty() && !path_has_suffix(dest_dir, ".mefd"))
@@ -468,7 +489,6 @@ std::string extract_session(const std::string& tar_path, const std::string& dest
       throw IoError("extraction target already exists (pass overwrite=true): " + dest);
     if (!fs::is_directory(dest))
       throw IoError("extraction target exists and is not a directory: " + dest);
-    fs::remove_all(dest);
   }
 
   // Members are written under `dest` with the session root stripped, so
@@ -482,42 +502,107 @@ std::string extract_session(const std::string& tar_path, const std::string& dest
     return p.substr(prefix.size());
   };
 
+  std::uint64_t total = 0;
+  if (ctl.progress)
+    for (const auto& [p, m] : idx.files())
+      if (!rel_of(p).empty()) total += m.size;
+  detail::ProgressReporter progress(ctl, total);
+
+  // Unpack into a temporary SIBLING (same filesystem, so the final move is a
+  // rename) and move it into place only once it is whole. A cancelled or
+  // failed extraction then leaves nothing, and with `overwrite` the existing
+  // target is not touched until the replacement is complete — it used to be
+  // deleted first, so a failure part-way lost both. The name is unique per
+  // call so a leftover from a crashed run is never mistaken for ours, and
+  // nothing that is not ours is ever removed.
+  fs::path final_path(dest);
+  if (final_path.filename().empty()) final_path = final_path.parent_path();  // trailing '/'
+  std::string tag;
+  {
+    std::random_device rd;
+    const unsigned long long v =
+        (static_cast<unsigned long long>(rd()) << 32) ^ static_cast<unsigned long long>(rd());
+    char hex[17];
+    std::snprintf(hex, sizeof hex, "%016llx", v);
+    tag = hex;
+  }
+  const fs::path staging =
+      final_path.parent_path() / (final_path.filename().string() + ".mef3io-extract-" + tag);
+  const fs::path retired =
+      final_path.parent_path() / (final_path.filename().string() + ".mef3io-replaced-" + tag);
+  if (fs::exists(staging) || fs::exists(retired))
+    throw IoError("staging directory already exists: " + staging.string());
+
   std::ifstream in(tar_path, std::ios::binary);
   if (!in) throw IoError("cannot open archive: " + tar_path);
 
   try {
-    fs::create_directories(dest);
+    progress.start();
+    fs::create_directories(staging);
     for (const auto& d : idx.dirs()) {
       const std::string rel = rel_of(d);
       if (rel.empty()) continue;
       check_member_safe(rel, tar_path);
-      fs::create_directories(fs::path(dest) / fs::path(rel));
+      fs::create_directories(staging / fs::path(rel));
     }
     std::vector<char> buf(1 << 20);
     for (const auto& [p, m] : idx.files()) {
       const std::string rel = rel_of(p);
       if (rel.empty()) continue;
       check_member_safe(rel, tar_path);
-      const fs::path out_path = fs::path(dest) / fs::path(rel);
+      ctl.check();
+      const fs::path out_path = staging / fs::path(rel);
       fs::create_directories(out_path.parent_path());
       std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
       if (!out) throw IoError("cannot create file: " + out_path.string());
       in.seekg(static_cast<std::streamoff>(m.offset));
       std::uint64_t remaining = m.size;
       while (remaining) {
+        ctl.check();
         const auto chunk =
             static_cast<std::streamsize>(std::min<std::uint64_t>(buf.size(), remaining));
         if (!in.read(buf.data(), chunk)) throw IoError("truncated tar archive: " + tar_path);
         out.write(buf.data(), chunk);
         remaining -= static_cast<std::uint64_t>(chunk);
+        progress.add(static_cast<std::uint64_t>(chunk));
       }
       out.flush();
       if (!out) throw IoError("write failed: " + out_path.string());
     }
+    // The last point a cancel or a throwing callback can stop the call; past
+    // here the target is replaced.
+    ctl.check();
+    progress.finish();
   } catch (...) {
     std::error_code ec;
-    fs::remove_all(dest, ec);  // never leave a half-extracted session behind
+    fs::remove_all(staging, ec);  // never leave a half-extracted session behind
     throw;
+  }
+
+  // Swap in. An existing target (overwrite, checked above) is renamed aside
+  // first and deleted only after the new tree is in place, so no failure here
+  // can lose both: if the second rename fails the old one is put back.
+  const bool replacing = fs::exists(final_path);
+  try {
+    if (replacing) fs::rename(final_path, retired);
+    try {
+      fs::rename(staging, final_path);
+    } catch (...) {
+      std::error_code ec;
+      if (replacing) fs::rename(retired, final_path, ec);
+      throw;
+    }
+  } catch (...) {
+    std::error_code ec;
+    fs::remove_all(staging, ec);
+    throw;
+  }
+  if (replacing) {
+    std::error_code ec;
+    fs::remove_all(retired, ec);
+    if (ec)
+      throw IoError("session extracted to " + dest + ", but the directory it replaced could "
+                    "not be removed: " + retired.string() + " (" + ec.message() + ")");
   }
   return dest;
 }

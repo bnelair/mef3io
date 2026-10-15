@@ -30,6 +30,7 @@ def have_cpp_backend() -> bool:
 
 
 from ._archive import archive_session, extract_session  # noqa: E402
+from ._cancel import CancelToken, Cancelled  # noqa: E402
 from ._reader import (  # noqa: E402
     BlockCopyWarning,
     Reader,
@@ -79,6 +80,7 @@ __all__ = [
     "UnreadableSegmentWarning",
     "MefError", "FormatError", "CrcError", "PasswordError", "IoError",
     "WriteConflictError",
+    "CancelToken", "Cancelled",
     "have_cpp_backend", "__version__",
 ]
 

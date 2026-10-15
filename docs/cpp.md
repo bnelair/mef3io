@@ -101,6 +101,51 @@ start after the segment end) and throw `WriteConflictError` on violation.
 
 Everything throws from the `mef3io::MefError` hierarchy (`errors.hpp`):
 `IoError`, `FormatError`, `CrcError`, `PasswordError`, `WriteConflictError`.
+The one exception is `mef3io::Cancelled` (below), thrown only when a
+`CancelToken` you passed is cancelled.
+
+## Cancelling and progress
+
+Reads and the long operations take an optional `const mef3io::Control&` as
+their last argument (`control.hpp`):
+
+```cpp
+#include "mef3io/control.hpp"
+
+mef3io::CancelToken token;               // cancel() from any thread
+mef3io::Control ctl;
+ctl.cancel = &token;                     // not owned; must outlive the call
+ctl.progress = [](std::uint64_t done, std::uint64_t total) { /* bytes */ };
+
+try {
+  auto x = reader.read("ch1", t0, t1, mef3io::Reader::kUseDefaultThreads, ctl);
+} catch (const mef3io::Cancelled&) {
+  // superseded
+}
+```
+
+Taking it: `Reader::read` / `read_raw`, `Session::collect_blocks`,
+`archive_session`, `extract_session`, `validate_session`, `repair_session`,
+`recover_session`. The guarantees are the ones in the
+[Python guide](python.md#cancelling-and-progress) — nothing is left behind,
+repair/recover write only after a cancellable read-only pass, progress is
+`(0, total)` … monotonic … `(total, total)` once on success, at a bounded
+rate, never concurrently, possibly from a worker thread.
+
+`mef3io::Cancelled` is deliberately **not** a `std::exception`. The core
+contains per-segment failures with `catch (const std::exception&)` (a lenient
+`Session`, the validator's skipped segments); a cancellation caught there
+would be reported as damage and the operation would carry on. Catch it by
+name. A progress callback that throws aborts the operation the same way and
+its exception propagates.
+
+C ABI: `mef3io_cancel_token_new` / `_cancel` / `_is_cancelled` / `_free`,
+a `mef3io_progress_fn(done, total, user_data)` callback, and the `*_ex`
+variants `mef3io_reader_read_ex`, `mef3io_reader_read_raw_ex`,
+`mef3io_archive_session_ex`, `mef3io_extract_session_ex` and
+`mef3io_recover_session_ex` (the existing functions are unchanged). A
+cancelled call returns `MEF3IO_ERR_CANCELLED`.
+
 
 ## Module map
 
@@ -121,6 +166,7 @@ Everything throws from the `mef3io::MefError` hierarchy (`errors.hpp`):
 | `session_writer.hpp` | precision inference, quantization, NaN splitting, segments, records |
 | `records.hpp` | record (.rdat/.ridx) read + write |
 | `parallel.hpp` | deterministic `parallel_for` |
+| `control.hpp` | `CancelToken`, `Cancelled`, progress callback type, `Control` |
 | `version.hpp` | `mef3io::version()` |
 | `c_api.h` | the flat C ABI (below) |
 
@@ -131,7 +177,7 @@ reader/writer surface as `extern "C"` functions for FFI consumers (the
 MATLAB MEX is built on it). Conventions:
 
 - every fallible call returns `MEF3IO_OK` (0) or an error code
-  (`MEF3IO_ERR_IO/FORMAT/CRC/PASSWORD/CONFLICT/ARGUMENT`); the message is in
+  (`MEF3IO_ERR_IO/FORMAT/CRC/PASSWORD/CONFLICT/ARGUMENT/CANCELLED`); the message is in
   `mef3io_last_error()` (thread-local);
 - handles are opaque (`mef3io_reader*`, `mef3io_writer*`); close functions
   accept NULL;

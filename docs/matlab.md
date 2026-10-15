@@ -126,6 +126,16 @@ Session naming is enforced at every entry point: directories must end
 `.mefd`, archives `.mefd.tar` — anything else is refused, so a stray
 directory or file can never be misread (or overwritten) as a session.
 
+## Not yet in MATLAB: cancelling and progress
+
+The Python and C APIs can cancel a read or a long operation from another
+thread and report its progress
+([Cancelling and progress](python.md#cancelling-and-progress)). The MATLAB
+classes do not expose this yet: a MEX call blocks MATLAB's single interpreter
+thread, so there is no second MATLAB thread to cancel from. The C ABI has the
+hooks (`mef3io_cancel_token_*`, the `*_ex` functions) for when this is wired
+up.
+
 ## How it is put together
 
 `matlab/mef3io_mex.cpp` is a single command-dispatch MEX over the flat C ABI

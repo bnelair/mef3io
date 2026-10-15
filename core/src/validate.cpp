@@ -901,8 +901,13 @@ std::vector<SegmentFiles> discover_segments(const SessionSource& src,
 
 // --- deriving the truth ------------------------------------------------------
 
+// `ctl` / `progress`: with exact_difference_bytes this walks one read per RED
+// block, which is where a large segment spends its time — so it is checked
+// for cancellation per block, and reports the .tdat bytes it has covered as
+// `data_base + end of block`.
 SegmentTruth derive_truth(const SessionSource& src, const SegmentState& s,
-                          const ValidateOptions& opts) {
+                          const ValidateOptions& opts, const Control& ctl,
+                          detail::ProgressReporter& progress, std::uint64_t data_base) {
   SegmentTruth t;
   const auto& idx = s.tidx_bytes;
   const std::size_t from_size = idx.size() > fmt::UNIVERSAL_HEADER_BYTES
@@ -1011,6 +1016,8 @@ SegmentTruth derive_truth(const SessionSource& src, const SegmentState& s,
     }
 
     if (opts.exact_difference_bytes && t.offsets_sane) {
+      ctl.check();
+      progress.advance_to(data_base + static_cast<std::uint64_t>(e.file_offset) + block_bytes);
       // Every block must contribute, or the maximum is taken over a subset and
       // is therefore an UNDER-estimate — the direction that truncates a
       // reader's buffer. Each way a block can fail to contribute sets
@@ -1345,7 +1352,8 @@ std::vector<std::string> Report::repairable_check_ids() const {
 namespace {
 
 // The shared body of validate/repair. `repair` empty => read-only.
-Report run(const std::string& path, const ValidateOptions& opts, const RepairSelection* repair) {
+Report run(const std::string& path, const ValidateOptions& opts, const RepairSelection* repair,
+           const Control& ctl) {
   auto src = open_session_source(path);
   Report report;
 
@@ -1380,24 +1388,69 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
   }
   std::set<std::string> channels_to_stamp;
 
-  for (const auto& files : discover_segments(*src, opts)) {
+  const std::vector<SegmentFiles> segments = discover_segments(*src, opts);
+
+  // Progress counts each segment's .tmet + .tidx + .tdat bytes — the bytes the
+  // pass covers, though only the index and a header per block are actually
+  // read. Sized only for a listener (three stats per segment).
+  std::vector<std::uint64_t> seg_bytes;
+  std::uint64_t total = 0;
+  if (ctl.progress) {
+    seg_bytes.reserve(segments.size());
+    for (const auto& f : segments) {
+      std::uint64_t b = 0;
+      if (f.missing.empty()) {
+        for (const auto* rel : {&f.tmet_rel, &f.tidx_rel, &f.tdat_rel}) {
+          try {
+            b += src->file_size(*rel);
+          } catch (const std::exception&) { /* reported by the pass itself */ }
+        }
+      }
+      seg_bytes.push_back(b);
+      total += b;
+    }
+  }
+  detail::ProgressReporter progress(ctl, total);
+  progress.start();
+  std::uint64_t seg_base = 0;
+
+  // A repair is decided during the pass and WRITTEN after it, so a cancel can
+  // never leave a session with some segments repaired and some not: the pass
+  // (all the reading, nearly all the time) is cancellable and writes nothing;
+  // the write phase is not. Only what the write needs is kept per segment —
+  // the new declarations and a checksum of the bytes they were derived from.
+  struct PendingRepair {
+    SegmentFiles files;
+    RepairBuffer buffer;
+    si1 s2_encryption = 0;
+    fmt::UniversalHeader tmet_uh;           // password validation fields
+    ui4 tmet_crc = 0, tidx_uh_crc = 0, tdat_uh_crc = 0;  // as validated
+    std::vector<std::size_t> finding_indices;  // into report.findings
+    /// The "no body CRC; this repair computes one" note, if any, so it can be
+    /// withdrawn when the write does not happen after all.
+    std::optional<std::size_t> crc_note_index;
+  };
+  std::vector<PendingRepair> pending;
+
+  for (std::size_t si = 0; si < segments.size(); ++si) {
+    const SegmentFiles& files = segments[si];
+    ctl.check();
+    if (si > 0 && progress.active()) seg_base += seg_bytes[si - 1];
+    progress.advance_to(seg_base);
+
     auto skip = [&](const std::string& reason) {
       report.skipped.push_back({files.channel, files.segment_number, files.description, reason});
     };
 
     // A finding is marked `repaired` only once the segment's writes have all
-    // succeeded, so these are staged out here where the catch below can still
-    // reach them. `files_written` records what was already replaced when a
-    // later write throws — a segment whose three files disagree is recoverable
-    // only if the operator is told which ones moved.
+    // succeeded (in the write phase below), so these are staged out here
+    // where the catch below can still reach them.
     std::vector<Finding> staged;
     std::vector<std::size_t> pending_repair;  // indices into `staged`
-    std::vector<std::string> files_written;
 
-    // One bad segment must not cost the caller the record of what was already
-    // rewritten in the ones before it. On a 254-channel session an exception
-    // escaping here would discard the whole report, leaving no way to tell
-    // which files had been modified.
+    // One bad segment must not cost the caller the record of the others. On a
+    // 254-channel session an exception escaping here would discard the whole
+    // report. (Cancelled is not a std::exception and passes straight through.)
     try {
 
     if (!files.missing.empty()) {
@@ -1424,6 +1477,7 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       skip("segment file is shorter than its fixed-size header");
       continue;
     }
+    progress.advance_to(seg_base + state.tmet_bytes.size() + state.tidx_bytes.size());
 
     // CRC checks read the raw bytes, so they run before the metadata loader
     // (which throws on a bad CRC) and can report instead of aborting.
@@ -1481,7 +1535,9 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       continue;
     }
 
-    const SegmentTruth truth = derive_truth(*src, state, opts);
+    const SegmentTruth truth =
+        derive_truth(*src, state, opts, ctl, progress,
+                     seg_base + state.tmet_bytes.size() + state.tidx_bytes.size());
     if (!truth.has_blocks) {
       ++report.segments_checked;
       skip(state.tdat_size > fmt::UNIVERSAL_HEADER_BYTES
@@ -1566,124 +1622,186 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
 
     if (!any_repair) {
       report.findings.insert(report.findings.end(), staged.begin(), staged.end());
+      staged.clear();
       continue;
     }
 
-    // Write back. Only declarations move: section 2 and the universal headers.
-    const std::string tmet_path = src->describe(files.tmet_rel);
-    const std::string tidx_path = src->describe(files.tidx_rel);
-    const std::string tdat_path = src->describe(files.tdat_rel);
-    if (repair->backup) {
-      const fsys::path backup_root = backup_root_for(path);
-      if (buffer.tmet_dirty) back_up(tmet_path, backup_root, files.tmet_rel);
-      if (buffer.tidx_dirty) back_up(tidx_path, backup_root, files.tidx_rel);
-      // Only the universal header of a .tdat is ever rewritten, so only that
-      // needs preserving; copying the whole data file would be a multi-gigabyte
-      // write to protect 1024 bytes.
-      if (buffer.tdat_dirty)
-        back_up(tdat_path, backup_root, files.tdat_rel + ".universal-header",
-                fmt::UNIVERSAL_HEADER_BYTES);
+    // If the file arrived with no body CRC at all — meflib's CRC_NO_ENTRY,
+    // which a streaming writer legitimately leaves — then computing one now
+    // turns "nobody ever verified these bytes" into "CRC verified", and the
+    // warning that said so disappears from every later report. Recomputing
+    // is unavoidable once section 2 changes; losing the audit trail is not.
+    std::optional<std::size_t> crc_note;  // index into `staged`
+    if (buffer.tmet_dirty && byteio::read<ui4>(state.tmet_bytes, 4) == fmt::CRC_NO_ENTRY) {
+      Finding note;
+      note.check_id = "crc.metadata";
+      note.severity = Severity::Warning;
+      note.repairable = false;
+      note.channel = files.channel;
+      note.segment_number = files.segment_number;
+      note.path = files.description;
+      note.field = "body_CRC";
+      note.stored = "NO_ENTRY";
+      note.expected = "computed during this repair";
+      note.message =
+          "this segment carried no body CRC, so its metadata was never verified; the repair "
+          "has now computed one over bytes nothing had checked — the file will read as "
+          "verified from here on, but this pass is the only record that it was not";
+      crc_note = staged.size();
+      staged.push_back(std::move(note));
     }
 
-    if (buffer.tmet_dirty) {
-      std::vector<ui1> file = state.tmet_bytes;
-      std::span<ui1> s2_image(file.data() + fmt::METADATA_SECTION_2_OFFSET,
-                              fmt::TIME_SERIES_METADATA_SECTION_2_BYTES);
-      // Section 1 says which key section 2 is under — meflib allows either
-      // level, and assuming level 1 re-encrypts a level-2 section with the
-      // wrong key, leaving CRC-valid garbage no reader can open.
-      const si1 s2_enc = state.md.section1.section_2_encryption;
-      std::optional<std::array<ui1, fmt::PASSWORD_BYTES>> s2_key;
-      if (s2_enc > 0) {
-        auto keys = crypto::validate_password(
-            opts.password, state.md.universal_header.level_1_password_validation_field,
-            state.md.universal_header.level_2_password_validation_field);
-        s2_key = (s2_enc == fmt::LEVEL_2_ENCRYPTION) ? keys.level2_key : keys.level1_key;
-        if (!s2_key)
-          throw PasswordError("section 2 is encrypted at level " + std::to_string(s2_enc) +
-                              "; the supplied password does not yield that key: " + tmet_path);
-        auto plain = crypto::aes128_ecb_decrypt(s2_image, *s2_key);
-        std::copy(plain.begin(), plain.end(), s2_image.begin());
-      }
-      // Patch only the fields a repair can change, in place. Re-serializing the
-      // whole section would zero the protected and discretionary regions (4320
-      // bytes this struct does not model) and could shorten an un-terminated
-      // text field.
-      buffer.s2.serialize_derived_fields(s2_image);
-      if (s2_enc > 0) {
-        auto enc = crypto::aes128_ecb_encrypt(s2_image, *s2_key);
-        std::copy(enc.begin(), enc.end(), s2_image.begin());
-      }
-      {
-        fmt::UniversalHeader uh = buffer.tmet_uh;
-        fmt::provenance::stamp_modified(uh, fmt::provenance::Operation::HeaderRepair);
-        uh.serialize(file);
-      }
-      // If the file arrived with no body CRC at all — meflib's CRC_NO_ENTRY,
-      // which a streaming writer legitimately leaves — then computing one now
-      // turns "nobody ever verified these bytes" into "CRC verified", and the
-      // warning that said so disappears from every later report. Recomputing
-      // is unavoidable once section 2 changes; losing the audit trail is not.
-      if (byteio::read<ui4>(state.tmet_bytes, 4) == fmt::CRC_NO_ENTRY) {
-        Finding note;
-        note.check_id = "crc.metadata";
-        note.severity = Severity::Warning;
-        note.repairable = false;
-        note.channel = files.channel;
-        note.segment_number = files.segment_number;
-        note.path = files.description;
-        note.field = "body_CRC";
-        note.stored = "NO_ENTRY";
-        note.expected = "computed during this repair";
-        note.message =
-            "this segment carried no body CRC, so its metadata was never verified; the repair "
-            "has now computed one over bytes nothing had checked — the file will read as "
-            "verified from here on, but this pass is the only record that it was not";
-        staged.push_back(std::move(note));
-      }
-      const ui4 body_crc = crc::calculate(std::span<const ui1>(file).subspan(
-          fmt::UNIVERSAL_HEADER_BYTES,
-          fmt::METADATA_FILE_BYTES - fmt::UNIVERSAL_HEADER_BYTES));
-      byteio::write<ui4>(file, 4, body_crc);
-      const ui4 header_crc = crc::calculate(
-          std::span<const ui1>(file).subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4));
-      byteio::write<ui4>(file, 0, header_crc);
-      // Recorded BEFORE the write, not after. A failure part-way through
-      // leaves bytes on disk — overwrite_universal_header patches in place and
-      // only then flushes, and 1024 bytes is smaller than a typical stream
-      // buffer, so a failed flush has already modified the file — and a path
-      // pushed afterwards is missing from exactly the list an operator uses to
-      // decide what to restore. Naming a file that turned out untouched costs
-      // nothing; omitting one that was modified sends them to restore the
-      // wrong set. Same reasoning as the append's wrote_* flags.
-      files_written.push_back(files.tmet_rel);
-      write_all_atomic(tmet_path, file);
-    }
-    if (buffer.tidx_dirty) {
-      files_written.push_back(files.tidx_rel);
-      overwrite_universal_header(tidx_path, buffer.tidx_uh);
-    }
-    if (buffer.tdat_dirty) {
-      files_written.push_back(files.tdat_rel);
-      overwrite_universal_header(tdat_path, buffer.tdat_uh);
-    }
-    // Everything reached disk: only now is a finding a repair.
-    for (const auto i : pending_repair) staged[i].repaired = true;
-    ++report.segments_repaired;
-    {
-      // Remember channels whose NON-last segment changed: their last segment
-      // gets a segment-repaired stamp once every segment has been processed.
-      const fsys::path channel_dir = fsys::path(path) / (files.channel + ".timd");
-      const auto last = detail::last_segment_dir(channel_dir);
-      if (last && detail::segment_number_of(last->stem().string()) != files.segment_number)
-        channels_to_stamp.insert(files.channel);
-    }
+    // Queue the write. The findings go into the report now, in segment order,
+    // and are flipped to `repaired` only once the write phase succeeds.
+    PendingRepair pr;
+    pr.files = files;
+    pr.buffer = std::move(buffer);
+    pr.s2_encryption = state.md.section1.section_2_encryption;
+    pr.tmet_uh = state.md.universal_header;
+    pr.tmet_crc = crc::calculate(state.tmet_bytes);
+    pr.tidx_uh_crc = crc::calculate(
+        std::span<const ui1>(state.tidx_bytes).subspan(0, fmt::UNIVERSAL_HEADER_BYTES));
+    pr.tdat_uh_crc = crc::calculate(state.tdat_uh);
+    const std::size_t first = report.findings.size();
+    for (const auto i : pending_repair) pr.finding_indices.push_back(first + i);
+    if (crc_note) pr.crc_note_index = first + *crc_note;
     report.findings.insert(report.findings.end(), staged.begin(), staged.end());
+    staged.clear();
+    pending.push_back(std::move(pr));
     } catch (const std::exception& e) {
       // The findings still belong in the report — losing them would hide what
-      // was wrong with the segment as well as failing to fix it. None is marked
-      // repaired: whatever was staged did not all reach disk.
+      // was wrong with the segment. Nothing has been written in this phase.
       report.findings.insert(report.findings.end(), staged.begin(), staged.end());
+      skip(std::string("aborted: ") + e.what());
+    }
+  }
+  // The last point at which a cancel is honoured. Nothing has been written.
+  ctl.check();
+
+  // ---- write phase: not cancellable. Each segment is a .tmet replaced by
+  // rename plus at most two 1024-byte header patches; stopping between
+  // segments would leave the session partly repaired. ----------------------
+  for (const auto& pr : pending) {
+    const SegmentFiles& files = pr.files;
+    const RepairBuffer& buffer = pr.buffer;
+    auto skip = [&](const std::string& reason) {
+      report.skipped.push_back({files.channel, files.segment_number, files.description, reason});
+    };
+    // `files_written` records what was already replaced when a later write
+    // throws — a segment whose three files disagree is recoverable only if the
+    // operator is told which ones moved.
+    std::vector<std::string> files_written;
+    try {
+      // The pass and the write are further apart than they once were, so check
+      // the bytes are still the ones the declarations were derived from. A
+      // writer that appended in between changed them; rewriting from the stale
+      // derivation would undo its update.
+      std::vector<ui1> tmet_bytes = src->read_all(files.tmet_rel);
+      const auto tidx_head = src->read_range(files.tidx_rel, 0, fmt::UNIVERSAL_HEADER_BYTES);
+      const auto tdat_head = src->read_range(files.tdat_rel, 0, fmt::UNIVERSAL_HEADER_BYTES);
+      if (crc::calculate(tmet_bytes) != pr.tmet_crc || crc::calculate(tidx_head) != pr.tidx_uh_crc ||
+          crc::calculate(tdat_head) != pr.tdat_uh_crc) {
+        skip("changed while it was being validated (is a writer running?); nothing was "
+             "repaired in this segment — run the repair again");
+        if (pr.crc_note_index) {
+          Finding& note = report.findings[*pr.crc_note_index];
+          note.expected = "not computed: the repair of this segment was skipped";
+          note.message = "this segment carries no body CRC, so its metadata has never been "
+                         "verified; the repair that would have computed one was skipped";
+        }
+        continue;
+      }
+
+      // Write back. Only declarations move: section 2 and the universal headers.
+      const std::string tmet_path = src->describe(files.tmet_rel);
+      const std::string tidx_path = src->describe(files.tidx_rel);
+      const std::string tdat_path = src->describe(files.tdat_rel);
+      if (repair->backup) {
+        const fsys::path backup_root = backup_root_for(path);
+        if (buffer.tmet_dirty) back_up(tmet_path, backup_root, files.tmet_rel);
+        if (buffer.tidx_dirty) back_up(tidx_path, backup_root, files.tidx_rel);
+        // Only the universal header of a .tdat is ever rewritten, so only that
+        // needs preserving; copying the whole data file would be a
+        // multi-gigabyte write to protect 1024 bytes.
+        if (buffer.tdat_dirty)
+          back_up(tdat_path, backup_root, files.tdat_rel + ".universal-header",
+                  fmt::UNIVERSAL_HEADER_BYTES);
+      }
+
+      if (buffer.tmet_dirty) {
+        std::vector<ui1>& file = tmet_bytes;
+        std::span<ui1> s2_image(file.data() + fmt::METADATA_SECTION_2_OFFSET,
+                                fmt::TIME_SERIES_METADATA_SECTION_2_BYTES);
+        // Section 1 says which key section 2 is under — meflib allows either
+        // level, and assuming level 1 re-encrypts a level-2 section with the
+        // wrong key, leaving CRC-valid garbage no reader can open.
+        const si1 s2_enc = pr.s2_encryption;
+        std::optional<std::array<ui1, fmt::PASSWORD_BYTES>> s2_key;
+        if (s2_enc > 0) {
+          auto keys = crypto::validate_password(opts.password,
+                                                pr.tmet_uh.level_1_password_validation_field,
+                                                pr.tmet_uh.level_2_password_validation_field);
+          s2_key = (s2_enc == fmt::LEVEL_2_ENCRYPTION) ? keys.level2_key : keys.level1_key;
+          if (!s2_key)
+            throw PasswordError("section 2 is encrypted at level " + std::to_string(s2_enc) +
+                                "; the supplied password does not yield that key: " + tmet_path);
+          auto plain = crypto::aes128_ecb_decrypt(s2_image, *s2_key);
+          std::copy(plain.begin(), plain.end(), s2_image.begin());
+        }
+        // Patch only the fields a repair can change, in place. Re-serializing
+        // the whole section would zero the protected and discretionary regions
+        // (4320 bytes this struct does not model) and could shorten an
+        // un-terminated text field.
+        buffer.s2.serialize_derived_fields(s2_image);
+        if (s2_enc > 0) {
+          auto enc = crypto::aes128_ecb_encrypt(s2_image, *s2_key);
+          std::copy(enc.begin(), enc.end(), s2_image.begin());
+        }
+        {
+          fmt::UniversalHeader uh = buffer.tmet_uh;
+          fmt::provenance::stamp_modified(uh, fmt::provenance::Operation::HeaderRepair);
+          uh.serialize(file);
+        }
+        const ui4 body_crc = crc::calculate(std::span<const ui1>(file).subspan(
+            fmt::UNIVERSAL_HEADER_BYTES,
+            fmt::METADATA_FILE_BYTES - fmt::UNIVERSAL_HEADER_BYTES));
+        byteio::write<ui4>(file, 4, body_crc);
+        const ui4 header_crc = crc::calculate(
+            std::span<const ui1>(file).subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4));
+        byteio::write<ui4>(file, 0, header_crc);
+        // Recorded BEFORE the write, not after. A failure part-way through
+        // leaves bytes on disk — overwrite_universal_header patches in place
+        // and only then flushes, and 1024 bytes is smaller than a typical
+        // stream buffer, so a failed flush has already modified the file — and
+        // a path pushed afterwards is missing from exactly the list an operator
+        // uses to decide what to restore. Naming a file that turned out
+        // untouched costs nothing; omitting one that was modified sends them to
+        // restore the wrong set. Same reasoning as the append's wrote_* flags.
+        files_written.push_back(files.tmet_rel);
+        write_all_atomic(tmet_path, file);
+      }
+      if (buffer.tidx_dirty) {
+        files_written.push_back(files.tidx_rel);
+        overwrite_universal_header(tidx_path, buffer.tidx_uh);
+      }
+      if (buffer.tdat_dirty) {
+        files_written.push_back(files.tdat_rel);
+        overwrite_universal_header(tdat_path, buffer.tdat_uh);
+      }
+      // Everything reached disk: only now is a finding a repair.
+      for (const auto i : pr.finding_indices) report.findings[i].repaired = true;
+      ++report.segments_repaired;
+      {
+        // Remember channels whose NON-last segment changed: their last segment
+        // gets a segment-repaired stamp once every segment has been processed.
+        const fsys::path channel_dir = fsys::path(path) / (files.channel + ".timd");
+        const auto last = detail::last_segment_dir(channel_dir);
+        if (last && detail::segment_number_of(last->stem().string()) != files.segment_number)
+          channels_to_stamp.insert(files.channel);
+      }
+    } catch (const std::exception& e) {
+      // None of this segment's findings is marked repaired: whatever was
+      // staged did not all reach disk.
       std::string reason = std::string("aborted: ") + e.what();
       if (!files_written.empty()) {
         std::string list;
@@ -1751,17 +1869,19 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     }
   }
 
+  progress.finish();
   return report;
 }
 
 }  // namespace
 
-Report validate_session(const std::string& path, const ValidateOptions& opts) {
-  return run(path, opts, nullptr);
+Report validate_session(const std::string& path, const ValidateOptions& opts,
+                        const Control& ctl) {
+  return run(path, opts, nullptr, ctl);
 }
 
 Report repair_session(const std::string& path, const RepairSelection& selection,
-                      const ValidateOptions& opts) {
+                      const ValidateOptions& opts, const Control& ctl) {
   if (selection.check_ids.empty())
     throw std::invalid_argument(
         "repair_session: no checks selected. Repairs are never implicit — pass the check ids to "
@@ -1769,7 +1889,7 @@ Report repair_session(const std::string& path, const RepairSelection& selection,
   if (path_has_suffix(path, ".tar"))
     throw IoError("cannot repair a tar session archive in place: " + path +
                   " (extract it first with extract_session)");
-  return run(path, opts, &selection);
+  return run(path, opts, &selection, ctl);
 }
 
 }  // namespace mef3io
