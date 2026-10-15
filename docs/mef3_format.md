@@ -368,7 +368,7 @@ protect metadata sections 2/3 and record bodies, **not the samples**. A
 block decodes without section 2, and its start time and sample count are in
 plain text both here and in the `.tidx`, so the stored integer samples, their
 timing and the sampling rate are all recoverable without a password; only the
-conversion factor to physical units is missing. See
+conversion factor and units are missing. See
 [What encryption protects](encryption_model.md#what-encryption-protects).
 
 **When a block IS encrypted, only bytes 0–15 of the statistics table are
