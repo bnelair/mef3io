@@ -11,6 +11,7 @@
 #include "mef3io/c_api.h"
 #include "mef3io/crc.hpp"
 #include "mef3io/errors.hpp"
+#include "mef3io/metadata.hpp"
 #include "mef3io/reader.hpp"
 #include "mef3io/records.hpp"
 #include "mef3io/session_writer.hpp"
@@ -504,5 +505,51 @@ TEST_CASE("C ABI reports segment metadata the writer could not use") {
   REQUIRE(std::string(buf).find("ch2-000000.tmet") != std::string::npos);
   REQUIRE(mef3io_writer_unreadable_metadata(w, 1, buf, sizeof buf) == MEF3IO_ERR_ARGUMENT);
   mef3io_writer_close(w);
+  fsys::remove_all(dir);
+}
+
+TEST_CASE("The offset probe verifies the body CRC before trusting section 3") {
+  const auto dir = fsys::temp_directory_path() / "mef3io_probe_s3.mefd";
+  fsys::remove_all(dir);
+  {
+    SessionWriter w(dir.string(), true);
+    const std::vector<si4> x(512, 0);
+    w.write_int32("ch1", x, 1.0, T0, 256.0);
+  }
+  const auto tmet = dir / "ch1.timd" / "ch1-000000.segd" / "ch1-000000.tmet";
+  std::vector<ui1> raw(fsys::file_size(tmet));
+  std::ifstream(tmet, std::ios::binary)
+      .read(reinterpret_cast<char*>(raw.data()), static_cast<std::streamsize>(raw.size()));
+  const si8 RTO = 3 * 86400 * SEC;
+  // An intact anonymized record (resealed after setting the offset).
+  byteio::write<si8>(raw, fmt::METADATA_SECTION_3_OFFSET, RTO);
+  byteio::write<ui4>(raw, 4,
+                     crc::calculate(std::span<const ui1>(raw).subspan(
+                         fmt::UNIVERSAL_HEADER_BYTES,
+                         fmt::METADATA_FILE_BYTES - fmt::UNIVERSAL_HEADER_BYTES)));
+  byteio::write<ui4>(raw, 0,
+                     crc::calculate(std::span<const ui1>(raw).subspan(
+                         4, fmt::UNIVERSAL_HEADER_BYTES - 4)));
+  REQUIRE(probe_recording_time_offset(raw, "") == std::optional<si8>(RTO));
+
+  SECTION("trailing padding past the record is not hashed") {
+    auto padded = raw;
+    padded.resize(padded.size() + 100, 0xAB);
+    REQUIRE(probe_recording_time_offset(padded, "") == std::optional<si8>(RTO));
+  }
+  SECTION("a zeroed offset (0 = no offset, i.e. write the real date) is rejected") {
+    auto bad = raw;
+    for (int i = 0; i < 8; ++i) bad[fmt::METADATA_SECTION_3_OFFSET + i] = 0;
+    REQUIRE_THROWS_AS(probe_recording_time_offset(bad, ""), CrcError);
+  }
+  SECTION("one flipped offset bit is rejected") {
+    auto bad = raw;
+    bad[fmt::METADATA_SECTION_3_OFFSET + 5] ^= 0x01;
+    REQUIRE_THROWS_AS(probe_recording_time_offset(bad, ""), CrcError);
+  }
+  SECTION("a truncated record is rejected") {
+    std::vector<ui1> cut(raw.begin(), raw.begin() + 12288);
+    REQUIRE_THROWS_AS(probe_recording_time_offset(cut, ""), FormatError);
+  }
   fsys::remove_all(dir);
 }

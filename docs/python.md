@@ -56,9 +56,10 @@ block_length=None, n_threads=0)`
   directories it created.
 - **Cost of choosing the offset.** A session-level annotation or a new
   channel needs the offset that every segment of the session agrees on. The
-  first one in a Writer reads about 5.6 KB of each segment's `.tmet` (its
-  header, section 1 and section 3), e.g. 0.6–0.8 s and 54 MB at 64 channels ×
-  150 segments. A channel-level annotation reads only that channel's
+  first one in a Writer reads and CRC-checks each segment's `.tmet` record
+  (16 KB; the offset in section 3 has no CRC of its own, so it is trusted
+  only after the body CRC), e.g. 1.4–1.8 s and 157 MB at 64 channels × 150
+  segments. A channel-level annotation reads only that channel's
   segments. Each answer is kept for the Writer's lifetime, so every later
   one costs nothing. Keep one Writer open across an acquisition, as for
   appends.

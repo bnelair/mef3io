@@ -1102,10 +1102,9 @@ def _tree(path):
 
 
 def _corrupt_tmet(tmet):
-    """Make a .tmet unreadable: break its universal-header CRC. (The writer
-    reads only the header, section 1 and section 3 for the offset, so damage
-    confined to section 2 is not "unreadable" to it -- see
-    test_section_2_damage_does_not_affect_the_offset.)"""
+    """Make a .tmet unreadable: break its universal-header CRC. (Any damage
+    the header or body CRC catches counts the same -- see
+    test_any_crc_damage_makes_a_tmet_unreadable_to_the_writer.)"""
     raw = bytearray(tmet.read_bytes())
     raw[300] ^= 0xFF
     tmet.write_bytes(bytes(raw))
@@ -1307,22 +1306,70 @@ def test_writers_warn_on_open_about_directories_without_metadata(tmp_path):
         CompatWriter(str(path), overwrite=False).close()
 
 
-def test_section_2_damage_does_not_affect_the_offset(tmp_path):
-    """The writer reads the offset from the universal header, section 1 and
-    section 3 only (a quarter of each .tmet). Damage confined to section 2
-    leaves the offset intact, so it neither blocks nor is misreported -- the
-    reader still rejects that segment for its own reasons."""
+S3 = 13312          # section 3; recording_time_offset is its first si8
+
+
+def _damage(tmet, how):
+    raw = bytearray(tmet.read_bytes())
+    if how == "zero last 4K page":
+        raw[12288:16384] = b"\0" * 4096
+    elif how == "zero s3 rto field":
+        raw[S3:S3 + 8] = b"\0" * 8
+    elif how == "flip one rto bit":
+        raw[S3 + 5] ^= 0x01
+    elif how == "section 2 byte":
+        raw[2000] ^= 0xFF
+    else:
+        raise AssertionError(how)
+    tmet.write_bytes(bytes(raw))
+
+
+@pytest.mark.parametrize("chans,how,op", [
+    (("ch1",), "zero last 4K page", "session note"),            # single channel, no witness
+    (("ch1",), "flip one rto bit", "session note"),
+    (("ch1",), "zero s3 rto field", "session note"),
+    (("ch1", "ch2"), "zero s3 rto field", "ch1 note"),          # channel scope, no witness
+    (("ch1", "ch2"), "zero last 4K page", "new channel"),
+    (("ch1",), "section 2 byte", "session note"),
+])
+def test_section_3_damage_never_lets_a_write_store_the_date(tmp_path, chans, how, op):
+    """Section 3 has no CRC of its own. A writer that trusted it on the
+    header CRC alone took a zeroed offset (0 = "no offset") and stored -t,
+    the real date, into an anonymized session. Any damage the body CRC sees
+    makes that .tmet UNREADABLE, so the usual rule refuses the write; nothing
+    is written and no absolute time reaches the files."""
+    rto = START - 3600 * SECOND
+    path = tmp_path / "s3.mefd"
+    _legacy_session(path, rto, annotate=False, chans=chans)
+    _damage(next(Path(path).glob("ch1.timd/*.segd/*.tmet")), how)
+    before = _tree(path)
+    t = START + 500 * SECOND
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with mef3io.Writer(str(path)) as w:
+            with pytest.raises(m.WriteConflictError, match="cannot be (read|verified)"):
+                if op == "session note":
+                    w.write_annotations([{"type": "Note", "time": t, "text": "x"}])
+                elif op == "ch1 note":
+                    w.write_annotations([{"type": "Note", "time": t, "text": "x"}], "ch1")
+                else:
+                    w.write("ch9", np.arange(512.0), t, FS, precision=0)
+            assert any("ch1-000000.tmet" in u and "CRC" in u for u in w.unreadable_metadata)
+    assert _tree(path) == before
+    blob = _all_bytes(path)
+    assert struct.pack("<q", t) not in blob and struct.pack("<q", -t) not in blob
+
+
+def test_any_crc_damage_makes_a_tmet_unreadable_to_the_writer(tmp_path):
+    """At offset 0 an unreadable .tmet is skipped (with a warning) so it does
+    not block unrelated writes -- including damage confined to section 2,
+    which the body CRC sees exactly as the full loader does."""
     path = tmp_path / "s2.mefd"
     _write_session(path, annotate=False)
-    tmet = next(Path(path).glob("ch2.timd/*.segd/*.tmet"))
-    raw = bytearray(tmet.read_bytes())
-    raw[2000] ^= 0xFF                                          # inside section 2
-    tmet.write_bytes(bytes(raw))
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        with mef3io.Writer(str(path)) as w:
+    _damage(next(Path(path).glob("ch2.timd/*.segd/*.tmet")), "section 2 byte")
+    with mef3io.Writer(str(path)) as w:
+        with pytest.warns(mef3io.UnreadableSegmentWarning, match="body CRC"):
             w.write_annotations([{"type": "Note", "time": START, "text": "ok"}])
-            assert w.unreadable_metadata == []
     assert _stored_times(_rdat(path)) == [-START]
 
 

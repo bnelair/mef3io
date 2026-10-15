@@ -173,9 +173,9 @@ SessionWriter::LevelOffset SessionWriter::scan_channel_offset(const fs::path& ti
   //   Agreed   every readable segment has the same offset (0 when none);
   //   Disputed two readable segments differ (`detail` names them);
   //   Unknown  a segment's section 3 is locked (level-1 access only).
-  // Each segment costs only the bytes that hold the offset — universal header,
-  // section 1 and section 3, a quarter of the .tmet — via
-  // probe_recording_time_offset; the full loader would read and CRC all 16 KB.
+  // Each segment's .tmet record is read once (16 KB, CRC-verified like the
+  // full loader) via probe_recording_time_offset, which decrypts and parses
+  // only section 3; the per-channel memo makes it a once-per-Writer cost.
   // A .tmet that cannot be read at all is counted in `unreadable` and listed
   // in unreadable_metadata(); resolve_offset() decides what that permits.
   LevelOffset out;
@@ -190,18 +190,15 @@ SessionWriter::LevelOffset SessionWriter::scan_channel_offset(const fs::path& ti
     try {
       if (fs::file_size(tmet) < static_cast<std::uintmax_t>(fmt::METADATA_FILE_BYTES))
         throw FormatError("tmet file too small (truncated?)");
-      // Unbuffered: a buffered stream would pull whole 8 KB pages around both
-      // reads, doubling the bytes read for a few KB of fields.
+      // Exactly the fixed-length record (never to EOF), unbuffered: the body
+      // CRC must be verified before section 3's offset can be trusted.
       std::ifstream f;
       f.rdbuf()->pubsetbuf(nullptr, 0);
       f.open(tmet, std::ios::binary);
-      std::vector<ui1> head(fmt::METADATA_SECTION_2_OFFSET), s3(fmt::METADATA_SECTION_3_BYTES);
-      f.read(reinterpret_cast<char*>(head.data()), static_cast<std::streamsize>(head.size()));
-      f.seekg(fmt::METADATA_SECTION_3_OFFSET);
-      f.read(reinterpret_cast<char*>(s3.data()), static_cast<std::streamsize>(s3.size()));
+      std::vector<ui1> record(fmt::METADATA_FILE_BYTES);
+      f.read(reinterpret_cast<char*>(record.data()), static_cast<std::streamsize>(record.size()));
       if (!f) throw IoError("cannot read " + tmet.string());
-      rto = probe_recording_time_offset(head, s3,
-                                        password_2_.empty() ? password_1_ : password_2_);
+      rto = probe_recording_time_offset(record, password_2_.empty() ? password_1_ : password_2_);
     } catch (const std::exception& e) {
       ++out.unreadable;
       if (out.unreadable_example.empty()) out.unreadable_example = tmet.string();

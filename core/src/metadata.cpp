@@ -22,22 +22,39 @@ void check_tmet_universal_header(const fmt::UniversalHeader& uh, std::span<const
   if (!header_unverifiable && !uh.header_crc_valid(bytes))
     throw CrcError("tmet universal header CRC mismatch");
 }
+
+// The body CRC rule shared by both: sections 1-3, bounded by the record's
+// fixed size — NOT by EOF, since some writers leave trailing bytes past the
+// record and hashing them rejects intact metadata. CRC_NO_ENTRY = never
+// computed (meflib's own marker).
+void check_tmet_body(const fmt::UniversalHeader& uh, std::span<const ui1> bytes) {
+  using namespace fmt;
+  if (uh.body_crc == CRC_NO_ENTRY) return;
+  const ui4 body = crc::calculate(
+      bytes.subspan(UNIVERSAL_HEADER_BYTES, METADATA_FILE_BYTES - UNIVERSAL_HEADER_BYTES));
+  if (body != uh.body_crc) throw CrcError("tmet body CRC mismatch (metadata sections corrupted)");
+}
 }  // namespace
 
-std::optional<si8> probe_recording_time_offset(std::span<const ui1> head,
-                                               std::span<const ui1> section3,
+std::optional<si8> probe_recording_time_offset(std::span<const ui1> tmet_bytes,
                                                const std::string& password) {
   using namespace fmt;
-  if (head.size() < static_cast<std::size_t>(METADATA_SECTION_2_OFFSET) ||
-      section3.size() < static_cast<std::size_t>(METADATA_SECTION_3_BYTES))
-    throw FormatError("tmet too small to hold its universal header, section 1 and section 3");
-  const auto uh = UniversalHeader::parse(head);
-  check_tmet_universal_header(uh, head);
+  if (tmet_bytes.size() < static_cast<std::size_t>(METADATA_FILE_BYTES))
+    throw FormatError("tmet file too small: expected " + std::to_string(METADATA_FILE_BYTES) +
+                      " bytes, got " + std::to_string(tmet_bytes.size()));
+  const auto uh = UniversalHeader::parse(tmet_bytes);
+  check_tmet_universal_header(uh, tmet_bytes);
+  // The SAME body check as the full loader, bounded by the fixed record size
+  // (never to EOF: foreign writers pad past it). Section 3 has no CRC of its
+  // own, so this is the only thing standing between a damaged offset and a
+  // write that stores the real date: a zeroed rto reads as 0 = "no offset".
+  check_tmet_body(uh, tmet_bytes);
   const auto s1 = MetadataSection1::parse(
-      head.subspan(METADATA_SECTION_1_OFFSET, METADATA_SECTION_1_BYTES));
+      tmet_bytes.subspan(METADATA_SECTION_1_OFFSET, METADATA_SECTION_1_BYTES));
   const int s2_enc = s1.section_2_encryption > 0 ? s1.section_2_encryption : 0;
   const int s3_enc = s1.section_3_encryption > 0 ? s1.section_3_encryption : 0;
-  std::vector<ui1> s3(section3.begin(), section3.begin() + METADATA_SECTION_3_BYTES);
+  std::vector<ui1> s3(tmet_bytes.begin() + METADATA_SECTION_3_OFFSET,
+                      tmet_bytes.begin() + METADATA_SECTION_3_OFFSET + METADATA_SECTION_3_BYTES);
   if (s2_enc > 0 || s3_enc > 0) {
     const auto keys = crypto::validate_password(password, uh.level_1_password_validation_field,
                                                 uh.level_2_password_validation_field);
@@ -88,12 +105,7 @@ TimeSeriesMetadata load_time_series_metadata(std::span<const ui1> tmet_bytes,
   // some writers leave trailing bytes past its end. Those bytes are not part
   // of the record the stored CRC was computed over, so hashing to EOF rejects
   // intact metadata as corrupt — and every read of such a session fails.
-  if (md.universal_header.body_crc != CRC_NO_ENTRY) {
-    ui4 body = crc::calculate(
-        tmet_bytes.subspan(UNIVERSAL_HEADER_BYTES, METADATA_FILE_BYTES - UNIVERSAL_HEADER_BYTES));
-    if (body != md.universal_header.body_crc)
-      throw CrcError("tmet body CRC mismatch (metadata sections corrupted)");
-  }
+  check_tmet_body(md.universal_header, tmet_bytes);
 
   // Section 1 is never encrypted.
   auto s1_bytes = tmet_bytes.subspan(METADATA_SECTION_1_OFFSET, METADATA_SECTION_1_BYTES);

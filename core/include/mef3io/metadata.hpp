@@ -18,18 +18,15 @@ struct TimeSeriesMetadata {
   bool section3_available = true;          // false if L2-encrypted and only L1 access
 };
 
-/// Just the recording-time offset of a .tmet, from what holds it: `head` =
-/// the first METADATA_SECTION_2_OFFSET bytes (universal header + section 1),
-/// `section3` = the METADATA_SECTION_3_BYTES at METADATA_SECTION_3_OFFSET.
-/// About a quarter of the file and no full-body CRC, for a writer that must
-/// learn every segment's offset without loading every segment's metadata.
-/// Checks the universal-header CRC and the password like the full loader
-/// (throws on failure); returns nullopt when section 3 is locked (level-1
-/// access only), and maps NO_ENTRY to 0. Damage confined to section 2 does
-/// not affect the offset and is not seen here; damage that changes section
-/// 3's offset shows up as a disagreement, which the writer refuses.
-std::optional<si8> probe_recording_time_offset(std::span<const ui1> head,
-                                               std::span<const ui1> section3,
+/// Just the recording-time offset of a .tmet record (the first
+/// METADATA_FILE_BYTES of the file), for a writer that must learn every
+/// segment's offset. Verifies exactly what the full loader verifies — the
+/// universal-header CRC, the body CRC (bounded by the record size) and the
+/// password — and throws on any failure, but decrypts and parses only section
+/// 3. Returns nullopt when section 3 is locked (level-1 access only), and maps
+/// NO_ENTRY to 0. Section 3 has no CRC of its own, so without the body check a
+/// damaged (e.g. zeroed) offset would be trusted — and 0 writes the real date.
+std::optional<si8> probe_recording_time_offset(std::span<const ui1> tmet_bytes,
                                                const std::string& password);
 
 /// The recording-time offset this segment's times are resolved with: section

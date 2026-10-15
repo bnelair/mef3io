@@ -69,11 +69,13 @@ quirks matter:
       L2-encrypted session opened with only the level-1 password
       (`PasswordError`; open the writer with the level-2 password). A locked
       offset is unknown, never assumed to be 0.
-  - **Unreadable metadata.** To learn the offset, mef3io reads each
-    segment's universal header, section 1 and section 3; damage confined to
-    section 2 does not affect the offset. A `.tmet` whose header fails its
-    CRC, or that is truncated, is always reported
-    (`Writer.unreadable_metadata`, plus a warning). What happens next
+  - **Unreadable metadata.** Section 3 has no CRC of its own, so mef3io
+    trusts a segment's offset only after the same checks the full loader
+    makes: the header CRC, and the body CRC over the fixed 16 384-byte record
+    (never to EOF). Without them a damaged, e.g. zeroed, offset would read as
+    0, "no offset", and a write would store the real date. A `.tmet` that
+    fails either check, or is truncated, is unreadable. That is always
+    reported (`Writer.unreadable_metadata`, plus a warning). What happens next
     depends on the readable segments:
     - **They agree on rto 0:** the damaged file is skipped, so one damaged
       segment in an ordinary session does not block unrelated writes.
