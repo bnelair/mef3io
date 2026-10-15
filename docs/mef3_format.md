@@ -61,8 +61,9 @@ quirks matter:
     date:
     - **A time at or before a non-zero `rto`** (`WriteConflictError`). `rto − t`
       would be non-negative, and every reader takes a non-negative time as
-      the absolute date (meflib.c:7665). So the only correct encoding is the
-      real date in plain, which the offset exists to hide.
+      the absolute date (meflib.c:7665). So the only correct encoding would be
+      the absolute date, outside the session's own `rto − t` form; mef3io
+      refuses rather than mix the two.
     - **A write to a level whose segments disagree on `rto`**
       (`WriteConflictError`, naming the segments). There is no single offset
       to store against.

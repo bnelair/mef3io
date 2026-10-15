@@ -25,7 +25,9 @@ def test_legacy_rto_example_runs_clean():
     pytest.importorskip("pymef", reason="legacy oracle not installed")
     # Point the subprocess at whichever mef3io this process imported (the
     # in-tree package after dev_build.sh, the installed one on CI).
-    env = dict(os.environ, PYTHONPATH=str(Path(mef3io.__file__).resolve().parent.parent))
+    # Prepend, so a local mef_tools checkout on the caller's path stays visible.
+    paths = [str(Path(mef3io.__file__).resolve().parent.parent), os.environ.get("PYTHONPATH", "")]
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in paths if p))
     run = subprocess.run(
         [sys.executable, str(REPO / "examples" / "11_legacy_rto_sessions.py")],
         capture_output=True, text=True, env=env, timeout=600,

@@ -198,7 +198,8 @@ adds to such a session inherits its offset. The offset does not
 de-identify the session, though: the date is in section 3 (see
 [De-identification](anonymization.md)).
 
-A write is refused, rather than revealing the date or misplacing times, when:
+A write is refused, rather than misplacing times or breaking the session's own
+`rto − t` form, when:
 - the time is at or before the offset (`WriteConflictError`);
 - the level's segments disagree on the offset (`WriteConflictError`);
 - the offset is locked because only the level-1 password was given

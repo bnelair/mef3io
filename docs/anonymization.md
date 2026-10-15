@@ -5,8 +5,8 @@
     a MEF 3.0 session. The date stays in every metadata file, in plain text
     unless the session is encrypted. mef3io never creates such a session. It
     still reads existing ones and extends them consistently. Real
-    de-identification will be done by `anonymize_session`, which is
-    **planned, not yet available** ([#70](https://github.com/bnelair/mef3io/issues/70)).
+    de-identification will come as a separate de-identified copy, which is
+    **planned, not yet available** (`anonymize_session`, [#70](https://github.com/bnelair/mef3io/issues/70)).
 
 ## In plain words
 
@@ -26,16 +26,17 @@ the real date anyway. Someone without the software can still read it with
 a few lines of code, or with a hex editor. It is like covering the date on
 a letter with a sticky note that has the date written on it.
 
-The offset only hides the date in one situation: the session is encrypted
-**and** the person has only the lower-level (level-1) password. In that case
-it is the encryption doing the hiding, not the offset. Even then, other
-parts of the session can still give the date away (see
+The offset only helps in one situation: the session is encrypted **and**
+the person has only the lower-level (level-1) password. Then the offset takes
+the date out of the times, and the encryption hides the offset. Without the
+encryption, the offset hides nothing. Even with it, other parts of the
+session can still give the date away (see
 [What else the offset leaves in place](#what-else-the-offset-leaves-in-place)).
 
 **What this means for you.**
 
 - Treat a session "anonymized" this way as **identifiable** data: it holds
-  the recording date, and often names too.
+  the recording date, and may hold names too.
 - mef3io will never make new sessions like this.
 - mef3io still opens existing ones, shows their true dates and times, and
   can add data or notes to them without breaking them.
@@ -124,8 +125,8 @@ offset (rto):    1936504800000000
 real start:      2031-05-14 13:47:05+00:00
 ```
 
-Every `.tmet` in the session carries the same offset, so any one of them is
-enough. The other stored times (block index, data block headers, records)
+Every `.tmet` in a meflib session carries the same offset (meflib uses one
+per session), so any one of them is normally enough. The other stored times (block index, data block headers, records)
 come back the same way.
 
 ## What else the offset leaves in place
@@ -163,8 +164,8 @@ it. For a time **before** the offset, `rto − t` is positive. Every reader
 then takes it as an absolute time, close to 1 January 1970. We wrote such a
 session with `mef_tools` 1.2.3 / `pymef` 1.4.8 and the offset one hour after
 the start. Its index then held `+3600000000`, which every reader takes as
-1970-01-01 01:00 UTC. The same session's `.tmet` universal header and data
-block header held the **real start time, unconverted**.
+1970-01-01 01:00 UTC. The same session's universal headers (`.tmet`, `.tidx`,
+`.tdat`) and data block header held the **real start time, unconverted**.
 
 A correct absolute time is also positive, so the bytes alone cannot tell the
 two apart. That is why mef3io's [validator](validation.md) stands its time
@@ -243,12 +244,18 @@ python -m mef3io anonymize SRC DST (--shift-us N | --reference-date ISO --tz IAN
   or re-encrypted with new passwords. `.mefd.tar` archives work as input.
 - **Refusals:** an existing `dst`, a `dst` inside `src`, video channels, an
   ambiguous legacy time convention, a shift that would take any time to 0 or
-  below, or a shift smaller than the session's time span plus one day.
+  below, or a shift whose magnitude is smaller than the session's time span
+  plus one day.
 - **Verification:** the validator passes the copy cleanly; every RED payload
   is byte-identical to the source; every time differs by exactly the shift
   (the time-zone fields must hold their set values instead); records match in
   count and order. A field-wise leak scan checks every time field and record
-  body against the original time range, plain or negated.
+  body against the original time range, plain or negated; data-derived bytes
+  (the RED payload and each block's statistics table) are checked
+  byte-identical instead of scanned.
+- **Provenance and progress:** the copy is stamped with a new operation code
+  (6, `anonymize`), and long runs report progress and can be cancelled
+  ([#69](https://github.com/bnelair/mef3io/issues/69)).
 
 ## Backward compatibility
 
@@ -265,15 +272,17 @@ legacy stack (`pip install mef3io[test]`). It:
    annotation;
 5. checks that both readers still agree, that the new channel took the
    session's offset, that a new index entry holds `rto − t`, and that **no
-   8-byte value anywhere in the session** equals a written time, plain or
-   negated;
+   8-byte value at any byte position in the session** equals any sample time
+   or whole second of the recording, plain or negated (legacy files
+   included);
 6. shows the three refusals (time before the offset, disputed offset,
-   offset locked behind level 2), each leaving the files byte-for-byte
-   unchanged.
+   offset locked behind level 2), each leaving every file and folder exactly
+   as it was.
 
 Its output (the temporary path differs per run):
 
 ```
+session: /tmp/.../legacy_rto.mefd
 fictional recording start 2031-05-14 13:47:05 UTC; meflib-style offset (local midnight) 2031-05-14 06:00:00 UTC
 
 2. Recover the date from the .tmet bytes (no library, no password)
@@ -302,8 +311,8 @@ fictional recording start 2031-05-14 13:47:05 UTC; meflib-style offset (local mi
   ok   the new channel inherited the session's offset
   ch2's first index entry stores -28085000000 us = rto - t (rto - t = -28085000000)
   ok   new times are stored in the session's own form, rto - t
-  8-byte values equal to a written time (plain or negated): none
-  ok   no written time appears in plain or negated form anywhere in the session
+  23041 recording times x 2 signs vs every 8-byte value in the session: 0 hits
+  ok   no recording time appears in plain or negated form anywhere in the session
   ok   the session grew (sanity)
 
 6. Refusals (each leaves the files untouched)
@@ -325,11 +334,15 @@ The same behaviour is pinned in more detail by `tests/test_p22_records.py`.
 - **Treat it as identifiable.** It holds the recording date, and the offset
   alone removes no names. Store and share it under the rules for identifiable
   data.
-- **If it must stay in this form, encrypt it.** With a level-2 password,
-  section 3 (the offset, time zone and subject fields) is encrypted. Give out
-  only the level-1 password to people who need the signal but not the date.
-  Record bodies written unencrypted, names in file and folder names, and the
-  session name stay readable whatever the password.
+- **If it must stay in this form, restrict access to it.** Keep it on
+  encrypted storage, or behind access controls meant for identifiable data.
+  mef3io has no tool that adds MEF encryption to an existing session, and do
+  not rewrite such a session into a new one to encrypt it: a fresh mef3io
+  write uses offset 0, so it would store the dates directly. If a session
+  already has a level-2 password, give out only the level-1 password to
+  people who need the signal but not the date. Record bodies written
+  unencrypted, file and folder names, and the session name stay readable
+  whatever the password.
 - **To share it de-identified, re-share it through `anonymize_session` once
   that ships** ([#70](https://github.com/bnelair/mef3io/issues/70)). It will
   produce a copy with every date moved, the offset set to 0 and identity

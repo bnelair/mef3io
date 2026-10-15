@@ -69,7 +69,7 @@ def utc(t_us):
 
 
 def meflib_rto(start_us, gmt_offset_s):
-    """meflib's generate_recording_time_offset (meflib.c:4274): the local
+    """meflib's generate_recording_time_offset (meflib.c:4276): the local
     midnight of the recording day, in uUTC."""
     start_s = start_us // S
     rto = start_s - start_s % 86400 + 86400 - gmt_offset_s
@@ -103,6 +103,13 @@ def legacy_session(path, offsets, password1=None, password2=None, note=True):
 
 def all_bytes(path):
     return b"".join(f.read_bytes() for f in sorted(Path(path).rglob("*")) if f.is_file())
+
+
+def tree(path):
+    """Every file and folder, with each file's bytes: a refused write must
+    leave this exactly as it was, not even an empty directory behind."""
+    return sorted((str(f.relative_to(path)), f.read_bytes() if f.is_file() else None)
+                  for f in Path(path).rglob("*"))
 
 
 def pymef_view(path, channel, start, end):
@@ -199,9 +206,17 @@ print(f"  ch2's first index entry stores {stored} us = rto - t "
 check(stored == RTO - append_at, "new times are stored in the session's own form, rto - t")
 
 blob = all_bytes(session)
-leaks = sorted({t for t in written for v in (t, -t) if struct.pack("<q", v) in blob})
-print(f"  8-byte values equal to a written time (plain or negated): {leaks or 'none'}")
-check(not leaks, "no written time appears in plain or negated form anywhere in the session")
+# Every sample time and whole second of the recording, plain and negated,
+# against the 8-byte value at EVERY byte position of every file (legacy ones
+# included): a writer storing the date directly, in any field, would hit.
+times = {START + round(i * S / FS) for i in range(int(90 * FS) + 1)}
+times |= {START + k * S for k in range(91)} | written | {START + 5 * S}
+windows = {blob[i:i + 8] for i in range(len(blob) - 7)}
+leaks = sorted(t for t in times
+               if struct.pack("<q", t) in windows or struct.pack("<q", -t) in windows)
+print(f"  {len(times)} recording times x 2 signs vs every 8-byte value in the session:"
+      f" {len(leaks)} hits")
+check(not leaks, "no recording time appears in plain or negated form anywhere in the session")
 check(len(blob) > len(before), "the session grew (sanity)")
 
 # --- 6. refusals -----------------------------------------------------------
@@ -209,7 +224,7 @@ print("\n6. Refusals (each leaves the files untouched)")
 
 
 def refused(path, attempt, error, open_kwargs=None):
-    snapshot = all_bytes(path)
+    snapshot = tree(path)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -217,7 +232,7 @@ def refused(path, attempt, error, open_kwargs=None):
                 attempt(w)
     except error as e:
         print(f"  {error.__name__}: {str(e).splitlines()[0][:110]}...")
-        return all_bytes(path) == snapshot
+        return tree(path) == snapshot
     return False
 
 
