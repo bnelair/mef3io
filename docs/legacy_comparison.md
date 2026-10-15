@@ -80,7 +80,9 @@ mef3io validates the password, derives the access level, decrypts exactly the
 sections that level allows, and reports the rest as unavailable
 (`Reader.info()` → `section3_available`, subject fields `None` under L1).
 Two-level access therefore works as designed: the L1 password can be given to
-signal-processing staff without exposing subject identity.
+signal-processing staff without exposing subject identity. Note that neither
+password protects the samples themselves, which are not encrypted (see
+[What encryption protects](encryption_model.md#what-encryption-protects)).
 
 ## Annotation encryption — a legacy writer gap
 
