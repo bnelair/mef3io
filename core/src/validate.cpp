@@ -1779,17 +1779,17 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
             std::span<const ui1>(file).subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4));
         byteio::write<ui4>(file, 0, header_crc);
         // Recorded BEFORE the write, not after. A failure part-way through
-        // leaves bytes on disk — overwrite_universal_header patches in place
-        // and only then flushes, and 1024 bytes is smaller than a typical
-        // stream buffer, so a failed flush has already modified the file — and
-        // a path pushed afterwards is missing from exactly the list an operator
-        // uses to decide what to restore. Naming a file that turned out
-        // untouched costs nothing; omitting one that was modified sends them to
-        // restore the wrong set. Same reasoning as the append's wrote_* flags.
-        // (The .tmet is replaced atomically — temp + rename — so unlike the
-        // header patches below it is only "written" once the call returns.)
-        write_all_atomic(tmet_path, file);
+        // can leave bytes on disk — overwrite_universal_header patches in
+        // place and only then flushes, and even the atomic .tmet replace can
+        // report failure after its rename took effect (a write-through flush
+        // on Windows) — and a path pushed afterwards is missing from exactly
+        // the list an operator uses to decide what to restore. Naming a file
+        // that turned out untouched costs nothing; omitting one that was
+        // modified sends them to restore the wrong set. Same reasoning as the
+        // append's wrote_* flags. (The catch below checks the .tmet on disk to
+        // decide whether the body-CRC note still holds.)
         files_written.push_back(files.tmet_rel);
+        write_all_atomic(tmet_path, file);
       }
       if (buffer.tidx_dirty) {
         files_written.push_back(files.tidx_rel);
@@ -1812,11 +1812,19 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       }
     } catch (const std::exception& e) {
       // None of this segment's findings is marked repaired: whatever was
-      // staged did not all reach disk. Nor was a CRC computed, unless the
-      // .tmet itself was replaced — in which case the note stands.
-      if (std::find(files_written.begin(), files_written.end(), files.tmet_rel) ==
-          files_written.end())
-        withdraw_crc_note(pr);
+      // staged did not all reach disk. Nor was a CRC computed unless the .tmet
+      // on disk really is the rewritten one: still the bytes the pass read
+      // means it was not replaced, and the note must stop saying it was.
+      bool tmet_replaced = false;
+      if (std::find(files_written.begin(), files_written.end(), files.tmet_rel) !=
+          files_written.end()) {
+        try {
+          tmet_replaced = crc::calculate(src->read_all(files.tmet_rel)) != pr.tmet_crc;
+        } catch (const std::exception&) {
+          tmet_replaced = true;  // cannot tell: keep both the listing and the note
+        }
+      }
+      if (!tmet_replaced) withdraw_crc_note(pr);
       std::string reason = std::string("aborted: ") + e.what();
       if (!files_written.empty()) {
         std::string list;
