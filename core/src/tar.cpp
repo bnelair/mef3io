@@ -583,6 +583,13 @@ std::string extract_session(const std::string& tar_path, const std::string& dest
   // first and deleted only after the new tree is in place, so no failure here
   // can lose both: if the second rename fails the old one is put back.
   const bool replacing = fs::exists(final_path);
+  if (replacing && !overwrite) {
+    // It was absent when we started; someone created it since. Not ours.
+    std::error_code ec;
+    fs::remove_all(staging, ec);
+    throw IoError("extraction target appeared while extracting (pass overwrite=true to "
+                  "replace it): " + dest);
+  }
   try {
     if (replacing) fs::rename(final_path, retired);
     try {
@@ -598,11 +605,11 @@ std::string extract_session(const std::string& tar_path, const std::string& dest
     throw;
   }
   if (replacing) {
+    // The extraction succeeded; failing the call now would only make a caller
+    // redo it. A leftover (e.g. a file held open by a virus scanner on
+    // Windows) is named "<dest>.mef3io-replaced-<hex>" and safe to delete.
     std::error_code ec;
     fs::remove_all(retired, ec);
-    if (ec)
-      throw IoError("session extracted to " + dest + ", but the directory it replaced could "
-                    "not be removed: " + retired.string() + " (" + ec.message() + ")");
   }
   return dest;
 }

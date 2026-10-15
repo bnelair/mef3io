@@ -1431,6 +1431,15 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     std::optional<std::size_t> crc_note_index;
   };
   std::vector<PendingRepair> pending;
+  // The "this repair computes a body CRC" note is queued during the pass; when
+  // the .tmet is then NOT rewritten it must stop saying so.
+  auto withdraw_crc_note = [&](const PendingRepair& pr) {
+    if (!pr.crc_note_index) return;
+    Finding& note = report.findings[*pr.crc_note_index];
+    note.expected = "not computed: the repair of this segment did not complete";
+    note.message = "this segment carries no body CRC, so its metadata has never been "
+                   "verified; the repair that would have computed one did not complete";
+  };
 
   for (std::size_t si = 0; si < segments.size(); ++si) {
     const SegmentFiles& files = segments[si];
@@ -1677,6 +1686,11 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
   }
   // The last point at which a cancel is honoured. Nothing has been written.
   ctl.check();
+  // finish() belongs HERE, before anything is written: progress measures the
+  // pass, and a callback that raises at (total, total) must stop the call
+  // while there is still nothing to lose. Called after the write phase, a
+  // raise there discarded the report of what had just been written.
+  progress.finish();
 
   // ---- write phase: not cancellable. Each segment is a .tmet replaced by
   // rename plus at most two 1024-byte header patches; stopping between
@@ -1703,12 +1717,7 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
           crc::calculate(tdat_head) != pr.tdat_uh_crc) {
         skip("changed while it was being validated (is a writer running?); nothing was "
              "repaired in this segment — run the repair again");
-        if (pr.crc_note_index) {
-          Finding& note = report.findings[*pr.crc_note_index];
-          note.expected = "not computed: the repair of this segment was skipped";
-          note.message = "this segment carries no body CRC, so its metadata has never been "
-                         "verified; the repair that would have computed one was skipped";
-        }
+        withdraw_crc_note(pr);
         continue;
       }
 
@@ -1801,7 +1810,11 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       }
     } catch (const std::exception& e) {
       // None of this segment's findings is marked repaired: whatever was
-      // staged did not all reach disk.
+      // staged did not all reach disk. Nor was a CRC computed, unless the
+      // .tmet itself was replaced — in which case the note stands.
+      if (std::find(files_written.begin(), files_written.end(), files.tmet_rel) ==
+          files_written.end())
+        withdraw_crc_note(pr);
       std::string reason = std::string("aborted: ") + e.what();
       if (!files_written.empty()) {
         std::string list;
@@ -1869,7 +1882,6 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     }
   }
 
-  progress.finish();
   return report;
 }
 

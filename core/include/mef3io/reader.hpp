@@ -81,7 +81,10 @@ class Reader {
   ///                   segment is fetched and before each block is decoded; a
   ///                   cancelled read throws Cancelled and returns no partial
   ///                   data. `ctl.progress` reports the compressed bytes of the
-  ///                   blocks being decoded (done, total).
+  ///                   blocks being decoded (done, total). Each segment's byte
+  ///                   extent is fetched in one read, so during that I/O the
+  ///                   cancel is seen at the next segment or block and
+  ///                   progress counts decoding only.
   /// @returns samples, a validity mask (0 in gaps), and scaling metadata.
   RawData read_raw(const std::string& channel, std::optional<si8> t0 = std::nullopt,
                    std::optional<si8> t1 = std::nullopt, int n_threads = kUseDefaultThreads,

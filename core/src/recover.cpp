@@ -416,6 +416,11 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
   }
   // The last point at which a cancel is honoured. Nothing has been written.
   ctl.check();
+  // finish() belongs HERE, before anything is written: progress measures the
+  // pass, and a callback that raises at (total, total) must stop the call
+  // while there is still nothing to lose. Called after the write phase, a
+  // raise there discarded the report of what had just been written.
+  progress.finish();
 
   // ---- phase 2: write. Not cancellable: each write is a whole file replaced
   // by rename or a 1024-byte header patch, and stopping between segments would
@@ -568,7 +573,6 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
                            stamp.tmet.string());
   }
   report.applied = apply;
-  progress.finish();
   return report;
 }
 

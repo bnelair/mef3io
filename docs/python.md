@@ -363,11 +363,27 @@ stop at the same points). `Cancelled` subclasses `Exception` directly, not
 **Progress.** `progress(done, total)` is called first with `(0, total)`, then
 at a bounded rate (about every 1 % of `total`, otherwise at most every
 250 ms), with `done` never decreasing, and finally with `(total, total)`
-exactly once — only if the call succeeds. Calls never overlap. The work runs
+exactly once — only if the call succeeds. For `repair_session` and
+`recover_session` that final call comes at the end of the read-only pass,
+before anything is written, so a callback that raises there still leaves the
+session untouched. Calls never overlap. The work runs
 with the GIL released; the callback takes the GIL only for its own call and
 may run on a decode worker thread rather than the calling one, so keep it
 short and hand UI updates to your UI thread. If it raises, the operation
-stops as if cancelled and *your* exception propagates.
+stops as if cancelled and *your* exception propagates. The callback must not
+call back into the same operation.
+
+On a read, progress counts decoding. Each segment's bytes are fetched in one
+read first, so a whole-channel read of a huge segment on slow storage shows
+`(0, total)` until that fetch is done, and a cancel during it takes effect at
+the next segment or block. Windowed (viewer) reads fetch only their window.
+With `total == 0` (an empty window) the single `(0, 0)` call is also the
+final one.
+
+`extract_session(..., overwrite=True)` briefly needs room for both trees. A
+hard kill mid-extract can leave a `<dest>.mef3io-extract-<hex>` staging
+directory, and a replaced tree that could not be deleted is left as
+`<dest>.mef3io-replaced-<hex>`; both are safe to delete.
 
 When neither keyword is given, nothing changes: the hooks cost one pointer
 test per unit of work (see `benchmarks/cancel_overhead_benchmark.py`).

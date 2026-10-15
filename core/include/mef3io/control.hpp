@@ -87,7 +87,10 @@ namespace detail {
 ///
 /// Guarantees to the callback:
 ///   * called once with (0, total) by start(), and once with (total, total)
-///     by finish() when — and only when — the operation completes;
+///     by finish() when — and only when — the operation completes (for
+///     total == 0 the single (0, 0) from start() is that report);
+///   * the callback must not drive the same operation (no re-entry: the
+///     reporter's mutex is not recursive);
 ///   * in between, at most once per 1% of `total` advanced, and otherwise at
 ///     most every 250 ms, so the call count stays bounded however fast or slow
 ///     the work is (about 100 + 4 per second);
@@ -135,7 +138,7 @@ class ProgressReporter {
   /// The operation completed: report (total, total). Call exactly once, on
   /// the success path only.
   void finish() {
-    if (!fn_) return;
+    if (!fn_ || total_ == 0) return;  // start() already said (0, 0)
     std::lock_guard<std::mutex> lock(mutex_);
     last_done_ = total_;
     (*fn_)(total_, total_);

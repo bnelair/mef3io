@@ -100,6 +100,10 @@ std::string archive_session(const std::string& session_dir, const std::string& t
 /// 1 MB chunks) or failed extraction leaves nothing behind — and, with
 /// `overwrite`, the existing target survives untouched until the new tree is
 /// whole. `ctl.progress` reports member bytes written out of their total.
+/// An overwrite briefly needs room for both trees. A hard kill mid-call can
+/// leave a `<dest>.mef3io-extract-<hex>` (staging) or, after a successful
+/// swap whose cleanup failed, a `<dest>.mef3io-replaced-<hex>` sibling; both
+/// are mef3io's own and safe to delete.
 std::string extract_session(const std::string& tar_path, const std::string& dest_dir = "",
                             bool overwrite = false, const Control& ctl = {});
 

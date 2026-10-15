@@ -97,7 +97,7 @@ class Recorder:
         dones = [d for d, _ in calls]
         assert dones == sorted(dones), "progress went backwards"
         assert calls[-1] == (total, total), calls[-3:]
-        assert sum(1 for d in dones if d == total) == 1 or total == 0, \
+        assert sum(1 for d in dones if d == total) == 1, \
             "(total, total) must be reported exactly once"
         assert all(0 <= d <= total for d in dones)
         return total
@@ -201,7 +201,7 @@ def test_parallel_read_stops_when_cancelled(session):
     token = mef3io.CancelToken()
 
     def progress(done, total):
-        if done > total // 4:
+        if 0 < done < total:  # the first intermediate report: most blocks remain
             token.cancel()
 
     with mef3io.Reader(str(session), n_threads=4) as r:
@@ -464,3 +464,53 @@ def test_repair_skips_a_segment_that_changed_between_the_pass_and_the_write(sess
              if f.check_id == "sizing.difference-bytes" and f.channel == changed[0].channel
              and f.segment == changed[0].segment]
     assert still and not any(f.repaired for f in still)
+
+
+@pytest.mark.parametrize("op", ["repair", "recover"])
+def test_a_callback_raising_at_the_end_of_the_pass_writes_nothing(session, op):
+    """(total, total) is reported when the read-only pass ends, BEFORE any
+    write — so a callback that raises there (a UI's abort, a Ctrl-C) cannot
+    leave files rewritten with the report of what changed lost."""
+    if op == "repair":
+        _break_difference_bytes(session)
+    else:
+        _drop_index_tail(session)
+    before = _digest(session)
+    parent_before = _listing(session.parent)
+
+    def progress(done, total):
+        if done == total:
+            raise KeyError("abort at the end")
+
+    with pytest.raises(KeyError):
+        if op == "repair":
+            mef3io.repair_session(str(session), ["sizing.difference-bytes"], progress=progress)
+        else:
+            mef3io.recover_session(str(session), apply=True, progress=progress)
+    assert _digest(session) == before
+    assert _listing(session.parent) == parent_before
+
+
+def test_an_empty_read_reports_zero_of_zero_once(session):
+    with mef3io.Reader(str(session)) as r:
+        rec = Recorder()
+        t = r.info("a")["start_time"]
+        assert r.read("a", t, t, progress=rec).size == 0
+        assert rec.calls == [(0, 0)]
+
+
+def test_extract_without_overwrite_never_deletes_a_target_that_appears(session, tmp_path):
+    tar = mef3io.archive_session(str(session), str(tmp_path / "t.mefd.tar"))
+    target = tmp_path / "late.mefd"
+    created = []
+
+    def progress(done, total):
+        if 0 < done < total and not created:
+            target.mkdir()
+            (target / "theirs.txt").write_text("someone else's")
+            created.append(True)
+
+    with pytest.raises(mef3io.IoError, match="appeared"):
+        mef3io.extract_session(tar, str(target), progress=progress)
+    assert (target / "theirs.txt").read_text() == "someone else's"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["late.mefd", "s.mefd", "t.mefd.tar"]

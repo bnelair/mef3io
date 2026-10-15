@@ -77,7 +77,7 @@ struct Calls {
       prev = d;
       if (d == total) ++at_total;
     }
-    CHECK((at_total == 1 || total == 0));
+    CHECK(at_total == 1);
   }
 };
 
