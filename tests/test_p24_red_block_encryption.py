@@ -42,6 +42,13 @@ def _segment(ch: str) -> Path:
     return seg / f"{ch}-000000"
 
 
+def test_bindings_reject_short_validation_fields():
+    with pytest.raises(ValueError):
+        m.red_decode_block(_blocks("l1_blocks")[0], "pass2", b"\0" * 4, b"\0" * 16)
+    with pytest.raises(ValueError):
+        m.red_encode_block(np.arange(10, dtype=np.int32), 0, True, 0, "", b"\0" * 16, b"")
+
+
 def _fields(ch: str) -> tuple[bytes, bytes]:
     uh = Path(f"{_segment(ch)}.tmet").read_bytes()[:UH]
     return uh[868:884], uh[884:900]
@@ -85,11 +92,14 @@ def test_mef3io_reads_meflib_encrypted_blocks(n_threads):
 
 
 def test_level1_password_reads_level1_blocks_only():
+    # A DELIBERATE divergence from meflib, which needs the level-2 password even
+    # here: process_password_data stores a level-1-only password's key in the
+    # level-2 slot (meflib.c:5080), leaving its level-1 key zero.
     r = m.Reader(str(SESSION), "pass1")
     raw = r.read_raw("l1_blocks", None, None)
     np.testing.assert_array_equal(np.asarray(raw["samples"]), TRUTH["l1_blocks"])
     # A level-2 block needs the level-2 password.
-    with pytest.raises(Exception, match="level-2"):
+    with pytest.raises(m.PasswordError, match="level-2"):
         r.read_raw("l2_blocks", None, None)
 
 
@@ -136,6 +146,6 @@ def test_only_the_first_16_statistics_bytes_are_ciphertext():
         assert wrong[:16] == right[:16] and wrong[16:] != right[16:]
         try:
             bad = m.red_decode_block(plain_block(wrong), "", b"\0" * 16, b"\0" * 16)
-        except Exception:
+        except (m.FormatError, m.CrcError):
             continue  # scrambled statistics may not even decode
         assert not np.array_equal(bad["samples"], TRUTH[ch][:bad["samples"].size]), ch

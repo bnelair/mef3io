@@ -365,12 +365,17 @@ compressed payload — is encrypted. Ciphering all 256 bytes is self-consistent
 (it round-trips) but cannot read meflib's encrypted blocks and writes blocks
 meflib cannot read; mef3io did exactly that until #80 (1.2.0 and earlier).
 
-Few readers can actually open an encrypted block: pymef's sample reader never
-gives meflib's RED decoder its password data (pymef3_file.c:2151 callocs the
-processing struct), so `RED_decode` dereferences NULL at meflib.c:6675 on the
-first encrypted block. mef3io reads them with the session password (a level-1
-password suffices for level-1 blocks) and its encoder reproduces meflib's
-encrypted blocks byte for byte (`tests/test_p24_red_block_encryption.py`, on a
+Few readers can actually open an encrypted block. pymef's time-series reader
+(`read_mef_ts_data`, behind both `read_ts_channels_sample` and
+`read_ts_channels_uutc`) never gives meflib's RED decoder its password data
+(pymef3_file.c:2151 callocs the processing struct), so `RED_decode`
+dereferences NULL at meflib.c:6675 on the first encrypted block. meflib itself
+needs the LEVEL-2 password even for level-1 blocks: `process_password_data`
+puts a level-1-only password's expanded key in `level_2_encryption_key`
+(meflib.c:5080), leaving the level-1 key slot zero, so it would decrypt a
+level-1 block with the wrong key. mef3io deliberately differs here — a level-1
+password reads level-1 blocks — and its encoder reproduces meflib's encrypted
+blocks byte for byte (`tests/test_p24_red_block_encryption.py`, on a
 fixture whose blocks meflib itself encrypted).
 
 To recover physical units: `value = stored_int32 * units_conversion_factor`.

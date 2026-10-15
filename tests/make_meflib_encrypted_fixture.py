@@ -21,7 +21,8 @@ pymef cannot produce it — its writer never sets a block encryption level
    really carries the encryption flag.
 
 pymef CANNOT read the result, and that is pymef's limitation, not the
-fixture's: ``read_mef_ts_data`` callocs its RED processing struct
+fixture's: its time-series reader ``read_mef_ts_data`` (behind both
+``read_ts_channels_sample`` and ``_uutc``) callocs its RED processing struct
 (pymef3_file.c:2151) and never sets ``password_data``, so RED_decode
 dereferences NULL at meflib.c:6675 on the first encrypted block (segfault).
 meflib — the harness — is therefore the oracle for the encrypted blocks; pymef

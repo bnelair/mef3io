@@ -24,7 +24,7 @@
  *       and write the samples as little-endian int32.
  *
  * `password` must grant LEVEL 2 access: meflib's process_password_data puts a
- * level-1-only password's key in level_2_encryption_key (meflib.c:5079), so a
+ * level-1-only password's key in level_2_encryption_key (meflib.c:5080), so a
  * level-1 block could not be handled with it.
  */
 #include <stdio.h>
@@ -101,7 +101,9 @@ int main(int argc, char **argv) {
 		si8 n_entries = (tidx_n - UNIVERSAL_HEADER_BYTES) / TIME_SERIES_INDEX_BYTES;
 		for (si8 e = 0; e < n_entries; ++e) {
 			TIME_SERIES_INDEX *tsi = (TIME_SERIES_INDEX *) (tidx + UNIVERSAL_HEADER_BYTES + e * TIME_SERIES_INDEX_BYTES);
+			if (tsi->file_offset < UNIVERSAL_HEADER_BYTES || tsi->file_offset + RED_BLOCK_HEADER_BYTES > tdat_n) { fprintf(stderr, "index entry %lld points outside the .tdat\n", (long long) e); return 1; }
 			RED_BLOCK_HEADER *orig = (RED_BLOCK_HEADER *) (tdat + tsi->file_offset);
+			if (orig->block_bytes < RED_BLOCK_HEADER_BYTES || tsi->file_offset + orig->block_bytes > tdat_n) { fprintf(stderr, "block %lld runs past the .tdat\n", (long long) e); return 1; }
 			if (orig->flags & (RED_LEVEL_1_ENCRYPTION_MASK | RED_LEVEL_2_ENCRYPTION_MASK)) { fprintf(stderr, "block %lld already encrypted\n", (long long) e); return 1; }
 			require_crc(orig, "encrypt input");
 			ui4 ns = orig->number_of_samples, bb = orig->block_bytes;
@@ -148,10 +150,13 @@ int main(int argc, char **argv) {
 		ui1 *tdat = slurp(argv[2], &tdat_n);
 		PASSWORD_DATA *pwd = keys_for(argv[3], argv[4]);
 		FILE *out = fopen(argv[5], "wb");
+		if (!out) { fprintf(stderr, "cannot write %s\n", argv[5]); return 2; }
 		si8 off = UNIVERSAL_HEADER_BYTES, blocks = 0;
 		while (off < tdat_n) {
+			if (off + RED_BLOCK_HEADER_BYTES > tdat_n) { fprintf(stderr, "truncated block header at %lld\n", (long long) off); return 1; }
 			RED_BLOCK_HEADER *bh = (RED_BLOCK_HEADER *) (tdat + off);
 			ui4 ns = bh->number_of_samples, bb = bh->block_bytes;
+			if (bb < RED_BLOCK_HEADER_BYTES || off + bb > tdat_n) { fprintf(stderr, "block at %lld runs past the .tdat\n", (long long) off); return 1; }
 			require_crc(bh, "decode input");
 			RED_PROCESSING_STRUCT *dec = decoder(ns, pwd);
 			dec->block_header = bh;
