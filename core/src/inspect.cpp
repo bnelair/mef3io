@@ -1,0 +1,712 @@
+// mef3io — inspect_session: everything about a session without its samples.
+//
+// File access, per segment: one .tmet read (the same 16 KB the Reader reads
+// on open), the sizes of .tmet/.tidx/.tdat, and an existence check for the
+// segment's record file. The .tidx is read only with read_index. The .tdat is
+// NEVER opened for reading — tests/test_p25_inspect.py pins that with
+// /proc/self/io.
+#include "mef3io/inspect.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
+#include <limits>
+#include <map>
+#include <set>
+
+#include "mef3io/byteio.hpp"
+#include "mef3io/crypto.hpp"
+#include "mef3io/errors.hpp"
+#include "mef3io/metadata.hpp"
+#include "mef3io/source.hpp"
+#include "mef3io/time.hpp"
+#include "mef3io/validate.hpp"
+#include "session_layout.hpp"
+
+namespace mef3io {
+namespace {
+
+/// A stored time as absolute uUTC, or nullopt when it cannot be known: the
+/// NO_ENTRY sentinel, or an offset-applied (negative) time whose offset is
+/// unknown. A non-negative time is absolute whatever the offset is.
+std::optional<si8> resolve(si8 stored, std::optional<si8> rto) {
+  if (stored == fmt::UUTC_NO_ENTRY) return std::nullopt;
+  if (stored >= 0) return stored;
+  if (!rto) return std::nullopt;
+  return to_user_time(stored, *rto);
+}
+
+void widen(std::optional<si8>& lo, std::optional<si8>& hi, std::optional<si8> t) {
+  if (!t) return;
+  lo = lo ? std::min(*lo, *t) : *t;
+  hi = hi ? std::max(*hi, *t) : *t;
+}
+
+/// Collects identifying fields by name, in first-seen order.
+class IdentityCollector {
+ public:
+  explicit IdentityCollector(bool keep_values) : keep_values_(keep_values) {}
+
+  void add(const std::string& name, const std::string& location, const std::string& value) {
+    Entry& e = entry(name, location);
+    if (value.empty()) return;
+    ++e.field.occurrences;
+    e.field.max_length = std::max(e.field.max_length, value.size());
+    e.distinct.insert(value);
+  }
+  void locked(const std::string& name, const std::string& location) {
+    ++entry(name, location).field.locked;
+  }
+  std::vector<IdentityField> finish() {
+    std::vector<IdentityField> out;
+    for (auto& name : order_) {
+      Entry& e = entries_.at(name);
+      e.field.distinct = e.distinct.size();
+      if (keep_values_) e.field.values.assign(e.distinct.begin(), e.distinct.end());
+      out.push_back(std::move(e.field));
+    }
+    return out;
+  }
+
+ private:
+  struct Entry {
+    IdentityField field;
+    std::set<std::string> distinct;
+  };
+  Entry& entry(const std::string& name, const std::string& location) {
+    auto it = entries_.find(name);
+    if (it == entries_.end()) {
+      order_.push_back(name);
+      it = entries_.emplace(name, Entry{}).first;
+      it->second.field.name = name;
+      it->second.field.location = location;
+    }
+    return it->second;
+  }
+  bool keep_values_;
+  std::vector<std::string> order_;
+  std::map<std::string, Entry> entries_;
+};
+
+/// Everything inspect learns about one segment before the summary is built.
+struct SegState {
+  const detail::LayoutSegment* layout = nullptr;
+  std::optional<TimeSeriesMetadata> md;  ///< nullopt: unreadable (lenient)
+  /// The segment's recording-time offset (0 = none); nullopt when section 3
+  /// is locked.
+  std::optional<si8> rto;
+  bool has_records = false;  ///< its .rdat exists (checked once, in the segment pass)
+};
+
+/// Gaps in a set of [start, end) spans: anywhere the next span starts more
+/// than `tolerance_us` after everything before it has ended.
+std::vector<InspectGap> find_gaps(std::vector<std::pair<si8, si8>> spans, double tolerance_us) {
+  std::vector<InspectGap> out;
+  std::sort(spans.begin(), spans.end());
+  std::optional<si8> covered;  // end of everything seen so far
+  for (const auto& [s, e] : spans) {
+    if (covered && static_cast<double>(s - *covered) > tolerance_us)
+      out.push_back(InspectGap{*covered, s});
+    covered = covered ? std::max(*covered, e) : e;
+  }
+  return out;
+}
+
+}  // namespace
+
+SessionSummary inspect_session(const std::string& path, const InspectOptions& opt) {
+  SessionSummary out;
+  const auto src = open_session_source(path);  // enforces the naming rules
+  const auto layout = detail::discover_layout(*src);
+
+  out.name = src->session_name();
+  out.path = path;
+  out.layout = path_has_suffix(path, ".tar") ? "tar" : "directory";
+  if (out.layout == "tar") out.archive_bytes = std::filesystem::file_size(path);
+  out.index_read = opt.read_index;
+  out.video_channels = layout.video_channels;
+  std::sort(out.video_channels.begin(), out.video_channels.end());
+  out.record_only_channels = layout.record_only_channels;
+  std::sort(out.record_only_channels.begin(), out.record_only_channels.end());
+
+  IdentityCollector identity(opt.include_values);
+  // Fixed order of the identity table, so a field that is never set still
+  // appears (with zero occurrences) and the shape never depends on the file.
+  for (const char* n : {"subject_name_1", "subject_name_2", "subject_id", "recording_location"})
+    identity.add(n, "metadata section 3", "");
+  for (const char* n : {"session_description", "channel_description", "reference_description"})
+    identity.add(n, "metadata section 2", "");
+  for (const char* n : {"session_name", "anonymized_name"})
+    identity.add(n, "universal header", "");
+  identity.add("record_text", "record bodies", "");
+
+  // Run `fn`, containing a failure when lenient. A wrong password is never
+  // contained: it is the caller's mistake, and reporting every segment of the
+  // session as "unreadable" would hide that.
+  auto contain = [&](const std::string& channel, int segment, const std::string& where,
+                     const std::string& kind, auto&& fn) -> std::string {
+    if (opt.strict) {
+      fn();
+      return {};
+    }
+    try {
+      fn();
+      return {};
+    } catch (const PasswordError&) {
+      throw;
+    } catch (const std::exception& e) {
+      const std::string reason = kind == "records" ? std::string("records: ") + e.what()
+                                                   : std::string(e.what());
+      out.problems.push_back(SegmentProblem{channel, segment, where, reason, kind});
+      return e.what();
+    }
+  };
+
+  bool any_ambiguous = false;
+  std::string ambiguous_where;
+  auto note_ambiguous = [&](std::optional<si8> rto, si8 stored, const std::string& where) {
+    if (!rto || *rto == 0 || stored == fmt::UUTC_NO_ENTRY || stored < 0) return;
+    if (!any_ambiguous) ambiguous_where = where;
+    any_ambiguous = true;
+  };
+
+  int worst_access = fmt::LEVEL_2_ACCESS;
+  std::set<si8> offsets_seen;           // non-zero offsets of readable segments
+  bool zero_offset_seen = false;
+  bool offset_plain = false;            // some offset segment keeps section 3 in plain
+  std::optional<fmt::MetadataSection3> tz;   // first readable section 3
+  bool tz_differs = false;
+  std::map<std::string, std::vector<SegState>> states;  // by channel
+
+  // ------------------------------------------------------------------ segments
+  std::vector<const detail::LayoutChannel*> chans;
+  for (const auto& lc : layout.channels) chans.push_back(&lc);
+  std::sort(chans.begin(), chans.end(),
+            [](auto* a, auto* b) { return a->name < b->name; });
+
+  for (const auto* lc : chans) {
+    InspectChannel ic;
+    ic.name = lc->name;
+    auto& seg_states = states[lc->name];
+    std::vector<std::pair<si8, si8>> spans;
+    bool spans_complete = true;
+    bool n_samples_known = true;
+    si8 n_samples = 0;
+
+    for (const auto& ls : lc->segments) {
+      InspectSegment is;
+      is.segment_number = ls.number;
+      is.path = src->describe(ls.dir());
+      SegState st;
+      st.layout = &ls;
+      std::vector<std::pair<si8, si8>> seg_spans;
+
+      const std::string failure = contain(lc->name, ls.number, src->describe(ls.tmet), "segment", [&] {
+        is.tidx_bytes = src->file_size(ls.tidx);
+        is.tdat_bytes = src->file_size(ls.tdat);  // size only: never read
+        const std::string rdat = ls.rdat();
+        if (src->exists(rdat)) {
+          is.has_records = true;
+          is.record_bytes = src->file_size(rdat);
+          const std::string ridx = rdat.substr(0, rdat.size() - 5) + ".ridx";
+          if (src->exists(ridx)) is.record_bytes += src->file_size(ridx);
+        }
+
+        const auto tmet_bytes = src->read_all(ls.tmet);  // whole file: its size is free
+        is.tmet_bytes = tmet_bytes.size();
+        auto md = load_time_series_metadata_partial(tmet_bytes, opt.password);
+        const auto& uh = md.universal_header;
+        // Everything that can still throw comes FIRST, before this segment
+        // touches any session-wide tally: in lenient mode a segment that fails
+        // part-way must contribute nothing at all.
+        const std::optional<si8> seg_rto =
+            md.section3_available ? std::optional<si8>(effective_rto(md.section3.recording_time_offset))
+                                  : std::nullopt;
+        std::string index_ambiguous;  // first .tidx time stored non-negative under an offset
+        bool index_complete = true;
+        // Block index (opt-in): spans of the blocks, for gaps inside segments.
+        if (opt.read_index) {
+          const auto idx = src->read_all(ls.tidx);
+          if (idx.size() < static_cast<std::size_t>(fmt::UNIVERSAL_HEADER_BYTES) ||
+              (idx.size() - fmt::UNIVERSAL_HEADER_BYTES) % fmt::TIME_SERIES_INDEX_BYTES != 0)
+            throw FormatError("index file is not a whole number of entries (truncated?): " +
+                              src->describe(ls.tidx));
+          const std::size_t n =
+              (idx.size() - fmt::UNIVERSAL_HEADER_BYTES) / fmt::TIME_SERIES_INDEX_BYTES;
+          const sf8 fs = md.section2_available ? md.section2.sampling_frequency : 0.0;
+          const std::span<const ui1> all(idx);
+          for (std::size_t i = 0; i < n; ++i) {
+            const auto e = fmt::TimeSeriesIndex::parse(
+                all.subspan(fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES,
+                            fmt::TIME_SERIES_INDEX_BYTES));
+            if (e.file_offset < 0 || e.number_of_samples == 0) continue;  // padding, as read_index
+            if (seg_rto && *seg_rto != 0 && e.start_time != fmt::UUTC_NO_ENTRY &&
+                e.start_time >= 0 && index_ambiguous.empty())
+              index_ambiguous = src->describe(ls.tidx);
+            const auto t = resolve(e.start_time, seg_rto);
+            if (!t || !(fs > 0)) {
+              index_complete = false;
+              continue;
+            }
+            seg_spans.emplace_back(
+                *t, *t + static_cast<si8>(std::llround(e.number_of_samples * 1e6 / fs)));
+          }
+        }
+        if (!index_complete) spans_complete = false;
+        if (!index_ambiguous.empty()) note_ambiguous(seg_rto, 0, index_ambiguous);
+
+        const bool encrypted =
+            md.section1.section_2_encryption > 0 || md.section1.section_3_encryption > 0;
+        if (encrypted || uh.is_password_protected()) out.encryption.encrypted = true;
+        out.encryption.section2_level =
+            std::max<int>(out.encryption.section2_level, md.section1.section_2_encryption);
+        out.encryption.section3_level =
+            std::max<int>(out.encryption.section3_level, md.section1.section_3_encryption);
+        worst_access = std::min(worst_access, encrypted ? md.access_level : fmt::LEVEL_2_ACCESS);
+        is.section2_available = md.section2_available;
+        is.section3_available = md.section3_available;
+        if (!md.section2_available) ++out.encryption.section2_locked;
+        if (!md.section3_available) ++out.encryption.section3_locked;
+
+        // The offset: section 3's, when it can be read; otherwise unknown —
+        // never assumed 0 (that is how a locked offset turns into a wrong date).
+        if (md.section3_available) {
+          st.rto = effective_rto(md.section3.recording_time_offset);
+          is.time_offset = *st.rto != 0 ? "applied" : "none";
+          if (*st.rto != 0) {
+            offsets_seen.insert(*st.rto);
+            if (md.section1.section_3_encryption <= 0) offset_plain = true;
+            if (opt.include_values) is.recording_time_offset = *st.rto;
+          } else {
+            zero_offset_seen = true;
+          }
+          if (!tz) {
+            tz = md.section3;
+          } else if (tz->gmt_offset != md.section3.gmt_offset ||
+                     tz->dst_start_time != md.section3.dst_start_time ||
+                     tz->dst_end_time != md.section3.dst_end_time) {
+            tz_differs = true;
+          }
+        } else {
+          is.time_offset = "locked";
+        }
+
+        is.start_time = resolve(uh.start_time, st.rto);
+        is.end_time = resolve(uh.end_time, st.rto);
+        note_ambiguous(st.rto, uh.start_time, src->describe(ls.tmet));
+        note_ambiguous(st.rto, uh.end_time, src->describe(ls.tmet));
+
+        if (md.section2_available) {
+          const auto& s2 = md.section2;
+          is.start_sample = s2.start_sample;
+          is.number_of_samples = s2.number_of_samples;
+          is.number_of_blocks = s2.number_of_blocks;
+          is.number_of_discontinuities = s2.number_of_discontinuities;
+          is.unset_declarations = unset_declarations(s2);
+        }
+        is.provenance = fmt::provenance::read(uh);
+
+        // Identity: universal header (always plain), sections 2 and 3 when open.
+        identity.add("session_name", "universal header", uh.session_name);
+        identity.add("anonymized_name", "universal header", uh.anonymized_name);
+        if (md.section2_available) {
+          identity.add("session_description", "metadata section 2", md.section2.session_description);
+          identity.add("channel_description", "metadata section 2", md.section2.channel_description);
+          identity.add("reference_description", "metadata section 2",
+                       md.section2.reference_description);
+        } else {
+          for (const char* n : {"session_description", "channel_description", "reference_description"})
+            identity.locked(n, "metadata section 2");
+        }
+        if (md.section3_available) {
+          identity.add("subject_name_1", "metadata section 3", md.section3.subject_name_1);
+          identity.add("subject_name_2", "metadata section 3", md.section3.subject_name_2);
+          identity.add("subject_id", "metadata section 3", md.section3.subject_id);
+          identity.add("recording_location", "metadata section 3", md.section3.recording_location);
+        } else {
+          for (const char* n : {"subject_name_1", "subject_name_2", "subject_id", "recording_location"})
+            identity.locked(n, "metadata section 3");
+        }
+        st.md = std::move(md);
+      });
+
+      if (!failure.empty()) {
+        // Lenient: the segment is listed, unreadable, and contributes nothing
+        // else — a half-described segment is worse than a skipped one.
+        InspectSegment bad;
+        bad.segment_number = is.segment_number;
+        bad.path = is.path;
+        bad.readable = false;
+        bad.problem = failure;
+        bad.time_offset = "locked";
+        ic.segments.push_back(std::move(bad));
+        seg_states.push_back(SegState{&ls, std::nullopt, std::nullopt});
+        spans_complete = false;
+        n_samples_known = false;
+        continue;
+      }
+
+      const auto& md = *st.md;
+      if (md.section2_available) {
+        if (!ic.sampling_frequency) {
+          ic.sampling_frequency = md.section2.sampling_frequency;
+          ic.units_conversion_factor = md.section2.units_conversion_factor;
+          ic.units_description = md.section2.units_description;
+        }
+        n_samples += md.section2.number_of_samples;
+        for (const auto& f : is.unset_declarations)
+          out.declaration_issues.push_back({lc->name, ls.number, f});
+      } else {
+        n_samples_known = false;
+      }
+      widen(ic.start_time, ic.end_time, is.start_time);
+      widen(ic.start_time, ic.end_time, is.end_time);
+      if (opt.read_index) {
+        spans.insert(spans.end(), seg_spans.begin(), seg_spans.end());
+      } else if (is.start_time && is.end_time) {
+        spans.emplace_back(*is.start_time, *is.end_time);
+      } else {
+        spans_complete = false;
+      }
+      ic.bytes += is.tmet_bytes + is.tidx_bytes + is.tdat_bytes + is.record_bytes;
+      st.has_records = is.has_records;
+      seg_states.push_back(std::move(st));
+      ic.segments.push_back(std::move(is));
+    }
+
+    if (n_samples_known) ic.number_of_samples = n_samples;
+    if (ic.sampling_frequency && *ic.sampling_frequency > 0) {
+      const double period = 1e6 / *ic.sampling_frequency;
+      // From the index, block ends are exact (start + n/fs), so anything past
+      // half a sample period is a gap. Between segments, writers disagree on
+      // whether the universal-header end is the last sample or just past it,
+      // so a gap there must exceed one and a half periods to count.
+      ic.gaps = find_gaps(std::move(spans), opt.read_index ? 0.5 * period : 1.5 * period);
+      ic.gaps_complete = opt.read_index && spans_complete;
+    }
+    out.total_bytes += ic.bytes;
+    widen(out.start_time, out.end_time, ic.start_time);
+    widen(out.start_time, out.end_time, ic.end_time);
+    out.channels.push_back(std::move(ic));
+  }
+
+  // ------------------------------------------------------------------ offsets
+  // The offset a channel- or session-level record file is read with: the one
+  // every readable segment of the scope agrees on (Session::agreed_rto). Any
+  // locked or disagreeing segment makes it unknown; `why` says which.
+  auto agreed = [&](const std::string* channel, std::string& why) -> std::optional<si8> {
+    std::optional<si8> value;
+    bool any = false;
+    for (const auto& [name, segs] : states) {
+      if (channel && name != *channel) continue;
+      for (const auto& st : segs) {
+        if (!st.md) continue;  // unreadable: already reported, has no say
+        if (!st.rto) {
+          why = "the recording-time offset is locked in section 3";
+          return std::nullopt;
+        }
+        if (any && *value != *st.rto) {
+          why = "segments disagree on the recording-time offset";
+          return std::nullopt;
+        }
+        value = st.rto;
+        any = true;
+      }
+    }
+    return any ? value : std::optional<si8>(0);
+  };
+
+  // ------------------------------------------------------------------ records
+  struct Unplaced {
+    std::string file, why;
+  };
+  std::vector<Unplaced> unplaced;
+  std::size_t records_failed = 0;
+
+  auto read_file = [&](const std::string& rdat, std::optional<si8> rto, const std::string& why,
+                       RecordLevel level, const std::string& channel, int segment) {
+    std::vector<InspectRecord> got;
+    const std::string failure =
+        contain(channel, segment, src->describe(rdat), "records", [&] {
+          std::uint64_t bytes = src->file_size(rdat);
+          const std::string ridx = rdat.substr(0, rdat.size() - 5) + ".ridx";
+          if (src->exists(ridx)) bytes += src->file_size(ridx);
+          if (level != RecordLevel::Segment) out.total_bytes += bytes;  // segments counted above
+          if (level == RecordLevel::Channel) {
+            for (auto& ic : out.channels)
+              if (ic.name == channel) ic.bytes += bytes;
+          }
+
+          const auto raw = src->read_all(rdat);
+          const auto uh = fmt::UniversalHeader::parse(raw);
+          identity.add("session_name", "universal header", uh.session_name);
+          identity.add("anonymized_name", "universal header", uh.anonymized_name);
+          const auto keys = crypto::validate_password(opt.password,
+                                                      uh.level_1_password_validation_field,
+                                                      uh.level_2_password_validation_field);
+          if (!opt.password.empty() && uh.is_password_protected() &&
+              keys.access_level == fmt::LEVEL_0_ACCESS)
+            throw PasswordError("record file is encrypted and the password is incorrect: " +
+                                src->describe(rdat));
+          RecordParseInfo info;
+          info.skip_locked_bodies = true;
+          auto recs = parse_records(raw, rto.value_or(0), keys, info);
+          // Placed only if the times do not depend on an offset we lack.
+          const bool placeable = rto.has_value() || !info.offset_dependent;
+          if (!placeable) unplaced.push_back({src->describe(rdat), why});
+          if (rto && *rto != 0 && info.header_time_non_negative) {
+            if (!any_ambiguous) ambiguous_where = src->describe(rdat);
+            any_ambiguous = true;
+          }
+          std::set<std::size_t> locked(info.locked.begin(), info.locked.end());
+          for (std::size_t i = 0; i < recs.size(); ++i) {
+            const Record& r = recs[i];
+            InspectRecord ir;
+            ir.level = level;
+            ir.channel = channel;
+            ir.segment = segment;
+            ir.type = r.type;
+            ir.body_locked = locked.count(i) != 0;
+            ir.duration = r.duration;
+            if (ir.body_locked) {
+              ++out.encryption.record_bodies_locked;
+              out.encryption.encrypted = true;
+              identity.locked("record_text", "record bodies");
+            }
+            std::size_t text = 0;
+            std::string joined;
+            for (const auto& f : record_fields(r)) {
+              if (!f.value) continue;
+              if (const auto* s = std::get_if<std::string>(&*f.value)) {
+                text += s->size();
+                if (!s->empty()) joined += (joined.empty() ? "" : "\n") + *s;
+              }
+            }
+            ir.text_bytes = text;
+            if (!joined.empty()) identity.add("record_text", "record bodies", joined);
+            if (placeable) {
+              ir.time = resolve(r.time, 0);  // already absolute; drops NO_ENTRY
+              std::optional<si8> lo, hi;
+              // Body times at or below 0 are sentinels (-1, NO_ENTRY), not times.
+              auto body = [&](const std::optional<si8>& t) {
+                if (t && *t > 0) widen(lo, hi, *t);
+              };
+              body(ir.time);
+              body(r.earliest_onset);
+              body(r.latest_offset);
+              for (const auto& c : r.seizure_channels) {
+                body(c.onset);
+                body(c.offset);
+              }
+              body(r.timestamp);
+              body(r.end_timestamp);
+              body(r.trace_timestamp);
+              if (ir.time && r.duration && *r.duration > 0)
+                body(saturating_add(*ir.time, *r.duration));
+              ir.first_time = lo;
+              ir.last_time = hi;
+            }
+            if (opt.include_values) {
+              ir.full = r;
+              ir.full->level = level;
+              ir.full->channel = channel;
+              ir.full->segment = segment;
+            }
+            got.push_back(std::move(ir));
+          }
+        });
+    if (!failure.empty()) {
+      ++records_failed;
+      return;
+    }
+    for (auto& ir : got) {
+      widen(out.records_start_time, out.records_end_time, ir.first_time);
+      widen(out.records_start_time, out.records_end_time, ir.last_time);
+      if (!ir.channel.empty())
+        for (auto& ic : out.channels)
+          if (ic.name == ir.channel) ++ic.records;
+      out.records.push_back(std::move(ir));
+    }
+  };
+
+  {  // session level
+    std::string ambiguity;
+    const std::string rdat = detail::session_record_file(*src, ambiguity);
+    if (!ambiguity.empty()) {
+      contain("", -1, src->describe(""), "records", [&] { throw FormatError(ambiguity); });
+      ++records_failed;
+    }
+    if (!rdat.empty()) {
+      std::string why;
+      const auto rto = agreed(nullptr, why);
+      read_file(rdat, rto, why, RecordLevel::Session, "", -1);
+    }
+  }
+  std::vector<std::string> record_channels;
+  for (const auto* lc : chans) record_channels.push_back(lc->name);
+  record_channels.insert(record_channels.end(), out.record_only_channels.begin(),
+                         out.record_only_channels.end());
+  std::sort(record_channels.begin(), record_channels.end());
+  for (const auto& name : record_channels) {
+    const std::string cand = name + ".timd/" + name + ".rdat";
+    if (src->exists(cand)) {
+      std::string why;
+      // A channel with no readable segment uses the session's (as written).
+      bool has_readable = false;
+      if (auto it = states.find(name); it != states.end())
+        for (const auto& st : it->second) has_readable |= st.md.has_value();
+      const auto rto = has_readable ? agreed(&name, why) : agreed(nullptr, why);
+      read_file(cand, rto, why, RecordLevel::Channel, name, -1);
+    }
+    auto it = states.find(name);
+    if (it == states.end()) continue;
+    for (const auto& st : it->second) {
+      if (!st.md) continue;
+      const std::string rdat = st.layout->rdat();
+      if (!st.has_records) continue;  // checked once, in the segment pass
+      read_file(rdat, st.rto, "the recording-time offset is locked in section 3",
+                RecordLevel::Segment, name, st.layout->number);
+    }
+  }
+  widen(out.first_time, out.last_time, out.start_time);
+  widen(out.first_time, out.last_time, out.end_time);
+  widen(out.first_time, out.last_time, out.records_start_time);
+  widen(out.first_time, out.last_time, out.records_end_time);
+
+  // ------------------------------------------------------------- summaries
+  out.encryption.access = worst_access >= fmt::LEVEL_2_ACCESS
+                              ? "full"
+                              : (worst_access == fmt::LEVEL_1_ACCESS ? "level-1" : "none");
+  if (out.encryption.record_bodies_locked && out.encryption.access == "full")
+    out.encryption.access = "level-1";
+  if (tz) {
+    if (tz->gmt_offset != fmt::GMT_OFFSET_NO_ENTRY) out.gmt_offset = tz->gmt_offset;
+    if (tz->dst_start_time != fmt::UUTC_NO_ENTRY) out.dst_start_time = tz->dst_start_time;
+    if (tz->dst_end_time != fmt::UUTC_NO_ENTRY) out.dst_end_time = tz->dst_end_time;
+  }
+
+  auto& to = out.time_offset;
+  to.segments_locked = out.encryption.section3_locked;
+  for (const auto& [name, segs] : states)
+    for (const auto& st : segs)
+      if (st.rto && *st.rto != 0) ++to.segments_with_offset;
+  if (offsets_seen.size() > 1 || (!offsets_seen.empty() && zero_offset_seen))
+    to.status = "disputed";
+  else if (!offsets_seen.empty())
+    to.status = "applied";
+  else if (to.segments_locked)
+    to.status = "locked";
+  to.ambiguous = any_ambiguous;
+  if (!offsets_seen.empty()) {
+    to.date_recoverable = true;
+    to.recoverable_by = offset_plain ? "anyone" : "level-2 password";
+    if (opt.include_values && to.status == "applied") to.value = *offsets_seen.begin();
+  }
+  if (to.status == "none") {
+    to.interpretation =
+        "No recording-time offset. Stored times are absolute UTC (negated on disk as meflib's "
+        "marker) and are reported as they are.";
+  } else if (to.status == "applied") {
+    to.interpretation =
+        "meflib's recording-time offset is set (deprecated as anonymization). Stored times "
+        "count from the offset and were converted back to true UTC. The real recording date "
+        "is stored in metadata section 3 " +
+        std::string(offset_plain ? "in plain text: anyone can recover it."
+                                 : "encrypted at level 2: anyone with the level-2 password "
+                                   "can recover it.");
+  } else if (to.status == "disputed") {
+    to.interpretation =
+        "Segments disagree on the recording-time offset. Each segment's times were resolved "
+        "with its own offset; channel- and session-level records that depend on it cannot be "
+        "placed.";
+  } else {
+    to.interpretation =
+        "Metadata section 3 is encrypted and the password does not open it, so any "
+        "recording-time offset is unknown. Times stored relative to it are reported as "
+        "unknown rather than guessed.";
+  }
+  if (to.segments_locked && to.status != "locked")
+    to.interpretation += " " + std::to_string(to.segments_locked) +
+                         " segment(s) keep section 3 locked; their times may be unknown.";
+
+  out.identity = identity.finish();
+
+  // ------------------------------------------------------------- warnings
+  auto warn = [&](std::string code, std::string message, bool blocks) {
+    out.warnings.push_back(InspectWarning{std::move(code), std::move(message), blocks});
+  };
+  if (!out.video_channels.empty()) {
+    std::string list;
+    for (const auto& v : out.video_channels) list += (list.empty() ? "" : ", ") + v;
+    warn("video-channels",
+         std::to_string(out.video_channels.size()) +
+             " video channel(s) present (" + list +
+             "). mef3io does not read video; they are listed but not described.",
+         true);
+  }
+  std::size_t bad_segments = 0;
+  for (const auto& p : out.problems)
+    if (p.kind == "segment") ++bad_segments;
+  if (bad_segments)
+    warn("unreadable-segments",
+         std::to_string(bad_segments) +
+             " segment(s) could not be read; see problems. Their spans are not described.",
+         true);
+  if (records_failed)
+    warn("unreadable-records",
+         std::to_string(records_failed) + " record file(s) could not be read; see problems.",
+         true);
+  if (out.encryption.section2_locked || out.encryption.section3_locked ||
+      out.encryption.record_bodies_locked)
+    warn("locked",
+         "Part of the session is encrypted and the password does not open it (section 2 locked "
+         "in " + std::to_string(out.encryption.section2_locked) + " segment(s), section 3 in " +
+             std::to_string(out.encryption.section3_locked) + ", " +
+             std::to_string(out.encryption.record_bodies_locked) +
+             " record bod(ies)). Those values are reported as locked, not guessed; the level-2 "
+             "password opens everything.",
+         true);
+  if (to.status == "applied" || to.status == "disputed")
+    warn("legacy-time-offset",
+         "This session uses meflib's recording-time offset, which is deprecated as "
+         "anonymization: the real recording date is stored in metadata section 3 and can be "
+         "recovered by " + std::string(offset_plain ? "anyone" : "anyone with the level-2 password") +
+             ". Times here are the true UTC times. Treat the session as identifiable.",
+         false);
+  if (to.status == "disputed")
+    warn("time-offset-disputed",
+         "Segments disagree on the recording-time offset; each segment was read with its own.",
+         true);
+  if (to.ambiguous)
+    warn("ambiguous-time-convention",
+         "A time is stored non-negative although the recording-time offset is set (first: " +
+             ambiguous_where +
+             "). Such a value cannot be told apart from an absolute time, so where it really "
+             "lies is uncertain.",
+         true);
+  bool times_unknown = false;
+  for (const auto& ic : out.channels)
+    for (const auto& is : ic.segments)
+      if (is.readable && (!is.start_time || !is.end_time)) times_unknown = true;
+  if (times_unknown || !unplaced.empty()) {
+    std::string msg = "Some times could not be resolved because the recording-time offset they "
+                      "depend on is unknown";
+    if (!unplaced.empty())
+      msg += "; " + std::to_string(unplaced.size()) + " record file(s) have no times (first: " +
+             unplaced.front().file + ": " + unplaced.front().why + ")";
+    warn("times-unresolved", msg + ". They are reported as unknown rather than guessed.", true);
+  }
+  if (!out.declaration_issues.empty())
+    warn("unset-declarations",
+         std::to_string(out.declaration_issues.size()) +
+             " section-2 size declaration(s) are unset. mef3io reads the data regardless; "
+             "meflib-based readers allocate from them. See declaration_issues.",
+         false);
+  if (tz_differs)
+    warn("time-zone-fields-differ",
+         "Segments disagree on GMT_offset or the DST fields; the first segment's are reported.",
+         false);
+  return out;
+}
+
+}  // namespace mef3io

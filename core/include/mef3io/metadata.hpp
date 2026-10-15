@@ -16,6 +16,9 @@ struct TimeSeriesMetadata {
   fmt::MetadataSection3 section3;
   int access_level = fmt::LEVEL_0_ACCESS;  // level attained with the password
   bool section3_available = true;          // false if L2-encrypted and only L1 access
+  /// false only from load_time_series_metadata_partial opened with no
+  /// password on an encrypted section 2 (section2 then holds defaults).
+  bool section2_available = true;
 };
 
 /// Just the recording-time offset of a .tmet record (the first
@@ -46,5 +49,14 @@ inline si8 segment_rto(const TimeSeriesMetadata& md) {
 // use it in that case).
 TimeSeriesMetadata load_time_series_metadata(std::span<const ui1> tmet_bytes,
                                              const std::string& password = "");
+
+/// Like load_time_series_metadata, for a caller that must DESCRIBE a session
+/// it may not be able to read in full (inspect_session). Opened with NO
+/// password, an encrypted section is reported as unavailable
+/// (section2_available / section3_available false, the section left at its
+/// defaults) instead of throwing. Everything else is unchanged: the CRC checks
+/// still throw, and so does a password that was given but is wrong.
+TimeSeriesMetadata load_time_series_metadata_partial(std::span<const ui1> tmet_bytes,
+                                                     const std::string& password = "");
 
 }  // namespace mef3io

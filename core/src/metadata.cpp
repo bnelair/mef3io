@@ -73,8 +73,14 @@ std::optional<si8> probe_recording_time_offset(std::span<const ui1> tmet_bytes,
   return rto == UUTC_NO_ENTRY ? 0 : rto;
 }
 
-TimeSeriesMetadata load_time_series_metadata(std::span<const ui1> tmet_bytes,
-                                             const std::string& password) {
+namespace {
+// `report_locked`: a section the password does not unlock is reported through
+// section2_available / section3_available instead of throwing. Only the "no
+// password at all" case differs from the strict loader -- a password that was
+// given and is wrong still throws, because that is a caller's mistake, not a
+// property of the file.
+TimeSeriesMetadata load_impl(std::span<const ui1> tmet_bytes, const std::string& password,
+                             bool report_locked) {
   using namespace fmt;
   if (tmet_bytes.size() < METADATA_FILE_BYTES)
     throw FormatError("tmet file too small: expected " + std::to_string(METADATA_FILE_BYTES) +
@@ -124,7 +130,7 @@ TimeSeriesMetadata load_time_series_metadata(std::span<const ui1> tmet_bytes,
     keys = crypto::validate_password(
         password, md.universal_header.level_1_password_validation_field,
         md.universal_header.level_2_password_validation_field);
-    if (keys.access_level == LEVEL_0_ACCESS)
+    if (keys.access_level == LEVEL_0_ACCESS && !(report_locked && password.empty()))
       throw PasswordError("tmet is encrypted and the password is missing or incorrect");
   }
   md.access_level = keys.access_level;
@@ -144,11 +150,15 @@ TimeSeriesMetadata load_time_series_metadata(std::span<const ui1> tmet_bytes,
 
   if (s2_enc > 0) {
     auto key = key_for(s2_enc);
-    if (key.empty()) throw PasswordError("insufficient access to decrypt metadata section 2");
-    auto dec = crypto::aes128_ecb_decrypt(s2, key);
-    std::copy(dec.begin(), dec.end(), s2.begin());
+    if (key.empty()) {
+      if (!report_locked) throw PasswordError("insufficient access to decrypt metadata section 2");
+      md.section2_available = false;
+    } else {
+      auto dec = crypto::aes128_ecb_decrypt(s2, key);
+      std::copy(dec.begin(), dec.end(), s2.begin());
+    }
   }
-  md.section2 = TimeSeriesMetadataSection2::parse(s2);
+  if (md.section2_available) md.section2 = TimeSeriesMetadataSection2::parse(s2);
 
   if (s3_enc > 0) {
     auto key = key_for(s3_enc);
@@ -165,6 +175,17 @@ TimeSeriesMetadata load_time_series_metadata(std::span<const ui1> tmet_bytes,
   }
 
   return md;
+}
+}  // namespace
+
+TimeSeriesMetadata load_time_series_metadata(std::span<const ui1> tmet_bytes,
+                                             const std::string& password) {
+  return load_impl(tmet_bytes, password, false);
+}
+
+TimeSeriesMetadata load_time_series_metadata_partial(std::span<const ui1> tmet_bytes,
+                                                     const std::string& password) {
+  return load_impl(tmet_bytes, password, true);
 }
 
 }  // namespace mef3io

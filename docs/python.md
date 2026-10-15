@@ -266,6 +266,91 @@ checked in its last segment, unchanged. That covers:
 If a session may have been edited that way, open it without `cache=`: a plain
 open always reads everything.
 
+## Inspecting a session without reading its samples
+
+`mef3io.inspect(path, password="")` returns a `SessionSummary`: everything a
+tool needs to know about a session, read from the metadata and the record
+files only. It **never reads a `.tdat`**. Data files appear only as file sizes,
+so inspecting a terabyte session costs about the same as opening a `Reader`.
+
+```python
+s = mef3io.inspect("session.mefd")            # or "session.mefd.tar", read in place
+
+s.layout, s.total_bytes                       # "directory" / "tar", bytes
+s.start_time, s.end_time                      # first / last sample, all channels (uUTC)
+s.first_time, s.last_time                     # samples AND annotations
+for c in s.channels:
+    c.name, c.sampling_frequency, c.number_of_samples
+    c.segments                                # SegmentSummary: times, samples, sizes, provenance
+    c.gaps                                    # [(start, end), ...] uUTC spans with no samples
+s.records                                     # RecordSummary at every level, with times
+s.encryption                                  # what is encrypted, what the password opened
+s.time_offset                                 # meflib's recording-time offset, in plain words
+s.identity_field("subject_id").present        # True / False / None (locked)
+[w.code for w in s.warnings]
+s.to_dict()                                   # plain data, ready for json.dumps
+```
+
+From the command line:
+
+```bash
+python -m mef3io inspect session.mefd           # text
+python -m mef3io inspect session.mefd --json    # the same as to_dict()
+```
+
+What it reports:
+
+| Part | Contents |
+|---|---|
+| Session | name, path, layout, total size, first/last sample and record times, the recording-time offset and how it was read, GMT offset and DST fields |
+| `channels` | sampling rate, units, start/end, stored samples, the segment map (`segments`, the same fields as `Reader.segments()` plus file sizes, declared discontinuities and the offset state), gaps, record count |
+| `records` | every record at the session, channel and segment level: type, time, duration, and `first_time` / `last_time` over everything the record mentions (header time, body times such as `Seiz` onsets, `time + duration`) |
+| `identity` | subject name 1/2, ID and location (section 3), the session, channel and reference descriptions (section 2), `session_name` and `anonymized_name` (every universal header), and record text: where each lives, in how many places it is set, its longest length, how many distinct values. **Values only with `include_values=True`.** |
+| `warnings` | each with a `code`, a plain-words `message`, and `blocks_anonymize`; `s.anonymize_blockers` lists the ones the planned `anonymize_session` (#70) will refuse on |
+| `problems` | with `strict=False`, what could not be read (same shape as `Reader.problems`) |
+
+Options:
+
+- `include_values=True` returns identity values: subject fields, descriptions,
+  record text and the full records (`RecordSummary.fields`, as
+  `Reader.records()` returns them), and the recording-time offset. Off by
+  default: a summary is safe to log or show without them.
+- `read_index=True` also reads every segment's block index (about 2% of the
+  data), which finds gaps **inside** a segment. Without it, `gaps` lists only
+  the gaps between segments and `gaps_complete` is `False`. An appended
+  recording is usually one segment per channel, so ask for the index when
+  the gaps matter.
+- `strict=False` reports an unreadable segment or record file in `problems`
+  and a warning, marks the segment `readable=False`, and describes the rest.
+  Strict, the default, raises as a `Reader` does.
+
+**Encrypted sessions are described, not refused.** Without a password,
+`inspect` still lists channels, segments, sizes and the plain universal-header
+fields. What the password does not open is reported as locked:
+`encryption["access"]` is `"none"`, `"level-1"` or `"full"`, the locked
+sections and record bodies are counted, and values that live there are `None`.
+A password that is given and wrong raises `PasswordError`.
+
+**Times are never guessed.** Every time is absolute UTC. A time stored
+relative to a recording-time offset that cannot be read (section 3 locked, or
+the segments of a channel disagree) is `None`, with a `times-unresolved`
+warning, rather than read as if the offset were 0.
+
+**The recording-time offset is reported plainly.** meflib's recording-time
+offset is deprecated as anonymization: the real date stays in section 3.
+`time_offset["status"]` is `"none"`, `"applied"`, `"disputed"` or `"locked"`;
+when an offset is set, `date_recoverable` is `True` and `recoverable_by` says
+by whom (`"anyone"` if section 3 is plain, `"level-2 password"` if encrypted),
+with a `legacy-time-offset` warning. The offset's value is itself identifying
+(it is the local midnight of the recording day), so it is returned only with
+`include_values=True`. `ambiguous` is `True` when a time is stored
+non-negative under a non-zero offset, where it cannot be told apart from an
+absolute time; that blocks anonymization.
+
+!!! note "Python first"
+    `inspect` is available in Python and C++ (`mef3io/inspect.hpp`,
+    `inspect_session`). The C ABI and MATLAB bindings come later.
+
 ## Tar archives (single-file sessions)
 
 A session directory can be packed into a single **uncompressed tar** file —

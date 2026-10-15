@@ -125,6 +125,31 @@ std::vector<Record> parse_records(std::span<const ui1> rdat_bytes, si8 rto,
                                    const crypto::AccessKeys& keys = {},
                                    bool* offset_dependent = nullptr);
 
+/// What parse_records can say about a file beyond its records; filled by the
+/// overload below. Used by inspect_session, which must describe a file it may
+/// not be able to read in full.
+struct RecordParseInfo {
+  /// In: leave an encrypted body the keys cannot open undecoded (its index in
+  /// `locked` below, body fields unset) instead of throwing PasswordError.
+  /// The header — type and time — is never encrypted, so it is still read.
+  bool skip_locked_bodies = false;
+  /// Out: some time (header or body) was stored negated, so the result
+  /// depends on `rto` (the same flag as parse_records' `offset_dependent`).
+  bool offset_dependent = false;
+  /// Out: some record HEADER time was stored non-negative. Under a non-zero
+  /// offset such a time is ambiguous: meflib would have stored it negated, and
+  /// a non-negative value is either an absolute time or `rto - t` of a time
+  /// before the offset (docs/anonymization.md). Body times are not counted:
+  /// meflib never negates them, so non-negative is their normal form.
+  bool header_time_non_negative = false;
+  /// Out: positions (in the returned vector) of records whose body was left
+  /// encrypted because `skip_locked_bodies` was set.
+  std::vector<std::size_t> locked;
+};
+
+std::vector<Record> parse_records(std::span<const ui1> rdat_bytes, si8 rto,
+                                   const crypto::AccessKeys& keys, RecordParseInfo& info);
+
 /// Throw FormatError unless every record can be written as given: a 4-byte
 /// ASCII type code, and no payload its type cannot store. write_records runs
 /// it first; callers that create directories run it before doing so.
