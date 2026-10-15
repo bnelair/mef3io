@@ -14,6 +14,7 @@
 #include "mef3io/source.hpp"
 #include "mef3io/writer.hpp"
 #include "mef3io/time.hpp"
+#include "last_segment.hpp"
 
 namespace fs = std::filesystem;
 
@@ -110,20 +111,31 @@ SessionWriter::SessionWriter(const std::string& mefd_path, bool overwrite, std::
     if (!entry.is_directory() || entry.path().extension() != ".timd") continue;
     std::string ch = entry.path().stem().string();
     int nseg = 0;
+    long long last = -1;
     for (const auto& s : fs::directory_iterator(entry.path())) {
       if (!s.is_directory() || s.path().extension() != ".segd") continue;
       // A segment directory with no metadata is not a segment: it is what an
       // earlier refused or crashed write left behind, and adopting it would
       // wedge the channel (every later write: "cannot open segment metadata
-      // for append"). Ignore it, say so, and let the next new segment reuse
-      // its number.
+      // for append"). Ignore it and say so.
       if (!fs::exists(s.path() / (s.path().stem().string() + ".tmet"))) {
-        note_unreadable(s.path().string() + ": empty segment directory ignored");
+        const std::string entry_text =
+            s.path().string() + ": segment directory without metadata (.tmet) ignored";
+        note_unreadable(entry_text);
+        empty_segment_dirs_[s.path().string()] = entry_text;
         continue;
       }
       ++nseg;
+      last = std::max(last, detail::segment_number_of(s.path().stem().string()));
     }
+    // Segments are addressed by the HIGHEST real segment NUMBER, never by
+    // how many there are: with a directory without metadata in the middle
+    // (0 good, 1 empty, 2 good) the count is 2 but the last segment is 2, and
+    // using the count appended to the empty one. A new segment is last + 1,
+    // so it never collides with or reorders a real one; an empty directory
+    // past every real segment is simply reused.
     channels_[ch].n_segments = nseg;
+    channels_[ch].last_segment = static_cast<int>(last);
     channels_[ch].hydrated = (nseg == 0);
   }
 }
@@ -131,7 +143,7 @@ SessionWriter::SessionWriter(const std::string& mefd_path, bool overwrite, std::
 void SessionWriter::hydrate(const std::string& channel, ChannelState& st) {
   if (st.hydrated) return;
   st.hydrated = true;
-  const std::string base = segment_name(channel, st.n_segments - 1);
+  const std::string base = segment_name(channel, st.last_segment);
   const std::string tmet_path =
       (fs::path(mefd_path_) / (channel + ".timd") / (base + ".segd") / (base + ".tmet")).string();
   std::ifstream f(tmet_path, std::ios::binary);
@@ -156,57 +168,132 @@ void SessionWriter::hydrate(const std::string& channel, ChannelState& st) {
   st.last_end_uutc = end_stored == fmt::UUTC_NO_ENTRY ? 0 : to_user_time(end_stored, rto);
 }
 
-SessionWriter::LevelOffset SessionWriter::level_offset(const std::optional<std::string>& channel) {
-  // What the on-disk segments of the level (one channel, or the whole
-  // session) say about the recording-time offset — the value the reader
-  // resolves that level's times with (Session::read_records).
+SessionWriter::LevelOffset SessionWriter::scan_channel_offset(const fs::path& timd) {
+  // What one channel's on-disk segments say about the recording-time offset:
   //   Agreed   every readable segment has the same offset (0 when none);
   //   Disputed two readable segments differ (`detail` names them);
   //   Unknown  a segment's section 3 is locked (level-1 access only).
+  // Each segment costs only the bytes that hold the offset — universal header,
+  // section 1 and section 3, a quarter of the .tmet — via
+  // probe_recording_time_offset; the full loader would read and CRC all 16 KB.
   // A .tmet that cannot be read at all is counted in `unreadable` and listed
   // in unreadable_metadata(); resolve_offset() decides what that permits.
   LevelOffset out;
   std::string agreed_where;
   bool have = false;
+  std::error_code ec;
+  for (const auto& segd : fs::directory_iterator(timd, ec)) {
+    if (!segd.is_directory() || segd.path().extension() != ".segd") continue;
+    const fs::path tmet = segd.path() / (segd.path().stem().string() + ".tmet");
+    if (!fs::exists(tmet)) continue;  // a directory without metadata: not a segment
+    std::optional<si8> rto;
+    try {
+      if (fs::file_size(tmet) < static_cast<std::uintmax_t>(fmt::METADATA_FILE_BYTES))
+        throw FormatError("tmet file too small (truncated?)");
+      // Unbuffered: a buffered stream would pull whole 8 KB pages around both
+      // reads, doubling the bytes read for a few KB of fields.
+      std::ifstream f;
+      f.rdbuf()->pubsetbuf(nullptr, 0);
+      f.open(tmet, std::ios::binary);
+      std::vector<ui1> head(fmt::METADATA_SECTION_2_OFFSET), s3(fmt::METADATA_SECTION_3_BYTES);
+      f.read(reinterpret_cast<char*>(head.data()), static_cast<std::streamsize>(head.size()));
+      f.seekg(fmt::METADATA_SECTION_3_OFFSET);
+      f.read(reinterpret_cast<char*>(s3.data()), static_cast<std::streamsize>(s3.size()));
+      if (!f) throw IoError("cannot read " + tmet.string());
+      rto = probe_recording_time_offset(head, s3,
+                                        password_2_.empty() ? password_1_ : password_2_);
+    } catch (const std::exception& e) {
+      ++out.unreadable;
+      if (out.unreadable_example.empty()) out.unreadable_example = tmet.string();
+      note_unreadable(tmet.string() + ": " + e.what());
+      continue;
+    }
+    ++out.readable;
+    if (!rto) {
+      out.state = LevelOffset::State::Unknown;
+      out.detail = tmet.string();
+      return out;  // nothing else can make it known
+    }
+    if (!have) {
+      have = true;
+      out.rto = *rto;
+      agreed_where = tmet.string();
+    } else if (out.state == LevelOffset::State::Agreed && *rto != out.rto) {
+      out.state = LevelOffset::State::Disputed;
+      out.detail = std::to_string(out.rto) + " in " + agreed_where + ", " +
+                   std::to_string(*rto) + " in " + tmet.string();
+    }
+  }
+  if (have) out.where = agreed_where;
+  return out;
+}
+
+SessionWriter::LevelOffset SessionWriter::level_offset(const std::optional<std::string>& channel) {
+  // One channel's answer is scanned ONCE per Writer and memoized: the
+  // segments this writer adds carry the offset resolve_offset() chose, so the
+  // answer stays true (written segments are folded in by note_new_segment()).
+  // The session's answer is the channels' answers combined — so a session
+  // records write or a new channel costs one pass over the session's offsets
+  // per Writer, and nothing after that.
+  auto channel_answer = [&](const std::string& name) -> const LevelOffset& {
+    auto it = channel_offsets_.find(name);
+    if (it == channel_offsets_.end())
+      it = channel_offsets_
+               .emplace(name, scan_channel_offset(fs::path(mefd_path_) / (name + ".timd")))
+               .first;
+    return it->second;
+  };
+  if (channel) return channel_answer(*channel);
+
+  LevelOffset out;
+  bool have = false;
+  std::string agreed_where;
   if (!fs::exists(mefd_path_)) return out;
-  for (const auto& timd : fs::directory_iterator(mefd_path_)) {
-    if (!timd.is_directory() || timd.path().extension() != ".timd") continue;
-    if (channel && timd.path().stem().string() != *channel) continue;
-    for (const auto& segd : fs::directory_iterator(timd.path())) {
-      if (!segd.is_directory() || segd.path().extension() != ".segd") continue;
-      const fs::path tmet = segd.path() / (segd.path().stem().string() + ".tmet");
-      if (!fs::exists(tmet)) continue;  // an empty segment directory: not a segment
-      TimeSeriesMetadata md;
-      try {
-        std::ifstream f(tmet, std::ios::binary);
-        std::vector<ui1> bytes((std::istreambuf_iterator<char>(f)),
-                               std::istreambuf_iterator<char>());
-        md = load_time_series_metadata(bytes, password_2_.empty() ? password_1_ : password_2_);
-      } catch (const std::exception& e) {
-        ++out.unreadable;
-        if (out.unreadable_example.empty()) out.unreadable_example = tmet.string();
-        note_unreadable(tmet.string() + ": " + e.what());
-        continue;
-      }
-      ++out.readable;
-      if (!md.section3_available) {
-        out.state = LevelOffset::State::Unknown;
-        out.detail = tmet.string();
-        return out;  // nothing else can make it known
-      }
-      const si8 rto = segment_rto(md);
+  std::vector<std::string> names;
+  for (const auto& timd : fs::directory_iterator(mefd_path_))
+    if (timd.is_directory() && timd.path().extension() == ".timd")
+      names.push_back(timd.path().stem().string());
+  std::sort(names.begin(), names.end());
+  for (const auto& name : names) {
+    const LevelOffset& lv = channel_answer(name);
+    out.readable += lv.readable;
+    out.unreadable += lv.unreadable;
+    if (out.unreadable_example.empty()) out.unreadable_example = lv.unreadable_example;
+    if (lv.state == LevelOffset::State::Unknown) {
+      out.state = LevelOffset::State::Unknown;
+      out.detail = lv.detail;
+      return out;
+    }
+    if (out.state != LevelOffset::State::Agreed) continue;
+    if (lv.state == LevelOffset::State::Disputed) {
+      out.state = LevelOffset::State::Disputed;
+      out.detail = lv.detail;
+    } else if (lv.readable > 0) {
       if (!have) {
         have = true;
-        out.rto = rto;
-        agreed_where = tmet.string();
-      } else if (out.state == LevelOffset::State::Agreed && rto != out.rto) {
+        out.rto = lv.rto;
+        agreed_where = lv.where;
+      } else if (lv.rto != out.rto) {
         out.state = LevelOffset::State::Disputed;
         out.detail = std::to_string(out.rto) + " in " + agreed_where + ", " +
-                     std::to_string(rto) + " in " + tmet.string();
+                     std::to_string(lv.rto) + " in " + lv.where;
       }
     }
   }
+  if (have) out.where = agreed_where;
   return out;
+}
+
+void SessionWriter::note_new_segment(const std::string& channel, const std::string& tmet,
+                                     si8 rto) {
+  // Keep a memoized channel answer true after this writer adds a segment.
+  const auto it = channel_offsets_.find(channel);
+  if (it == channel_offsets_.end()) return;  // never scanned: a later scan sees the file
+  LevelOffset& lv = it->second;
+  if (lv.readable++ == 0) {
+    lv.rto = rto;
+    lv.where = tmet;
+  }
 }
 
 void SessionWriter::note_unreadable(const std::string& what) {
@@ -305,6 +392,7 @@ void SessionWriter::write_records(std::optional<std::string> channel,
   // that can refuse runs BEFORE any directory or file is created.
   const std::string what =
       channel ? "channel-level records of " + *channel : std::string("session-level records");
+  validate_records_for_write(records);
   const si8 rto = resolve_offset(channel, what);
   for (const auto& r : records) require_storable_time(r.time, rto, "record time");
   std::string dir, base;
@@ -393,7 +481,8 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   summary.gaps_skipped = static_cast<si8>(runs.size()) > 0 ? static_cast<si8>(runs.size()) - 1 : 0;
   if (runs.empty()) {
     // All-NaN / no valid data: no-op on disk, but report it explicitly.
-    summary.segment = (!new_segment && st.n_segments > 0) ? st.n_segments - 1 : st.n_segments;
+    summary.segment = (!new_segment && st.n_segments > 0) ? st.last_segment
+                                                          : st.last_segment + 1;
     return summary;
   }
 
@@ -418,7 +507,7 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   }
 
   const bool append = !new_segment && st.n_segments > 0;
-  const int seg = append ? st.n_segments - 1 : st.n_segments;
+  const int seg = append ? st.last_segment : st.last_segment + 1;
   std::string seg_dir =
       (fs::path(mefd_path_) / (channel + ".timd") / (segment_name(channel, seg) + ".segd")).string();
 
@@ -480,7 +569,20 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
 
   st.sampling_frequency = fs;
   st.units_conversion_factor = ufact;
-  st.n_segments = seg + 1;
+  if (!append) {
+    ++st.n_segments;
+    note_new_segment(channel, (fs::path(seg_dir) / (segment_name(channel, seg) + ".tmet")).string(),
+                     spec.recording_time_offset);
+    // The slot is a real segment now: drop the stale "ignored" report.
+    const auto e = empty_segment_dirs_.find(seg_dir);
+    if (e != empty_segment_dirs_.end()) {
+      unreadable_metadata_.erase(
+          std::remove(unreadable_metadata_.begin(), unreadable_metadata_.end(), e->second),
+          unreadable_metadata_.end());
+      empty_segment_dirs_.erase(e);
+    }
+  }
+  st.last_segment = seg;
   st.total_samples += stored;
   st.last_end_uutc =
       start_uutc + static_cast<si8>(std::llround(static_cast<sf8>(n) / fs * 1e6));

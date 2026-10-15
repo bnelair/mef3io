@@ -69,8 +69,10 @@ quirks matter:
       L2-encrypted session opened with only the level-1 password
       (`PasswordError`; open the writer with the level-2 password). A locked
       offset is unknown, never assumed to be 0.
-  - **Unreadable metadata.** A `.tmet` that cannot be read at all, found
-    while mef3io works out the offset, is always reported
+  - **Unreadable metadata.** To learn the offset, mef3io reads each
+    segment's universal header, section 1 and section 3; damage confined to
+    section 2 does not affect the offset. A `.tmet` whose header fails its
+    CRC, or that is truncated, is always reported
     (`Writer.unreadable_metadata`, plus a warning). What happens next
     depends on the readable segments:
     - **They agree on rto 0:** the damaged file is skipped, so one damaged
@@ -81,9 +83,12 @@ quirks matter:
       unknown.
   - **A channel with no segment yet** takes the session's offset for its
     records, under the same rules.
-  - **A refused write changes nothing.** Every check runs before any
-    directory or file is created. An empty segment directory left by an
-    earlier crash is ignored (and reported) instead of being adopted.
+  - **A refused write changes nothing.** Every check (record type, time,
+    offset) runs before any directory or file is created. A segment
+    directory without metadata left by an earlier crash is ignored (and
+    reported) instead of being adopted. Segments are numbered by the highest
+    real segment number, so such a directory never misplaces an append or a
+    new segment.
 - The empty value ("no entry") for a time is `INT64_MIN`.
 
 ## Universal header — 1024 B, prefixes every file
@@ -392,7 +397,8 @@ named after its directory:
 
 `Reader.records()` reads the session level; `Reader.records("ch1")` reads the
 channel level AND every segment level of `ch1`; `records("ch1", segment=0)`
-one segment; `records(level="all")` everything. Every record carries `level`,
+one segment; `records(level="all")` everything, including a channel that has
+records but no segments yet. Every record carries `level`,
 `channel` and `segment` so the source is never ambiguous. mef3io writes only
 the session and channel levels.
 

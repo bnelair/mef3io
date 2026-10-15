@@ -338,6 +338,7 @@ class Session {
   bool strict_ = true;
   std::vector<SegmentProblem> problems_;
   std::set<std::string> reported_record_files_;  // record files already in problems_
+  std::vector<std::string> record_only_channels_;  // records but no segments (yet)
 };
 
 }  // namespace mef3io

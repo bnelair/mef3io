@@ -1,6 +1,7 @@
 // mef3io — load and decrypt a time-series metadata (.tmet) file.
 #pragma once
 
+#include <optional>
 #include <span>
 #include <string>
 
@@ -16,6 +17,20 @@ struct TimeSeriesMetadata {
   int access_level = fmt::LEVEL_0_ACCESS;  // level attained with the password
   bool section3_available = true;          // false if L2-encrypted and only L1 access
 };
+
+/// Just the recording-time offset of a .tmet, from what holds it: `head` =
+/// the first METADATA_SECTION_2_OFFSET bytes (universal header + section 1),
+/// `section3` = the METADATA_SECTION_3_BYTES at METADATA_SECTION_3_OFFSET.
+/// About a quarter of the file and no full-body CRC, for a writer that must
+/// learn every segment's offset without loading every segment's metadata.
+/// Checks the universal-header CRC and the password like the full loader
+/// (throws on failure); returns nullopt when section 3 is locked (level-1
+/// access only), and maps NO_ENTRY to 0. Damage confined to section 2 does
+/// not affect the offset and is not seen here; damage that changes section
+/// 3's offset shows up as a disagreement, which the writer refuses.
+std::optional<si8> probe_recording_time_offset(std::span<const ui1> head,
+                                               std::span<const ui1> section3,
+                                               const std::string& password);
 
 /// The recording-time offset this segment's times are resolved with: section
 /// 3's value, or 0 when section 3 is unreadable (level-1 access) or NO_ENTRY.

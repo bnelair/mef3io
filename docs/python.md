@@ -37,14 +37,31 @@ block_length=None, n_threads=0)`
   session, rather than guessing the offset. Earlier releases took it as 0,
   which in an anonymized session placed appended data decades off.
 - `Writer.unreadable_metadata` lists segment metadata the writer could not
-  use (`"path: reason"`). That means `.tmet` files it could not read while
-  choosing the offset, and empty segment directories left by a crashed
-  write, which are ignored. At offset 0 such a file is skipped with an
-  `UnreadableSegmentWarning`, so one damaged segment does not block
-  unrelated writes. Where the offset is non-zero, or nothing else is
-  readable, the write is refused instead.
-- **A refused write leaves the session exactly as it was.** No directory or
-  file is created before every check has passed.
+  use (`"path: reason"`):
+  - `.tmet` files it could not read while choosing the offset. At offset 0
+    such a file is skipped, so one damaged segment does not block unrelated
+    writes. Where the offset is non-zero, or nothing else is readable, the
+    write is refused instead.
+  - Segment directories without metadata (what a crashed write can leave
+    behind). These are ignored, never adopted. Segments are numbered by the
+    highest real segment number, so such a directory is neither appended to
+    nor collides with a new segment. An entry is dropped once a new segment
+    fills that directory.
+
+  Every entry raises an `UnreadableSegmentWarning`, when the Writer opens or
+  during the write that finds it (`mef3io:unreadableMetadata` in MATLAB).
+- **A refused write leaves the session exactly as it was.** Every check runs
+  before any directory or file is created: the record type, the time, and the
+  offset (known and agreed). A write that fails later anyway removes the
+  directories it created.
+- **Cost of choosing the offset.** A session-level annotation or a new
+  channel needs the offset that every segment of the session agrees on. The
+  first one in a Writer reads about 5.6 KB of each segment's `.tmet` (its
+  header, section 1 and section 3), e.g. 0.6–0.8 s and 54 MB at 64 channels ×
+  150 segments. A channel-level annotation reads only that channel's
+  segments. Each answer is kept for the Writer's lifetime, so every later
+  one costs nothing. Keep one Writer open across an acquisition, as for
+  appends.
 - `block_length` overrides the RED block size (default: `fs` samples for
   fs ≥ 5000, else `10*fs`). `n_threads=0` uses all cores.
 
@@ -148,7 +165,7 @@ r.records()                       # session-level records
 r.records("ch1")                  # ch1's channel-level AND segment-level records
 r.records("ch1", segment=0)       # only segment 0's
 r.records("ch1", level="channel") # only the channel file
-r.records(level="all")            # every record in the session
+r.records(level="all")            # every record in the session (see below)
 ```
 
 Each dict has `type`, `time` (absolute uUTC), the three location keys,
@@ -186,7 +203,9 @@ A write is refused, rather than revealing the date or misplacing times, when:
   readable at all (`WriteConflictError`).
 
 A channel that has no data yet takes the session's offset for its
-annotations.
+annotations. Its records are listed: `records("chNew")` and
+`records(level="all")` include it. It is not added to `Reader.channels`,
+which lists channels with samples.
 
 The `mef_tools`-compatible `MefReader.get_annotations(channel)` keeps the
 legacy meaning — that channel's channel-level records only — while

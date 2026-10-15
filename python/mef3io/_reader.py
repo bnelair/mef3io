@@ -574,7 +574,9 @@ class Reader:
             natural meaning: session-level records when ``channel`` is
             ``None``; the channel's channel-level AND segment-level records
             when it is given; the segment's when ``segment`` is given.
-            ``"all"`` without a channel returns every record in the session.
+            ``"all"`` without a channel returns every record in the session,
+            including channels that have records but no data yet (not in
+            :attr:`channels`, which lists channels with samples).
             A level outside the scope (``"session"`` with a channel) raises
             ``ValueError``.
 

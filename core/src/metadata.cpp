@@ -1,6 +1,7 @@
 // mef3io — .tmet loader with CRC validation, password check, decryption.
 #include "mef3io/metadata.hpp"
 
+#include <optional>
 #include <vector>
 #include <algorithm>
 
@@ -9,6 +10,51 @@
 #include "mef3io/errors.hpp"
 
 namespace mef3io {
+namespace {
+// The universal-header CRC rule shared by the full loader and the offset
+// probe (see load_time_series_metadata for why CRC_NO_ENTRY is accepted only
+// on an otherwise self-consistent header).
+void check_tmet_universal_header(const fmt::UniversalHeader& uh, std::span<const ui1> bytes) {
+  using namespace fmt;
+  const bool header_unverifiable = uh.header_crc == CRC_NO_ENTRY &&
+                                   uh.file_type_string == FILE_TYPE_TS_METADATA &&
+                                   uh.byte_order_code == MEF_LITTLE_ENDIAN;
+  if (!header_unverifiable && !uh.header_crc_valid(bytes))
+    throw CrcError("tmet universal header CRC mismatch");
+}
+}  // namespace
+
+std::optional<si8> probe_recording_time_offset(std::span<const ui1> head,
+                                               std::span<const ui1> section3,
+                                               const std::string& password) {
+  using namespace fmt;
+  if (head.size() < static_cast<std::size_t>(METADATA_SECTION_2_OFFSET) ||
+      section3.size() < static_cast<std::size_t>(METADATA_SECTION_3_BYTES))
+    throw FormatError("tmet too small to hold its universal header, section 1 and section 3");
+  const auto uh = UniversalHeader::parse(head);
+  check_tmet_universal_header(uh, head);
+  const auto s1 = MetadataSection1::parse(
+      head.subspan(METADATA_SECTION_1_OFFSET, METADATA_SECTION_1_BYTES));
+  const int s2_enc = s1.section_2_encryption > 0 ? s1.section_2_encryption : 0;
+  const int s3_enc = s1.section_3_encryption > 0 ? s1.section_3_encryption : 0;
+  std::vector<ui1> s3(section3.begin(), section3.begin() + METADATA_SECTION_3_BYTES);
+  if (s2_enc > 0 || s3_enc > 0) {
+    const auto keys = crypto::validate_password(password, uh.level_1_password_validation_field,
+                                                uh.level_2_password_validation_field);
+    if (keys.access_level == LEVEL_0_ACCESS)
+      throw PasswordError("tmet is encrypted and the password is missing or incorrect");
+    if (s3_enc > 0) {
+      std::span<const ui1> key;
+      if (s3_enc == LEVEL_1_ENCRYPTION && keys.level1_key) key = *keys.level1_key;
+      if (s3_enc == LEVEL_2_ENCRYPTION && keys.level2_key) key = *keys.level2_key;
+      if (key.empty()) return std::nullopt;  // locked: the offset is unknown, not 0
+      auto dec = crypto::aes128_ecb_decrypt(s3, key);
+      std::copy(dec.begin(), dec.end(), s3.begin());
+    }
+  }
+  const si8 rto = MetadataSection3::parse(s3).recording_time_offset;
+  return rto == UUTC_NO_ENTRY ? 0 : rto;
+}
 
 TimeSeriesMetadata load_time_series_metadata(std::span<const ui1> tmet_bytes,
                                              const std::string& password) {
@@ -32,12 +78,7 @@ TimeSeriesMetadata load_time_series_metadata(std::span<const ui1> tmet_bytes,
   // the universal header to be self-consistent first. A zeroed or garbled
   // header fails this and is rejected as it was before; a genuine meflib file
   // carries a correct type string and byte-order code and passes.
-  const bool header_unverifiable =
-      md.universal_header.header_crc == CRC_NO_ENTRY &&
-      md.universal_header.file_type_string == FILE_TYPE_TS_METADATA &&
-      md.universal_header.byte_order_code == MEF_LITTLE_ENDIAN;
-  if (!header_unverifiable && !md.universal_header.header_crc_valid(tmet_bytes))
-    throw CrcError("tmet universal header CRC mismatch");
+  check_tmet_universal_header(md.universal_header, tmet_bytes);
   // The body CRC covers sections 1-3 (encryption flags, fs/ufact/counts,
   // subject metadata) — 15/16 of the file. Without this check, body
   // corruption silently yields garbage scaling.

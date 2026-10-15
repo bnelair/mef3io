@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <optional>
 #include <span>
@@ -119,7 +120,8 @@ class SessionWriter {
   struct ChannelState {
     sf8 sampling_frequency = 0.0;
     sf8 units_conversion_factor = 1.0;
-    int n_segments = 0;
+    int n_segments = 0;      // real segments (with metadata) on disk
+    int last_segment = -1;   // highest real segment NUMBER (-1: none)
     si8 total_samples = 0;   // channel-wide sample count so far
     si8 last_end_uutc = 0;   // for append-time validation
     bool hydrated = true;    // false for channels adopted from disk until their
@@ -155,8 +157,13 @@ class SessionWriter {
     int unreadable = 0;  // segments whose .tmet could not be read at all
     std::string detail;  // which segments disagree / which section 3 is locked
     std::string unreadable_example;
+    std::string where;   // a segment carrying the agreed offset
   };
+  LevelOffset scan_channel_offset(const std::filesystem::path& timd);
+  // Memoized per channel; the session combines the channels' answers.
   LevelOffset level_offset(const std::optional<std::string>& channel);
+  void note_new_segment(const std::string& channel, const std::string& tmet, si8 rto);
+  std::map<std::string, LevelOffset> channel_offsets_;
   // The offset a write at this level stores times against, or a refusal
   // (see session_writer.cpp for the rule). Channel scope falls back to the
   // session when the channel has no segment.
@@ -166,6 +173,7 @@ class SessionWriter {
   void note_unreadable(const std::string& what);
   std::optional<si8> session_rto_;  // the session's resolved offset, once known
   std::vector<std::string> unreadable_metadata_;
+  std::map<std::string, std::string> empty_segment_dirs_;  // dir -> its report entry
   WriteSummary write_blocks(const std::string& channel, const std::vector<si4>& samples,
                             std::span<const ui1> valid, sf8 ufact, si8 start_uutc, sf8 fs,
                             bool new_segment);

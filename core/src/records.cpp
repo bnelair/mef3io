@@ -403,11 +403,7 @@ void write_file(const std::string& path, const std::vector<ui1>& bytes) {
 
 }  // namespace
 
-void write_records(const std::string& dir, const std::string& base,
-                   const std::string& session_name, const std::string& channel_name,
-                   int segment_number, const std::vector<Record>& records, si8 rto,
-                   const std::string& password_1, const std::string& password_2) {
-  if (records.empty()) return;
+void validate_records_for_write(const std::vector<Record>& records) {
   // Reject bad type codes before touching the filesystem, so a rejected batch
   // never leaves a half-written .rdat/.ridx pair behind. Any 4-character code
   // is allowed through: types we build no body for still round-trip as an
@@ -441,6 +437,14 @@ void write_records(const std::string& dir, const std::string& base,
                         "\" stores no duration (only \"EDFA\" does), but duration was given; "
                         "it would be silently dropped");
   }
+}
+
+void write_records(const std::string& dir, const std::string& base,
+                   const std::string& session_name, const std::string& channel_name,
+                   int segment_number, const std::vector<Record>& records, si8 rto,
+                   const std::string& password_1, const std::string& password_2) {
+  if (records.empty()) return;
+  validate_records_for_write(records);
   const bool encrypt = !password_1.empty();
   crypto::ValidationFields vf =
       encrypt ? crypto::make_validation_fields(password_1, password_2) : crypto::ValidationFields{};

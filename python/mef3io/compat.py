@@ -17,7 +17,7 @@ from __future__ import annotations
 import warnings
 from typing import Optional, Union
 
-from ._writer import reporting_unreadable_metadata
+from ._writer import reporting_unreadable_metadata, warn_unreadable_metadata
 from ._reader import SessionDeclarationWarning, _declaration_warning_text
 
 import numpy as np
@@ -187,6 +187,7 @@ class MefWriter:
             raise ValueError(f"durability must be 'full' or 'fast', not {durability!r}")
         self._path = str(session_path)
         self._w = _mef3io.SessionWriter(self._path, overwrite, password1 or "", password2 or "")
+        warn_unreadable_metadata(self._w.unreadable_metadata)
         # "fast" by default, matching mef3io.Writer and the legacy stack this
         # class stands in for — meflib flushes nothing at all. See
         # mef3io.Writer for what an unclean shutdown costs and how

@@ -36,6 +36,10 @@ The first append after a writer opens a segment still does the full walk once â€
 it has to, since the blocks already on disk are only described there. Every
 append after that is incremental. **Keep one `Writer` open** across a long
 acquisition rather than reopening it per block, and that cost is paid once.
+The same goes for the recording-time offset a Writer must establish before
+the first session-level annotation or new channel: that reads a few KB of
+every segment's metadata once per Writer (about 0.7 s at 64 channels Ã— 150
+segments) and nothing afterwards.
 
 ## Durability, and what it costs
 

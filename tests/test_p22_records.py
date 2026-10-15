@@ -936,7 +936,7 @@ def test_one_damaged_tmet_does_not_block_unrelated_writes(tmp_path, write):
     _write_session(path, annotate=False)
     tmet = next(Path(path).glob("ch2.timd/*.segd/*.tmet"))
     raw = bytearray(tmet.read_bytes())
-    raw[2000] ^= 0xFF                                     # break ch2's metadata CRC
+    raw[300] ^= 0xFF                                      # break ch2 universal-header CRC
     tmet.write_bytes(bytes(raw))
 
     # A new segment of ch1 is scoped to ch1's own segments, so it never even
@@ -1102,8 +1102,12 @@ def _tree(path):
 
 
 def _corrupt_tmet(tmet):
+    """Make a .tmet unreadable: break its universal-header CRC. (The writer
+    reads only the header, section 1 and section 3 for the offset, so damage
+    confined to section 2 is not "unreadable" to it -- see
+    test_section_2_damage_does_not_affect_the_offset.)"""
     raw = bytearray(tmet.read_bytes())
-    raw[2000] ^= 0xFF
+    raw[300] ^= 0xFF
     tmet.write_bytes(bytes(raw))
 
 
@@ -1244,21 +1248,117 @@ def test_a_refused_write_leaves_the_tree_untouched_and_the_channel_usable(tmp_pa
         assert r.segments(ch)[-1]["start_time"] == late
 
 
-def test_a_wedged_empty_segment_directory_is_ignored(tmp_path):
-    """Sessions already wedged by an earlier release: an empty .segd (no
-    .tmet) is not adopted as a segment; it is reported and its number reused."""
-    path = tmp_path / "wedged.mefd"
-    _write_session(path, annotate=False)
-    empty = Path(path) / "ch1.timd" / "ch1-000001.segd"
-    empty.mkdir()
-    with mef3io.Writer(str(path)) as w:
-        w.write("ch1", np.arange(512.0), START + 10 * SECOND, FS, precision=3)   # in-segment
-        w.write("ch1", np.arange(512.0), START + 60 * SECOND, FS, precision=3,
-                new_segment=True)
-        assert any("empty segment directory" in u for u in w.unreadable_metadata)
+def _segment_layout(path, numbers, empty):
+    """ch1 with real segments at `numbers` and metadata-less dirs at `empty`."""
+    with mef3io.Writer(str(path), overwrite=True) as w:
+        for k in range(len(numbers)):
+            w.write("ch1", np.arange(512.0), START + k * 100 * SECOND, FS, precision=0,
+                    new_segment=k > 0)
+    timd = Path(path) / "ch1.timd"
+    # Renumber the real segments (highest first, so nothing collides).
+    for k in reversed(range(len(numbers))):
+        old, new = f"ch1-{k:06d}", f"ch1-{numbers[k]:06d}"
+        if old == new:
+            continue
+        (timd / f"{new}.segd").mkdir()
+        for f in (timd / f"{old}.segd").iterdir():
+            f.rename(timd / f"{new}.segd" / f.name.replace(old, new))
+        (timd / f"{old}.segd").rmdir()
+    for n in empty:
+        (timd / f"ch1-{n:06d}.segd").mkdir()
+
+
+@pytest.mark.parametrize("numbers,empty,append_to,new_number", [
+    ([0, 2], [1], 2, 3),    # empty in the MIDDLE: main appended to 2 and created 3
+    ([0], [1], 0, 1),       # empty at the END: its number is reused
+    ([0, 1], [3], 1, 2),    # an empty dir past a gap is left alone
+])
+def test_directories_without_metadata_never_misnumber_segments(tmp_path, numbers, empty,
+                                                                append_to, new_number):
+    """Segments are addressed by the highest real segment NUMBER, not by how
+    many there are: counting skipped the empty one and appended to it."""
+    path = tmp_path / "gap.mefd"
+    _segment_layout(path, numbers, empty)
+    t_app = START + len(numbers) * 100 * SECOND
+    with pytest.warns(mef3io.UnreadableSegmentWarning, match="without metadata"):
+        w = mef3io.Writer(str(path))
+    with w:
+        assert w.write("ch1", np.arange(512.0), t_app, FS, precision=0)["segment"] == append_to
+        s = w.write("ch1", np.arange(512.0), t_app + 100 * SECOND, FS, precision=0,
+                    new_segment=True)
+        assert s["segment"] == new_number
+        reused = new_number in empty
+        # A filled slot is no longer reported; the others still are.
+        listed = [u for u in w.unreadable_metadata if "without metadata" in u]
+        assert len(listed) == len(empty) - int(reused)
     segs = mef3io.Reader(str(path)).segments("ch1")
-    assert [s["segment"] for s in segs] == [0, 1]
-    assert segs[1]["start_time"] == START + 60 * SECOND
+    assert [x["segment"] for x in segs] == sorted(numbers + [new_number])
+    assert segs[-1]["start_time"] == t_app + 100 * SECOND
+
+
+def test_writers_warn_on_open_about_directories_without_metadata(tmp_path):
+    from mef3io.compat import MefWriter as CompatWriter
+
+    path = tmp_path / "w.mefd"
+    _segment_layout(path, [0], [1])
+    with pytest.warns(mef3io.UnreadableSegmentWarning, match="without metadata"):
+        mef3io.Writer(str(path)).close()
+    with pytest.warns(mef3io.UnreadableSegmentWarning, match="without metadata"):
+        CompatWriter(str(path), overwrite=False).close()
+
+
+def test_section_2_damage_does_not_affect_the_offset(tmp_path):
+    """The writer reads the offset from the universal header, section 1 and
+    section 3 only (a quarter of each .tmet). Damage confined to section 2
+    leaves the offset intact, so it neither blocks nor is misreported -- the
+    reader still rejects that segment for its own reasons."""
+    path = tmp_path / "s2.mefd"
+    _write_session(path, annotate=False)
+    tmet = next(Path(path).glob("ch2.timd/*.segd/*.tmet"))
+    raw = bytearray(tmet.read_bytes())
+    raw[2000] ^= 0xFF                                          # inside section 2
+    tmet.write_bytes(bytes(raw))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with mef3io.Writer(str(path)) as w:
+            w.write_annotations([{"type": "Note", "time": START, "text": "ok"}])
+            assert w.unreadable_metadata == []
+    assert _stored_times(_rdat(path)) == [-START]
+
+
+def test_records_of_a_channel_without_data_are_listed(tmp_path):
+    """write_annotations(..., "chNew") makes a channel that has records and no
+    segments; records() reaches it (pymef does too), with the session's offset."""
+    pytest.importorskip("pymef")
+    from pymef.mef_session import MefSession
+
+    rto = START - 3600 * SECOND
+    path = tmp_path / "rec_only.mefd"
+    _legacy_session(path, rto, annotate=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with mef3io.Writer(str(path)) as w:
+            w.write_annotations([{"type": "Note", "time": START + SECOND, "text": "n"}], "chNew")
+        r = mef3io.Reader(str(path))
+    assert "chNew" not in r.channels                      # no samples are invented
+    assert [(a["text"], a["time"], a["level"]) for a in r.records("chNew")] == [
+        ("n", START + SECOND, "channel")]
+    assert [a["channel"] for a in r.records(level="all")] == ["chNew"]
+    with pytest.raises(IndexError):
+        r.records("chNew", segment=0)
+    assert [int(x["time"]) for x in MefSession(str(path), "").read_records("chNew")] == [
+        START + SECOND]
+
+
+def test_a_bad_record_type_leaves_no_channel_directory(tmp_path):
+    """Record validation runs before the channel directory is created."""
+    path = tmp_path / "bad.mefd"
+    _write_session(path, annotate=False)
+    before = _tree(path)
+    with mef3io.Writer(str(path)) as w:
+        with pytest.raises(RuntimeError, match="exactly 4 ASCII bytes"):
+            w.write_annotations([{"type": "Notes", "time": START, "text": "x"}], "chNew")
+    assert _tree(path) == before
 
 
 def test_a_renamed_archive_still_finds_its_session_records(tmp_path):

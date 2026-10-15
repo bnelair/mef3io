@@ -40,6 +40,18 @@ def _as_int32_counts(data):
     return np.ascontiguousarray(a, dtype=np.int32)
 
 
+def warn_unreadable_metadata(entries, stacklevel=3):
+    """One warning for segment metadata a writer could not use (or [] = none)."""
+    if entries:
+        from ._reader import UnreadableSegmentWarning
+
+        warnings.warn(
+            f"{len(entries)} segment metadata problem(s) were skipped by the writer "
+            f"(unreadable .tmet, or a segment directory without metadata): {entries[0]}. "
+            "Full list in Writer.unreadable_metadata.",
+            UnreadableSegmentWarning, stacklevel=stacklevel)
+
+
 @contextlib.contextmanager
 def reporting_unreadable_metadata(impl):
     """Warn about segment metadata the core skipped during one write call.
@@ -50,18 +62,14 @@ def reporting_unreadable_metadata(impl):
     still damage, so it is reported, never silent. Shared by
     :class:`Writer` and the ``mef_tools``-compatible ``MefWriter``.
     """
-    before = len(impl.unreadable_metadata)
+    before = set(impl.unreadable_metadata)
     try:
         yield
     finally:
-        added = impl.unreadable_metadata[before:]
-        if added:
-            from ._reader import UnreadableSegmentWarning
-
-            warnings.warn(
-                f"{len(added)} segment metadata file(s) could not be read and were "
-                f"skipped when choosing the recording-time offset: {added[0]}",
-                UnreadableSegmentWarning, stacklevel=4)
+        # By content, not position: an entry is dropped once its slot is
+        # filled, so the list can shrink and grow within one call.
+        warn_unreadable_metadata(
+            [e for e in impl.unreadable_metadata if e not in before], stacklevel=5)
 
 
 class Writer:
@@ -152,6 +160,7 @@ class Writer:
             )
         self._path = str(path)
         self._impl = _mef3io.SessionWriter(str(path), overwrite, password1 or "", password2 or "")
+        warn_unreadable_metadata(self._impl.unreadable_metadata)
         # Deliberately cache-unaware: a snapshot is judged only when a cached
         # open happens (mef3io.cache), never maintained by write paths.
         if units is not None:

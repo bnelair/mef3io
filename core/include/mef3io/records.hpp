@@ -125,6 +125,11 @@ std::vector<Record> parse_records(std::span<const ui1> rdat_bytes, si8 rto,
                                    const crypto::AccessKeys& keys = {},
                                    bool* offset_dependent = nullptr);
 
+/// Throw FormatError unless every record can be written as given: a 4-byte
+/// ASCII type code, and no payload its type cannot store. write_records runs
+/// it first; callers that create directories run it before doing so.
+void validate_records_for_write(const std::vector<Record>& records);
+
 // Write records to `<dir>/<base>.rdat` + `<base>.ridx`. `session_name`/
 // `channel_name` populate the universal headers. Times are stored with
 // to_stored_time(t, rto) (time.hpp): -t at rto 0, rto - t under an

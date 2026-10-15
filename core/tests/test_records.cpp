@@ -479,11 +479,11 @@ TEST_CASE("C ABI reports segment metadata the writer could not use") {
     w.write_int32("ch1", x, 1.0, T0, 256.0);
     w.write_int32("ch2", x, 1.0, T0, 256.0);
   }
-  // Break ch2's metadata body (the CRC check rejects it).
+  // Break ch2's universal header (its CRC check rejects it).
   const auto tmet = dir / "ch2.timd" / "ch2-000000.segd" / "ch2-000000.tmet";
   {
     std::fstream f(tmet, std::ios::in | std::ios::out | std::ios::binary);
-    f.seekp(2000);
+    f.seekp(300);
     const char junk = 0x5a;
     f.write(&junk, 1);
   }

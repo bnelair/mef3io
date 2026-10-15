@@ -71,7 +71,14 @@ void Session::discover() {
           source_->exists(seg.tdat_path))
         ch.segments.push_back(std::move(seg));
     }
-    if (ch.segments.empty()) continue;
+    if (ch.segments.empty()) {
+      // No samples, but records: a channel annotated before its data arrives
+      // (mef3io's own write_annotations(..., "chNew") makes one; pymef reads
+      // it). Not a data channel, but its records are listed.
+      if (source_->exists(entry.name + "/" + ch.info.name + ".rdat"))
+        record_only_channels_.push_back(ch.info.name);
+      continue;
+    }
 
     std::sort(ch.segments.begin(), ch.segments.end(),
               [](const SegmentReader& a, const SegmentReader& b) {
@@ -273,6 +280,10 @@ std::optional<si8> Session::agreed_rto(const std::string* channel, std::string& 
       }
     }
   }
+  // A channel with no readable segment has no offset of its own: its records
+  // were written with the SESSION's (SessionWriter::resolve_offset), so they
+  // are read with it too.
+  if (channel && !agreed) return agreed_rto(nullptr, why);
   return agreed.value_or(0);
 }
 
@@ -340,13 +351,18 @@ std::vector<Record> Session::read_records(std::optional<std::string> channel,
   // record files happen to exist.
   if (segment && !channel)
     throw std::invalid_argument("a record segment needs its channel");
-  if (channel && channels_.find(*channel) == channels_.end())
+  const bool record_only =
+      channel && std::find(record_only_channels_.begin(), record_only_channels_.end(),
+                           *channel) != record_only_channels_.end();
+  if (channel && !record_only && channels_.find(*channel) == channels_.end())
     throw std::out_of_range("no such channel: " + *channel);
   if (channel && levels == RecordLevels::Session)
     throw std::invalid_argument("session-level records do not belong to a channel");
   if (segment && levels == RecordLevels::Channel)
     throw std::invalid_argument("channel-level records do not belong to a segment");
   if (segment) {
+    if (record_only)
+      throw std::out_of_range("no such segment: " + *channel + " has records but no segments");
     const auto& segs = channels_.at(*channel).segments;
     if (std::none_of(segs.begin(), segs.end(),
                      [&](const SegmentReader& s) { return s.segment_number == *segment; }))
@@ -411,7 +427,12 @@ std::vector<Record> Session::read_records(std::optional<std::string> channel,
     }
   }
 
-  for (const auto& name : channel_names_) {
+  // Data channels plus channels that have records but no segments yet, by name.
+  std::vector<std::string> record_channels = channel_names_;
+  record_channels.insert(record_channels.end(), record_only_channels_.begin(),
+                         record_only_channels_.end());
+  std::sort(record_channels.begin(), record_channels.end());
+  for (const auto& name : record_channels) {
     if (channel && name != *channel) continue;
     // Channel level: <ch>.timd/<ch>.rdat (meflib.c:5660).
     if (want_channel) {
@@ -425,7 +446,7 @@ std::vector<Record> Session::read_records(std::optional<std::string> channel,
     // Segment level: <seg>.segd/<seg>.rdat, next to the segment's .tmet
     // (meflib.c:6030). Its offset is the segment's own, so it is never
     // disputed, and a dispute at the channel level above never costs these.
-    if (want_segment) {
+    if (want_segment && channels_.count(name)) {
       for (auto& seg : channels_.at(name).segments) {
         if (segment && seg.segment_number != *segment) continue;
         if (!seg.load_error.empty()) continue;  // lenient: reported in problems()
