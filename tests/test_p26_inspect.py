@@ -1,4 +1,4 @@
-"""P25: ``mef3io.inspect`` (#67) — everything about a session without its samples.
+"""P26: ``mef3io.inspect`` (#67) — everything about a session without its samples.
 
 Pins: the summary agrees with the Reader on everything both can see; it NEVER
 reads a ``.tdat`` (``/proc/self/io`` rchar, like test_p17); identity fields
@@ -932,3 +932,24 @@ def test_inspect_bad_hook_arguments_are_type_errors(session):
         mef3io.inspect(session, cancel=object())
     with pytest.raises(TypeError):
         mef3io.inspect(session, progress=3)
+
+
+def test_inspect_cancel_noticed_mid_run_in_lenient_mode(session):
+    token = mef3io.CancelToken()
+
+    def cb(done, total):
+        if done:
+            token.cancel()
+
+    with pytest.raises(mef3io.Cancelled):
+        mef3io.inspect(session, strict=False, read_index=True, cancel=token, progress=cb)
+
+
+def test_inspect_progress_stays_monotonic_past_a_failed_segment(session):
+    _corrupt(_tmets(session, "ch1")[1])
+    calls = []
+    s = mef3io.inspect(session, strict=False, read_index=True,
+                       progress=lambda d, t: calls.append((d, t)))
+    assert s.problems
+    assert all(a[0] <= b[0] for a, b in zip(calls, calls[1:]))
+    assert calls[-1][0] == calls[-1][1] == calls[0][1]

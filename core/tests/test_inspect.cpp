@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <vector>
 
+#include "mef3io/control.hpp"
 #include "mef3io/errors.hpp"
 #include "mef3io/inspect.hpp"
 #include "mef3io/session.hpp"
@@ -115,4 +116,25 @@ TEST_CASE("inspect_session describes an encrypted session it cannot open") {
   REQUIRE(f.channels[0].start_time == START);
   REQUIRE(f.records[0].text_bytes == 5);
   REQUIRE_FALSE(f.offset_assumed_zero);
+}
+
+TEST_CASE("inspect_session honours a cancel token, lenient or not") {
+  const auto path = write_session("mef3io_inspect_cancel.mefd");
+  CancelToken token;
+  token.cancel();
+  Control ctl;
+  ctl.cancel = &token;
+  for (bool strict : {true, false}) {
+    InspectOptions opt;
+    opt.strict = strict;
+    // Cancelled is not a std::exception: lenient containment cannot swallow it.
+    REQUIRE_THROWS_AS(inspect_session(path, opt, ctl), Cancelled);
+  }
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> calls;
+  Control prog;
+  prog.progress = [&](std::uint64_t d, std::uint64_t t) { calls.emplace_back(d, t); };
+  inspect_session(path, {}, prog);
+  REQUIRE(calls.size() >= 2);
+  REQUIRE(calls.front().first == 0);
+  REQUIRE(calls.back().first == calls.back().second);
 }

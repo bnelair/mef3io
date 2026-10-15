@@ -2,7 +2,8 @@
 //
 // Two hooks, both optional, both carried by one `Control` passed to the
 // operations that can take a while: a windowed or full read, archive_session,
-// extract_session, validate_session, repair_session and recover_session.
+// extract_session, inspect_session, validate_session, repair_session and
+// recover_session.
 //
 //   * CancelToken — a flag any thread may set. The operation looks at it
 //     between units of work (a decoded block, a 1 MB copy chunk, a segment)
