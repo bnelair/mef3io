@@ -57,8 +57,8 @@ quirks matter:
     follow the same rule. The session keeps agreeing, so its existing
     records stay readable.
   - **Refused writes.** These raise an error and leave the files untouched,
-    rather than store something that would misplace times or reveal the
-    date:
+    rather than store something that would misplace times or break the
+    session's `rto − t` form:
     - **A time at or before a non-zero `rto`** (`WriteConflictError`). `rto − t`
       would be non-negative, and every reader takes a non-negative time as
       the absolute date (meflib.c:7665). So the only correct encoding would be

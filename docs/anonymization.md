@@ -126,8 +126,8 @@ real start:      2031-05-14 13:47:05+00:00
 ```
 
 Every `.tmet` in a meflib session carries the same offset (meflib uses one
-per session), so any one of them is normally enough. The other stored times (block index, data block headers, records)
-come back the same way.
+per session), so any one of them is normally enough. The other stored
+times (block index, data block headers, records) come back the same way.
 
 ## What else the offset leaves in place
 
