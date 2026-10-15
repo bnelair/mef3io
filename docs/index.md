@@ -64,8 +64,9 @@ The same session opens in MATLAB (`mef3io.Reader('session.mefd')`) and C++
 | [Python guide](python.md) | `Reader`, `Writer`, legacy compat, caching |
 | [MATLAB guide](matlab.md) | `+mef3io` classes and the MEX |
 | [C++ guide](cpp.md) | using the core library and the flat C ABI |
-| [Examples](examples.md) | nine runnable scripts |
+| [Examples](examples.md) | eleven runnable scripts |
 | [Format reference](mef3_format.md) | the MEF 3.0 on-disk structure, field by field |
+| [De-identification](anonymization.md) | why meflib's recording-time offset is not anonymization, and what mef3io does instead |
 | [Performance & legacy comparison](legacy_comparison.md) | measured speed, encryption, and quantization differences |
 
 ## Status and scope

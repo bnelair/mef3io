@@ -49,8 +49,9 @@ quirks matter:
   - **rto ≠ 0** (only in a foreign session that used meflib's anonymization,
     which mef3io is extending): times are stored as `rto − t`, meflib's own
     offset-applied form. This covers data blocks, index, universal headers and
-    records alike. The real date never reaches the file, which is what the
-    offset is for, and every reader places the time correctly.
+    records alike. mef3io never writes a date there in plain, and every
+    reader places the time correctly. (The date is still in the file: the
+    offset itself sits in section 3, see below.)
   - **New segments and channels** added to a session whose segments all agree
     on a non-zero `rto` carry that same `rto` in section 3, and their times
     follow the same rule. The session keeps agreeing, so its existing
@@ -93,6 +94,17 @@ quirks matter:
     new segment.
 - The empty value ("no entry") for a time is `INT64_MIN`.
 
+**The recording-time offset as "anonymization" is deprecated by mef3io.**
+This is not a format change: MEF 3.0 still defines the field, and mef3io
+reads and extends offset sessions exactly as described above. But the
+offset only moves the date into `recording_time_offset` in section 3 of
+every `.tmet`, which is plain text unless the session is encrypted, so
+`−stored + rto` gives the real date back to anyone. mef3io therefore never
+creates an offset session (a new session gets `rto = 0`), and
+de-identification is planned as a separate copy
+([#70](https://github.com/bnelair/mef3io/issues/70)). See
+[De-identification and the recording-time offset](anonymization.md).
+
 ## Universal header — 1024 B, prefixes every file
 
 Every `.tmet/.tidx/.tdat/.rdat/.ridx` file starts with the same 1024-byte
@@ -128,8 +140,9 @@ modifies, to record **which version created the file, which version last
 modified it, and what was done to it**.
 
 **No times are recorded.** The universal header is never encrypted, so a
-write time would reveal when a recording was made, which is exactly what
-`recording_time_offset` exists to hide.
+write time would reveal when a recording was made. (`recording_time_offset`
+was meant to hide that, but does not: see
+[De-identification](anonymization.md).)
 
 | Offset | Bytes | Type | Field |
 |---|---|---|---|
@@ -304,7 +317,7 @@ still read correctly.
 
 | Offset | Type | Field |
 |---|---|---|
-| 0 | si8 | recording time offset (`rto`, used to de-negate times) |
+| 0 | si8 | recording time offset (`rto`, used to de-negate times; holds the recording date, see [De-identification](anonymization.md)) |
 | 8 / 16 | si8 | DST start / end time |
 | 24 | si4 | GMT offset (seconds) |
 | 28 / 156 | char[128] | subject name 1 / 2 |
