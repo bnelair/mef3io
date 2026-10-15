@@ -84,6 +84,14 @@ The two-level scheme still matters for *who can read what*:
 This lets a data-sharing workflow hand out the level-1 password for signal
 access while withholding subject identity behind the level-2 password.
 
+!!! note "Section 3 is plain text in an unencrypted session"
+    Without a level-2 password, section 3 is stored unencrypted (level `-2`).
+    It holds the subject fields **and** `recording_time_offset`, which in a
+    session "anonymized" by meflib's recording-time offset is the recording
+    date. Anyone can read it from the bytes, and with the level-2 password
+    anyone can read it from an encrypted session too. See
+    [De-identification and the recording-time offset](anonymization.md).
+
 ## Password/key derivation (for completeness)
 
 - Password bytes = terminal byte of each UTF-8 character, up to 16, zero-padded.

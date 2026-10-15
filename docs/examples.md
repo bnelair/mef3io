@@ -1,6 +1,6 @@
 # Examples
 
-Ten runnable Python scripts live in
+Eleven runnable Python scripts live in
 [`examples/`](https://github.com/bnelair/mef3io/tree/main/examples); each is
 self-contained, writes its session under a temporary directory, and prints
 what it does. MATLAB equivalents of the core operations are shown in the
@@ -19,6 +19,7 @@ what it does. MATLAB equivalents of the core operations are shown in the
 | [08_legacy_compatibility.py](https://github.com/bnelair/mef3io/blob/main/examples/08_legacy_compatibility.py) | Legacy-vs-new write/read timing and value comparison (needs `mef3io[test]` + scipy/tqdm) |
 | [09_encryption_replicability.py](https://github.com/bnelair/mef3io/blob/main/examples/09_encryption_replicability.py) | The full encryption matrix: both writers × plain/encrypted × both readers, plus L1/L2/wrong-password probes (needs `mef3io[test]`) |
 | [10_tar_archive.py](https://github.com/bnelair/mef3io/blob/main/examples/10_tar_archive.py) | Single-file sessions: `archive_session`, reading the tar in place, writer rejection, standard-tar interop |
+| [11_legacy_rto_sessions.py](https://github.com/bnelair/mef3io/blob/main/examples/11_legacy_rto_sessions.py) | Legacy recording-time-offset ("anonymized") sessions: the date recovered from plain bytes, true-UTC reads in mef3io and pymef, consistent appends/channels/notes, the refusals (needs `mef3io[test]`; see [De-identification](anonymization.md)) |
 
 The numbers produced by 08/09 (and the MATLAB/Python twins
 `benchmarks/bindings_benchmark.py` + `matlab/benchmark_mef3io.m`) are

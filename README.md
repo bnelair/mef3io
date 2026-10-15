@@ -24,6 +24,12 @@ C++ tests). Scope notes:
   metadata locked) — see
   [docs/legacy_comparison.md](docs/legacy_comparison.md).
 - **Records**: read/write Note, EDFA, SyLg, Seiz (others read as header-only).
+- **De-identification**: meflib's recording-time-offset "anonymization" is
+  deprecated in mef3io — the date stays in section 3 of every `.tmet`, in
+  plain text unless the session is encrypted. mef3io never creates such
+  sessions, reads and extends existing ones consistently, and plans a real
+  de-identified copy (#70) — see
+  [docs/anonymization.md](docs/anonymization.md).
 - **Pure-Python backend**: not yet implemented (`backend="pure"` raises).
 - **Append** extends the channel's last segment in place (legacy semantics);
   `new_segment=True` forces a fresh segment.
