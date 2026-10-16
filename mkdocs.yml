@@ -57,6 +57,11 @@ nav:
       - MEF 3.0 for students: students.md
       - Install: install.md
       - Examples: examples.md
+  - How-to:
+      - Convert EDF, EDF+ or BDF to MEF 3.0: howto/edf_to_mef.md
+      - Read MEF 3.0 in Python: howto/read_python.md
+      - Read MEF 3.0 in MATLAB: howto/read_matlab.md
+      - Long recordings with gaps: howto/long_recordings.md
   - Guides:
       - Python: python.md
       - MATLAB: matlab.md

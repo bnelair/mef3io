@@ -55,7 +55,35 @@ design).
   — `test_mef3io.m`) and keep them green.
 - Match the surrounding style (the C++ is close to the MEF/meflib spec naming;
   keep offset tables faithful to the format).
-- CI must pass: it builds and tests on Linux/macOS across Python 3.10–3.14.
+- CI must pass: it builds and tests on Linux, macOS and Windows across
+  Python 3.10–3.14.
+
+## Documentation rules
+
+The documentation is part of the product: a wrong sentence in it costs a user
+as much as a bug. When you change behavior, change the docs in the same pull
+request.
+
+- **Revised against the code before every release.** The docs, the README,
+  the examples and the release notes are checked against the code before each
+  release; the checklist is in
+  [Versioning & releases](https://bnelair.github.io/mef3io/releasing/)
+  (`docs/releasing.md`). Every example must run, and
+  `PYTHONPATH=python mkdocs build --strict` must stay green.
+- **No facts that go stale in the README.** It is also the PyPI page, frozen
+  at each release. Leave out test counts, version histories and "new in"
+  lists; those belong in the release notes.
+- **One name for each thing, everywhere.** "MEF 3.0" for the format, "mef3io"
+  for the library, and one docs address, https://bnelair.github.io/mef3io/.
+- **No private product names.** Public text never names a private
+  third-party product; `tests/test_p25_public_text.py` and the docs workflow
+  check this.
+- **No institution branding.** A plain affiliation line for the maintainers
+  is the only mention.
+- **Say what it does for the user.** Describe a feature by what the reader
+  gains or must do, in plain words, with runnable code first where it fits.
+  The how-to pages (`docs/howto/`) answer one question each and link to the
+  full guides instead of repeating them.
 
 ## Reporting good bugs
 

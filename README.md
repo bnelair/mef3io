@@ -94,8 +94,10 @@ x = r.read('eeg1');
 
 More: the [Python](https://bnelair.github.io/mef3io/python/),
 [MATLAB](https://bnelair.github.io/mef3io/matlab/) and
-[C++](https://bnelair.github.io/mef3io/cpp/) guides, and runnable
-[examples](https://bnelair.github.io/mef3io/examples/).
+[C++](https://bnelair.github.io/mef3io/cpp/) guides, runnable
+[examples](https://bnelair.github.io/mef3io/examples/), and short how-to
+pages such as
+[converting EDF, EDF+ or BDF to MEF 3.0](https://bnelair.github.io/mef3io/howto/edf_to_mef/).
 
 ## What it is built for
 

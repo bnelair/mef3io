@@ -22,3 +22,4 @@ does. Times in MEF 3.0 are **uUTC** — microseconds since the Unix epoch.
 | `09_encryption_replicability.py` | Encryption replicability matrix: both writers × plain/encrypted × both readers, plus what L1/L2/wrong passwords actually unlock (needs `mef3io[test]`) |
 | `10_tar_archive.py` | Single-file `.mefd.tar` sessions: archive, read in place, extract |
 | `11_legacy_rto_sessions.py` | Legacy recording-time-offset ("anonymized") sessions: the date is recoverable from plain bytes; mef3io and pymef read true UTC; mef3io appends, adds a channel and a note consistently; refusals (needs `mef3io[test]`; see `docs/anonymization.md`) |
+| `12_edf_to_mef.py` | Converting EDF, EDF+ or BDF to MEF 3.0: per-channel rates, units, time zone, annotations, EDF+D gaps, verification (needs pyedflib: `pip install pyedflib`, from 1.3 `mef3io[edf]`; with no arguments it converts a demo file; see `docs/howto/edf_to_mef.md`) |
