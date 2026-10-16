@@ -59,8 +59,9 @@ To find where the gaps are without reading samples, see
 ## Annotations
 
 ```python
-r.records()            # session-level annotations: type, time (uUTC), text, ...
-r.records("Fp1")       # one channel's annotations
+with mef3io.Reader("recording.mefd") as r:
+    r.records()        # session-level annotations: type, time (uUTC), text, ...
+    r.records("Fp1")   # one channel's annotations
 ```
 
 ## Encrypted sessions

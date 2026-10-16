@@ -14,6 +14,8 @@ for c in s.channels:
 ```
 
 Or from a terminal: `python -m mef3io inspect recording.mefd --index`.
+`inspect` needs mef3io 1.3 or later; `Reader.segments()` and `Reader.toc()`
+below work in every version.
 
 ## How gaps appear
 
@@ -66,13 +68,14 @@ with mef3io.Writer("recording.mefd") as w:      # creates, or reopens and extend
   and appends to it, so a program can stop and continue the next day. One
   `Writer` kept open is faster, because it does not re-read the index on
   each block.
-- Each append costs time in proportion to the **new** data only, however
-  long the recording already is.
+- With one `Writer` kept open, each append costs time in proportion to the
+  **new** data only, however long the recording already is.
 - New data must start after the channel's last sample, at the same sampling
   rate; otherwise the write is refused and nothing is changed.
 - `new_segment=True` starts a new segment, for example once per day. That
-  keeps each segment's files a manageable size and lets one damaged file
-  affect only its own segment.
+  keeps each segment's files a manageable size, and a damaged file then
+  affects only its own segment when read with `strict=False`
+  ([Python guide](../python.md#reading)).
 - If the program or the computer stops in the middle of a write, run
   `python -m mef3io recover recording.mefd` (it only reports; add `--apply`
   to fix). Data from earlier appends is never at risk.

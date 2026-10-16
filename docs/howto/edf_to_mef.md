@@ -5,7 +5,7 @@ description: "Convert an EDF, EDF+ or BDF recording to MEF 3.0 with mef3io and p
 # Convert EDF, EDF+ or BDF to MEF 3.0
 
 ```bash
-pip install "mef3io[edf]"     # mef3io plus pyedflib, the EDF reader
+pip install mef3io pyedflib   # pyedflib reads EDF; from mef3io 1.3: pip install "mef3io[edf]"
 python 12_edf_to_mef.py recording.edf recording.mefd --timezone Europe/Prague
 ```
 
@@ -13,7 +13,7 @@ The script is
 [`examples/12_edf_to_mef.py`](https://github.com/bnelair/mef3io/blob/main/examples/12_edf_to_mef.py).
 Run it without arguments to convert a small demo file first. It prints each
 channel and ends with `verified` once it has read the new session back and
-compared it with the EDF file:
+checked it against the values it reads from the EDF file:
 
 ```text
 EEG Fp1: 256 Hz, uV, stored to 0.01 uV
@@ -21,7 +21,7 @@ ECG: 64 Hz, mV, stored to 0.0001 mV
 2 annotation(s); verified /tmp/.../demo.mefd
 ```
 
-From your own code, save the script beside it as `edf2mef.py`, then:
+From your own code, save the script next to your code as `edf2mef.py`, then:
 
 ```python
 from edf2mef import convert, verify
@@ -42,19 +42,18 @@ nothing in the file says which. So the script **refuses to guess**: pass
 `--timezone` with the zone of the recording site.
 
 - An IANA name, such as `Europe/Prague` or `America/Chicago`. Daylight saving
-  is applied for the recording date. On Windows this needs
-  `pip install tzdata`.
+  is applied for the recording date. A start time in the hour skipped or
+  repeated by a daylight-saving change is refused; pass a fixed offset
+  instead. On Windows this needs `pip install tzdata`.
 - A fixed offset, such as `+01:00`, or `UTC`. Use this when you know the
-  offset the recording system used. A start time that falls in the hour
-  skipped or repeated by a daylight-saving change is refused with a request
-  for one.
+  offset the recording system used.
 
 The offset is also stored in the session (`Subject.gmt_offset`), so a viewer
 can show local clock times again.
 
 ## Channels, sampling rates and units
 
-Each EDF signal becomes one MEF channel with **its own sampling rate**: a
+Each EDF signal becomes one MEF 3.0 channel with **its own sampling rate**: a
 256 Hz EEG channel and a 64 Hz ECG channel stay 256 Hz and 64 Hz. Nothing is
 resampled. The EDF label becomes the channel name, with characters that are
 not safe in a folder name replaced by `_` (`EEG Fp1/Ref` becomes
@@ -66,19 +65,20 @@ units. The transducer and prefilter text go into the channel description.
 EDF stores whole numbers per sample plus a linear scale to physical units.
 MEF 3.0 also stores whole numbers ("counts") with a scale, but the scale is a
 power of ten. The script picks, per channel, the number of decimal places so
-that one MEF count is **no larger than one EDF step**. For the demo EEG
-channel, an EDF step is about 0.098 uV and the MEF count is 0.01 uV.
+that one count is **no larger than one EDF step**. For the demo EEG channel,
+an EDF step is about 0.098 uV and a count is 0.01 uV.
 
-Every sample therefore comes back within half a MEF count of the EDF value,
-and the final check asserts exactly that. The script lowers the precision if
-a channel's values would not fit the 32-bit counts MEF uses. More on the
-format's scaling: [Python guide, writing](../python.md#writing).
+Every sample therefore comes back within half a count of the EDF value. The
+counts are 32-bit numbers; if a channel's values are too large for that at
+full resolution (rare: large values measured very finely), the script uses
+fewer decimal places and prints a warning naming the channel. More on the
+scaling: [Python guide, writing](../python.md#writing).
 
 ## Annotations
 
-EDF+ and BDF+ annotations become session-level MEF records at the same
-absolute time. An annotation with a duration becomes an `EDFA` record that
-keeps it; one without becomes a `Note`. Read them with `Reader.records()`.
+EDF+ and BDF+ annotations become session-level records at the same absolute
+time. An annotation with a duration becomes an `EDFA` record that keeps it;
+one without becomes a `Note`. Read them with `Reader.records()`.
 
 ## Discontinuous files (EDF+D) become gaps
 
@@ -89,8 +89,14 @@ is stored as a gap and reads back as `NaN`, at the right place, as for any
 [recording with gaps](long_recordings.md).
 
 pyedflib refuses EDF+D and BDF+D files, so for those the script reads the
-file itself (`read_discontinuous`): the EDF header has a fixed layout and the
+file itself (`open_discontinuous`): the EDF header has a fixed layout and the
 record times are the first annotation of each record.
+
+## Large files
+
+The script converts one channel at a time, in pieces of ten minutes
+(`CHUNK_SECONDS`), so a recording of days needs no more memory than a short
+one. The check at the end reads the same way.
 
 ## Patient identity is not copied
 
@@ -107,10 +113,13 @@ annotation text and file names can identify a person too. See
 
 ## Checking the result
 
-`verify()` reopens the session and checks, per channel, that every sample is
-within half a MEF count of the EDF value, that gaps are exactly where the
-EDF+D record times put them, and that every annotation was written. You can
-also look at the session without reading any samples:
+`verify()` reads the EDF file again and the new session, piece by piece, and
+checks per channel that every sample is within half a count of the EDF value
+at the same time, that each count is no coarser than the EDF step (unless a
+warning said so), that no extra samples fill a gap, and that every annotation
+was written. It uses the script's own EDF reading, so it confirms the
+conversion, not the EDF reader. With mef3io 1.3 or later you can also look at
+the session without reading any samples:
 
 ```bash
 python -m mef3io inspect recording.mefd
@@ -119,8 +128,8 @@ python -m mef3io inspect recording.mefd
 ## Why pyedflib
 
 The script reads EDF with [pyedflib](https://github.com/holgern/pyedflib), a
-small, maintained wrapper around the EDFlib C library. It is installed only
-with the `[edf]` extra, never by `pip install mef3io`. It reads EDF, EDF+ and
+small, maintained wrapper around the EDFlib C library. mef3io never installs
+it by itself: `pip install pyedflib`, or the `[edf]` extra from mef3io 1.3. It reads EDF, EDF+ and
 BDF, keeps each channel at its own sampling rate, and gives the stored whole
 numbers, so the conversion controls the scaling itself.
 [MNE-Python](https://mne.tools) also reads EDF and is the better choice for

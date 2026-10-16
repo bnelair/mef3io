@@ -14,8 +14,9 @@ fs = info.sampling_frequency;
 ```
 
 Get the `mef3io-matlab-vX.Y.Z.zip` bundle from a
-[GitHub release](https://github.com/bnelair/mef3io/releases); it works without
-compiling anything ([Install](../install.md#matlab) has the details). `x`
+[GitHub release](https://github.com/bnelair/mef3io/releases); on the
+[supported platforms](../install.md#matlab) it works without compiling
+anything. `x`
 holds the values in physical units (`info.units_description`, for
 example `uV`), one per sample period from the channel's first sample to its
 last.
