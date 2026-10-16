@@ -407,6 +407,8 @@ def anonymize_session(
     """
     if channels is not None and exclude_channels is not None:
         raise ValueError("pass channels or exclude_channels, not both")
+    if channels is not None and not _names(channels, "channels"):
+        raise ValueError("the selection leaves no channel to copy (channels=[])")
     out1, out2 = _output_passwords(output_password)
     if out1:
         from ._writer import warn_password_interop

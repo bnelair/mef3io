@@ -1287,9 +1287,11 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
     ValidateOptions vo;
     vo.password = o.password;
     vo.exact_difference_bytes = false;
-    const Report sr = validate_session(src_path, vo, ctl);
+    Control inner;
+    inner.cancel = ctl.cancel;
+    const Report sr = validate_session(src_path, vo, inner);
     vo.password = o.output_password;
-    const Report dr = validate_session(dst_path, vo, ctl);
+    const Report dr = validate_session(dst_path, vo, inner);
     std::set<std::string> known;
     for (const auto& f : sr.findings) known.insert(finding_key(f));
     for (const auto& f : dr.findings) {
@@ -1365,7 +1367,9 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
 VerifyReport verify_anonymized(const std::string& src, const std::string& dst, si8 shift_us,
                                const VerifyOptions& options, const Control& ctl) {
   const auto source = open_session_source(src);
-  const SourcePlan plan = plan_source(*source, src, options.password, ctl);
+  Control inner;
+  inner.cancel = ctl.cancel;
+  const SourcePlan plan = plan_source(*source, src, options.password, inner);
   std::uint64_t total = std::max<std::uint64_t>(1, 2 * plan.summary.total_bytes);
   detail::ProgressReporter progress(ctl, total);
   progress.start();
@@ -1411,16 +1415,21 @@ AnonymizeReport anonymize_session(const std::string& src_path, const std::string
   const SessionSource& src = *source;
 
   // ---- what the source is ------------------------------------------------
-  SourcePlan plan = plan_source(src, src_path, o.password, ctl);
+  // Inner calls get the cancel token but not the progress callback: their
+  // own (0..total) reports would interleave with this call's.
+  Control inner;
+  inner.cancel = ctl.cancel;
+  SourcePlan plan = plan_source(src, src_path, o.password, inner);
   {
+    if (plan.summary.encryption.access != "full")
+      throw PasswordError("the session is encrypted and the password does not open all of it: "
+                          "metadata section 3 holds the recording-time offset and the subject "
+                          "fields, so anonymizing needs the level-2 password");
     std::string why;
     for (const auto& w : plan.summary.warnings)
       if (w.blocks_anonymize) why += "\n  - " + w.code + ": " + w.message;
     if (!why.empty())
       throw WriteConflictError("this session cannot be anonymized safely:" + why);
-    if (plan.summary.encryption.access != "full")
-      throw PasswordError("the session is encrypted and the password does not open all of it; "
-                          "anonymizing needs the level-2 password");
   }
 
   // ---- channel selection -------------------------------------------------
