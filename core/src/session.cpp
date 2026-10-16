@@ -62,6 +62,9 @@ void Session::discover() {
 }
 
 TimeSeriesMetadata& Session::segment_metadata(SegmentReader& seg) {
+  // Loaded for every readable segment at open; a later call only reads it.
+  // Locked anyway: it is never reset, so the reference stays valid after.
+  std::lock_guard<std::mutex> lock(state_mu_);
   if (!seg.metadata) {
     auto bytes = source_->read_all(seg.tmet_path);
     seg.metadata = load_time_series_metadata(bytes, password_);
@@ -69,10 +72,21 @@ TimeSeriesMetadata& Session::segment_metadata(SegmentReader& seg) {
   return *seg.metadata;
 }
 
-std::span<const ui1> Session::segment_index(SegmentReader& seg) {
-  if (seg.tidx_bytes.empty()) seg.tidx_bytes = source_->read_all(seg.tidx_path);
+std::shared_ptr<const std::vector<ui1>> Session::segment_index(SegmentReader& seg) {
+  {
+    std::lock_guard<std::mutex> lock(index_mu_);
+    if (seg.tidx) {
+      seg.index_last_used = ++index_tick_;
+      return seg.tidx;  // the copy is the caller's pin
+    }
+  }
+  // Read OUTSIDE the lock: other threads keep using the cache meanwhile. Two
+  // threads missing the same segment both read it; the first to finish wins.
+  auto loaded = std::make_shared<const std::vector<ui1>>(source_->read_all(seg.tidx_path));
+  std::lock_guard<std::mutex> lock(index_mu_);
+  if (!seg.tidx) seg.tidx = std::move(loaded);
   seg.index_last_used = ++index_tick_;
-  return seg.tidx_bytes;
+  return seg.tidx;
 }
 
 void Session::load_channel_basic_info(const std::string& name, Channel& ch) {
@@ -152,7 +166,8 @@ std::vector<DataRun> Session::read_runs(const std::string& channel, std::optiona
     auto& md = segment_metadata(seg);
     const si8 rto = segment_rto(md);
 
-    auto idx = segment_index(seg);
+    const auto idx_pin = segment_index(seg);  // keeps the bytes alive for this call
+    const std::span<const ui1> idx(*idx_pin);
     const std::size_t n_entries = index_entry_count(idx, source_->describe(seg.tidx_path));
 
     crypto::AccessKeys keys = crypto::validate_password(
@@ -237,7 +252,7 @@ std::optional<si8> Session::agreed_rto(const std::string* channel, std::string& 
   for (const auto& name : channel_names_) {
     if (channel && name != *channel) continue;
     for (auto& seg : channels_.at(name).segments) {
-      if (!seg.load_error.empty()) continue;  // lenient: already reported, has no say
+      if (segment_failed(seg)) continue;  // lenient: already reported, has no say
       const si8 rto = segment_rto(segment_metadata(seg));
       if (!agreed) {
         agreed = rto;
@@ -292,6 +307,7 @@ void Session::read_record_file(std::vector<Record>& out, const std::string& rdat
     // not a successful read through the old password mapping.
     if (keys.legacy_password_mapping) {
       const auto where = source_->describe(rdat_path);
+      std::lock_guard<std::mutex> lock(state_mu_);
       if (std::find(legacy_password_record_files_.begin(), legacy_password_record_files_.end(),
                     where) == legacy_password_record_files_.end())
         legacy_password_record_files_.push_back(where);
@@ -317,6 +333,7 @@ void Session::read_record_file(std::vector<Record>& out, const std::string& rdat
   try {
     run();
   } catch (const std::exception& e) {
+    std::lock_guard<std::mutex> lock(state_mu_);
     if (reported_record_files_.insert(rdat_path).second)
       problems_.push_back(SegmentProblem{channel, segment, source_->describe(rdat_path),
                                          std::string("records: ") + e.what(), "records"});
@@ -376,6 +393,7 @@ std::vector<Record> Session::read_records(std::optional<std::string> channel,
     const std::string rdat_path = detail::session_record_file(*source_, reason);
     if (!reason.empty()) {
       if (strict_) throw FormatError(reason);
+      std::lock_guard<std::mutex> lock(state_mu_);
       if (reported_record_files_.insert("<session-root>").second)
         problems_.push_back(SegmentProblem{"", -1, source_->describe(""),
                                            "records: " + reason, "records"});
@@ -409,7 +427,7 @@ std::vector<Record> Session::read_records(std::optional<std::string> channel,
     if (want_segment && channels_.count(name)) {
       for (auto& seg : channels_.at(name).segments) {
         if (segment && seg.segment_number != *segment) continue;
-        if (!seg.load_error.empty()) continue;  // lenient: reported in problems()
+        if (segment_failed(seg)) continue;  // lenient: reported in problems()
         const std::string cand =
             seg.tmet_path.substr(0, seg.tmet_path.size() - 5) + ".rdat";  // ".tmet"
         if (source_->exists(cand))
@@ -453,7 +471,8 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
         password_, md.universal_header.level_1_password_validation_field,
         md.universal_header.level_2_password_validation_field);
 
-    auto idx = segment_index(seg);
+    const auto idx_pin = segment_index(seg);  // keeps the bytes alive for this call
+    const std::span<const ui1> idx(*idx_pin);
     const std::size_t n_entries = index_entry_count(idx, source_->describe(seg.tidx_path));
 
     // Determine whether any block in this segment is in range before loading
@@ -561,22 +580,32 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
   return out;
 }
 
+namespace {
+std::size_t cached_bytes(const SegmentReader& seg) { return seg.tidx ? seg.tidx->capacity() : 0; }
+}  // namespace
+
 std::size_t Session::index_cache_bytes() const {
+  std::lock_guard<std::mutex> lock(index_mu_);
   std::size_t total = 0;
   for (const auto& name : channel_names_)
-    for (const auto& seg : channels_.at(name).segments) total += seg.tidx_bytes.capacity();
+    for (const auto& seg : channels_.at(name).segments) total += cached_bytes(seg);
   return total;
 }
 
 void Session::trim_index_cache() {
   if (index_budget_ == 0) return;
-  std::size_t total = index_cache_bytes();
+  std::lock_guard<std::mutex> lock(index_mu_);
+  std::size_t total = 0;
+  for (const auto& name : channel_names_)
+    for (const auto& seg : channels_.at(name).segments) total += cached_bytes(seg);
   if (total <= index_budget_) return;
 
-  // Oldest first. Only called once a public operation has finished, so no
-  // caller is holding a span into any of these buffers — evicting one while it
-  // was in use would be a use-after-free, which is why this is never done
-  // mid-read.
+  // Oldest first. Called at the end of a public operation, so THIS call holds
+  // no index. Another thread's call may: it holds its own pin (segment_index
+  // returns a shared_ptr), so dropping the cache's reference here frees the
+  // bytes only once that call is done with them. Without the pin, evicting an
+  // index in use was a use-after-free ("double free or corruption" from four
+  // threads reading one Session with a tiny budget).
   struct Victim {
     std::uint64_t used;
     SegmentReader* seg;
@@ -584,14 +613,14 @@ void Session::trim_index_cache() {
   std::vector<Victim> victims;
   for (const auto& name : channel_names_)
     for (auto& seg : channels_.at(name).segments)
-      if (!seg.tidx_bytes.empty()) victims.push_back({seg.index_last_used, &seg});
+      if (seg.tidx) victims.push_back({seg.index_last_used, &seg});
   std::sort(victims.begin(), victims.end(),
             [](const Victim& a, const Victim& b) { return a.used < b.used; });
 
   for (const auto& v : victims) {
     if (total <= index_budget_) break;
-    total -= v.seg->tidx_bytes.capacity();
-    std::vector<ui1>().swap(v.seg->tidx_bytes);  // actually release the memory
+    total -= cached_bytes(*v.seg);
+    v.seg->tidx.reset();  // the memory goes with the last pin
     v.seg->index_last_used = 0;
   }
 }
@@ -652,7 +681,8 @@ std::vector<BlockIndexEntry> Session::read_index(const std::string& channel) {
     if (!with_segment(channel, seg, [&] {
     auto& md = segment_metadata(seg);
     const si8 rto = segment_rto(md);
-    auto idx = segment_index(seg);
+    const auto idx_pin = segment_index(seg);  // keeps the bytes alive for this call
+    const std::span<const ui1> idx(*idx_pin);
     const std::size_t n = index_entry_count(idx, source_->describe(seg.tidx_path));
     for (std::size_t i = 0; i < n; ++i) {
       auto e = fmt::TimeSeriesIndex::parse(
