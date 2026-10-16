@@ -117,8 +117,10 @@ enum class Operation : ui1 {
   HeaderRepair = 3,    ///< repair_session: declarations only, samples untouched
   Recovery = 4,        ///< recover_session: index and data reconciled
   MetadataUpdate = 5,  ///< reserved: descriptive metadata rewritten in place
-  // 6, 7, 8: reserved for anonymize (#70), rename (#72) and transform (#73).
-  // Not assigned here, so those issues can define them without a collision.
+  Anonymize = 6,       ///< anonymize_session (#70): a de-identified copy, every
+                       ///< time shifted; stamped on every file of the copy
+  // 7, 8: reserved for rename (#72) and transform (#73). Not assigned here, so
+  // those issues can define them without a collision.
   SegmentRepaired = 9, ///< stamped on a channel's LAST segment when repair or
                        ///< recovery modified ANOTHER segment of that channel
 };
