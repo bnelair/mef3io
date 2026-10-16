@@ -255,20 +255,20 @@ def convert(edf_path, mef_path, timezone=None, copy_patient=False, overwrite=Fal
             "recording was made in, e.g. timezone='Europe/Prague' or '+01:00'."
         )
     tz = parse_timezone(timezone)
-    if overwrite:
-        mef3io.Writer(mef_path, overwrite=True, **keys).close()
-    elif Path(mef_path).exists():
+    if not overwrite and Path(mef_path).exists():
         raise FileExistsError(f"{mef_path} exists; pass overwrite=True to replace it")
 
-    with open_edf(str(edf_path)) as edf:
+    with open_edf(str(edf_path)) as edf:  # opened first: a bad path deletes nothing
+        if overwrite:
+            mef3io.Writer(mef_path, overwrite=True, **keys).close()
         start_uutc = local_to_uutc(edf["start"], tz)
         subject = mef3io.Subject(
             gmt_offset=int(edf["start"].replace(tzinfo=tz).utcoffset().total_seconds()))
         if copy_patient:
             subject.name_1, subject.id = edf["patient"]["name"], edf["patient"]["code"]
             if not (subject.name_1 or subject.id):
-                print("warning: no patient name or code found to copy (plain EDF/BDF has "
-                      "only a free-text patient field, which is not copied)")
+                print("warning: no patient name or code to copy (plain EDF/BDF has only "
+                      "a free-text patient field; in EDF+ 'X' means unknown)")
 
         taken, channels = set(), {}
         for sig in edf["signals"]:
@@ -370,10 +370,18 @@ def main(argv=None) -> int:
     if a.encrypt:
         import getpass
 
-        keys = dict(password1=getpass.getpass("Level-1 password (signals): "),
-                    password2=getpass.getpass("Level-2 password (everything): "))
+        def ask(label):
+            first = getpass.getpass(f"{label}: ")
+            if first != getpass.getpass(f"{label} again: "):
+                ap.error("passwords do not match")
+            return first
+
+        keys = dict(password1=ask("Level-1 password (technical metadata)"),
+                    password2=ask("Level-2 password (everything else, incl. patient)"))
         if not (keys["password1"] and keys["password2"]):
             ap.error("--encrypt needs both passwords")
+        if keys["password1"] == keys["password2"]:
+            ap.error("use two different passwords")
     if a.edf is None:  # demo
         tmp = Path(tempfile.mkdtemp())
         a.edf, a.mefd, a.timezone, a.overwrite = str(tmp / "demo.edf"), str(tmp / "demo.mefd"), "UTC", True

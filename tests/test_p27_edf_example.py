@@ -162,7 +162,7 @@ def test_existing_session_is_not_replaced_without_overwrite(tmp_path):
 def test_command_line_encrypts_without_passwords_on_the_command_line(tmp_path, monkeypatch, capsys):
     src, out = tmp_path / "e.edf", str(tmp_path / "e.mefd")
     _write_edf(src, patient=True)
-    answers = iter(["one", "two"])
+    answers = iter(["one", "one", "two", "two"])  # each asked twice
     monkeypatch.setattr("getpass.getpass", lambda prompt="": next(answers))
     assert ex.main([str(src), out, "--timezone", "UTC", "--copy-patient", "--encrypt"]) == 0
     assert "verified" in capsys.readouterr().out
@@ -170,6 +170,26 @@ def test_command_line_encrypts_without_passwords_on_the_command_line(tmp_path, m
         mef3io.Reader(out)
     with mef3io.Reader(out, "two") as r:
         assert r.metadata.subject.id == "MRN123"
+
+
+def test_command_line_refuses_mistyped_passwords(tmp_path, monkeypatch):
+    src, out = tmp_path / "e.edf", str(tmp_path / "e.mefd")
+    _write_edf(src)
+    answers = iter(["one", "onf"])
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": next(answers))
+    with pytest.raises(SystemExit):
+        ex.main([str(src), out, "--timezone", "UTC", "--encrypt"])
+    assert not (tmp_path / "e.mefd").exists()
+
+
+def test_bad_edf_path_with_overwrite_keeps_the_old_session(tmp_path):
+    src, out = tmp_path / "x.edf", str(tmp_path / "x.mefd")
+    _write_edf(src)
+    ex.convert(src, out, "UTC")
+    with pytest.raises(OSError):
+        ex.convert(tmp_path / "missing.edf", out, "UTC", overwrite=True)
+    with mef3io.Reader(out) as r:
+        assert len(r.channels) == 2
 
 
 def test_copy_patient_warns_when_nothing_to_copy(tmp_path, capsys):

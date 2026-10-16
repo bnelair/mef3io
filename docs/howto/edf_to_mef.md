@@ -132,8 +132,9 @@ checks per channel that every sample is within half a count of the EDF value
 at the same time, that each count is no coarser than the EDF step (unless a
 warning said so), that no extra samples fill a gap, and that every annotation
 was written with the same time, type, text and duration. It uses the
-script's own EDF reading, so it confirms the conversion, not the EDF reader. With mef3io 1.3 or later you can also look at
-the session without reading any samples:
+script's own EDF reading, so it confirms the conversion, not the EDF reader.
+With mef3io 1.3 or later you can also look at the session without reading
+any samples:
 
 ```bash
 python -m mef3io inspect recording.mefd
