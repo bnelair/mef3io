@@ -17,8 +17,17 @@ from __future__ import annotations
 import warnings
 from typing import Optional, Union
 
-from ._writer import reporting_unreadable_metadata, warn_unreadable_metadata
-from ._reader import SessionDeclarationWarning, _declaration_warning_text
+from ._writer import (
+    reporting_unreadable_metadata,
+    warn_password_interop,
+    warn_unreadable_metadata,
+)
+from ._reader import (
+    SessionDeclarationWarning,
+    _declaration_warning_text,
+    _warn_legacy_password,
+    _warning_on_legacy_records,
+)
 
 import numpy as np
 
@@ -41,6 +50,7 @@ class MefReader:
         warn_declarations: bool = True,
     ):
         self._r = _mef3io.Reader(str(session_path), password2 or "")
+        self._path_str = str(session_path)
         # The legacy drop-in is exactly the entry point people with legacy-
         # written sessions use, so it must carry the same open-time warning as
         # mef3io.Reader — otherwise the population most affected is the one
@@ -57,6 +67,9 @@ class MefReader:
                 SessionDeclarationWarning,
                 stacklevel=2,
             )
+        # Only sessions an older mef3io wrote can trigger it (mef_tools always
+        # used meflib's mapping), so it costs a legacy user nothing.
+        _warn_legacy_password(self._r, str(session_path), stacklevel=2)
         self.bi = [self._basic_info(ch) for ch in self._r.channels]
 
     def _basic_info(self, channel: str) -> dict:
@@ -137,13 +150,16 @@ class MefReader:
         for the fields. Returns ``None`` (with a printed warning) on failure,
         as the legacy API did.
         """
-        try:
-            if channel is None:
-                return self._r.records()
-            return self._r.records(channel, level="channel")
-        except Exception:
-            print("WARNING: read of annotations record failed, no annotations returned")
-            return None
+        # The warning sits OUTSIDE the try: under -W error it must propagate,
+        # not be mistaken for a failed read and swallowed.
+        with _warning_on_legacy_records(self._r, self._path_str, stacklevel=4):
+            try:
+                if channel is None:
+                    return self._r.records()
+                return self._r.records(channel, level="channel")
+            except Exception:
+                print("WARNING: read of annotations record failed, no annotations returned")
+                return None
 
     def close(self):
         self._r = None
@@ -188,6 +204,7 @@ class MefWriter:
         self._path = str(session_path)
         self._w = _mef3io.SessionWriter(self._path, overwrite, password1 or "", password2 or "")
         warn_unreadable_metadata(self._w.unreadable_metadata)
+        warn_password_interop(password1, password2)
         # "fast" by default, matching mef3io.Writer and the legacy stack this
         # class stands in for — meflib flushes nothing at all. See
         # mef3io.Writer for what an unclean shutdown costs and how

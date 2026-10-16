@@ -42,6 +42,8 @@ from ._inspect import (  # noqa: E402
 from ._cancel import CancelToken, Cancelled  # noqa: E402
 from ._reader import (  # noqa: E402
     BlockCopyWarning,
+    LegacyPasswordWarning,
+    PasswordInteropWarning,
     Reader,
     SessionDeclarationWarning,
     UnreadableSegmentWarning,
@@ -88,6 +90,8 @@ __all__ = [
     "validate_session", "repair_session", "recover_session",
     "RecoveryReport", "RecoveredSegment",
     "BlockCopyWarning",
+    "LegacyPasswordWarning",
+    "PasswordInteropWarning",
     "SessionDeclarationWarning",
     "UnreadableSegmentWarning",
     "MefError", "FormatError", "CrcError", "PasswordError", "IoError",

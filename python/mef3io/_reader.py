@@ -3,6 +3,7 @@ backend). Thin: adds context-manager support and pandas-friendly helpers while
 delegating all real work to the backend."""
 from __future__ import annotations
 
+import contextlib
 import warnings
 from typing import Callable, Optional
 
@@ -65,6 +66,85 @@ class BlockCopyWarning(UserWarning):
 
         warnings.filterwarnings("ignore", category=mef3io.BlockCopyWarning)
     """
+
+
+class LegacyPasswordWarning(UserWarning):
+    """The password opened this session only through mef3io's OLD byte mapping.
+
+    MEF derives a 16-byte key from the password one byte per character.
+    meflib (and so pymef and ``mef_tools``) keeps the low byte of each
+    character's Unicode code point; mef3io 1.2.0 and earlier kept the last byte of
+    its UTF-8 encoding instead. The two agree on ASCII and disagree on
+    everything else (``"é"`` is 0xE9 in meflib, 0xA9 in old mef3io) — issue #84.
+
+    mef3io now writes with meflib's mapping and reads with it first. A session
+    an older mef3io encrypted with a non-ASCII password still opens, through a
+    fallback to the old mapping, and this warning says so (on open for the
+    metadata, from :meth:`Reader.records` for record files): the data is intact,
+    but meflib and pymef cannot open that session with that password. To make
+    it readable everywhere, re-encrypt it into a new session with the same
+    password once ``transform_session`` (issue #73) is available; until then,
+    reading it into a new session with :class:`Writer` does the same.
+
+    The fallback cannot tell who wrote a file: it also accepts a SECOND
+    password, the one whose old-mapping bytes equal the real key (for a
+    session keyed with ``"b©"``, also ``"bé"``), whoever wrote it. That is
+    inherent to any compatibility fallback and is why it is announced.
+
+    Appending to such a session keeps the existing segments' keys (rewriting
+    them would mean re-encrypting them); new segments use meflib's mapping.
+    """
+
+
+class PasswordInteropWarning(UserWarning):
+    """A password that other MEF readers handle differently than you may expect.
+
+    Raised by :class:`Writer` for a password longer than 15 characters (meflib
+    and pymef refuse it, so only mef3io will open the session) or one that
+    contains a character above U+00FF (MEF keeps only the low byte of each
+    code point, as meflib does, so a different password can unlock the same
+    session). The session is still written; the warning only tells you about
+    its reach. Short Latin-1 passwords (ASCII, or e.g. ``"é"``, ``"ü"``) raise
+    nothing.
+    """
+
+
+def _legacy_password_warning_text(what: str, path: str) -> str:
+    return (
+        f"{path}: the password opened {what} only through the password-to-key "
+        "mapping that mef3io used up to 1.2.0, which differs from meflib's for "
+        "non-ASCII characters (issue #84); such files were most likely encrypted "
+        "by one of those versions. The data is read correctly, but meflib and "
+        "pymef cannot open these files with this password. Re-encrypt the "
+        "session (transform_session, issue #73, or rewrite it with "
+        "mef3io.Writer) to make it readable everywhere."
+    )
+
+
+def _warn_legacy_password(impl, path: str, stacklevel: int) -> None:
+    fn = getattr(impl, "legacy_password_channels", None)
+    channels = list(fn()) if fn is not None else []
+    if channels:
+        shown = ", ".join(channels[:3]) + (", ..." if len(channels) > 3 else "")
+        warnings.warn(_legacy_password_warning_text(f"{len(channels)} channel(s) ({shown})", path),
+                      LegacyPasswordWarning, stacklevel=stacklevel + 1)
+
+
+@contextlib.contextmanager
+def _warning_on_legacy_records(impl, path: str, stacklevel: int):
+    """Warn about record files a records() call opened via the old mapping."""
+    # finally: a strict call can read an old-keyed file and then fail on the
+    # next one. The list is cumulative and deduplicated, so a file not
+    # announced now would never be announced.
+    before = len(impl.legacy_password_record_files())
+    try:
+        yield
+    finally:
+        added = impl.legacy_password_record_files()[before:]
+        if added:
+            warnings.warn(_legacy_password_warning_text(
+                f"{len(added)} record file(s) (first: {added[0]})", path),
+                LegacyPasswordWarning, stacklevel=stacklevel)
 
 
 def _unreadable_warning_text(problems: list, path: str) -> str:
@@ -252,6 +332,11 @@ class Reader:
                     _cache.discard(self._cache_path)
             except OSError:
                 pass  # a snapshot is an accelerator; failing to save never fails an open
+
+        # Never from a cache snapshot: encrypted sessions are never cached, so
+        # an encrypted session always has its backend built here.
+        if self._impl is not None:
+            _warn_legacy_password(self._impl, self._path, stacklevel=2)
 
         if not self._strict:
             problems = self.problems  # from the cache snapshot on a warm open
@@ -640,7 +725,8 @@ class Reader:
         """
         impl = self._ensure_impl()
         before = len(impl.problems())
-        out = impl.records(channel, segment, level)
+        with _warning_on_legacy_records(impl, self._path, stacklevel=4):
+            out = impl.records(channel, segment, level)
         added = impl.problems()[before:]
         if added:
             # Lenient only (strict raises): a record file that could not be

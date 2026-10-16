@@ -7,6 +7,42 @@ authors:
   - family-names: "Mivalt"
     given-names: "Filip"
     affiliation: "Bioelectronics Neurophysiology and Engineering Laboratory (BNEL), Mayo Clinic"
+references:
+  - type: article
+    title: "Large-scale electrophysiology: acquisition, compression, encryption, and storage of big data"
+    authors:
+      - family-names: "Brinkmann"
+        given-names: "Benjamin H."
+      - family-names: "Bower"
+        given-names: "Mark R."
+      - family-names: "Stengel"
+        given-names: "Keith A."
+      - family-names: "Worrell"
+        given-names: "Gregory A."
+      - family-names: "Stead"
+        given-names: "Matt"
+    journal: "Journal of Neuroscience Methods"
+    volume: 180
+    issue: 1
+    start: 185
+    end: 192
+    year: 2009
+    doi: "10.1016/j.jneumeth.2009.03.022"
+  - type: software
+    title: "meflib"
+    authors:
+      - name: "meflib contributors"
+    repository-code: "https://github.com/msel-source/meflib"
+  - type: software
+    title: "pymef"
+    authors:
+      - name: "pymef contributors"
+    repository-code: "https://github.com/msel-source/pymef"
+  - type: software
+    title: "mef_tools"
+    authors:
+      - name: "mef_tools contributors"
+    repository-code: "https://github.com/bnelair/mef_tools"
 repository-code: "https://github.com/bnelair/mef3io"
 url: "https://bnelair.github.io/mef3io/"
 license: Apache-2.0

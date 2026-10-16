@@ -51,6 +51,10 @@ class Reader {
   /// a segment throws instead. Non-empty means parts of this session read back
   /// as gaps that are NOT gaps in the recording.
   const std::vector<SegmentProblem>& problems() const { return session_.problems(); }
+  /// See Session::legacy_password_record_files.
+  const std::vector<std::string>& legacy_password_record_files() const {
+    return session_.legacy_password_record_files();
+  }
 
   /// Set the default decode thread count (0 = all cores, 1 = serial).
   void set_threads(int n) { n_threads_ = n; }

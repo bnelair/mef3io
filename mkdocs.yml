@@ -95,6 +95,7 @@ nav:
   - Development:
       - Design & internals: design.md
       - Versioning & releases: releasing.md
+  - Contributors and credits: contributors.md
 
 extra:
   social:

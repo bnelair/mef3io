@@ -83,6 +83,15 @@ class SessionWriter {
   /// Grows over the writer's life; deduplicated.
   const std::vector<std::string>& unreadable_metadata() const { return unreadable_metadata_; }
 
+  /// Segments (`.tmet` paths) this writer appended to whose password matched
+  /// only through the byte mapping mef3io used up to 1.2.0 (issue #84). Their
+  /// existing keys are kept (re-keying would mean re-encrypting the segment),
+  /// so they stay unopenable by meflib/pymef with that password; NEW segments
+  /// always use meflib's mapping. Grows over the writer's life; deduplicated.
+  const std::vector<std::string>& legacy_password_segments() const {
+    return legacy_password_segments_;
+  }
+
   // Optional override for the RED block length (samples per block). <= 0 uses
   // the fs-derived heuristic.
   void set_block_length(si8 n) { block_length_override_ = n; }
@@ -173,6 +182,7 @@ class SessionWriter {
   void note_unreadable(const std::string& what);
   std::optional<si8> session_rto_;  // the session's resolved offset, once known
   std::vector<std::string> unreadable_metadata_;
+  std::vector<std::string> legacy_password_segments_;
   std::map<std::string, std::string> empty_segment_dirs_;  // dir -> its report entry
   WriteSummary write_blocks(const std::string& channel, const std::vector<si4>& samples,
                             std::span<const ui1> valid, sf8 ufact, si8 start_uutc, sf8 fs,

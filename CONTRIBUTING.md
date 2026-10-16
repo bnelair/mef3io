@@ -5,6 +5,10 @@ MEF 3.0 wrapped for Python (nanobind) and MATLAB (MEX); the guiding principle
 is that the high-level behavior lives in C++ so every binding behaves
 identically.
 
+Everyone taking part is expected to follow our
+[code of conduct](CODE_OF_CONDUCT.md). Contributors are credited in
+[CONTRIBUTORS.md](CONTRIBUTORS.md).
+
 ## Ways to help
 
 - **Report a bug** or **request a feature** via

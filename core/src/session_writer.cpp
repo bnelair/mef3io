@@ -158,6 +158,10 @@ void SessionWriter::hydrate(const std::string& channel, ChannelState& st) {
     throw PasswordError("writing to channel " + channel + " needs the full-access (level-2) "
                         "password: section 3 of " + tmet_path + ", which holds the "
                         "recording-time offset, is locked with the level-1 password alone");
+  if (md.legacy_password_mapping &&
+      std::find(legacy_password_segments_.begin(), legacy_password_segments_.end(), tmet_path) ==
+          legacy_password_segments_.end())
+    legacy_password_segments_.push_back(tmet_path);
   const si8 rto = segment_rto(md);
   st.sampling_frequency = md.section2.sampling_frequency;
   st.units_conversion_factor = md.section2.units_conversion_factor;
