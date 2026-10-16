@@ -222,8 +222,9 @@ Laboratory (BNEL) at Mayo Clinic.
 
 **Past tools contributors:** Bruno Aristimunha, Mark R. Bower, Benjamin H.
 Brinkmann, Clemens Brunner, Jan Cimbálník, Daniel P. Crepeau, Richard Jie Cui,
-Arnaud Delorme, Václav Křemen, Eric Larson, Filip Mivalt, Vladimir Sladky,
-Matt Stead, Keith A. Stengel, Max van den Boom, Gregory A. Worrell and others.
+Arnaud Delorme, Dora Hermes, Václav Křemen, Eric Larson, Filip Mivalt,
+Vladimir Sladky, Matt Stead, Keith A. Stengel, Max van den Boom, Vince Vasoli,
+Gregory A. Worrell and others.
 We thank them all. The past tools are listed
 [above](#mef-30-and-the-original-libraries) and in
 [CONTRIBUTORS.md](https://github.com/bnelair/mef3io/blob/main/CONTRIBUTORS.md).

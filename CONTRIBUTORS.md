@@ -34,10 +34,10 @@ data*, J Neurosci Methods 180(1):185-192, 2009,
 
 Bruno Aristimunha, Mark R. Bower, Benjamin H. Brinkmann, Clemens Brunner,
 Jan Cimbálník, Daniel P. Crepeau, Richard Jie Cui, Arnaud Delorme,
-Václav Křemen, Eric Larson, Filip Mivalt, Vladimir Sladky, Matt Stead,
-Keith A. Stengel, Max van den Boom, Gregory A. Worrell and
-[@nelagri](https://github.com/nelagri).
+Dora Hermes, Václav Křemen, Eric Larson, Filip Mivalt, Vladimir Sladky,
+Matt Stead, Keith A. Stengel, Max van den Boom, Vince Vasoli,
+Gregory A. Worrell and [@nelagri](https://github.com/nelagri).
 
-Names come from the projects' public commit histories, the 2009 paper and the
-maintainer's records. If you contributed to any of these tools and are missing
+Names come from the projects' public commit histories, the author lines in
+their source files, the 2009 paper and the maintainer's records. If you contributed to any of these tools and are missing
 or misnamed, please open an issue.
