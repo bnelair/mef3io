@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import copy
 import os
+import sys
 import pickle
 import re
 import shutil
@@ -191,6 +192,10 @@ def _not_a_session(templates, tmp_path):
 
 
 def _non_utf8_segment_folder(src):
+    # Only Linux filesystems take arbitrary bytes in a name: APFS rejects a
+    # non-UTF-8 name (EILSEQ) and Windows paths are UTF-16.
+    if not sys.platform.startswith("linux"):
+        pytest.skip("non-UTF-8 file names need a Linux filesystem")
     seg = next((src / "ch3.timd").glob("*.segd"))
     for f in list(seg.iterdir()):
         os.rename(bytes(f), bytes(seg) + b"/ch3-\xff" + f.suffix.encode())
