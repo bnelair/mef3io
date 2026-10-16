@@ -28,3 +28,5 @@ Install: `pip install mef3io` (Python 3.10+, numpy only). MATLAB: the mef3io-mat
 - [Source code](https://github.com/bnelair/mef3io)
 - [meflib](https://github.com/msel-source/meflib): the reference C library; its meflib.h is the MEF 3.0 specification
 - [pymef](https://github.com/msel-source/pymef) and [mef_tools](https://github.com/bnelair/mef_tools): the legacy Python stack
+- [mef3io-studio](https://github.com/bnelair/mef3io-studio): desktop app for exploring and anonymizing MEF 3.0 recordings
+- [mef3io-server](https://github.com/bnelair/mef3io-server): gRPC server streaming MEF 3.0 data to viewers on a local network

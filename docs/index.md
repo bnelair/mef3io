@@ -135,5 +135,13 @@ The same session opens in MATLAB (`mef3io.Reader('session.mefd')`) and C++
 What changed in each version is in the
 [release notes](release_notes/index.md).
 
+## Related projects
+
+- [mef3io-studio](https://github.com/bnelair/mef3io-studio): a desktop app for
+  exploring and anonymizing MEF 3.0 recordings; installers are on its
+  Releases page.
+- [mef3io-server](https://github.com/bnelair/mef3io-server): a gRPC server
+  that streams MEF 3.0 data to viewers on a local network.
+
 Maintained by Filip Mivalt, Bioelectronics Neurophysiology and Engineering
 Laboratory (BNEL) at Mayo Clinic.

@@ -191,6 +191,14 @@ benchmarks/  performance comparisons
 docs/        documentation site source
 ```
 
+## Related projects
+
+- [mef3io-studio](https://github.com/bnelair/mef3io-studio): a desktop app for
+  exploring and anonymizing MEF 3.0 recordings; installers are on its
+  Releases page.
+- [mef3io-server](https://github.com/bnelair/mef3io-server): a gRPC server
+  that streams MEF 3.0 data to viewers on a local network.
+
 ## Citing and license
 
 If you use mef3io in published work, please cite it via

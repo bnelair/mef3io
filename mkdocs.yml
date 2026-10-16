@@ -90,3 +90,15 @@ nav:
   - Development:
       - Design & internals: design.md
       - Versioning & releases: releasing.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/bnelair/mef3io
+      name: mef3io on GitHub
+    - icon: material/application-outline
+      link: https://github.com/bnelair/mef3io-studio
+      name: mef3io-studio, a desktop app for MEF 3.0 recordings
+    - icon: material/server-network
+      link: https://github.com/bnelair/mef3io-server
+      name: mef3io-server, streams MEF 3.0 data to viewers
