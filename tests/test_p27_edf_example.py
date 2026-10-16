@@ -1,0 +1,162 @@
+"""P27: examples/12_edf_to_mef.py converts EDF / EDF+ / BDF correctly.
+
+docs/howto/edf_to_mef.md teaches this script, so it is held to what the page
+promises: per-channel rates kept, samples within half a MEF count, the start
+time converted with the zone the user names (and refused without one), EDF+
+annotations as Note/EDFA records, EDF+D gaps as NaN at the right time, and
+patient identity copied only on request. Needs the optional pyedflib
+(``pip install "mef3io[edf]"``); skipped cleanly without it.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import importlib.util
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+import mef3io
+
+pyedflib = pytest.importorskip("pyedflib", reason="optional EDF reader not installed")
+
+REPO = Path(__file__).resolve().parent.parent
+_spec = importlib.util.spec_from_file_location("edf_to_mef", REPO / "examples" / "12_edf_to_mef.py")
+ex = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(ex)
+
+LOCAL_START = dt.datetime(2024, 3, 5, 10, 20, 30)  # CET (UTC+1) in Europe/Prague
+UTC_START = 1_709_630_430_000_000  # 2024-03-05 09:20:30 UTC
+SECONDS = 6
+
+
+def _write_edf(path, bdf=False, patient=False):
+    ftype = pyedflib.FILETYPE_BDFPLUS if bdf else pyedflib.FILETYPE_EDFPLUS
+    dmax = 2**23 - 1 if bdf else 32767
+    w = pyedflib.EdfWriter(str(path), 2, file_type=ftype)
+    w.setSignalHeaders([
+        dict(label="EEG Fp1/Ref", dimension="uV", sample_frequency=200, physical_min=-500,
+             physical_max=500, digital_min=-dmax - 1, digital_max=dmax),
+        dict(label="ECG", dimension="mV", sample_frequency=50, physical_min=-4,
+             physical_max=4, digital_min=-dmax - 1, digital_max=dmax),
+    ])
+    w.setStartdatetime(LOCAL_START)
+    if patient:
+        w.setPatientName("Doe_Jane")
+        w.setPatientCode("MRN123")
+    w.writeAnnotation(1.5, 0.25, "artifact")
+    w.writeAnnotation(4.0, -1, "eyes closed")
+    rng = np.random.default_rng(0)
+    w.writeSamples([rng.uniform(-400, 400, 200 * SECONDS), rng.uniform(-3, 3, 50 * SECONDS)])
+    w.close()
+
+
+def _shift_records(path, from_record, shift_s, discontinuous=True):
+    """Records >= from_record start shift_s later (and the file becomes +D)."""
+    b = bytearray(Path(path).read_bytes())
+    width = 3 if b[0] == 0xFF else 2
+    ns, hb, nrec = int(b[252:256]), int(b[184:192]), int(b[236:244])
+    nsamp = [int(b[256 + ns * 216 + 8 * i:256 + ns * 216 + 8 * i + 8]) for i in range(ns)]
+    ann = next(i for i in range(ns) if b[256 + 16 * i:256 + 16 * i + 16].strip().endswith(b"Annotations"))
+    start = sum(nsamp[:ann]) * width
+    size = nsamp[ann] * width
+    if discontinuous:
+        b[192:197] = b"BDF+D" if width == 3 else b"EDF+D"
+    for k in range(from_record, nrec):
+        off = hb + k * sum(nsamp) * width + start
+        rec = bytes(b[off:off + size])
+        stamp = rec.split(b"\x14")[0]
+        new = ("+%g" % (float(stamp) + shift_s)).encode() + rec[len(stamp):]
+        b[off:off + size] = new[:size]
+    Path(path).write_bytes(bytes(b))
+
+
+@pytest.mark.parametrize("bdf", [False, True], ids=["edf", "bdf"])
+def test_continuous_file_round_trips(tmp_path, bdf):
+    src, out = tmp_path / ("x.bdf" if bdf else "x.edf"), str(tmp_path / "x.mefd")
+    _write_edf(src, bdf=bdf)
+    res = ex.convert(src, out, "Europe/Prague")
+    ex.verify(out, res)
+    with mef3io.Reader(out) as r:
+        assert sorted(r.channels) == ["ECG", "EEG Fp1_Ref"]
+        eeg, ecg = r.info("EEG Fp1_Ref"), r.info("ECG")
+        assert (eeg["sampling_frequency"], ecg["sampling_frequency"]) == (200, 50)
+        assert (eeg["units_description"], ecg["units_description"]) == ("uV", "mV")
+        assert eeg["start_time"] == ecg["start_time"] == UTC_START
+        assert len(r.read("ECG")) == 50 * SECONDS
+        recs = sorted(r.records(), key=lambda x: x["time"])
+        assert [(x["type"], x["text"]) for x in recs] == [("EDFA", "artifact"), ("Note", "eyes closed")]
+        assert recs[0]["time"] == UTC_START + 1_500_000 and recs[0]["duration"] == 250_000
+        assert recs[1]["time"] == UTC_START + 4_000_000
+
+
+def test_sub_second_start_is_kept(tmp_path):
+    # EDF+ puts the sub-second part of the start in the first record's time
+    # stamp; pyedflib's getStartdatetime() mis-scales it, the example does not.
+    src, out = tmp_path / "s.edf", str(tmp_path / "s.mefd")
+    _write_edf(src)
+    _shift_records(src, 0, 0.25, discontinuous=False)
+    ex.verify(out, ex.convert(src, out, "Europe/Prague"))
+    with mef3io.Reader(out) as r:
+        assert r.info("ECG")["start_time"] == UTC_START + 250_000
+        # annotation onsets are relative to the header second, not the stamp
+        assert min(x["time"] for x in r.records()) == UTC_START + 1_500_000
+
+
+@pytest.mark.parametrize("bdf", [False, True], ids=["edf", "bdf"])
+def test_discontinuous_records_become_gaps(tmp_path, bdf):
+    src, out = tmp_path / ("d.bdf" if bdf else "d.edf"), str(tmp_path / "d.mefd")
+    _write_edf(src, bdf=bdf)
+    _shift_records(src, from_record=3, shift_s=2)  # 2 s gap after 3 s of data
+    with pytest.raises(OSError):
+        pyedflib.EdfReader(str(src)).close()  # why the example reads +D itself
+    res = ex.convert(src, out, "+01:00")
+    ex.verify(out, res)
+    with mef3io.Reader(out) as r:
+        y = r.read("EEG Fp1_Ref")
+        assert len(y) == 200 * (SECONDS + 2)
+        assert np.isnan(y[600:1000]).all() and not np.isnan(y[:600]).any()
+        assert not np.isnan(y[1000:]).any()
+        assert r.info("EEG Fp1_Ref")["start_time"] == UTC_START
+        assert len(r.records()) == 2
+
+
+def test_time_zone_is_required_and_never_guessed(tmp_path):
+    src = tmp_path / "x.edf"
+    _write_edf(src)
+    with pytest.raises(ValueError, match="time zone"):
+        ex.convert(src, str(tmp_path / "x.mefd"))
+    assert not (tmp_path / "x.mefd").exists()
+    # 02:30 on 2024-03-31 does not exist in Prague (clocks jump 02:00 -> 03:00).
+    with pytest.raises(ValueError, match="daylight-saving"):
+        ex.local_to_uutc(dt.datetime(2024, 3, 31, 2, 30), ex.parse_timezone("Europe/Prague"))
+    assert ex.local_to_uutc(LOCAL_START, ex.parse_timezone("UTC")) == UTC_START + 3_600_000_000
+
+
+@pytest.mark.parametrize("discontinuous", [False, True], ids=["pyedflib", "edf+d"])
+def test_patient_identity_is_copied_only_on_request(tmp_path, discontinuous):
+    src = tmp_path / "p.edf"
+    _write_edf(src, patient=True)
+    if discontinuous:
+        _shift_records(src, 3, 1)
+    plain, copied = str(tmp_path / "plain.mefd"), str(tmp_path / "copied.mefd")
+    ex.convert(src, plain, "UTC")
+    ex.convert(src, copied, "UTC", copy_patient=True)
+    with mef3io.Reader(plain) as r:
+        assert (r.metadata.subject.name_1, r.metadata.subject.id) == ("", "")
+    with mef3io.Reader(copied) as r:
+        assert (r.metadata.subject.name_1, r.metadata.subject.id) == ("Doe Jane", "MRN123")  # EDF+ "_" = space
+
+
+def test_existing_session_is_not_replaced_without_overwrite(tmp_path):
+    src, out = tmp_path / "x.edf", str(tmp_path / "x.mefd")
+    _write_edf(src)
+    ex.convert(src, out, "UTC")
+    with pytest.raises(FileExistsError):
+        ex.convert(src, out, "UTC")
+    ex.verify(out, ex.convert(src, out, "UTC", overwrite=True))
+
+
+def test_demo_runs_end_to_end(capsys):
+    assert ex.main([]) == 0
+    assert "verified" in capsys.readouterr().out

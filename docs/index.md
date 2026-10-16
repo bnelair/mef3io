@@ -106,7 +106,8 @@ The same session opens in MATLAB (`mef3io.Reader('session.mefd')`) and C++
 | [Python guide](python.md) | `Reader`, `Writer`, legacy compat, caching |
 | [MATLAB guide](matlab.md) | `+mef3io` classes and the MEX |
 | [C++ guide](cpp.md) | using the core library and the flat C ABI |
-| [Examples](examples.md) | eleven runnable scripts |
+| [How-to](howto/read_python.md) | short answers: read in [Python](howto/read_python.md) or [MATLAB](howto/read_matlab.md), [convert EDF to MEF 3.0](howto/edf_to_mef.md), [long recordings with gaps](howto/long_recordings.md) |
+| [Examples](examples.md) | twelve runnable scripts |
 | [Release notes](release_notes/index.md) | what changed in each version, and what an upgrade asks of you |
 | [Format reference](mef3_format.md) | the MEF 3.0 on-disk structure, field by field |
 | [De-identification](anonymization.md) | why meflib's recording-time offset is not anonymization, and what mef3io does instead |
