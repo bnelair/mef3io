@@ -13,6 +13,8 @@ The native API:
 
 ::: mef3io.extract_session
 
+::: mef3io.password_interop_issue
+
 ## Inspecting a session
 
 See the [Python guide](../python.md#inspecting-a-session-without-reading-its-samples).
@@ -38,11 +40,19 @@ for the workflow. Python and C++ only (no MATLAB, no C ABI).
 
 ::: mef3io.anonymize_session
 
+::: mef3io.anonymize.check
+
 ::: mef3io.anonymize.verify
 
 ::: mef3io.anonymize.reference_shift
 
 ::: mef3io.AnonymizeReport
+
+::: mef3io.anonymize.CheckReport
+
+::: mef3io.anonymize.Refusal
+
+::: mef3io.anonymize.REFUSAL_CODES
 
 ::: mef3io.VerifyReport
 

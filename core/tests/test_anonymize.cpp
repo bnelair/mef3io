@@ -119,6 +119,68 @@ TEST_CASE("anonymize_session refuses, and leaves nothing behind") {
   CHECK_FALSE(fsys::exists(dir / "A.mefd.partial"));
 }
 
+namespace {
+/// The code of the refusal `fn` throws, which must also be an `E`.
+template <class E, class F>
+std::string code_of(F&& fn) {
+  try {
+    fn();
+  } catch (const E& e) {
+    const auto* a = dynamic_cast<const AnonymizeError*>(&e);
+    REQUIRE(a != nullptr);
+    CHECK(a->refusal().message == e.what());
+    return a->code();
+  }
+  FAIL("no exception of the expected type");
+  return {};
+}
+}  // namespace
+
+TEST_CASE("refusal codes ride on the usual exception types; check_anonymize agrees (#111)") {
+  const auto dir = fresh("mef3io_anon_codes");
+  const std::string src = write_session(dir);
+  const std::string dst = (dir / "A.mefd").string();
+  AnonymizeOptions o;
+  o.shift_us = 3600000000LL;
+  CHECK(code_of<std::invalid_argument>([&] { anonymize_session(src, dst, o); }) ==
+        "shift-below-floor");
+  o.shift_us = 1000 * DAY;
+  o.channels = {"nope"};
+  CHECK(code_of<std::invalid_argument>([&] { anonymize_session(src, dst, o); }) ==
+        "channel-unknown");
+  o.channels = {};
+  CHECK(code_of<IoError>([&] { anonymize_session(src, src + "/inner.mefd", o); }) ==
+        "dst-inside-src");
+
+  // check_anonymize: every refusal, the first is what anonymize_session throws.
+  o.shift_us = 3600000000LL;
+  o.exclude_channels = {"a", "b"};
+  fsys::create_directories(dir / "B.mefd");
+  const AnonymizeCheck c = check_anonymize(src, (dir / "B.mefd").string(), o);
+  CHECK_FALSE(c.ok);
+  std::vector<std::string> codes;
+  for (const auto& r : c.refusals) codes.push_back(r.code);
+  CHECK(codes == std::vector<std::string>{"dst-exists", "no-channels-left", "shift-below-floor"});
+  CHECK(c.refusals[0].kind == RefusalKind::Io);
+  CHECK(std::string(refusal_kind_name(c.refusals[0].kind)) == "IoError");
+  CHECK(code_of<IoError>([&] { anonymize_session(src, (dir / "B.mefd").string(), o); }) ==
+        "dst-exists");
+  // the shift left open; nothing written either way
+  o.exclude_channels = {};
+  CHECK(check_anonymize(src, dst, o, {}, /*check_shift=*/false).ok);
+  CHECK_FALSE(fsys::exists(dst));
+  CHECK_FALSE(fsys::exists(dst + ".partial"));
+
+  // the report carries the source's times (in memory only)
+  o.shift_us = -5000 * DAY;
+  const AnonymizeReport rep = anonymize_session(src, dst, o);
+  REQUIRE(rep.source_start_us);
+  CHECK(*rep.source_start_us == START);
+  REQUIRE(rep.source_channel_times.size() == 2);
+  CHECK(rep.source_channel_times[0].channel == "a");
+  CHECK(rep.source_channel_times[0].start_us == START);
+}
+
 TEST_CASE("copy_segment: dropping blocks flags the next kept one and renumbers samples") {
   const auto dir = fresh("mef3io_copy_drop");
   const std::string path = (dir / "c.mefd").string();

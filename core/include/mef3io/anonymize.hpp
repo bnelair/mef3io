@@ -14,12 +14,22 @@
 // and a FIELD-WISE leak scan of every time and text field. anonymize_session
 // runs it on the copy before publishing it.
 //
+// check_anonymize() runs every check anonymize_session makes before it writes
+// (the same code: both call one pre-flight function) and returns the
+// refusals as data. It writes nothing and reads only metadata.
+//
+// Every refusal carries a stable `code` (docs/anonymization.md lists them);
+// anonymize_session throws it as an AnonymizeError mixed into the exception
+// type it always threw (std::invalid_argument, IoError, ...).
+//
 // Available in C++ and Python. There is no C ABI or MATLAB binding.
 #pragma once
 
+#include <exception>
 #include <functional>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "mef3io/control.hpp"
@@ -124,12 +134,77 @@ struct VerifyOptions {
   bool clear_descriptions = true;
 };
 
+/// Which exception type a refusal is thrown as.
+enum class RefusalKind {
+  InvalidArgument,  ///< std::invalid_argument (Python ValueError)
+  Io,               ///< IoError
+  WriteConflict,    ///< WriteConflictError
+  Password,         ///< PasswordError
+  Format,           ///< FormatError
+  Crc,              ///< CrcError
+};
+
+/// The Python name of the exception type: "ValueError", "IoError",
+/// "WriteConflictError", "PasswordError", "FormatError" or "CrcError".
+const char* refusal_kind_name(RefusalKind kind) noexcept;
+
+/// One reason a session cannot be anonymized as asked.
+struct AnonymizeRefusal {
+  std::string code;     ///< stable, e.g. "dst-exists" (docs/anonymization.md)
+  std::string message;  ///< plain words
+  RefusalKind kind = RefusalKind::InvalidArgument;
+  std::string channel;  ///< the channel concerned, or ""
+  std::string field;    ///< the option or field concerned (e.g. "pseudonym"), or ""
+  /// For a refusal taken from inspect_session's warnings: that warning's code.
+  std::string inspect_code;
+};
+
+/// Mixed into every exception anonymize_session throws for a refusal, next to
+/// its usual type: `catch (const AnonymizeError& e)` reads the code, and
+/// `catch (const IoError&)` still works as before.
+class AnonymizeError {
+ public:
+  explicit AnonymizeError(AnonymizeRefusal r) : refusal_(std::move(r)) {}
+  virtual ~AnonymizeError() = default;
+  const AnonymizeRefusal& refusal() const noexcept { return refusal_; }
+  const std::string& code() const noexcept { return refusal_.code; }
+
+ private:
+  AnonymizeRefusal refusal_;
+};
+
+/// Result of check_anonymize().
+struct AnonymizeCheck {
+  bool ok = false;  ///< no refusal
+  /// Every refusal found, in the order anonymize_session meets them (it
+  /// throws the first). Checks that depend on an earlier one that failed
+  /// (e.g. everything about the source when it cannot be opened) are skipped.
+  std::vector<AnonymizeRefusal> refusals;
+  std::vector<std::string> notes;  ///< what anonymize_session would note up front
+  std::string session_name;        ///< the copy's (empty when dst is unusable)
+  std::string pseudonym;
+  std::vector<std::string> channels_kept, channels_excluded;
+};
+
+/// When one channel's recording began and ended in the SOURCE.
+struct SourceChannelTimes {
+  std::string channel;
+  std::optional<si8> start_us, end_us;  ///< uUTC; empty for a record-only channel
+};
+
 struct AnonymizeReport {
   std::string destination;
   std::string session_name;        ///< the copy's
   std::string pseudonym;
   si8 shift_us = 0;
   si8 source_recording_time_offset = 0;  ///< read from the source; the copy has 0
+  /// The SOURCE's first and last sample time (uUTC; empty without samples).
+  /// THE RE-IDENTIFICATION KEY: with the shift they give the real dates back.
+  /// Returned to the caller only: never written into the copy, never logged,
+  /// never put into a warning or a message.
+  std::optional<si8> source_start_us, source_end_us;
+  /// The same per kept channel (same caution).
+  std::vector<SourceChannelTimes> source_channel_times;
   std::vector<std::string> channels_kept;
   std::vector<std::string> channels_excluded;
   si8 segments = 0;
@@ -156,6 +231,9 @@ struct AnonymizeReport {
 /// verify_anonymized passes; a failure or a cancel removes `<dst>.partial`
 /// and leaves nothing behind.
 ///
+/// Every refusal below is thrown as an exception that is ALSO an
+/// AnonymizeError carrying a stable code (docs/anonymization.md).
+///
 /// @throws std::invalid_argument  a bad option: zero shift, shift below the
 ///         floor or into times <= 0, unknown/conflicting channel selection,
 ///         one output password without the other, a callback policy without
@@ -173,6 +251,23 @@ struct AnonymizeReport {
 /// @throws Cancelled      `ctl.cancel` was set; nothing is left behind.
 AnonymizeReport anonymize_session(const std::string& src, const std::string& dst,
                                   const AnonymizeOptions& options, const Control& ctl = {});
+
+/// Every check anonymize_session makes before it writes, without writing.
+///
+/// Runs the same pre-flight code as anonymize_session but collects the
+/// refusals instead of throwing the first. Reads only metadata (what
+/// inspect_session reads, plus the segment universal headers and the record
+/// files of the kept channels); never a `.tdat`. Some refusals can only come
+/// from the copy pass (a failing block CRC, a block time stored ambiguously,
+/// a failed verification); docs/anonymization.md lists which.
+///
+/// `check_shift = false` skips the shift checks (for a shift not chosen yet).
+/// @throws Cancelled  `ctl.cancel` was set. A refusal is never thrown, it is
+///         returned; only an error that is not one (a bug, an OS failure)
+///         propagates.
+AnonymizeCheck check_anonymize(const std::string& src, const std::string& dst,
+                               const AnonymizeOptions& options, const Control& ctl = {},
+                               bool check_shift = true);
 
 /// Check a copy against its source. Reads both; writes nothing.
 VerifyReport verify_anonymized(const std::string& src, const std::string& dst, si8 shift_us,

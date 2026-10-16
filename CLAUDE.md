@@ -91,6 +91,33 @@ header 5/8. Segment folders renamed canonically. Unknown record bodies are
 dropped. (8) Inner inspect/validate calls get a cancel-only `Control`
 (passing progress restarts the caller's sequence). (9) pymef SEGFAULTS on
 unknown or `UnRc` record types: oracle tests must not include them.
+(10) #111 ONE PRE-FLIGHT: `preflight()` in anonymize.cpp makes EVERY check
+decidable before writing (options, paths, source open, records ambiguity,
+inspect plan, password access, inspect blockers, channel selection, shift,
+names, segment numbering from each .tmet UH @48, record files incl. the
+Epoc/Curs id_number window). `anonymize_session` runs it with
+collect=false (throws the first, BEFORE any file or progress report);
+`check_anonymize` / `mef3io.anonymize.check` with collect=true. Never add an
+up-front check anywhere else — it would let the two disagree; test_p32
+parametrizes every refusal case through BOTH and requires the same first
+code/type/message. Reads metadata only (rchar-pinned < 2% of .tdat, <= 3x
+inspect). Blockers thrown as ONE exception (message lists all, code = first)
+— collect mode lists each with `inspect_code`. (11) Every refusal throws
+`CodedError<Base>` = the old exception type + the `AnonymizeError` mixin
+(code, kind, channel, field, inspect_code); `refusal_of()` gives uncoded
+shared-code errors a generic code at preflight stages and at the
+anonymize_session boundary. Python: a translator registered LAST sets
+`.code`/`.details` on the usual type. The code table lives in THREE places
+that test_p32 keeps equal: `REFUSAL_CODES` (python/mef3io/anonymize.py),
+the table in docs/anonymization.md (code, type, check|copy|defensive), and
+the cases in test_p32 (every non-defensive code must be reached, no
+defensive one may be). Copy-only: block-crc, data-damaged, verify-failed
+(and a BLOCK time before rto). Damaged record files surface as
+source-damaged/source-crc (strict inspect fails first), so record-damaged/
+record-crc are defensive. (12) `AnonymizeReport.source_start_us/_end_us/
+source_channel_times` = THE RE-IDENTIFICATION KEY: in memory only; out of
+repr, summary() and to_dict() (unless include_original_times=True); never
+in a message or warning; test_p32 greps the copy's bytes for them.
 
 Tar session archives: `archive_session(dir)` packs a session into ONE
 deterministic uncompressed ustar (`name.mefd.tar`); readers in all languages
@@ -247,7 +274,8 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   that was mef3io <= 1.2.0's bug (#84): equal on ASCII, wrong on everything
   else. Chars > U+00FF collide (low byte only) — matched exactly, warned on
   write (`PasswordInteropWarning`, also > 15 chars / > 15 UTF-8 bytes: pymef
-  strcpy's into a 16-byte buffer). L1 field = SHA256(L1)[:16]; L2 field =
+  strcpy's into a 16-byte buffer; the same rule is public as
+  `mef3io.password_interop_issue(pw) -> str | None`, Python only, #111). L1 field = SHA256(L1)[:16]; L2 field =
   SHA256(L2)[:16] XOR L1. L2 access derives putative L1 = SHA256(pwd)[:16]
   XOR L2field, checks its hash. READ FALLBACK (`validate_password`): meflib
   rule first; only if it fails AND the legacy bytes differ, the old

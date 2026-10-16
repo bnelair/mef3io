@@ -51,7 +51,7 @@ from ._reader import (  # noqa: E402
     UnreadableSegmentWarning,
 )
 from ._warnings import MefWarning  # noqa: E402
-from ._writer import Writer  # noqa: E402
+from ._writer import Writer, password_interop_issue  # noqa: E402
 from .metadata import Acquisition, Metadata, Subject  # noqa: E402
 from .validate import (  # noqa: E402
     Check,
@@ -85,6 +85,7 @@ else:  # pragma: no cover - only without the extension
 __all__ = [
     "Reader", "Writer", "Metadata", "Subject", "Acquisition",
     "MefReader", "MefWriter", "archive_session", "extract_session",
+    "password_interop_issue",
     "anonymize_session", "AnonymizeReport", "VerifyReport",
     # Not "inspect": `from mef3io import *` would shadow the standard library's.
     "SessionSummary", "ChannelSummary", "SegmentSummary",
