@@ -360,13 +360,14 @@ segment's times are resolved with its own offset.
   user to see. They are never called verified, and the warning blocks
   anonymization (which needs the level-2 password anyway).
 - **Segment unreadable** (lenient mode): its times are `None`, with a
-  `times-unresolved` warning. A
-channel- or session-level record file is read with the offset all the
-segments in its scope share; when they disagree, or one is locked, its
-offset-dependent times are `None` (`RecordSummary.times_known` is `False`,
-and the times in `fields` are `None` too). A locked segment takes part with its
-assumed 0, exactly as in a `Reader`, so against a readable non-zero offset it
-is a dispute, never a silent choice.
+  `times-unresolved` warning.
+
+A channel- or session-level record file is read with the offset all the
+segments in its scope share. When they disagree, or one is unreadable, its
+offset-dependent times are `None` (`RecordSummary.times_known` is `False`, and
+the times in `fields` are `None` too). A locked segment takes part with its
+assumed 0, exactly as in a `Reader`, so against a read non-zero offset it is a
+dispute (`time_offset["status"]` is `"disputed"`), never a silent choice.
 
 **The recording-time offset is reported plainly.** meflib's recording-time
 offset is deprecated as anonymization: the real date stays in section 3 (see

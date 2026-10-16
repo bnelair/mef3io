@@ -61,8 +61,10 @@ struct InspectSegment {
   /// folder missing one of its files).
   std::string time_offset = "none";
   std::optional<si8> recording_time_offset;  ///< include_values only
-  /// Section 3 is locked, so the times above were resolved ASSUMING offset 0,
-  /// as the Reader does. Not verified (see TimeOffsetSummary::interpretation).
+  /// Section 3 is locked and a time above was stored offset-applied
+  /// (negated), so it was resolved ASSUMING offset 0, as the Reader does. Not
+  /// verified (see TimeOffsetSummary::interpretation). time_offset is then
+  /// "locked"; a locked segment whose times are all absolute is not flagged.
   bool offset_assumed_zero = false;
   std::uint64_t tmet_bytes = 0, tidx_bytes = 0, tdat_bytes = 0;
   std::uint64_t record_bytes = 0;  ///< this segment's .rdat + .ridx
@@ -91,7 +93,8 @@ struct InspectChannel {
   /// BETWEEN segments and may miss ones inside a segment.
   bool gaps_complete = false;
   /// false when a listed gap may not be one: a segment that could not be
-  /// read or placed (lenient mode, locked offset) may hold data there.
+  /// read or placed (lenient mode) may hold data there, or a segment placed
+  /// with an assumed offset 0 sits next to one with a read non-zero offset.
   bool gaps_certain = true;
   std::uint64_t bytes = 0;  ///< every file of the channel, .tdat included (sizes only)
   /// Some of its times (segments or records) assume offset 0: not verified.
@@ -107,8 +110,9 @@ struct InspectRecord {
   /// Header time, absolute uUTC. nullopt when it was stored relative to an
   /// offset that is disputed or belongs to an unreadable segment.
   std::optional<si8> time;
-  /// false when the file's times depend on an offset that is locked or
-  /// disputed: then every time here (and in `full`) is unset, never guessed.
+  /// false when the file's times depend on an offset that is disputed or
+  /// unknown (an unreadable segment in scope): then every time here (and in
+  /// `full`) is unset, never guessed.
   bool times_known = true;
   /// The times were resolved with an ASSUMED offset 0 (a section 3 in their
   /// scope is locked), as the Reader does. Not verified.

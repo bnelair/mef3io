@@ -452,11 +452,14 @@ def _render(s: SessionSummary) -> str:
     out.append(f"  recording-time offset: {to['status']}"
                + (f", date recoverable by {to['recoverable_by']}" if to["date_recoverable"] else "")
                + (f", value {to['value']}" if to["value"] is not None else ""))
-    out.append(f"  samples: {_t(s.start_time)} -> {_t(s.end_time)}")
+    if s.offset_assumed_zero:
+        out.append("  NOTE: section 3 is locked; times marked * assume offset 0 (not verified)")
+    mark = " *" if s.offset_assumed_zero else ""
+    out.append(f"  samples: {_t(s.start_time)} -> {_t(s.end_time)}{mark}")
     out.append(f"  records: {len(s.records)}"
-               + (f", {_t(s.records_start_time)} -> {_t(s.records_end_time)}"
+               + (f", {_t(s.records_start_time)} -> {_t(s.records_end_time)}{mark}"
                   if s.records_start_time is not None else ""))
-    out.append(f"  overall: {_t(s.first_time)} -> {_t(s.last_time)}")
+    out.append(f"  overall: {_t(s.first_time)} -> {_t(s.last_time)}{mark}")
     out.append(f"  channels: {len(s.channels)}"
                + (f"; record-only: {', '.join(s.record_only_channels)}" if s.record_only_channels else "")
                + (f"; video: {', '.join(s.video_channels)}" if s.video_channels else ""))
@@ -465,7 +468,8 @@ def _render(s: SessionSummary) -> str:
         gaps = f"{len(c.gaps)} gap(s)" + ("" if c.gaps_complete else " between segments") \
             + ("" if c.gaps_certain else " (uncertain)")
         out.append(f"    {c.name}: {fs}, {len(c.segments)} segment(s), {gaps}, "
-                   f"{_t(c.start_time)} -> {_t(c.end_time)}")
+                   f"{_t(c.start_time)} -> {_t(c.end_time)}"
+                   + (" *" if c.offset_assumed_zero else ""))
     out.append("  identity fields:")
     for f in s.identity:
         state = {True: "present", False: "empty",

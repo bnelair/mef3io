@@ -127,7 +127,8 @@ TEST_CASE("inspect_session honours a cancel token, lenient or not") {
   for (bool strict : {true, false}) {
     InspectOptions opt;
     opt.strict = strict;
-    // Cancelled is not a std::exception: lenient containment cannot swallow it.
+    // Lenient or not, a set token stops the call with Cancelled (which is not a
+    // std::exception, so no containment site could swallow it either).
     REQUIRE_THROWS_AS(inspect_session(path, opt, ctl), Cancelled);
   }
   std::vector<std::pair<std::uint64_t, std::uint64_t>> calls;

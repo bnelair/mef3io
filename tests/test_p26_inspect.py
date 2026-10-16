@@ -570,6 +570,65 @@ def test_a_locked_segment_against_a_readable_offset_is_a_dispute_not_a_choice(tm
     s = mef3io.inspect(plain, "pw1")
     note = next(r for r in s.records if r.level == "session")
     assert note.time is None and not note.times_known
+    # ... and the session says so, not "applied".
+    assert s.time_offset["status"] == "disputed"
+    codes = {w.code for w in s.anonymize_blockers}
+    assert {"time-offset-disputed", "offset-assumed-zero"} <= codes
+
+
+def test_an_assumed_offset_next_to_a_read_one_makes_the_gaps_uncertain(tmp_path):
+    """Round 6: one channel, segment 0 locked (assumed 0), segment 1 read with
+    a 3-day offset. The 3-day 'gap' between them may be the assumption."""
+    enc = _write(tmp_path / "e.mefd", password1="pw1", password2="pw2", records=False)
+    plain = _write(tmp_path / "p.mefd", records=False)
+    _set_rto(plain, THREE_DAYS, channel="ch1")
+    seg0 = sorted(Path(plain).glob("ch1.timd/*.segd"))[0]
+    shutil.rmtree(seg0)
+    shutil.copytree(sorted(Path(enc).glob("ch1.timd/*.segd"))[0], seg0)
+    for read_index in (False, True):
+        c = mef3io.inspect(plain, "pw1", read_index=read_index).channel("ch1")
+        assert c.offset_assumed_zero and c.gaps
+        assert not c.gaps_certain and not c.gaps_complete
+    # ch2 is all read, no assumption: certain as before.
+    assert mef3io.inspect(plain, "pw1").channel("ch2").gaps_certain
+
+
+def test_a_locked_segment_with_absolute_times_is_not_flagged(tmp_path):
+    """Round 6: the flag marks what the assumption TOUCHED. Universal-header
+    times stored non-negative are absolute whatever the offset; a channel can
+    still be flagged through its channel-level records."""
+    path = _write(tmp_path / "e.mefd", password1="pw1", password2="pw2")
+    for tmet in _tmets(path, "ch1"):
+        raw = bytearray(tmet.read_bytes())
+        for off in (16, 24):                       # start_time, end_time
+            stored = struct.unpack_from("<q", raw, off)[0]
+            struct.pack_into("<q", raw, off, -stored)   # absolute: non-negated
+        struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))  # header CRC only
+        tmet.write_bytes(bytes(raw))
+    s = mef3io.inspect(path, "pw1")
+    c = s.channel("ch1")
+    assert c.start_time == START                    # absolute, nothing assumed
+    assert not any(g.offset_assumed_zero for g in c.segments)
+    assert all(g.time_offset == "locked" for g in c.segments)
+    edfa = next(r for r in s.records if r.type == "EDFA")
+    assert edfa.offset_assumed_zero                 # its time was stored negated
+    assert c.offset_assumed_zero                    # flagged through that record only
+
+
+def test_read_index_under_a_locked_offset_matches_full_access(tmp_path):
+    path = _write(tmp_path / "e.mefd", password1="pw1", password2="pw2")
+    one = mef3io.inspect(path, "pw1", read_index=True).channel("ch1")
+    two = mef3io.inspect(path, "pw2", read_index=True).channel("ch1")
+    assert one.gaps == two.gaps and one.gaps_complete and two.gaps_complete
+    assert one.offset_assumed_zero and not two.offset_assumed_zero
+
+
+def test_cli_marks_assumed_times(tmp_path):
+    path = _write(tmp_path / "e.mefd", password1="pw1", password2="pw2")
+    text = str(mef3io.inspect(path, "pw1"))
+    assert "assume offset 0" in text and "samples:" in text
+    assert "*" in text.split("samples:")[1].splitlines()[0]
+    assert "assume offset 0" not in str(mef3io.inspect(path, "pw2"))
 
 
 def test_an_unreadable_segment_leaves_identity_unknown_not_absent(session):

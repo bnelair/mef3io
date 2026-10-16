@@ -249,6 +249,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     std::vector<std::pair<si8, si8>> spans;
     bool spans_complete = true;
     bool spans_certain = true;  // false: a listed gap may hold an unreadable segment's data
+    bool ch_assumed = false, ch_verified_offset = false;  // see the gap computation
     bool n_samples_known = true;
     si8 n_samples = 0;
 
@@ -284,6 +285,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
             md.section3_available ? effective_rto(md.section3.recording_time_offset) : 0;
         std::string index_ambiguous;  // first .tidx time stored non-negative under an offset
         bool index_complete = true;
+        bool index_offset_dependent = false;  // some .tidx entry time stored negated
         // Block index (opt-in): spans of the blocks, for gaps inside segments.
         if (opt.read_index) {
           const auto idx = src->read_all(ls.tidx);
@@ -311,6 +313,8 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
             if (seg_rto && *seg_rto != 0 && e.start_time != fmt::UUTC_NO_ENTRY &&
                 e.start_time >= 0 && index_ambiguous.empty())
               index_ambiguous = src->describe(ls.tidx);
+            if (e.start_time != fmt::UUTC_NO_ENTRY && e.start_time < 0)
+              index_offset_dependent = true;
             const auto t = resolve(e.start_time, seg_rto);
             // fs and the count come from the file: a zero, NaN, denormal or
             // absurd value must not reach llround (UB outside si8's range).
@@ -338,8 +342,9 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
         if (!md.section2_available) ++out.encryption.section2_locked;
         if (!md.section3_available) ++out.encryption.section3_locked;
 
-        // The offset: section 3's, when it can be read; otherwise unknown —
-        // never assumed 0 (that is how a locked offset turns into a wrong date).
+        // The offset: section 3's, when it can be read. Locked: ASSUMED 0, as
+        // the Reader does (segment_rto) — flagged wherever a time depended on
+        // it, never called verified.
         if (md.section3_available) {
           st.rto = effective_rto(md.section3.recording_time_offset);
           is.time_offset = *st.rto != 0 ? "applied" : "none";
@@ -361,7 +366,11 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
           is.time_offset = "locked";
           st.rto = 0;
           st.rto_assumed = true;
-          is.offset_assumed_zero = true;
+          // Flag only what the assumption touched: a time stored negated
+          // (offset applied). Non-negative times are absolute regardless.
+          auto dep = [](si8 t) { return t != fmt::UUTC_NO_ENTRY && t < 0; };
+          is.offset_assumed_zero =
+              dep(uh.start_time) || dep(uh.end_time) || index_offset_dependent;
         }
 
         is.start_time = resolve(uh.start_time, st.rto);
@@ -465,6 +474,8 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
       widen(ic.start_time, ic.end_time, is.start_time);
       widen(ic.start_time, ic.end_time, is.end_time);
       if (is.offset_assumed_zero) ic.offset_assumed_zero = out.offset_assumed_zero = true;
+      if (st.rto_assumed) ch_assumed = true;
+      else if (st.rto && *st.rto != 0) ch_verified_offset = true;
       if (opt.read_index) {
         spans.insert(spans.end(), seg_spans.begin(), seg_spans.end());
       } else if (is.start_time && is.end_time) {
@@ -489,6 +500,11 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
                      [](const InspectSegment& a, const InspectSegment& b) {
                        return a.segment_number < b.segment_number;
                      });
+
+    // A locked segment placed with an assumed 0 next to one with a READ
+    // non-zero offset: the two sit up to that offset apart on the time axis,
+    // so a "gap" between them may be the assumption, not the recording.
+    if (ch_assumed && ch_verified_offset) spans_complete = spans_certain = false;
 
     if (n_samples_known) ic.number_of_samples = n_samples;
     if (ic.sampling_frequency && *ic.sampling_frequency > 0) {
@@ -521,8 +537,9 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
 
   // ------------------------------------------------------------------ offsets
   // The offset a channel- or session-level record file is read with: the one
-  // every readable segment of the scope agrees on (Session::agreed_rto). Any
-  // locked or disagreeing segment makes it unknown; `why` says which.
+  // every readable segment of the scope agrees on (Session::agreed_rto); a
+  // locked one takes part with its assumed 0. A disagreeing or unreadable
+  // segment makes it unknown; `why` says which.
   auto agreed = [&](const std::string* channel, std::string& why,
                     bool& assumed) -> std::optional<si8> {
     std::optional<si8> value;
@@ -795,7 +812,10 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
   for (const auto& [name, segs] : states)
     for (const auto& st : segs)
       if (st.rto && *st.rto != 0) ++to.segments_with_offset;
-  if (offsets_seen.size() > 1 || (!offsets_seen.empty() && zero_offset_seen))
+  // A locked segment counts as its assumed 0 — the rule agreed() and the
+  // Reader follow — so next to a read non-zero offset that is a dispute too.
+  if (offsets_seen.size() > 1 ||
+      (!offsets_seen.empty() && (zero_offset_seen || to.segments_locked)))
     to.status = "disputed";
   else if (!offsets_seen.empty())
     to.status = "applied";
@@ -823,8 +843,8 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
                                    "can recover it.");
   } else if (to.status == "disputed") {
     to.interpretation =
-        "Segments disagree on the recording-time offset. Each segment's times were resolved "
-        "with its own offset; channel- and session-level records that depend on it cannot be "
+        "Segments disagree on the recording-time offset (a segment with section 3 locked counts "
+        "as its assumed 0). Each segment's times were resolved with its own offset; channel- and session-level records that depend on it cannot be "
         "placed.";
   } else if (to.status == "unknown") {
     to.interpretation =
@@ -901,8 +921,8 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
          "in " + std::to_string(out.encryption.section2_locked) + " segment(s), section 3 in " +
              std::to_string(out.encryption.section3_locked) + ", " +
              std::to_string(out.encryption.record_bodies_locked) +
-             " record bod(ies)). Those values are reported as locked, not guessed; the level-2 "
-             "password opens everything.",
+             " record bod(ies)). Those values are reported as locked, not guessed (times: see "
+             "offset-assumed-zero); the level-2 password opens everything.",
          true);
   if (to.status == "applied" || to.status == "disputed")
     warn("legacy-time-offset",
