@@ -6,7 +6,7 @@
 !!! note "This is the original plan"
     It records the design as agreed before the code was written, and is kept
     for its reasoning. Where it differs from what shipped (the pure-Python
-    backend is still a stub, `Writer.write` takes float data and
+    backend is a stub, `Writer.write` takes float data and
     `write_int32` the counts, records are written with `write_annotations`,
     and later features such as `inspect`, cancellation and the validator are
     not planned here), the [Python](python.md), [C++](cpp.md) and

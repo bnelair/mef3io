@@ -109,7 +109,8 @@ Changes in every version, and what an upgrade asks of you, are listed in the
   keep confidential recordings on protected storage. See
   [what encryption protects](https://bnelair.github.io/mef3io/encryption_model/#what-encryption-protects).
 - **Encrypted data blocks.** Some recordings have encrypted data blocks
-  (written by some third-party tools). mef3io reads them: a block encrypted
+  (written by some third-party tools; meflib can write them, though not by
+  default). mef3io reads them: a block encrypted
   at level 1 with either password, one at level 2 with the level-2 password.
   Because of known bugs, pymef crashes on such blocks and
   meflib requires the level-2 password even for level-1 blocks. Recordings

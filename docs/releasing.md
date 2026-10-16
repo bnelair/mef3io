@@ -32,6 +32,8 @@ release:
       do in `docs/release_notes/X.Y.Z.md`, and add it to the release-notes
       index and the `mkdocs.yml` nav (newest first). The release workflow
       publishes GitHub's generated notes; replace them with the reviewed page
+      (first change its "Draft" line to `*Released YYYY-MM-DD*`; links in
+      these pages are absolute so they work on GitHub too)
       (`gh release edit vX.Y.Z --notes-file docs/release_notes/X.Y.Z.md`)
       as soon as it is out.
 
