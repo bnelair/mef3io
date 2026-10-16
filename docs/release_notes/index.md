@@ -5,6 +5,7 @@ Newest first.
 
 | Version | Released | Main changes |
 |---|---|---|
+| [Unreleased](unreleased.md) | — | `anonymize_session`: de-identified copies with every time shifted |
 | [1.3.0](1.3.0.md) | *upcoming* | `inspect()`, cancelling and progress, encrypted data blocks from other writers decoded correctly, safer `extract_session(overwrite=True)` |
 | [1.2.0](1.2.0.md) | 2026-10-15 | lenient reading (`strict=False`), records at every level, provenance stamp, faster snapshot cache, recording-time-offset fixes |
 | [1.1.4](1.1.4.md) | 2026-09-21 | Windows: `durability="full"` appends and non-ASCII paths |

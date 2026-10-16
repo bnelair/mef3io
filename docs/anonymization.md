@@ -1,5 +1,5 @@
 ---
-description: "Why meflib's recording-time offset does not de-identify a MEF 3.0 recording, and what mef3io does instead."
+description: "How to make a de-identified copy of a MEF 3.0 session with anonymize_session, and why meflib's recording-time offset does not de-identify a recording."
 ---
 
 # De-identification and the recording-time offset
@@ -8,9 +8,9 @@ description: "Why meflib's recording-time offset does not de-identify a MEF 3.0 
     A recording-time offset (RTO) does **not** remove the recording date from
     a MEF 3.0 session. The date stays in every metadata file, in plain text
     unless the session is encrypted. mef3io never creates such a session. It
-    still reads existing ones and extends them consistently. Real
-    de-identification will come as a separate de-identified copy, which is
-    **planned, not yet available** (`anonymize_session`, [#70](https://github.com/bnelair/mef3io/issues/70)).
+    still reads existing ones and extends them consistently. To de-identify a
+    session, make a de-identified copy with `anonymize_session`; see
+    [De-identified copies](#de-identified-copies-with-anonymize_session).
 
 ## In plain words
 
@@ -50,9 +50,9 @@ See
 - mef3io will never make new sessions like this.
 - mef3io still opens existing ones, shows their true dates and times, and
   can add data or notes to them without breaking them.
-- For sharing, mef3io will offer a proper de-identified **copy**, where all
-  dates are moved and names removed. That feature is planned; see
-  [What mef3io will provide instead](#what-mef3io-will-provide-instead).
+- For sharing, make a de-identified **copy**: every date moved, names
+  removed. See
+  [De-identified copies](#de-identified-copies-with-anonymize_session).
 
 ## What the offset is
 
@@ -179,8 +179,8 @@ the start. Its index then held `+3600000000`, which every reader takes as
 
 A correct absolute time is also positive, so the bytes alone cannot tell the
 two apart. That is why mef3io's [validator](validation.md) stands its time
-checks down whenever `rto ≠ 0`. It is also why the planned
-`anonymize_session` will refuse a session with an ambiguous legacy time
+checks down whenever `rto ≠ 0`. It is also why
+`anonymize_session` refuses a session with an ambiguous legacy time
 convention.
 
 ## Deprecated in mef3io
@@ -210,62 +210,180 @@ as meflib does.
     level-1 password (`PasswordError`), or damaged metadata where the
     offset matters (`WriteConflictError`).
   The full rules are in the [format reference](mef3_format.md#times).
-- **New de-identification goes through `anonymize_session`** (planned,
-  [#70](https://github.com/bnelair/mef3io/issues/70)). It produces a separate
-  copy with `recording_time_offset = 0`.
+- **New de-identification goes through `anonymize_session`.** It produces a
+  separate copy with `recording_time_offset = 0`; see the next section.
 
-## What mef3io will provide instead
+## De-identified copies with `anonymize_session`
 
-!!! note "Planned, not yet implemented"
-    This section summarises [issue #70](https://github.com/bnelair/mef3io/issues/70).
-    None of it is available yet, and the details may change before it ships.
+*Python and C++. Not available in MATLAB.*
+
+### In plain words
+
+`anonymize_session` makes a **copy** of a recording that you can share. In
+the copy:
+
+- **every date and time is moved** by the same amount, so the copy no longer
+  says when the recording was made. Times keep their order and spacing, so
+  seizures, sleep stages and gaps still line up with the signal;
+- **the patient's details are removed**: name, ID, recording location, the
+  session's name, the free-text descriptions and, by default, the text of
+  annotations;
+- **the signal itself is copied unchanged**, sample for sample.
+
+Your original recording is never changed. The copy is checked before it is
+saved under its final name; if anything is wrong, or you cancel, nothing is
+left behind.
+
+If you anonymize several recordings of one patient with the **same** shift,
+they stay in the right order and the right distance apart.
+
+### Quick start
 
 ```python
-mef3io.anonymize_session(src, dst, shift_us, *, pseudonym=None,
-    clear=("subject", "location", "descriptions"), text="drop" | "keep" | callable,
-    rename=True, password="", output_password=None,
-    progress=None, cancel=None) -> AnonymizeReport
-mef3io.anonymize.verify(src, dst, shift_us) -> VerifyReport
-python -m mef3io anonymize SRC DST (--shift-us N | --reference-date ISO --tz IANA_ZONE) [...]
+import mef3io
+
+# Move the recording so it starts on 3 January 2000, keeping the local time of day.
+start = mef3io.inspect("patient.mefd").start_time            # µs since 1970, UTC
+shift = mef3io.anonymize.reference_shift(start, "2000-01-03", tz="Europe/Prague")
+
+report = mef3io.anonymize_session("patient.mefd", "S001.mefd", shift)
+print(report.summary())
 ```
 
-- **A copy, never an edit.** The original session is never modified. The
-  copy is written to `dst.partial` and renamed only after verification
-  passes.
-- **Every time moved by one constant shift**, each in the sign convention it
-  came in: universal-header start/end in every file, `.tidx` entries, RED
-  block headers (with the block CRC recomputed), record headers and `.ridx`
-  entries at all three levels, and record **body** times (`Seiz`, `Epoc`,
-  `Curs`). The shift is a whole number of days, plus, when the local time of
-  day is to be kept, the reference recording's UTC offset. Options keep the
-  weekday, and a batch of recordings can share one shift.
-- **Time-zone fields set, not shifted:** `recording_time_offset = 0`,
-  `GMT_offset = 0`, DST start/end = "no entry". The copy shows its times
-  directly in UTC and carries no location hint.
-- **Identity removed:** subject names, ID and location; `session_name` in
-  every universal header and in `session_description`; `anonymized_name` set
-  to the pseudonym; the level, file and provenance UUIDs regenerated; section
-  2 descriptions; record free text (drop, keep, or a caller's function);
-  directory names; foreign discretionary and protected regions; and file
-  modification times (fresh files).
-- **Samples untouched:** nothing is decoded or re-encoded, so the samples are
-  bit-identical.
-- **Encrypted input** needs the level-2 password. The output is unencrypted,
-  or re-encrypted with new passwords. `.mefd.tar` archives work as input.
-- **Refusals:** an existing `dst`, a `dst` inside `src`, video channels, an
-  ambiguous legacy time convention, a shift that would take any time to 0 or
-  below, or a shift whose magnitude is smaller than the session's time span
-  plus one day.
-- **Verification:** the validator passes the copy cleanly; every RED payload
-  is byte-identical to the source; every time differs by exactly the shift
-  (the time-zone fields must hold their set values instead); records match in
-  count and order. A field-wise leak scan checks every time field and record
-  body against the original time range, plain or negated; data-derived bytes
-  (the RED payload and each block's statistics table) are checked
-  byte-identical instead of scanned.
-- **Provenance and progress:** the copy is stamped with a new operation code
-  (6, `anonymize`), and long runs report progress and can be cancelled
-  ([#69](https://github.com/bnelair/mef3io/issues/69)).
+From a terminal:
+
+```
+python -m mef3io anonymize patient.mefd S001.mefd --reference-date 2000-01-03 --tz Europe/Prague
+python -m mef3io anonymize patient.mefd S001.mefd --shift-us -630720000000000
+```
+
+The copy's folder name (`S001` above) becomes its session name everywhere.
+Choose a code that says nothing about the patient.
+
+### Choosing the shift
+
+The shift is a number of microseconds added to every time. Pick it from the
+date you want the recording to start on:
+
+- **Keep the UTC time of day:** `reference_shift(start, new_date)`. The shift
+  is a whole number of days.
+- **Keep the local time of day:** `reference_shift(start, new_date, tz=...)`
+  with the site's time zone (an IANA name such as `America/Chicago`). The
+  copy's UTC clock then shows the original *local* time of day. The copy
+  stores no time zone, so read its times as plain clock times.
+- **Keep the weekday:** add `keep_weekday=True`; the date moves to the
+  nearest one with the same weekday.
+- **Several recordings of one patient:** compute the shift once, from one
+  reference recording, and use it for all of them. A recording made in the
+  other daylight-saving season then shows its local time one hour off.
+
+Two rules protect the copy:
+
+- the shift must be at least the recording's length **plus one day** (in
+  either direction), so that no moved time can land inside the original
+  dates, which is what lets the check below recognise a leaked date;
+- every moved time must stay after 1 January 1970.
+
+### What changes, in detail
+
+| | What happens |
+|---|---|
+| Times | Moved by the shift, each kept in the form it was stored in: universal-header start and end in every file, the block index, every data block's header (its checksum is recomputed), annotation headers and the annotation index at session, channel and segment level, and the times inside `Seiz` (onset, offset, per-channel onset and offset), `Epoc` (start, end) and `Curs` (trace time) annotations. |
+| Time-zone fields | Set, not moved: `recording_time_offset = 0`, `GMT_offset = 0`, daylight-saving start and end = "no entry". |
+| Subject | `subject_name_1`, `subject_name_2`, `subject_id` and `recording_location` cleared (`clear=`). |
+| Session name | Replaced by the copy's name in every file header, in the names of the session-level annotation files, and in `session_description`. `anonymized_name` is set to `pseudonym` (default: the copy's name). |
+| Descriptions | `session_description`, `channel_description` and `reference_description` cleared. With `clear=("subject", "location")` they are kept, with the old session name replaced and the removed names taken out. |
+| Annotation text | `text="drop"` (default) clears every free-text field; the annotations, their types and their (moved) times stay. `text="keep"` keeps the text with the removed names taken out. A function `text(value, info)` decides itself; the names are still taken out afterwards. An annotation of a type or version mef3io does not know keeps its type and time, but its contents are not copied, since they may hold text or dates nothing can find. |
+| Identifiers | Every file identifier (level, file and provenance UUID) is new, so nothing links the copy back to the original. |
+| Other programs' data | The private areas other programs may fill in the headers (protected and discretionary regions) are cleared. |
+| Files | Every file is written new, so file dates are those of the copy. Files that are not part of the MEF layout are not copied (listed in `report.not_copied`). |
+| Samples | Not decoded, not re-encoded: byte-identical. |
+| Provenance | Every file is stamped with operation 6, `anonymize`. |
+
+Channel names are **kept**: they name electrodes, and studies need them.
+
+### Leaving channels out
+
+`exclude_channels=["ECG"]` leaves those channels out; `channels=[...]` copies
+only the ones named. Use one or the other. An excluded channel leaves no
+trace: no folder, no annotations, no entry in a seizure annotation's channel
+list, and its name is taken out of any text that is kept. Naming an unknown
+channel, or leaving none, is refused.
+
+### Encryption
+
+- An **encrypted source** needs its level-2 (full-access) password: the
+  recording-time offset and the subject fields are in the part only that
+  password opens.
+- The **copy** is unencrypted by default. Pass
+  `output_password=("level1", "level2")` to encrypt it, with the same rules as
+  `Writer`. The source's passwords are never carried over.
+- **Data blocks** that the source had encrypted are encrypted again with the
+  copy's passwords, at the same level, so protection is never silently
+  dropped. They are decrypted only when the copy has no passwords. Blocks the
+  source had unencrypted (everything mef3io writes) stay unencrypted, and the
+  copy stays readable by pymef and meflib. pymef cannot read encrypted data
+  blocks at all, and meflib needs the level-2 password even for level-1
+  blocks.
+
+### What is refused
+
+Nothing is written when:
+
+- the destination exists, lies inside the source, or does not end in `.mefd`;
+  a leftover `<dst>.partial` from an interrupted run is in the way (remove it
+  if no copy is running);
+- the session has something `inspect` marks as blocking: video channels,
+  unreadable or incomplete segments, parts the password does not open,
+  segments that disagree on the recording-time offset, or a time stored in
+  the legacy convention that cannot be told apart from an absolute one (see
+  [The sign convention is not reliable either](#the-sign-convention-is-not-reliable-either));
+- the shift is zero, smaller than the recording's length plus one day, or
+  would move a time to 1970 or before;
+- a data block or annotation fails its checksum: damaged data is never
+  re-sealed into a copy that would then look intact.
+
+A session that uses meflib's recording-time offset **is** accepted when the
+offset is unambiguous: its times are read as true UTC, moved, and the copy
+has offset 0.
+
+### How the copy is checked
+
+`anonymize_session` checks every copy with `mef3io.anonymize.verify` before
+giving it its final name; you can run the same check later:
+
+```python
+report = mef3io.anonymize.verify("patient.mefd", "S001.mefd", shift)
+assert report.ok, report.summary()
+```
+
+It confirms that:
+
+- the [validator](validation.md) finds nothing in the copy that the source
+  did not already have;
+- every data block's compressed data and its compression table are
+  byte-identical to the source's (compared decrypted where encrypted), so the
+  samples are too;
+- every time differs from the source's by exactly the shift, in the same
+  stored form, and the time-zone fields hold their set values;
+- the annotations match in number, order and type;
+- **no date leaked.** Every time field, one field at a time, is compared with
+  the source's recording dates (widened by a day, plain or negated); every
+  text field is searched for the names that should be gone; no source
+  identifier is reused. Sizes, counts and sample values are never read as
+  times, and the compressed data, whose bytes look random, is compared
+  rather than searched, so the check does not raise false alarms.
+
+The report never repeats a name it found, so it can be logged.
+
+### What it does not do
+
+- It does not change the **signal**. A recording can identify a person by
+  its content (an unusual rhythm, a voice on an audio channel). Leave such
+  channels out.
+- It keeps **channel names**, sampling rates, filter settings and file
+  sizes.
+- It does not handle **video** (sessions with video channels are refused).
 
 ## Backward compatibility
 
@@ -354,8 +472,8 @@ The same behaviour is pinned in more detail by `tests/test_p22_records.py`.
   unencrypted, file and folder names, and the session name stay readable
   whatever the password, and so do the samples and their times of day
   ([What encryption protects](encryption_model.md#what-encryption-protects)).
-- **To share it de-identified, re-share it through `anonymize_session` once
-  that ships** ([#70](https://github.com/bnelair/mef3io/issues/70)). It will
-  produce a copy with every date moved, the offset set to 0 and identity
-  removed. Until then, do not treat a recording-time offset as
+- **To share it de-identified, make a copy with `anonymize_session`**
+  ([De-identified copies](#de-identified-copies-with-anonymize_session)). It
+  reads the offset session's true times, moves every date, sets the offset to
+  0 and removes identity. Do not treat a recording-time offset as
   de-identification.

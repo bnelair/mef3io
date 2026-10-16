@@ -169,8 +169,9 @@ Changes in every version, and what an upgrade asks of you, are listed in the
 - **De-identification**: meflib's recording-time offset does not hide the
   recording date (it stays in every metadata file, in plain text unless the
   session is encrypted), so mef3io never creates such sessions; it reads and
-  extends existing ones. A real de-identified copy is planned
-  ([#70](https://github.com/bnelair/mef3io/issues/70)) — see
+  extends existing ones. To share a recording, make a de-identified copy with
+  `mef3io.anonymize_session` (every date moved, identity removed, samples
+  unchanged; Python and C++) — see
   [De-identification](https://bnelair.github.io/mef3io/anonymization/).
 - **Pure-Python backend** is not implemented (`backend="pure"` raises); the
   wheels carry the compiled core.

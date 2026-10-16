@@ -181,8 +181,8 @@ class IdentityField:
 class SummaryWarning:
     """Something a caller should know before using the session.
 
-    ``blocks_anonymize`` marks the conditions ``anonymize_session`` (#70) is
-    specified to refuse: video channels, an ambiguous or disputed time
+    ``blocks_anonymize`` marks the conditions ``anonymize_session`` refuses:
+    video channels, an ambiguous or disputed time
     convention, unresolved times, locked (encrypted) parts, unreadable files.
     """
 
@@ -326,7 +326,7 @@ class SessionSummary:
 
     @property
     def anonymize_blockers(self) -> list:
-        """The warnings ``anonymize_session`` (#70) is specified to refuse on."""
+        """The warnings ``anonymize_session`` refuses on."""
         return [w for w in self.warnings if w.blocks_anonymize]
 
     def to_dict(self) -> dict:

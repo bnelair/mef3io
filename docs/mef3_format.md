@@ -106,7 +106,7 @@ offset only moves the date into `recording_time_offset` in section 3 of
 every `.tmet`, which is plain text unless the session is encrypted, so
 `−stored + rto` gives the real date back to anyone. mef3io therefore never
 creates an offset session (a new session gets `rto = 0`), and
-de-identification is planned as a separate copy
+de-identification is a separate copy made by `anonymize_session`
 ([#70](https://github.com/bnelair/mef3io/issues/70)). See
 [De-identification and the recording-time offset](anonymization.md).
 

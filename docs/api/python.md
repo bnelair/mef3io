@@ -31,6 +31,23 @@ See the [Python guide](../python.md#inspecting-a-session-without-reading-its-sam
 
 ::: mef3io.SummaryWarning
 
+## De-identified copies
+
+See [De-identification](../anonymization.md#de-identified-copies-with-anonymize_session)
+for the workflow. Python and C++ only (no MATLAB, no C ABI).
+
+::: mef3io.anonymize_session
+
+::: mef3io.anonymize.verify
+
+::: mef3io.anonymize.reference_shift
+
+::: mef3io.AnonymizeReport
+
+::: mef3io.VerifyReport
+
+::: mef3io.anonymize.VerifyIssue
+
 ## Cancelling and progress
 
 See the [Python guide](../python.md#cancelling-and-progress).

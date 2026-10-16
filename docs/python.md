@@ -355,7 +355,7 @@ What it reports:
 | `channels` | sampling rate, units, start/end, stored samples, the segment map (`segments`, the same fields as `Reader.segments()` plus file sizes, declared discontinuities and the offset state), gaps, record count |
 | `records` | every record at the session, channel and segment level: type, time, duration, and `first_time` / `last_time` over everything the record mentions (header time, body times such as `Seiz` onsets, `time + duration`) |
 | `identity` | subject name 1/2, ID and location (section 3), the session, channel and reference descriptions (section 2), `session_name` and `anonymized_name` (every universal header), and record text: where each lives, in how many places it is set, its longest length, how many distinct values. **Values only with `include_values=True`.** |
-| `warnings` | each with a `code`, a plain-words `message`, and `blocks_anonymize`; `s.anonymize_blockers` lists the ones the planned `anonymize_session` (#70) will refuse on |
+| `warnings` | each with a `code`, a plain-words `message`, and `blocks_anonymize`; `s.anonymize_blockers` lists the ones `anonymize_session` refuses on |
 | `problems` | with `strict=False`, what could not be read (same shape as `Reader.problems`) |
 | `incomplete_channels` | channel folders without one complete segment. A segment folder missing its `.tmet`, `.tidx` or `.tdat` is skipped silently by a `Reader`; `inspect` lists it as `readable=False`, counts its files, reports what it may hold as unknown, and warns (`incomplete-segments`) |
 
