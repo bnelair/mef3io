@@ -154,11 +154,25 @@ TEST_CASE("ProgressReporter is safe from many threads and never re-enters") {
 }
 
 TEST_CASE("parallel_for stops scheduling work after the first exception") {
+  // Not a race against the thrower: the other items wait until item 0 is
+  // about to throw, then each takes ~200 us. Before, they were trivial, and a
+  // CI runner that preempted the thread holding item 0 for a few ms let the
+  // other workers finish all 10000 (seen on macOS). Now the thrower would
+  // have to stall for ~0.5 s between the flag and the throw.
   std::atomic<int> ran{0};
+  std::atomic<bool> throwing{false};
   CHECK_THROWS_AS(parallel_for(10000, 4,
                                [&](std::size_t i) {
                                  ++ran;
-                                 if (i == 0) throw Cancelled();
+                                 if (i == 0) {
+                                   throwing = true;
+                                   throw Cancelled();
+                                 }
+                                 const auto give_up = std::chrono::steady_clock::now() +
+                                                      std::chrono::seconds(10);
+                                 while (!throwing && std::chrono::steady_clock::now() < give_up)
+                                   std::this_thread::yield();
+                                 std::this_thread::sleep_for(std::chrono::microseconds(200));
                                }),
                   Cancelled);
   CHECK(ran.load() < 10000);
