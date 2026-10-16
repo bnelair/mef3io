@@ -9,7 +9,6 @@ Two write paths:
 from __future__ import annotations
 
 import contextlib
-import warnings
 from typing import Optional
 
 import numpy as np
@@ -40,49 +39,54 @@ def _as_int32_counts(data):
     return np.ascontiguousarray(a, dtype=np.int32)
 
 
-def warn_unreadable_metadata(entries, stacklevel=3):
+def warn_unreadable_metadata(entries, stacklevel=3, path=None):
     """One warning for segment metadata a writer could not use (or [] = none)."""
     if entries:
         from ._reader import UnreadableSegmentWarning
+        from ._warnings import emit
 
-        warnings.warn(
+        emit(UnreadableSegmentWarning,
             f"{len(entries)} segment metadata problem(s) were skipped by the writer "
             f"(unreadable .tmet, or a segment directory without metadata): {entries[0]}. "
             "Full list in Writer.unreadable_metadata.",
-            UnreadableSegmentWarning, stacklevel=stacklevel)
+            path=path, details=entries, stacklevel=stacklevel)
 
 
-def warn_password_interop(password1, password2, stacklevel=3):
+def warn_password_interop(password1, password2, stacklevel=3, path=None):
     """Warn about a password other MEF readers will not handle as expected."""
     from . import _mef3io
     from ._reader import PasswordInteropWarning
+    from ._warnings import emit
 
     if not password1:
         return  # no password1 -> nothing is encrypted
     for label, pw in (("level-1", password1), ("level-2", password2)):
         issue = _mef3io.password_interop_issue(pw) if pw else ""
         if issue:
-            warnings.warn(f"the {label} password will not interoperate as expected: {issue}.",
-                          PasswordInteropWarning, stacklevel=stacklevel)
+            emit(PasswordInteropWarning,
+                 f"the {label} password will not interoperate as expected: {issue}.",
+                 path=path, details=(label,), stacklevel=stacklevel)
 
 
-def warn_legacy_password_segments(entries, stacklevel=3):
+def warn_legacy_password_segments(entries, stacklevel=3, path=None):
     """One warning for segments appended to under the password mapping of mef3io 1.2.0 and earlier."""
     if entries:
         from ._reader import LegacyPasswordWarning
+        from ._warnings import emit
 
-        warnings.warn(
+        emit(
+            LegacyPasswordWarning,
             f"{len(entries)} segment(s) were appended to whose password matched only "
             f"through the password-to-key mapping that mef3io used up to 1.2.0 (issue #84; "
-            f"most likely written by one of those versions): "
-            f"{entries[0]}. They keep their old keys, so meflib and pymef cannot open them "
+            f"most likely written by one of those versions). They keep their old keys, so meflib and pymef cannot open them "
             "with this password; new segments use meflib's mapping. Re-encrypt the session "
-            "(transform_session, issue #73) to make it readable everywhere.",
-            LegacyPasswordWarning, stacklevel=stacklevel)
+            "(transform_session, issue #73) to make it readable everywhere. "
+            "The segments are listed in the warning's details.",
+            path=path, details=entries, stacklevel=stacklevel)
 
 
 @contextlib.contextmanager
-def reporting_unreadable_metadata(impl):
+def reporting_unreadable_metadata(impl, path=None):
     """Warn about segment metadata the core skipped during one write call.
 
     Choosing the recording-time offset reads other segments' ``.tmet`` files;
@@ -99,10 +103,10 @@ def reporting_unreadable_metadata(impl):
         # By content, not position: an entry is dropped once its slot is
         # filled, so the list can shrink and grow within one call.
         warn_unreadable_metadata(
-            [e for e in impl.unreadable_metadata if e not in before], stacklevel=5)
+            [e for e in impl.unreadable_metadata if e not in before], stacklevel=5, path=path)
         warn_legacy_password_segments(
             [e for e in getattr(impl, "legacy_password_segments", []) if e not in legacy_before],
-            stacklevel=5)
+            stacklevel=5, path=path)
 
 
 class Writer:
@@ -193,8 +197,8 @@ class Writer:
             )
         self._path = str(path)
         self._impl = _mef3io.SessionWriter(str(path), overwrite, password1 or "", password2 or "")
-        warn_unreadable_metadata(self._impl.unreadable_metadata)
-        warn_password_interop(password1, password2)
+        warn_unreadable_metadata(self._impl.unreadable_metadata, path=self._path)
+        warn_password_interop(password1, password2, path=self._path)
         # Deliberately cache-unaware: a snapshot is judged only when a cached
         # open happens (mef3io.cache), never maintained by write paths.
         if units is not None:
@@ -375,4 +379,4 @@ class Writer:
         return list(self._impl.unreadable_metadata)
 
     def _reporting_unreadable_metadata(self):
-        return reporting_unreadable_metadata(self._impl)
+        return reporting_unreadable_metadata(self._impl, self._path)

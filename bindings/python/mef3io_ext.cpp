@@ -223,6 +223,7 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
   d["archive_bytes"] = opt_obj(s.archive_bytes);
   d["index_read"] = s.index_read;
   d["offset_assumed_zero"] = s.offset_assumed_zero;
+  d["legacy_password_mapping"] = s.legacy_password_mapping;
 
   nb::dict enc;
   enc["encrypted"] = s.encryption.encrypted;
@@ -264,6 +265,8 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
     cd["units_conversion_factor"] = opt_obj(c.units_conversion_factor);
     cd["units_description"] =
         c.units_description ? record_str(*c.units_description) : nb::object(nb::none());
+    cd["channel_description"] =
+        c.channel_description ? record_str(*c.channel_description) : nb::object(nb::none());
     cd["start_time"] = opt_obj(c.start_time);
     cd["end_time"] = opt_obj(c.end_time);
     cd["number_of_samples"] = opt_obj(c.number_of_samples);

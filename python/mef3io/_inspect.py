@@ -84,12 +84,23 @@ class ChannelSummary:
     non-zero offset was read. ``number_of_samples`` counts stored samples (gaps excluded).
     ``bytes`` is every file of the channel; ``records`` counts its channel-
     and segment-level records.
+
+    ``sampling_frequency``, ``units_conversion_factor`` and
+    ``units_description`` come from the first segment whose metadata section 2
+    is readable, and are ``None`` when every section 2 is locked (encrypted,
+    no level-1 password). ``channel_description`` is section 2's free-text
+    description from the same segment. It can identify the subject, so, like
+    every identity value, it is returned only with ``include_values=True``:
+    otherwise it is ``None``, and so it is when section 2 is locked. Its
+    presence is always reported in the identity table
+    (``identity_field("channel_description")``).
     """
 
     name: str
     sampling_frequency: Optional[float]
     units_conversion_factor: Optional[float]
     units_description: Optional[str]
+    channel_description: Optional[str]
     start_time: Optional[int]
     end_time: Optional[int]
     number_of_samples: Optional[int]
@@ -262,6 +273,16 @@ class SessionSummary:
         :attr:`mef3io.Reader.declaration_issues`).
     index_read : bool
         Whether the block indices were read (``read_index=True``).
+    legacy_password_mapping : bool
+        The password opened some metadata or record file only through the
+        password-to-key mapping of mef3io 1.2.0 and earlier (issue #84): the
+        session was most likely encrypted by one of those versions with a
+        non-ASCII password. The data is read correctly, but meflib and pymef
+        cannot open those files with this password. A ``"legacy-password"``
+        warning (in ``warnings``) says how many. :func:`inspect` reports this
+        as data and does NOT emit :class:`mef3io.LegacyPasswordWarning`, as it
+        reports every other condition (a :class:`mef3io.Reader` opened on the
+        same session does emit it).
     offset_assumed_zero : bool
         Some time here assumes recording-time offset 0 because a section 3
         is locked (level-1 password, or none). The same flag is on every
@@ -280,6 +301,7 @@ class SessionSummary:
     archive_bytes: Optional[int]
     index_read: bool
     offset_assumed_zero: bool
+    legacy_password_mapping: bool
     encryption: dict
     time_offset: dict
     gmt_offset: Optional[int]
@@ -370,12 +392,15 @@ def inspect(
         is given and wrong raises :class:`mef3io.PasswordError`. The level-2
         password opens everything; the level-1 password leaves section 3
         (subject fields, the recording-time offset) and level-2 record bodies
-        locked.
+        locked. A non-ASCII password that matches only through the mapping of
+        mef3io 1.2.0 and earlier is accepted, as the Reader accepts it, and
+        flagged in ``legacy_password_mapping`` rather than warned about.
     include_values : bool, default False
         Return identity VALUES: subject name/ID/location, descriptions,
         ``session_name``/``anonymized_name``, record text and the full
         records, and the recording-time offset. Off by default, when identity
-        fields report presence and length only. Names and paths are NOT
+        fields report presence and length only (and
+        ``ChannelSummary.channel_description`` is ``None``). Names and paths are NOT
         de-identified either way: the session's folder name (usually the same
         as ``session_name``), channel names and file paths are always
         returned, so a summary of an identifiable session is identifiable.

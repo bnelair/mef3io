@@ -665,6 +665,25 @@ cannot out-count `segment_map`. Surfaced as Python `Reader(strict=False)` /
 fails. Tests: `tests/test_p20_segment_isolation.py`, block in
 `matlab/test_mef3io.m`.
 
+Warnings (#96): EVERY Python warning is a `MefWarning` (`python/mef3io/
+_warnings.py`, a UserWarning) emitted through `_warnings.emit(cls, msg,
+path=, details=, stacklevel=)` — NEVER a bare `warnings.warn` (test_p30 greps
+the package for one). The session goes in `w.message.path`, the structured
+items in `.details`; the TEXT carries no path: `emit` scrubs the session's
+location and name to `<session>` (also `<archive>::<root>.mefd/...` in a tar
+and `<name>.rdat`), so callers with a no-paths-in-logs rule (mef3io-studio)
+can log `str(w.message)`. `emit` hands each SESSION its own warning registry
+(`warn_explicit`), which keeps the default filter's "once per session" now
+that the path is out of the text. `stacklevel` means what it means to
+`warnings.warn` at the call site. The pyproject filter matches the text after
+the old path prefix, so it still works. `inspect()` emits NO Python warnings:
+it reports conditions as `SummaryWarning` data (incl. `legacy-password` +
+`SessionSummary.legacy_password_mapping`, from the .tmet and the record
+files). `ChannelSummary.channel_description` is an identity value: only with
+`include_values`, None when section 2 is locked. inspect's `SummaryWarning`
+messages and `problems` still contain paths (they are data, documented as
+identifiable). Tests: tests/test_p30_warning_paths.py, p26, p27.
+
 VERIFY BEFORE PUBLISHING: `scripts/verify_local.sh` (`--full-bench`,
 `--no-bench`) is the single entry point — builds, asserts the IN-TREE extension
 is the one under test (not an installed wheel), runs the C++ + Python suites,
