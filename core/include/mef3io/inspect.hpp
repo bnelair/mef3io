@@ -83,6 +83,12 @@ struct InspectChannel {
   std::string name;
   std::optional<sf8> sampling_frequency, units_conversion_factor;
   std::optional<std::string> units_description;
+  /// Section 2's free-text channel description, as the first segment whose
+  /// section 2 is readable states it (segments can differ; the identity
+  /// table lists every distinct value). An IDENTITY value, so it is returned
+  /// only with InspectOptions::include_values (like the identity table's
+  /// values); nullopt otherwise, and when every section 2 is locked.
+  std::optional<std::string> channel_description;
   std::optional<si8> start_time, end_time;
   /// Stored samples (gaps excluded); nullopt when a section 2 is locked.
   std::optional<si8> number_of_samples;
@@ -219,6 +225,12 @@ struct SessionSummary {
   std::vector<SegmentProblem> problems;            ///< lenient mode only
   std::vector<DeclarationIssue> declaration_issues;
   bool index_read = false;
+  /// The password opened some metadata or record file only through the
+  /// password-to-key mapping of mef3io 1.2.0 and earlier (issue #84,
+  /// crypto::extract_password_bytes_legacy). The data is read correctly, but
+  /// meflib and pymef cannot open those files with this password. A
+  /// "legacy-password" warning says how many files.
+  bool legacy_password_mapping = false;
   /// Some time in this summary assumes offset 0 because a section 3 is
   /// locked (level-1 password or none). Not verified.
   bool offset_assumed_zero = false;

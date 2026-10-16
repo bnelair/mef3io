@@ -235,6 +235,9 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
   std::optional<fmt::MetadataSection3> tz;   // first readable section 3
   bool tz_differs = false;
   std::map<std::string, std::vector<SegState>> states;  // by channel
+  // Opened only through mef3io <= 1.2.0's password mapping (issue #84).
+  std::set<std::string> legacy_channels;
+  std::size_t legacy_record_files = 0;
 
   // ------------------------------------------------------------------ segments
   std::vector<const detail::LayoutChannel*> chans;
@@ -455,11 +458,13 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
       progress_done += is.tmet_bytes + (opt.read_index ? is.tidx_bytes : 0);
       progress.advance_to(progress_done);
       const auto& md = *st.md;
+      if (md.legacy_password_mapping) legacy_channels.insert(lc->name);
       if (md.section2_available) {
         if (!ic.sampling_frequency) {
           ic.sampling_frequency = md.section2.sampling_frequency;
           ic.units_conversion_factor = md.section2.units_conversion_factor;
           ic.units_description = md.section2.units_description;
+          if (opt.include_values) ic.channel_description = md.section2.channel_description;
         }
         // File-derived: a negative count is nonsense, and the sum must not overflow.
         if (md.section2.number_of_samples < 0)
@@ -590,7 +595,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     std::vector<std::string> texts;  // each record's free text, for the identity table
     std::uint64_t file_bytes = 0;
     fmt::UniversalHeader uh;
-    bool placeable = true, ambiguous = false, offset_dependent = false;
+    bool placeable = true, ambiguous = false, offset_dependent = false, legacy = false;
     const std::string failure =
         contain(channel, segment, src->describe(rdat), "records", [&] {
           file_bytes = src->file_size(rdat);
@@ -609,6 +614,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
           RecordParseInfo info;
           info.skip_locked_bodies = true;
           auto recs = parse_records(raw, rto.value_or(0), keys, info);
+          legacy = keys.legacy_password_mapping;
           // NOTHING above may touch a session-wide tally: it can all throw,
           // and a file that failed must contribute nothing but its size.
           // Placed only if the times do not depend on an offset we lack.
@@ -694,6 +700,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
       identity.locked("record_text", "record bodies");
       return;
     }
+    if (legacy) ++legacy_record_files;
     identity.add("session_name", "universal header", uh.session_name);
     identity.add("anonymized_name", "universal header", uh.anonymized_name);
     if (!placeable) unplaced.push_back({src->describe(rdat), why});
@@ -980,6 +987,34 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
       msg += "; " + std::to_string(unplaced.size()) + " record file(s) have no times (first: " +
              unplaced.front().file + ": " + unplaced.front().why + ")";
     warn("times-unresolved", msg + ". They are reported as unknown rather than guessed.", true);
+  }
+  if (!legacy_channels.empty() || legacy_record_files) {
+    out.legacy_password_mapping = true;
+    std::string what;
+    if (!legacy_channels.empty()) {
+      std::string list;
+      std::size_t shown = 0;
+      for (const auto& c : legacy_channels) {
+        if (shown++ == 3) {
+          list += ", ...";
+          break;
+        }
+        list += (list.empty() ? "" : ", ") + c;
+      }
+      what = "the metadata of " + std::to_string(legacy_channels.size()) + " channel(s) (" +
+             list + ")";
+    }
+    if (legacy_record_files)
+      what += (what.empty() ? "" : " and ") + std::to_string(legacy_record_files) +
+              " record file(s)";
+    warn("legacy-password",
+         "The password opened " + what +
+             " only through the password-to-key mapping that mef3io used up to 1.2.0, which "
+             "differs from meflib's for non-ASCII characters (issue #84). The data is read "
+             "correctly, but meflib and pymef cannot open these files with this password. "
+             "Re-encrypt the session (rewrite it with mef3io.Writer) to make it readable "
+             "everywhere.",
+         false);
   }
   if (!out.declaration_issues.empty())
     warn("unset-declarations",

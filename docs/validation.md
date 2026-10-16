@@ -154,7 +154,7 @@ Opening a session that leaves size declarations unset emits a
 `SessionDeclarationWarning`:
 
 ```
-SessionDeclarationWarning: subject.mefd: metadata section 2 leaves size
+SessionDeclarationWarning: metadata section 2 leaves size
 declarations unset across 254 channel(s): maximum_difference_bytes (254
 segment(s)). This does NOT affect reading with mef3io — every buffer is sized
 from the block headers themselves, and the data is intact. It does affect

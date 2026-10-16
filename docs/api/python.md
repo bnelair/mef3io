@@ -63,7 +63,22 @@ See the [validation guide](../validation.md) for what each check means.
 
 ::: mef3io.RecoveredSegment
 
+## Warnings
+
+Every warning carries its session in `w.message.path` and never in its text;
+see [Warnings carry the path as data](../python.md#warnings-carry-the-path-as-data).
+
+::: mef3io.MefWarning
+
 ::: mef3io.SessionDeclarationWarning
+
+::: mef3io.UnreadableSegmentWarning
+
+::: mef3io.BlockCopyWarning
+
+::: mef3io.LegacyPasswordWarning
+
+::: mef3io.PasswordInteropWarning
 
 ## Metadata objects
 
