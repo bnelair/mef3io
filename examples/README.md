@@ -18,7 +18,7 @@ does. Times in MEF 3.0 are **uUTC** — microseconds since the Unix epoch.
 | `05_annotations.py` | Writing and reading records (annotations), session- and channel-level |
 | `06_encryption.py` | Two-level passwords, what each level can access |
 | `07_legacy_mef_tools_style.py` | `from mef3io import MefReader, MefWriter` as a mef_tools drop-in |
-| `08_legacy_compatibility.py` | Legacy-vs-new write/read timing and value comparison on larger data (needs `mef3io[test]` + scipy/matplotlib/tqdm; writes under a hardcoded path) |
+| `08_legacy_compatibility.py` | Legacy-vs-new write/read timing and value comparison on larger data (needs `mef3io[test]` + scipy/tqdm; writes under a temporary directory, or `$MEF3IO_BENCH_DIR`) |
 | `09_encryption_replicability.py` | Encryption replicability matrix: both writers × plain/encrypted × both readers, plus what L1/L2/wrong passwords actually unlock (needs `mef3io[test]`) |
 | `10_tar_archive.py` | Single-file `.mefd.tar` sessions: archive, read in place, extract |
 | `11_legacy_rto_sessions.py` | Legacy recording-time-offset ("anonymized") sessions: the date is recoverable from plain bytes; mef3io and pymef read true UTC; mef3io appends, adds a channel and a note consistently; refusals (needs `mef3io[test]`; see `docs/anonymization.md`) |

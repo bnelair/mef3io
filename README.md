@@ -81,6 +81,11 @@ More: the [Python](https://bnelair.github.io/mef3io/python/),
 - **Protected recordings.** Both MEF 3.0 password levels work as specified:
   the level-1 password opens the technical metadata while the subject's
   identity stays behind the level-2 password.
+- **Looking before reading.** `mef3io.inspect(path)` (or
+  `python -m mef3io inspect`) describes a session — channels, segments,
+  gaps, annotations, encryption, what identifying fields it holds — without
+  reading any samples, and long reads and operations can report progress and
+  be cancelled from another thread (Python and C++).
 - **One file instead of a folder.** A session can be packed into a single
   `.mefd.tar` and read in place, without unpacking.
 
@@ -91,7 +96,8 @@ pymef, but declare some buffer sizes as `0`, which can crash meflib-based
 readers. Opening one warns once. Appending with a current version repairs the
 segment it extends; `mef3io.repair_session` fixes the rest in place — see
 [Validating and repairing](https://bnelair.github.io/mef3io/validation/).
-Changes in every version are listed in the [release notes](https://github.com/bnelair/mef3io/releases).
+Changes in every version, and what an upgrade asks of you, are listed in the
+[release notes](https://bnelair.github.io/mef3io/release_notes/).
 
 ## Scope and limitations
 
@@ -102,6 +108,13 @@ Changes in every version are listed in the [release notes](https://github.com/bn
   signal: the samples and their timing can be decoded without a password, so
   keep confidential recordings on protected storage. See
   [what encryption protects](https://bnelair.github.io/mef3io/encryption_model/#what-encryption-protects).
+- **Encrypted data blocks.** Some recordings have encrypted data blocks
+  (written by some third-party tools). mef3io reads them: a block encrypted
+  at level 1 with either password, one at level 2 with the level-2 password.
+  Because of known bugs, pymef crashes on such blocks and
+  meflib requires the level-2 password even for level-1 blocks. Recordings
+  mef3io writes leave data blocks unencrypted (as meflib does by default) and
+  stay fully compatible; encrypted *metadata* works in every direction.
 - **Records** (annotations): every record type MEF 3.0 defines is read;
   `Note`, `SyLg` and `EDFA` can be written with their text.
 - **De-identification**: meflib's recording-time offset does not hide the

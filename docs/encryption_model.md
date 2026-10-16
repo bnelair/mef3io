@@ -194,6 +194,23 @@ gate the signal itself: the samples are readable without any password (see
     anyone can read it from an encrypted session too. See
     [De-identification and the recording-time offset](anonymization.md).
 
+## Compatibility with other MEF 3.0 tools
+
+- **Encrypted metadata** (sections 2 and 3, record bodies) interoperates in
+  both directions: pymef and mef_tools read encrypted sessions mef3io writes,
+  and mef3io reads theirs at either password level. (With only the level-1
+  password the legacy reader itself returns no samples, whoever wrote the
+  file; see the [legacy comparison](legacy_comparison.md).)
+- **Encrypted data blocks.** Some recordings have encrypted data blocks
+  (written by some third-party tools). mef3io reads them: a block encrypted
+  at level 1 with either password, one at level 2 with the level-2 password.
+  Because of known bugs, pymef crashes on such blocks, and meflib requires the
+  level-2 password even for level-1 blocks. Recordings mef3io writes leave
+  data blocks unencrypted, as meflib does by default, and stay fully
+  compatible. mef3io 1.2 and earlier decoded such blocks wrongly (they
+  deciphered the whole 256-byte table instead of its first 16 bytes); see
+  [Encrypted data blocks](#encrypted-data-blocks).
+
 ## Password/key derivation (for completeness)
 
 - Password bytes, zero-padded to 16: meflib keeps the low byte of each

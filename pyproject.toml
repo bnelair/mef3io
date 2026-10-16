@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "Mayo Clinic — BNEL" }]
-keywords = ["MEF", "MEF3", "EEG", "iEEG", "electrophysiology", "neuroscience", "meflib", "pymef"]
+keywords = ["MEF", "MEF3", "MEF 3.0", "Multiscale Electrophysiology Format", "EEG", "iEEG", "SEEG", "ECoG", "electrophysiology", "neuroscience", "meflib", "pymef"]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Science/Research",

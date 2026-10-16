@@ -40,6 +40,11 @@ every binding carries the same version number.
   hides identity and annotation text, not the samples themselves — see
   [what it protects](encryption_model.md#what-encryption-protects).
 - **Deterministic** — output is byte-identical regardless of thread count.
+- **Made for tools** — `mef3io.inspect()` describes a session without
+  reading its samples, and reads and long operations can report progress and
+  be cancelled from another thread (Python and C++).
+- **Encrypted data blocks** written by some third-party tools are read too;
+  see [compatibility](encryption_model.md#compatibility-with-other-mef-30-tools).
 
 ## Quick taste (Python)
 
@@ -67,6 +72,7 @@ The same session opens in MATLAB (`mef3io.Reader('session.mefd')`) and C++
 | [MATLAB guide](matlab.md) | `+mef3io` classes and the MEX |
 | [C++ guide](cpp.md) | using the core library and the flat C ABI |
 | [Examples](examples.md) | eleven runnable scripts |
+| [Release notes](release_notes/index.md) | what changed in each version, and what an upgrade asks of you |
 | [Format reference](mef3_format.md) | the MEF 3.0 on-disk structure, field by field |
 | [De-identification](anonymization.md) | why meflib's recording-time offset is not anonymization, and what mef3io does instead |
 | [Performance & legacy comparison](legacy_comparison.md) | measured speed, encryption, and quantization differences |
@@ -85,7 +91,7 @@ The same session opens in MATLAB (`mef3io.Reader('session.mefd')`) and C++
   [Validating and repairing](validation.md) shows how to fix them.
 
 What changed in each version is in the
-[release notes](https://github.com/bnelair/mef3io/releases).
+[release notes](release_notes/index.md).
 
 mef3io is developed at the Mayo Clinic BNEL (Bioelectronics Neurophysiology
 and Engineering Lab).

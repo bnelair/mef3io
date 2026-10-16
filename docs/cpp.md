@@ -144,7 +144,9 @@ a `mef3io_progress_fn(done, total, user_data)` callback, and the `*_ex`
 variants `mef3io_reader_read_ex`, `mef3io_reader_read_raw_ex`,
 `mef3io_archive_session_ex`, `mef3io_extract_session_ex` and
 `mef3io_recover_session_ex` (the existing functions are unchanged). A
-cancelled call returns `MEF3IO_ERR_CANCELLED`.
+cancelled call returns `MEF3IO_ERR_CANCELLED`. Validation, repair and
+`inspect_session` have no C ABI functions, so MATLAB (built on the C ABI) has
+none of them either.
 
 
 ## Module map
