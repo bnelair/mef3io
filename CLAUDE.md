@@ -112,12 +112,22 @@ that test_p32 keeps equal: `REFUSAL_CODES` (python/mef3io/anonymize.py),
 the table in docs/anonymization.md (code, type, check|copy|defensive), and
 the cases in test_p32 (every non-defensive code must be reached, no
 defensive one may be). Copy-only: block-crc, data-damaged, verify-failed
-(and a BLOCK time before rto). Damaged record files surface as
+(and a time the Shifter refuses in a .tidx/.tdat UH or a block; every
+.tmet UH and record-file time goes through the SAME Shifter in preflight).
+Messages NEVER carry a source time (or rto): built without them, and
+`scrub_times()` replaces any 10+-digit number in the source window in
+VerifyIssue text, inherited findings, inspect blocker and shared-code
+messages; test_p32 greps every refusal/verify message. Damaged record files surface as
 source-damaged/source-crc (strict inspect fails first), so record-damaged/
 record-crc are defensive. (12) `AnonymizeReport.source_start_us/_end_us/
 source_channel_times` = THE RE-IDENTIFICATION KEY: in memory only; out of
-repr, summary() and to_dict() (unless include_original_times=True); never
-in a message or warning; test_p32 greps the copy's bytes for them.
+repr, summary() and to_dict() (unless include_original_times=True) and
+PICKLE (`__reduce__` drops them unless `with_original_times_in_pickle()`;
+copy/deepcopy keep them; asdict includes them); never in a message or
+warning; test_p32 greps the copy's bytes for them. (13) verify: a kept
+source DATA channel must be a data channel in the copy ("has no segments in
+the copy"); a records-only channel is accepted only if records-only in the
+source; anonymize_session also requires verify's channels == kept.
 
 Tar session archives: `archive_session(dir)` packs a session into ONE
 deterministic uncompressed ustar (`name.mefd.tar`); readers in all languages

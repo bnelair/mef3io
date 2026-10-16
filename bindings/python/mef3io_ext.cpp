@@ -30,6 +30,7 @@
 #include "mef3io/writer.hpp"
 
 #include <cmath>
+#include <cstring>
 #include <algorithm>
 #include <filesystem>
 
@@ -588,7 +589,13 @@ NB_MODULE(_mef3io, m) {
       PyObject* type = g_refusal_types[static_cast<int>(r.kind)];
       const auto* se = dynamic_cast<const std::exception*>(&e);
       const char* msg = se ? se->what() : r.message.c_str();
-      PyObject* exc = PyObject_CallFunction(type, "s", msg);
+      // "replace": a message holding a non-UTF-8 path must still raise the
+      // refusal (with its code), not a UnicodeDecodeError.
+      PyObject* text = PyUnicode_DecodeUTF8(msg, static_cast<Py_ssize_t>(std::strlen(msg)),
+                                            "replace");
+      if (!text) return;
+      PyObject* exc = PyObject_CallOneArg(type, text);
+      Py_DECREF(text);
       if (!exc) return;  // the constructor's error is set
       PyObject_SetAttrString(exc, "code", nb::str(r.code.c_str()).ptr());
       PyObject_SetAttrString(exc, "details", refusal_details(r).ptr());
@@ -704,7 +711,9 @@ NB_MODULE(_mef3io, m) {
         for (const auto& r : c.refusals) {
           nb::dict d;
           d["code"] = r.code;
-          d["message"] = r.message;
+          // Messages may name source paths, which need not be UTF-8.
+          d["message"] = nb::steal(PyUnicode_DecodeUTF8(
+              r.message.data(), static_cast<Py_ssize_t>(r.message.size()), "replace"));
           d["error"] = mef3io::refusal_kind_name(r.kind);
           d["channel"] = str_or_none(r.channel);
           d["field"] = str_or_none(r.field);

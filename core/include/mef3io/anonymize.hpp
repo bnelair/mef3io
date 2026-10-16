@@ -258,7 +258,8 @@ AnonymizeReport anonymize_session(const std::string& src, const std::string& dst
 /// refusals instead of throwing the first. Reads only metadata (what
 /// inspect_session reads, plus the segment universal headers and the record
 /// files of the kept channels); never a `.tdat`. Some refusals can only come
-/// from the copy pass (a failing block CRC, a block time stored ambiguously,
+/// from the copy pass (a failing block CRC, a time in a block index or data
+/// header or a block's own time that the shift rule refuses,
 /// a failed verification); docs/anonymization.md lists which.
 ///
 /// `check_shift = false` skips the shift checks (for a shift not chosen yet).

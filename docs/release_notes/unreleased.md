@@ -45,8 +45,9 @@
   - `AnonymizeReport.source_start_us`, `source_end_us` and
     `source_channel_times`: the source's original times. They are the
     re-identification key, returned to the caller only: never written into
-    the copy, never logged, and left out of `repr`, `summary()` and (unless
-    asked) `to_dict()`.
+    the copy, never logged or put in a message, and left out of `repr`,
+    `summary()`, pickles and (unless asked) `to_dict()`. No refusal or
+    verification message names a source time any more.
   - `mef3io.password_interop_issue(password)` returns why a password will
     not work as expected in other MEF readers (more than 15 characters, more
     than 15 UTF-8 bytes, a character above U+00FF), or `None`: the rule
@@ -56,7 +57,7 @@
   - Also: a time in an `Epoc` or `Curs` ID number is now refused before
     anything is written (`id-number-time`), not after the whole copy; and a
     channel that holds only annotations no longer makes the copy fail its
-    own verification.
+    own verification (a kept data channel that lost its samples still does).
 
   Python and C++ (`mef3io::check_anonymize`, `mef3io::AnonymizeError`);
   `password_interop_issue` is Python only. Not in MATLAB.
@@ -121,6 +122,12 @@
   use `w.message.path` instead; filters by category are unaffected, and so is
   a filter on the rest of the text (for example
   `ignore:.*leaves size declarations unset.*`).
+- **`anonymize_session` with ambiguous session-level annotation files**
+  (several `.rdat` at the session root, none named after the session) now
+  raises `FormatError` (code `records-ambiguous`), as `inspect` and the
+  Reader do, instead of `WriteConflictError`. Both are `MefError`s; code
+  that caught `WriteConflictError` for it should catch `MefError` or check
+  `exc.code`.
 - **`ChannelSummary` and `SessionSummary` have new fields**
   (`channel_description`, `legacy_password_mapping`). Code that builds them
   positionally (rather than receiving them from `inspect`) must add them.

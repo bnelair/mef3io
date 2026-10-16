@@ -392,9 +392,16 @@ if not rep.ok:
 `rep.ok` means the copy will start. A few refusals can only come from the
 copy itself (marked *copy* below): a data block that fails its checksum or
 runs past the end of its file, which needs the data blocks, and a failed
-verification, which needs the finished copy. A block time stored at or
-before a non-zero recording-time offset is also only met there; every other
-such time is caught up front with the same code.
+verification, which needs the finished copy. Every time in the metadata
+and annotation files goes through the copy's own shifting rule up front, so
+a time at or before a non-zero recording-time offset, or one the shift would
+take to 1970 or before, is caught there; only a time in a block index or
+data file's header, or a data block's own time, is met by the copy alone,
+with the same code.
+
+No refusal or verification message holds one of the source's times: they
+name the field and describe the problem in words. Messages may name the
+source's and the copy's paths.
 
 `check` is in Python and C++ (`mef3io::check_anonymize`), not in MATLAB.
 
@@ -446,12 +453,12 @@ refusal has a code.
 | `parts-locked` | `WriteConflictError` | check | Parts the password does not open (comes with a password refusal). |
 | `rto-disputed` | `WriteConflictError` | check | Segments disagree on the recording-time offset. |
 | `rto-unreadable` | `WriteConflictError` | check | The recording-time offset cannot be read, so some times are unknown. |
-| `time-before-rto` | `WriteConflictError` | check | A time stored at or before a non-zero recording-time offset (a block time only in the copy pass). |
+| `time-before-rto` | `WriteConflictError` | check | A time stored at or before a non-zero recording-time offset (a block index, data header or block time: only in the copy pass). |
 | `inspect-blocker` | `WriteConflictError` | defensive | A blocking `inspect` warning this table does not know yet (`details["inspect_code"]` names it). |
 | `channel-unknown` | `ValueError` | check | A named channel is not in the session (`details["channel"]`). |
 | `no-channels-left` | `ValueError` | check | The selection leaves no channel. |
 | `shift-below-floor` | `ValueError` | check | The shift is smaller than the recording's span plus one day. |
-| `shift-not-positive` | `ValueError` | check | The shift moves a time to 1970 or before. |
+| `shift-not-positive` | `ValueError` | check | The shift moves a time to 1970 or before (a block index, data header or block time: only in the copy pass). |
 | `rename-name-mismatch` | `ValueError` | check | `rename=False` and the destination is not named after the source. |
 | `name-contains-identity` | `ValueError` | check | The copy's name holds the patient's name, ID, location or the original session name. |
 | `pseudonym-contains-identity` | `ValueError` | check | The pseudonym holds one of them. |
@@ -492,7 +499,10 @@ mef3io never writes them into the copy (its leak scan would refuse the copy
 if one appeared there), never logs them, and never puts them in a warning or
 an error message. They are left out of `repr(report)`, `report.summary()`
 and `report.to_dict()`; `report.to_dict(include_original_times=True)`
-includes them. Keep them as you would the original recording, apart from the
+includes them. A pickled report arrives **without** them unless it was
+marked with `report.with_original_times_in_pickle()` (to hand it to a helper
+process you control, never to a cache); `copy.copy` and `copy.deepcopy` keep
+them, and so does `dataclasses.asdict(report)`, so prefer `to_dict()`. Keep them as you would the original recording, apart from the
 copy.
 
 ### How the copy is checked

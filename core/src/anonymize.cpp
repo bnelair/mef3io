@@ -194,13 +194,12 @@ struct Shifter {
       const si8 r = effective_rto(rto);
       if (r > 0 && -s > INT64_MAX - r)
         refuse(RefusalKind::Format, "time-overflow",
-               what + ": stored time " + std::to_string(s) + " overflows");
+               what + ": the stored time is out of range");
       return -s + r;
     }
     if (rto != 0 && s <= rto)
       refuse(RefusalKind::WriteConflict, "time-before-rto",
-          what + " is stored non-negative (" + std::to_string(s) +
-          ") at or before the session's recording-time offset. Such a value cannot be told "
+          what + " is stored non-negative at or before the session's recording-time offset. Such a value cannot be told "
           "apart from a time stored relative to the offset (the legacy convention, "
           "docs/anonymization.md), so where it lies is unknown and it is not copied.");
     return s;
@@ -211,8 +210,8 @@ struct Shifter {
     const si8 a = absolute(s, what);
     if ((shift > 0 && a > INT64_MAX - shift) || (shift < 0 && a + shift <= 0))
       refuse(RefusalKind::InvalidArgument, "shift-not-positive",
-             "the shift moves " + what + " (" + std::to_string(a) +
-                 " uUTC) to 0 or below, or out of range; shifted times must stay above 0",
+             "the shift moves " + what +
+                 " to 0 or below, or out of range; shifted times must stay above 0",
              {}, "shift_us");
     const si8 n = a + shift;
     return s < 0 ? -n : n;
@@ -956,9 +955,8 @@ class Anonymizer {
     TmetImage t = open_tmet(src_, rel, o_.password);
     if (t.rto != sh_.rto)
       refuse(RefusalKind::WriteConflict, "rto-disputed",
-             "segments disagree on the recording-time offset (" + std::to_string(sh_.rto) +
-                 " for the session, " + std::to_string(t.rto) + " in " + src_.describe(rel) +
-                 "), so there is no single right way to read their times",
+             "segments disagree on the recording-time offset (" + src_.describe(rel) +
+                 " differs from the rest of the session), so there is no single right way to read their times",
              channel);
     std::span<ui1> b(t.bytes);
     auto s2 = b.subspan(S2, S2_BYTES);
@@ -1288,6 +1286,42 @@ bool in_absolute_window(const SourcePlan& p, si8 v) {
   return a >= p.first - DAY_US + 1 && a <= p.last + DAY_US - 1;
 }
 
+/// `text` with every number that could be one of the source's times (10+
+/// digits, inside the recording range +- a day, absolute or relative to the
+/// offset, or the offset itself) replaced by "<time>". The source's times
+/// are the re-identification key: they never reach a message (#111). The
+/// messages built here name no time in the first place; this also covers
+/// text that comes from shared code (inspect, the validator).
+std::string scrub_times(const SourcePlan& p, const std::string& text) {
+  if (!p.has_times && p.rto == 0) return text;
+  std::string out;
+  out.reserve(text.size());
+  std::size_t i = 0;
+  while (i < text.size()) {
+    if (!std::isdigit(static_cast<unsigned char>(text[i]))) {
+      out += text[i++];
+      continue;
+    }
+    std::size_t j = i;
+    while (j < text.size() && std::isdigit(static_cast<unsigned char>(text[j]))) ++j;
+    const std::string run = text.substr(i, j - i);
+    bool hit = false;
+    if (run.size() >= 10 && run.size() <= 18) {
+      const si8 a = std::stoll(run);
+      hit = in_absolute_window(p, a) || (p.rto != 0 && a == (p.rto < 0 ? -p.rto : p.rto));
+      if (!hit && p.rto != 0 && p.has_times) {
+        const si8 lo = p.first - DAY_US + 1 - p.rto, hi = p.last + DAY_US - 1 - p.rto;
+        hit = a >= lo && a <= hi;
+      }
+    } else if (run.size() > 18) {
+      hit = true;  // out of range for a time; never worth printing
+    }
+    out += hit ? std::string("<time>") : run;
+    i = j;
+  }
+  return out;
+}
+
 SourcePlan plan_source(const SessionSource& src, const std::string& path,
                        const std::string& password, const Control& ctl) {
   SourcePlan p;
@@ -1413,11 +1447,11 @@ class Verifier {
   }
 
   void problem(const std::string& loc, const std::string& field, const std::string& msg) {
-    rep_.problems.push_back({loc, field, msg});
+    rep_.problems.push_back({loc, scrub_times(plan_, field), scrub_times(plan_, msg)});
   }
 
   void leak(const std::string& loc, const std::string& field, const std::string& msg) {
-    VerifyIssue i{loc, field, msg};
+    VerifyIssue i{loc, scrub_times(plan_, field), scrub_times(plan_, msg)};
     rep_.leaks.push_back(i);
     rep_.problems.push_back(i);
   }
@@ -1443,8 +1477,7 @@ class Verifier {
                   bool body = false) {
     ++rep_.times_checked;
     if (!(body && is_sentinel(dst_v, true)) && in_window(dst_v))
-      leak(loc, field, "holds " + std::to_string(dst_v) +
-                           ", a time inside the source's recording range (plain or negated)");
+      leak(loc, field, "holds a time inside the source's recording range (plain or negated)");
     si8 expected;
     try {
       expected = sh_(src_v, field, body);
@@ -1454,9 +1487,8 @@ class Verifier {
     }
     if (dst_v != expected)
       problem(loc, field,
-              "is " + std::to_string(dst_v) + ", expected " + std::to_string(expected) +
-                  " (the source's " + std::to_string(src_v) + " shifted by " +
-                  std::to_string(sh_.shift) + " us in the same sign convention)");
+              "differs from the source's value shifted by the shift in the same sign "
+              "convention");
   }
 
   /// A fixed-width text field of the copy, `len` bytes at `off`: no
@@ -1931,14 +1963,30 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
       v.problem(c, "channel", "is not a channel of the source");
   // A channel with records and no segment is listed as incomplete too (the
   // layout's rule); the copy writes one for a record-only source channel.
+  // Accepted only where the SOURCE's channel is record-only too: a data
+  // channel whose segments are gone from the copy is a loss, not a layout.
+  std::map<std::string, std::size_t> source_segments;  // data channels
+  for (const auto& c : plan.layout.channels) source_segments[c.name] = c.segments.size();
   bool bad_layout = !dlayout.video_channels.empty();
-  for (const auto& c : dlayout.incomplete_channels)
-    if (!c.incomplete.empty() ||
+  for (const auto& c : dlayout.incomplete_channels) {
+    const bool record_only =
+        c.incomplete.empty() &&
         std::find(dlayout.record_only_channels.begin(), dlayout.record_only_channels.end(),
-                  c.name) == dlayout.record_only_channels.end())
-      bad_layout = true;
+                  c.name) != dlayout.record_only_channels.end();
+    if (!record_only) bad_layout = true;
+  }
   if (bad_layout)
     v.problem(dst_path, "layout", "the copy holds video or incomplete channel folders");
+  // Every source data channel the copy keeps must be a data channel there
+  // (segment counts are compared below).
+  {
+    std::set<std::string> ddata;
+    for (const auto& c : dlayout.channels) ddata.insert(c.name);
+    for (const auto& [name, n] : source_segments)
+      if (dch.count(name) && !ddata.count(name))
+        v.problem(name, "segments",
+                  "has no segments in the copy; the source's has " + std::to_string(n));
+  }
 
   // The shift floor, re-checked: below it the leak window cannot tell a
   // leak from a legitimately shifted time.
@@ -1996,7 +2044,7 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
       auto it = known.find(key);
       if (it != known.end() && it->second > 0) {
         --it->second;
-        rep.inherited_findings.push_back(key);
+        rep.inherited_findings.push_back(scrub_times(plan, key));
       } else {
         v.problem(f.path, f.check_id, "the validator reports on the copy: " + f.message);
       }
@@ -2107,6 +2155,7 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path,
                  std::string channel = {}, std::string field = {}) {
     AnonymizeRefusal r{std::move(code), std::move(message), kind, std::move(channel),
                        std::move(field), {}};
+    if (pf.plan) r.message = scrub_times(*pf.plan, r.message);  // never a source time
     if (!collect) raise(std::move(r));
     pf.refusals.push_back(std::move(r));
   };
@@ -2117,6 +2166,7 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path,
     auto r = refusal_of(e, format_code, crc_code, io_code);
     if (!r) std::rethrow_exception(e);  // Cancelled, or a bug: not a refusal
     if (r->channel.empty()) r->channel = channel;
+    if (pf.plan) r->message = scrub_times(*pf.plan, r->message);
     if (!collect) raise(std::move(*r));
     pf.refusals.push_back(std::move(*r));
   };
@@ -2211,7 +2261,7 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path,
     std::vector<AnonymizeRefusal> blockers;
     for (const auto& w : plan.summary.warnings)
       if (w.blocks_anonymize)
-        blockers.push_back(AnonymizeRefusal{blocker_code(w.code), w.message,
+        blockers.push_back(AnonymizeRefusal{blocker_code(w.code), scrub_times(plan, w.message),
                                             RefusalKind::WriteConflict, {}, {}, w.code});
     if (!blockers.empty() && !collect) {
       // One exception for all of them, as every release so far has thrown.
@@ -2255,6 +2305,7 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path,
   }
 
   // ---- the shift ---------------------------------------------------------
+  bool first_time_refused = false;
   if (check_shift && o.shift_us != 0 && plan.has_times) {
     const si8 span = saturating_add(plan.last, -plan.first);
     const si8 mag =
@@ -2266,11 +2317,13 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path,
           "plus one day (" + std::to_string(floor) + " us), so that no shifted time can fall "
           "inside the original range",
           {}, "shift_us");
-    if (o.shift_us < 0 && plan.first + o.shift_us <= 0)
+    if (o.shift_us < 0 && plan.first + o.shift_us <= 0) {
+      first_time_refused = true;
       add(RefusalKind::InvalidArgument, "shift-not-positive",
-          "the shift moves the first time (" + std::to_string(plan.first) +
-              " uUTC) to 0 or below; shifted times must stay above 0",
+          "the shift moves the session's first time to 0 or below; shifted times must stay "
+          "above 0",
           {}, "shift_us");
+    }
   }
 
   // ---- names -------------------------------------------------------------
@@ -2335,6 +2388,22 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path,
   }
 
   // ---- what the copy pass would meet, read from metadata -----------------
+  // Every time the metadata and record files hold goes through the copy's
+  // own Shifter, so a time the copy would refuse (at or before a non-zero
+  // offset, moved to 0 or below, out of range) is refused here first. Only
+  // the .tidx/.tdat headers and block times are left to the copy pass. After
+  // the first such refusal the rest are skipped (one per cause is enough).
+  const Shifter sh{plan.rto, check_shift ? o.shift_us : 0};
+  bool time_refused = first_time_refused;  // that refusal covers the rest
+  auto shift_time = [&](si8 v, const std::string& what, bool body, const std::string& channel) {
+    if (time_refused) return;
+    try {
+      (void)sh(v, what, body);
+    } catch (...) {
+      time_refused = true;
+      add_exception(std::current_exception(), "time-overflow", "source-crc", "io-error", channel);
+    }
+  };
   // Segment numbers: named canonically, as the writer names them. The
   // number is the .tmet header's (@48); the folder name must agree. A folder
   // whose suffix is not a number, or names another segment, is refused:
@@ -2359,7 +2428,10 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path,
       const int folder_number = std::stoi(suffix);
       si4 uh_number = fmt::SI4_NO_ENTRY;
       try {
-        uh_number = read<si4>(src.read_range(seg.tmet, 0, UH), 48);
+        const auto uh = src.read_range(seg.tmet, 0, UH);
+        uh_number = read<si4>(uh, 48);
+        shift_time(read<si8>(uh, UH_START), c.name + " metadata start time", false, c.name);
+        shift_time(read<si8>(uh, UH_END), c.name + " metadata end time", false, c.name);
       } catch (...) {
         add_exception(std::current_exception(), "source-damaged", "source-crc",
                       "source-unreadable", c.name);
@@ -2403,8 +2475,37 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path,
       continue;
     }
     const std::string where = src.describe(rel);
+    for (const auto* uh : {&f.uh, &f.ridx_uh}) {
+      if (uh->size() < UH) continue;  // no index file
+      shift_time(read<si8>(*uh, UH_START), "record file " + where + " start time", false, channel);
+      shift_time(read<si8>(*uh, UH_END), "record file " + where + " end time", false, channel);
+    }
+    for (const auto& e : f.ridx)
+      shift_time(read<si8>(e, 16), "record index entry of " + where, false, channel);
+    std::set<std::string> excluded_keys;
+    for (const auto& c : pf.excluded) excluded_keys.insert(channel_key(c));
     for (std::size_t i = 0; i < f.records.size(); ++i) {
       const RawRecord& r = f.records[i];
+      const std::string what = "record " + std::to_string(i) + " (" + r.type + ") of " + where;
+      shift_time(r.time, what + " time", false, channel);
+      if (const BodyLayout* lay = layout_of(r); lay && !lay->keep_whole &&
+                                                 lay->variable_text_from == SIZE_MAX) {
+        for (std::size_t off : lay->times)
+          shift_time(read<si8>(r.body, off), what + " body time", true, channel);
+        if (r.type == "Seiz") {  // the entries the copy keeps, as rewrite_body does
+          const si4 declared = read<si4>(r.body, SEIZ_NCH);
+          const std::size_t room = (r.body.size() - SEIZ_FIXED) / SEIZ_CHANNEL;
+          const std::size_t n =
+              std::min(room, static_cast<std::size_t>(std::max<si4>(declared, 0)));
+          for (std::size_t c = 0; c < n; ++c) {
+            const std::size_t e = SEIZ_FIXED + c * SEIZ_CHANNEL;
+            if (excluded_keys.count(channel_key(read_string(r.body, e, SEIZ_CHANNEL_NAME))))
+              continue;
+            for (std::size_t off : {SEIZ_CH_ONSET, SEIZ_CH_OFFSET})
+              shift_time(read<si8>(r.body, e + off), what + " channel time", true, channel);
+          }
+        }
+      }
       if (f.has_ridx &&
           std::none_of(f.ridx.begin(), f.ridx.end(),
                        [&](const auto& x) { return read<si8>(x, 8) == f.record_offsets[i]; }))
@@ -2612,6 +2713,13 @@ AnonymizeReport anonymize_impl(const std::string& src_path, const std::string& d
     vo.clear_descriptions = o.clear_descriptions;
     rep.verification =
         verify_impl(src_path, src, plan, root.string(), o.shift_us, vo, ctl, on_bytes);
+    // verify alone cannot tell a dropped channel from an excluded one; here
+    // the selection is known.
+    if (rep.verification.channels != rep.channels_kept) {
+      rep.verification.problems.push_back(
+          {root.string(), "channels", "the copy does not hold exactly the kept channels"});
+      rep.verification.ok = false;
+    }
     if (!rep.verification.ok) {
       std::string msg = "the copy failed verification, so it was not published (" +
                         std::to_string(rep.verification.problems.size()) + " problem(s)):";

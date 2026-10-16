@@ -18,7 +18,8 @@ import datetime as _dt
 import json
 import os
 import sys
-from dataclasses import asdict, dataclass, field
+import copy as _copy
+from dataclasses import asdict, dataclass, field, fields, replace
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 from ._cancel import CancelToken, _hooks
@@ -365,8 +366,13 @@ class AnonymizeReport:
     back. They are returned to the caller, in memory, and nowhere else:
     mef3io never writes them into the copy (the copy's leak scan refuses it
     if any appears), never logs them and never puts them in a warning or a
-    message. They are left out of ``repr()``, :meth:`summary` and, unless
-    asked for, :meth:`to_dict`. Store them as you would the original
+    message. They are left out of ``repr()``, :meth:`summary`, :meth:`to_dict`
+    (unless ``include_original_times=True``) and **pickling**: a pickled
+    report arrives without them unless it was marked with
+    :meth:`with_original_times_in_pickle` (for example to pass it to a helper
+    process you control; never to a cache). ``copy.copy`` and
+    ``copy.deepcopy`` keep them. ``dataclasses.asdict(report)`` INCLUDES
+    them: prefer :meth:`to_dict`. Store them as you would the original
     recording.
     """
 
@@ -405,6 +411,34 @@ class AnonymizeReport:
             d[k] = tuple(d[k])
         d["source_channel_times"] = {k: tuple(v) for k, v in d["source_channel_times"].items()}
         return cls(**d)
+
+    def with_original_times_in_pickle(self) -> "AnonymizeReport":
+        """A copy of this report whose pickle KEEPS the original times.
+
+        By default a pickled report drops them (the re-identification key).
+        Use this only to hand the report to a process you control, never for
+        a cache or a file.
+        """
+        out = replace(self)
+        object.__setattr__(out, "_pickle_original_times", True)
+        return out
+
+    def __reduce__(self):
+        values = {f.name: getattr(self, f.name) for f in fields(self)}
+        keep = getattr(self, "_pickle_original_times", False)
+        if not keep:
+            values.update(source_start_us=None, source_end_us=None, source_channel_times={})
+        return (_unpickle_report, (values, keep))
+
+    def __copy__(self):
+        out = replace(self)
+        if getattr(self, "_pickle_original_times", False):
+            object.__setattr__(out, "_pickle_original_times", True)
+        return out
+
+    def __deepcopy__(self, memo):
+        values = {f.name: _copy.deepcopy(getattr(self, f.name), memo) for f in fields(self)}
+        return _unpickle_report(values, getattr(self, "_pickle_original_times", False))
 
     def to_dict(self, *, include_original_times: bool = False) -> dict:
         """Plain ``dict`` (JSON-serialisable).
@@ -445,6 +479,13 @@ class AnonymizeReport:
             lines.append(f"  note: {n}")
         lines.append(self.verification.summary())
         return "\n".join(lines)
+
+
+def _unpickle_report(values: dict, keep: bool) -> AnonymizeReport:
+    out = AnonymizeReport(**values)
+    if keep:
+        object.__setattr__(out, "_pickle_original_times", True)
+    return out
 
 
 def _backend():
@@ -775,9 +816,13 @@ def check(
     What it cannot decide (codes marked ``"copy"`` in :data:`REFUSAL_CODES`):
     a data block failing its CRC or running past its file (``block-crc``,
     ``data-damaged``), and the final verification of the copy
-    (``verify-failed``), which needs the copy. A block time stored at or
-    before a non-zero recording-time offset is also only met there (the same
-    ``time-before-rto`` code ``check`` reports for every other time).
+    (``verify-failed``), which needs the copy. Every time in the metadata
+    headers and the record files is put through the copy's own shifting
+    rule up front (``time-before-rto``, ``shift-not-positive``,
+    ``time-overflow``); only a time in a block index or data file header, or
+    a block's own time, is met by the copy pass alone, with the same code.
+
+    No refusal message, here or raised, holds one of the source's times.
 
     Available in Python and C++ (``mef3io::check_anonymize``); not in MATLAB.
 

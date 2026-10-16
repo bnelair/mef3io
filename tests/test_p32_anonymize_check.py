@@ -23,6 +23,9 @@ What is pinned here:
 """
 from __future__ import annotations
 
+import copy
+import os
+import pickle
 import re
 import shutil
 import struct
@@ -44,6 +47,7 @@ from test_p29_anonymize import (
     _edit_record,
     _legacy,
     _named_session,
+    _plant_uh,
     _rename_segment,
     _rich_session,
     _set_rto,
@@ -186,6 +190,27 @@ def _not_a_session(templates, tmp_path):
     return src, tmp_path / "S001.mefd", {}
 
 
+def _non_utf8_segment_folder(src):
+    seg = next((src / "ch3.timd").glob("*.segd"))
+    for f in list(seg.iterdir()):
+        os.rename(bytes(f), bytes(seg) + b"/ch3-\xff" + f.suffix.encode())
+    os.rename(bytes(seg), bytes(seg.parent) + b"/ch3-\xff.segd")
+
+
+def _record_file_header_before_the_shift(src):
+    # The session record file's header start time a day before the recording
+    # (inspect does not count it in the session's range): the shift below
+    # keeps the session's first time above 0 but not this one. Before #111
+    # only the copy pass met it.
+    _plant_uh(src, "jane_roe.rdat", 16, -(START - DAY))
+
+
+def _source_times_in(text):
+    """10+-digit numbers in `text` that could be one of the fixtures' source
+    times (all start at START), plain or negated."""
+    return [n for n in re.findall(r"\d{10,}", text) if abs(int(n) - START) <= 3 * DAY]
+
+
 CASES = {
     # --- the refusal cases of test_p29 -----------------------------------
     "shift 0": ("shift-zero", lambda t, p: _plain(t, p, shift=0)),
@@ -259,6 +284,10 @@ CASES = {
     "bad text policy": ("text-invalid", lambda t, p: _plain(t, p, text="redact")),
     "two folders, one number": ("segment-number-duplicate", _mutated(_duplicate_segment)),
     "record index names no record": ("record-index-mismatch", _mutated(_move_an_index_entry)),
+    "a non-UTF-8 folder name": ("segment-folder-unnumbered", _mutated(_non_utf8_segment_folder)),
+    "a body time the shift takes below 0": (
+        "shift-not-positive",
+        _mutated(_record_file_header_before_the_shift, shift=-(START - DAY // 2))),
 }
 
 # Refusals only the copy pass can meet: check() passes these sessions.
@@ -301,6 +330,9 @@ def test_check_agrees_with_anonymize_session(templates, tmp_path, case):
     assert set(e.details) == {"channel", "field", "inspect_code"}
     assert e.details["channel"] == first.channel and e.details["field"] == first.field
     assert _tree(tmp_path) == before, "anonymize_session left something behind"
+    # the re-identification key never reaches a message
+    for text in [str(e)] + [r.message for r in rep.refusals]:
+        assert not _source_times_in(text), text
 
 
 @pytest.mark.parametrize("case", list(COPY_CASES))
@@ -315,6 +347,32 @@ def test_copy_pass_refusals_carry_codes(templates, tmp_path, case):
         _quiet(mef3io.anonymize_session, src, dst, shift, **kw)
     assert exc.value.code == code and type(exc.value).__name__ == REFUSAL_CODES[code][0]
     assert _tree(tmp_path) == before  # the partial copy is gone
+    assert not _source_times_in(str(exc.value)), str(exc.value)
+
+
+def test_verify_messages_name_no_source_time(templates, tmp_path):
+    src = _fresh(templates, tmp_path)
+    _quiet(mef3io.anonymize_session, src, tmp_path / "S001.mefd", SHIFT)
+    rep = _quiet(mef3io.anonymize.verify, src, tmp_path / "S001.mefd", SHIFT + SECOND)
+    assert not rep.ok and len(rep.problems) > 10   # every time is off by one second
+    for i in rep.problems + rep.notes:
+        assert not _source_times_in(i.field + " " + i.message), i
+    for f in rep.inherited_findings:
+        assert not _source_times_in(f), f
+
+
+def test_verify_refuses_a_copy_that_lost_a_channels_samples(templates, tmp_path):
+    """A kept data channel left with only its records in the copy is a loss."""
+    src = _fresh(templates, tmp_path)
+    dst = tmp_path / "S001.mefd"
+    _quiet(mef3io.anonymize_session, src, dst, SHIFT)
+    assert (dst / "ch1.timd" / "ch1.rdat").exists()
+    for seg in (dst / "ch1.timd").glob("*.segd"):
+        shutil.rmtree(seg)
+    rep = _quiet(mef3io.anonymize.verify, src, dst, SHIFT)
+    assert not rep.ok
+    assert any(p.location == "ch1" and "has no segments in the copy; the source's has 2"
+               in p.message for p in rep.problems), rep.summary()
 
 
 def test_a_wrong_argument_type_has_a_code_in_both(templates, tmp_path):
@@ -467,6 +525,15 @@ def test_the_report_carries_the_original_times_and_the_copy_does_not(templates, 
     shown = repr(rep) + rep.summary() + str(rep.to_dict())
     for t in key:
         assert str(t) not in shown
+    # pickling drops them unless asked; copies keep them
+    assert pickle.loads(pickle.dumps(rep)).source_start_us is None
+    assert pickle.loads(pickle.dumps(rep)).source_channel_times == {}
+    assert pickle.loads(pickle.dumps(rep)).verification == rep.verification
+    kept = pickle.loads(pickle.dumps(rep.with_original_times_in_pickle()))
+    assert kept.source_start_us == START and kept.source_channel_times == rep.source_channel_times
+    assert pickle.loads(pickle.dumps(kept)).source_start_us == START   # the mark survives
+    assert copy.copy(rep).source_start_us == START
+    assert copy.deepcopy(rep).source_channel_times == rep.source_channel_times
     full = rep.to_dict(include_original_times=True)
     assert full["source_start_us"] == START and "ch1" in full["source_channel_times"]
     # ... and nowhere in the copy, plain or negated (the leak scan refuses it)
