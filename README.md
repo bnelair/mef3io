@@ -214,7 +214,7 @@ Laboratory (BNEL) at Mayo Clinic.
 
 ## Contributors and credits
 
-**mef3io:** Filip Mivalt (maintainer), [@SweetVlad](https://github.com/SweetVlad).
+**mef3io:** Filip Mivalt (maintainer), Vladimir Sladky.
 
 **The format and the earlier tools**, whose authors we thank for making this
 work possible: Matt Stead, who conceived MEF, and his co-authors of the 2009

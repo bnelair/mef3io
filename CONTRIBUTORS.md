@@ -3,7 +3,7 @@
 ## mef3io
 
 - **Filip Mivalt** ([@xmival00](https://github.com/xmival00)), maintainer, Bioelectronics Neurophysiology and Engineering Laboratory (BNEL) at Mayo Clinic
-- [@SweetVlad](https://github.com/SweetVlad)
+- Vladimir Sladky ([@SweetVlad](https://github.com/SweetVlad))
 
 Contributions are welcome; see [CONTRIBUTING.md](https://github.com/bnelair/mef3io/blob/main/CONTRIBUTING.md).
 
@@ -29,11 +29,13 @@ exist, and we thank them for it.
   Bruno Aristimunha, Clemens Brunner, [@nelagri](https://github.com/nelagri).
 - **[mef_tools](https://github.com/bnelair/mef_tools)**, high-level Python
   reading and writing on pymef: Filip Mivalt, Václav Křemen,
-  [@SweetVlad](https://github.com/SweetVlad).
+  Vladimir Sladky.
 - **MATLAB:** Richard Jie Cui, [MEF_import](https://github.com/jiecui/MEF_import)
   (an EEGLAB plugin) and
   [mef_reader_fieldtrip](https://github.com/jiecui/mef_reader_fieldtrip)
-  (a FieldTrip reader for MEF 2.1, MEF 3.0 and MED 1.0).
+  (a FieldTrip reader for MEF 2.1, MEF 3.0 and MED 1.0, with contributions
+  from Max van den Boom).
 
-Names come from each project's commit history and the 2009 paper. If you
+Names come from each project's commit history, the 2009 paper and the
+maintainer's records. If you
 contributed to any of these and are missing or misnamed, please open an issue.
