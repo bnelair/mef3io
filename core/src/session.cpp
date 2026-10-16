@@ -117,6 +117,7 @@ void Session::load_channel_basic_info(const std::string& name, Channel& ch) {
     }
     info.number_of_samples += md.section2.number_of_samples;
     if (md.universal_header.is_password_protected()) info.password_protected = true;
+    if (md.legacy_password_mapping) info.legacy_password_mapping = true;
     });
     if (ok) ++readable;
   }

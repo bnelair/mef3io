@@ -26,6 +26,7 @@ classdef Writer < handle
 
     properties (Access = private)
         h uint64 = 0
+        legacySeen cell = {}   % legacy-password segments already warned about
     end
 
     methods
@@ -56,6 +57,21 @@ classdef Writer < handle
                 obj.setMetadata(opts.Metadata);
             end
             obj.warnUnreadable({});   % what opening the session already found
+            % A password other MEF readers handle differently (issue #84):
+            % warn, never refuse. Mirrors Python's PasswordInteropWarning.
+            if ~isempty(opts.Password1)
+                labels = {'level-1', 'level-2'};
+                pws = {opts.Password1, opts.Password2};
+                for k = 1:2
+                    if isempty(pws{k}), continue; end
+                    issue = mef3io_mex('password_interop_issue', pws{k});
+                    if ~isempty(issue)
+                        warning('mef3io:passwordInterop', ...
+                            'the %s password will not interoperate as expected: %s.', ...
+                            labels{k}, issue);
+                    end
+                end
+            end
         end
 
         function setMetadata(obj, md)
@@ -183,6 +199,19 @@ classdef Writer < handle
                      '(unreadable .tmet, or a segment directory without metadata): %s. ' ...
                      'Full list in unreadableMetadata().'], ...
                     numel(u), u{1});
+            end
+            % Segments appended to under the password mapping of mef3io 1.2.0 and earlier (#84).
+            l = setdiff(mef3io_mex('writer_legacy_password_segments', obj.h), ...
+                        obj.legacySeen, 'stable');
+            if ~isempty(l)
+                obj.legacySeen = [obj.legacySeen; l(:)];
+                warning('mef3io:legacyPassword', ...
+                    ['%d segment(s) were appended to whose password matched only ' ...
+                     'through the password-to-key mapping that mef3io used up to 1.2.0 ' ...
+                     '(issue #84): %s. They keep their old keys, so meflib and pymef ' ...
+                     'cannot open them with this password; new segments use meflib''s ' ...
+                     'mapping. Re-encrypt the session to make it readable everywhere.'], ...
+                    numel(l), l{1});
             end
         end
     end

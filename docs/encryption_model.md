@@ -74,10 +74,14 @@ Also worth knowing:
   values derived from an unsalted SHA-256 hash of each password in plain
   text, so anyone with the files can test guesses as fast as their computer
   allows. A short or common password protects little. For compatibility,
-  use at most 15 characters (meflib refuses longer passwords; mef3io
-  ignores everything past the 16th) and ASCII characters only: for non-ASCII
-  characters mef3io currently keeps a different byte than meflib, so the two
-  would not accept the same password.
+  use at most 15 characters, and at most 15 bytes once written as UTF-8
+  (meflib refuses longer passwords, pymef copies the password into a
+  16-byte buffer, and mef3io ignores everything past the 16th character).
+  Letters such as é, ü or ÿ (up to U+00FF) work the same in mef3io, meflib
+  and pymef, but take two of those 15 bytes each. Avoid characters beyond
+  U+00FF (Ł, €, any non-Latin script): every MEF reader keeps only the low
+  byte of each one, so a different password can unlock the same session.
+  mef3io's writer warns (`PasswordInteropWarning`) about either case.
 - **In an unencrypted session nothing is hidden**, including section 3. A
   recording-time offset there hides no date: it is stored right next to the
   times it shifts ([details](anonymization.md)).
@@ -196,12 +200,39 @@ gate the signal itself: the samples are readable without any password (see
 
 ## Password/key derivation (for completeness)
 
-- Password bytes, zero-padded to 16: meflib keeps the low byte of each
-  character's Unicode code point and accepts at most 15 characters
-  (meflib.c:2439; the limit is enforced in `check_password`, meflib.c:1056,
-  meflib.h:260); mef3io currently keeps the last UTF-8 byte of each
-  character, up to 16 characters. The two are only guaranteed to agree on
-  ASCII passwords of at most 15 characters ([#84](https://github.com/bnelair/mef3io/issues/84)).
+- Password bytes, zero-padded to 16: **the low byte of each character's
+  Unicode code point** (meflib `extract_terminal_password_bytes`,
+  meflib.c:2439, decoding with `UTF8_nextchar`, meflib.c:8855). So `é`
+  (U+00E9, UTF-8 `C3 A9`) is `0xE9`. meflib accepts at most 15 characters
+  (`check_password`, meflib.c:1056; meflib.h:260); pymef passes the
+  password to meflib as UTF-8 through a 16-byte buffer (`strcpy` into
+  `password_arr[PASSWORD_BYTES]`, pymef3_file.c), so for pymef and
+  `mef_tools` the limit is 15 UTF-8 **bytes**. mef3io derives exactly
+  meflib's bytes (it reproduces `UTF8_nextchar` byte for byte, malformed
+  input included), keeps reading up to 16 characters, ignores the rest, and
+  stops at the first NUL.
+- **Characters above U+00FF collide.** Only the low byte survives, so `Ł`
+  (U+0141) and `A` (U+0041) give the same byte, and `Ā` (U+0100) gives
+  `0x00`, the same as the padding. mef3io matches this exactly, because a
+  different rule would make such passwords unusable in meflib and pymef, and
+  warns when writing with one.
+- **Sessions written by mef3io 1.2.0 and earlier.** Those versions kept the
+  *last UTF-8 byte* of each character instead (`é` became `0xA9`),
+  which agrees with meflib on ASCII and on nothing else
+  ([#84](https://github.com/bnelair/mef3io/issues/84)). To keep those
+  sessions readable, mef3io verifies a password with meflib's rule first
+  and, only if that fails and the password has a non-ASCII character (so
+  the old rule gives different bytes), with the old rule. A match through
+  the old rule opens the session and raises `LegacyPasswordWarning`
+  (MATLAB: `mef3io:legacyPassword`; C: `mef3io_reader_n_legacy_password_
+  channels`): the data is intact, but meflib and pymef cannot open that
+  session with that password. Re-encrypting it into a new session makes it
+  readable everywhere (`transform_session`,
+  [#73](https://github.com/bnelair/mef3io/issues/73), once available; until
+  then, read it and write it again with `mef3io.Writer`). New files are
+  never written with the old rule. Appending to an old segment keeps that
+  segment's keys (changing them would mean re-encrypting it) and warns; a
+  new segment uses meflib's rule.
 - Level-1 validation field = `SHA256(L1_bytes)[:16]`.
 - Level-2 validation field = `SHA256(L2_bytes)[:16] XOR L1_bytes`.
 - Verifying a password: try it as L1 (does its SHA-256 prefix match the L1

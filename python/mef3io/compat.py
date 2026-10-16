@@ -17,8 +17,16 @@ from __future__ import annotations
 import warnings
 from typing import Optional, Union
 
-from ._writer import reporting_unreadable_metadata, warn_unreadable_metadata
-from ._reader import SessionDeclarationWarning, _declaration_warning_text
+from ._writer import (
+    reporting_unreadable_metadata,
+    warn_password_interop,
+    warn_unreadable_metadata,
+)
+from ._reader import (
+    SessionDeclarationWarning,
+    _declaration_warning_text,
+    _warn_legacy_password,
+)
 
 import numpy as np
 
@@ -57,6 +65,9 @@ class MefReader:
                 SessionDeclarationWarning,
                 stacklevel=2,
             )
+        # Only sessions an older mef3io wrote can trigger it (mef_tools always
+        # used meflib's mapping), so it costs a legacy user nothing.
+        _warn_legacy_password(self._r, str(session_path), stacklevel=2)
         self.bi = [self._basic_info(ch) for ch in self._r.channels]
 
     def _basic_info(self, channel: str) -> dict:
@@ -188,6 +199,7 @@ class MefWriter:
         self._path = str(session_path)
         self._w = _mef3io.SessionWriter(self._path, overwrite, password1 or "", password2 or "")
         warn_unreadable_metadata(self._w.unreadable_metadata)
+        warn_password_interop(password1, password2)
         # "fast" by default, matching mef3io.Writer and the legacy stack this
         # class stands in for — meflib flushes nothing at all. See
         # mef3io.Writer for what an unclean shutdown costs and how

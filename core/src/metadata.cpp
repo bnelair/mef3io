@@ -134,6 +134,7 @@ TimeSeriesMetadata load_impl(std::span<const ui1> tmet_bytes, const std::string&
       throw PasswordError("tmet is encrypted and the password is missing or incorrect");
   }
   md.access_level = keys.access_level;
+  md.legacy_password_mapping = keys.legacy_password_mapping;
 
   // Copy the two section images so we can decrypt without mutating the input.
   std::vector<ui1> s2(tmet_bytes.begin() + METADATA_SECTION_2_OFFSET,

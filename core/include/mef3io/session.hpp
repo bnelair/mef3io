@@ -168,6 +168,10 @@ struct ChannelInfo {
   // Any segment carries password validation fields (metadata is encrypted at
   // some level). The warm-start cache never snapshots such a session.
   bool password_protected = false;
+  // The password opened at least one segment only through the byte mapping
+  // mef3io used up to 1.2.0 (issue #84): meflib/pymef cannot open those files
+  // with this password. Readers surface it as a warning.
+  bool legacy_password_mapping = false;
   std::string subject_name_1;
   std::string subject_name_2;
   std::string subject_id;

@@ -67,6 +67,61 @@ class BlockCopyWarning(UserWarning):
     """
 
 
+class LegacyPasswordWarning(UserWarning):
+    """The password opened this session only through mef3io's OLD byte mapping.
+
+    MEF derives a 16-byte key from the password one byte per character.
+    meflib (and so pymef and ``mef_tools``) keeps the low byte of each
+    character's Unicode code point; mef3io 1.2.0 and earlier kept the last byte of
+    its UTF-8 encoding instead. The two agree on ASCII and disagree on
+    everything else (``"é"`` is 0xE9 in meflib, 0xA9 in old mef3io) — issue #84.
+
+    mef3io now writes with meflib's mapping and reads with it first. A session
+    an older mef3io encrypted with a non-ASCII password still opens, through a
+    fallback to the old mapping, and this warning says so: the data is intact,
+    but meflib and pymef cannot open that session with that password. To make
+    it readable everywhere, re-encrypt it into a new session with the same
+    password once ``transform_session`` (issue #73) is available; until then,
+    reading it into a new session with :class:`Writer` does the same.
+
+    Appending to such a session keeps the existing segments' keys (rewriting
+    them would mean re-encrypting them); new segments use meflib's mapping.
+    """
+
+
+class PasswordInteropWarning(UserWarning):
+    """A password that other MEF readers handle differently than you may expect.
+
+    Raised by :class:`Writer` for a password longer than 15 characters (meflib
+    and pymef refuse it, so only mef3io will open the session) or one that
+    contains a character above U+00FF (MEF keeps only the low byte of each
+    code point, as meflib does, so a different password can unlock the same
+    session). The session is still written; the warning only tells you about
+    its reach. Short Latin-1 passwords (ASCII, or e.g. ``"é"``, ``"ü"``) raise
+    nothing.
+    """
+
+
+def _legacy_password_warning_text(channels: list, path: str) -> str:
+    shown = ", ".join(channels[:3]) + (", ..." if len(channels) > 3 else "")
+    return (
+        f"{path}: the password opened {len(channels)} channel(s) ({shown}) only "
+        "through the password-to-key mapping that mef3io used up to 1.2.0, which "
+        "differs from meflib's for non-ASCII characters (issue #84). The data "
+        "is read correctly, but meflib and pymef cannot open these files with "
+        "this password. Re-encrypt the session (transform_session, issue #73, "
+        "or rewrite it with mef3io.Writer) to make it readable everywhere."
+    )
+
+
+def _warn_legacy_password(impl, path: str, stacklevel: int) -> None:
+    fn = getattr(impl, "legacy_password_channels", None)
+    channels = list(fn()) if fn is not None else []
+    if channels:
+        warnings.warn(_legacy_password_warning_text(channels, path),
+                      LegacyPasswordWarning, stacklevel=stacklevel + 1)
+
+
 def _unreadable_warning_text(problems: list, path: str) -> str:
     chans = sorted({p["channel"] for p in problems})
     first = problems[0]
@@ -252,6 +307,11 @@ class Reader:
                     _cache.discard(self._cache_path)
             except OSError:
                 pass  # a snapshot is an accelerator; failing to save never fails an open
+
+        # Never from a cache snapshot: encrypted sessions are never cached, so
+        # an encrypted session always has its backend built here.
+        if self._impl is not None:
+            _warn_legacy_password(self._impl, self._path, stacklevel=2)
 
         if not self._strict:
             problems = self.problems  # from the cache snapshot on a warm open
