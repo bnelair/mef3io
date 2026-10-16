@@ -421,6 +421,7 @@ nb::dict verify_report_dict(const mef3io::VerifyReport& r) {
   d["ok"] = r.ok;
   d["problems"] = issues(r.problems);
   d["leaks"] = issues(r.leaks);
+  d["notes"] = issues(r.notes);
   d["inherited_findings"] = r.inherited_findings;
   d["channels"] = r.channels;
   d["excluded_channels"] = r.excluded_channels;

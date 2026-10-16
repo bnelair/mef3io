@@ -69,6 +69,11 @@ class VerifyReport:
         The problems found by the leak scan: a time field holding a value in
         the source's recording range (plain or negated), a name that should
         be gone, a source UUID, an uncleared field.
+    notes : tuple of VerifyIssue
+        Overlaps reported but not refused, worth showing the user: an
+        identity value inside a kept channel's name as part of a longer token
+        (or one shorter than 3 characters), inside the copy's own name, or a
+        number of fewer than 4 digits inside a longer number in kept text.
     inherited_findings : tuple of str
         Validator findings the source already had; a copy carries them over
         unchanged and they do not count against ``ok``.
@@ -81,6 +86,7 @@ class VerifyReport:
     ok: bool
     problems: Tuple[VerifyIssue, ...]
     leaks: Tuple[VerifyIssue, ...]
+    notes: Tuple[VerifyIssue, ...]
     inherited_findings: Tuple[str, ...]
     channels: Tuple[str, ...]
     excluded_channels: Tuple[str, ...]
@@ -96,6 +102,7 @@ class VerifyReport:
             ok=bool(d["ok"]),
             problems=tuple(VerifyIssue(**p) for p in d["problems"]),
             leaks=tuple(VerifyIssue(**p) for p in d["leaks"]),
+            notes=tuple(VerifyIssue(**p) for p in d.get("notes", ())),
             inherited_findings=tuple(d["inherited_findings"]),
             channels=tuple(d["channels"]),
             excluded_channels=tuple(d["excluded_channels"]),
@@ -119,6 +126,10 @@ class VerifyReport:
             lines.append(f"  - {p}")
         if len(self.problems) > 20:
             lines.append(f"  ... and {len(self.problems) - 20} more")
+        for n in self.notes[:20]:
+            lines.append(f"  note: {n}")
+        if len(self.notes) > 20:
+            lines.append(f"  ... and {len(self.notes) - 20} more notes")
         if self.inherited_findings:
             lines.append(
                 f"  {len(self.inherited_findings)} validator finding(s) carried over from the "
@@ -350,8 +361,11 @@ def anonymize_session(
         (default) clears it; the records themselves, their types and shifted
         times are kept. ``"keep"`` keeps it, with only the names mef3io knows
         removed (the old session name, cleared subject and location values,
-        excluded channel names). It does **not** find dates, ages, other
-        people's names or anything else written in free text. A callable
+        excluded channel names). Names shorter than 4 characters and numbers
+        are replaced only as whole words / whole numbers, and kept channel
+        names are never changed; a short name left inside a longer word makes
+        :func:`verify` refuse the copy. It does **not** find dates, ages,
+        other people's names or anything else written in free text. A callable
         ``text(value, info)`` returns the new text (``None`` clears); the same
         redaction is applied after it. Text that is not valid UTF-8 is passed
         with ``errors="surrogateescape"`` and encoded back the same way, so

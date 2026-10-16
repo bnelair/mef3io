@@ -51,10 +51,18 @@ offsets, renumbers start_sample and flags the block after a drop as a
 discontinuity, returns section-2 stats; reused by cut/merge #103).
 
 Anonymize (#70) invariants, all test-pinned (`tests/test_p29_anonymize.py`):
-(1) `verify` is FIELD-WISE and INDEPENDENT of the rewrite: its name scan is
-a plain case-insensitive substring search (after removing only the copy's
-own names/kept channels) and never shares the redactor's matcher, so a
-rewrite gap fails closed; times are checked one field at a time against the
+(1) `verify` is FIELD-WISE and INDEPENDENT of the rewrite (own matcher, so
+a rewrite gap fails closed). Rewritten fields: plain case-insensitive
+substring scan; excused only inside the copy's own name or a kept channel
+name (NOTE), or a <4-digit number inside a longer number (NOTE). Kept
+channel names (+ paths, UH channel_name, Seiz entries derived from them):
+tokens split on non-alphanumerics incl. `_`; REFUSE only a token EQUAL to an
+identity value of 3+ chars, else NOTE (256-channel montages hit "12"/"P3"/
+"EEG"). Identity checks run before excusing the copy's own name ("S0012"
+vs copy "S001"). Epoc/Curs id_number: absolute window only (the rto window
+reaches small ints). Redactor: <4 chars = whole tokens, numeric = whole
+numbers, never inside kept channel names. Segment number = `.tmet` UH @48,
+folder suffix must agree; times are checked one field at a time against the
 source range +-1 day, plain or negated -- never a sliding window, never
 size/count fields, RED payload + stats compared, not scanned. (2) Build in
 `<dst>.partial`, fsync, verify, THEN rename; any failure/cancel removes it.

@@ -160,17 +160,36 @@ struct Shifter {
 
 // ---------------------------------------------------------------------------
 // Text. Two matchers, deliberately unrelated:
-//   * Redactor (the REWRITE): replaces the names a copy must not carry.
-//     Identity values (session names, subject fields, location, anonymized
-//     names) are replaced wherever they occur as a substring; excluded
-//     channel names only at word boundaries (letters and digits continue a
-//     word, '_' does not), so excluding "LAH1" leaves a kept "LAH12" intact.
-//   * Scanner (the CHECK, in verify): a plain case-insensitive substring
-//     search, after removing only the strings the copy is allowed to carry.
-//     It never uses the Redactor, so a gap in the rewrite fails closed.
+//   * Redactor (the REWRITE): replaces the names a copy must not carry, never
+//     inside a kept channel's name (which is retained verbatim by design).
+//     How a value is matched depends on what it is:
+//       - 4+ characters, not purely numeric: anywhere, as a substring;
+//       - shorter than 4 characters: whole tokens only (a token is a maximal
+//         run of letters and digits; '_' and everything else end it), so
+//         "rec" does not turn "recorded" into nonsense;
+//       - purely numeric: whole numbers only (a number is a maximal run of
+//         digits and ':' '.' ','), so ID "12" leaves "12:30" and "1200";
+//       - excluded channel names: whole tokens.
+//   * Scanner (the CHECK, in verify): its own code, never the Redactor's.
+//       - A field the copy REWRITES: a plain case-insensitive substring
+//         search. An occurrence is excused only when it lies entirely inside
+//         the copy's own name or pseudonym (a NOTE), inside a kept channel's
+//         name (that name's own rule decides), or, for a numeric value of
+//         fewer than 4 digits, inside a longer number (a NOTE). Everything
+//         else refuses the copy.
+//       - A kept channel's name (and what derives from it: path components,
+//         the UH channel_name, Seiz entries naming it): split into tokens;
+//         REFUSED when a token equals an identity value of 3+ characters,
+//         otherwise any overlap is a NOTE. Channel names are needed by every
+//         study and routinely hold short codes ("LAH12", "P3", "EEG1").
 // ---------------------------------------------------------------------------
 
-bool continues_word(ui1 c) { return c >= 0x80 || std::isalnum(c); }
+bool is_alnum(char c) {
+  const auto u = static_cast<unsigned char>(c);
+  return u >= 0x80 || std::isalnum(u);
+}
+bool is_digit(char c) { return c >= '0' && c <= '9'; }
+bool number_char(char c) { return is_digit(c) || c == ':' || c == '.' || c == ','; }
 char fold(char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); }
 std::string folded(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(), fold);
@@ -182,86 +201,187 @@ std::string trimmed(const std::string& s) {
   while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
   return s.substr(a, b - a);
 }
+bool all_digits(const std::string& s) {
+  return !s.empty() && std::all_of(s.begin(), s.end(), is_digit);
+}
 /// How a channel name is compared for exclusion: trimmed, case-folded.
 std::string channel_key(const std::string& s) { return folded(trimmed(s)); }
 
+using Span = std::pair<std::size_t, std::size_t>;  // [first, last)
+
+/// Every occurrence of `needle` (already folded) in `hay` (already folded).
+std::vector<Span> occurrences(const std::string& hay, const std::string& needle) {
+  std::vector<Span> out;
+  if (needle.empty()) return out;
+  for (std::size_t p = hay.find(needle); p != std::string::npos; p = hay.find(needle, p + 1))
+    out.push_back({p, p + needle.size()});
+  return out;
+}
+
+bool covered_by(const Span& s, const std::vector<Span>& by) {
+  for (const auto& b : by)
+    if (b.first <= s.first && s.second <= b.second) return true;
+  return false;
+}
+
+/// The maximal number-like run (digits and : . ,) around [a, b), with
+/// punctuation trimmed from both ends.
+Span number_run(const std::string& h, std::size_t a, std::size_t b) {
+  while (a > 0 && number_char(h[a - 1])) --a;
+  while (b < h.size() && number_char(h[b])) ++b;
+  while (a < b && !is_digit(h[a])) ++a;
+  while (b > a && !is_digit(h[b - 1])) --b;
+  return {a, b};
+}
+
+/// The maximal alphanumeric token around [a, b).
+Span token_run(const std::string& h, std::size_t a, std::size_t b) {
+  while (a > 0 && is_alnum(h[a - 1])) --a;
+  while (b < h.size() && is_alnum(h[b])) ++b;
+  return {a, b};
+}
+
 struct Redactor {
+  enum class Mode { Substring, Token, Number };
   struct Rule {
-    std::string needle;       // case-folded
+    std::string needle;  // case-folded
     std::string replacement;
-    bool word = false;        // match only at word boundaries
+    Mode mode = Mode::Substring;
   };
   std::vector<Rule> rules;
+  std::vector<std::string> protect;  // kept channel names, folded, longest first
 
-  void add(const std::string& value, const std::string& replacement, bool word) {
-    // One- and zero-byte values would match nearly any text.
-    if (value.size() < 2) return;
+  /// `name_like`: an excluded channel name, matched as a whole token.
+  void add(const std::string& value, const std::string& replacement, bool name_like) {
+    if (value.size() < 2) return;  // one byte would match nearly any text
     const std::string n = folded(value);
     if (n == folded(replacement)) return;
     for (const auto& r : rules)
       if (r.needle == n) return;
-    rules.push_back({n, replacement, word});
-    // Longest first, so "Jane Doe" is replaced before "Jane".
+    Mode mode = Mode::Substring;
+    if (all_digits(n)) mode = Mode::Number;
+    else if (name_like || n.size() < 4) mode = Mode::Token;
+    rules.push_back({n, replacement, mode});
     std::stable_sort(rules.begin(), rules.end(),
                      [](const Rule& a, const Rule& b) { return a.needle.size() > b.needle.size(); });
   }
 
-  static std::size_t find(const std::string& text, const Rule& r, std::size_t from) {
-    const std::string& needle = r.needle;
-    if (needle.empty() || text.size() < needle.size()) return std::string::npos;
-    for (std::size_t i = from; i + needle.size() <= text.size(); ++i) {
-      bool eq = true;
-      for (std::size_t k = 0; k < needle.size() && eq; ++k) eq = fold(text[i + k]) == needle[k];
-      if (!eq) continue;
-      if (!r.word) return i;
-      const bool left = i == 0 || !continues_word(static_cast<ui1>(text[i - 1]));
-      const bool right = i + needle.size() == text.size() ||
-                         !continues_word(static_cast<ui1>(text[i + needle.size()]));
-      if (left && right) return i;
-    }
-    return std::string::npos;
-  }
-
   std::string apply(std::string text) const {
     for (const auto& r : rules) {
-      std::size_t pos = 0;
-      while ((pos = find(text, r, pos)) != std::string::npos) {
-        text.replace(pos, r.needle.size(), r.replacement);
-        pos += r.replacement.size();
+      std::size_t from = 0;
+      while (true) {
+        const std::string h = folded(text);
+        std::vector<Span> keep;
+        for (const auto& k : protect)
+          for (const auto& s : occurrences(h, k)) keep.push_back(s);
+        std::size_t p = h.find(r.needle, from);
+        while (p != std::string::npos) {
+          const Span s{p, p + r.needle.size()};
+          bool ok = !covered_by(s, keep);
+          // A partial overlap with a kept name is also left alone.
+          for (const auto& k : keep)
+            if (s.first < k.second && k.first < s.second) ok = false;
+          if (ok && r.mode == Mode::Token) ok = token_run(h, s.first, s.second) == s;
+          if (ok && r.mode == Mode::Number) ok = number_run(h, s.first, s.second) == s;
+          if (ok) break;
+          p = h.find(r.needle, p + 1);
+        }
+        if (p == std::string::npos) break;
+        text.replace(p, r.needle.size(), r.replacement);
+        from = p + r.replacement.size();
       }
     }
     return text;
   }
 };
 
-/// verify's text check. Never shares code with the Redactor.
+/// verify's text check. Never shares code with the Redactor's matching.
 struct Scanner {
   struct Needle {
     std::string value;  // case-folded
     std::string label;  // what it is (never the value)
   };
-  std::vector<Needle> identity;          // must not occur anywhere
-  std::vector<Needle> excluded;          // excluded channel names
-  std::vector<std::string> allowed;      // the copy's own names (folded)
-  std::vector<std::string> kept_channels;  // folded
+  struct Result {
+    std::string refuse;  // label of a forbidden string; "" = none
+    std::string note;    // an overlap that is reported, not refused
+  };
+  std::vector<Needle> identity;            // must not occur anywhere
+  std::vector<Needle> excluded;            // excluded channel names
+  std::vector<std::string> allowed;        // the copy's own names (folded)
+  std::vector<std::string> kept_channels;  // folded, longest first
 
-  static void erase_all(std::string& hay, const std::string& s) {
-    if (s.empty()) return;
-    std::size_t p = 0;
-    while ((p = hay.find(s, p)) != std::string::npos) hay.replace(p, s.size(), "\x01");
+  /// The rule for a kept channel's name and anything derived from it.
+  Result channel(const std::string& name) const {
+    const std::string h = folded(name);
+    std::vector<std::string> tokens;
+    for (std::size_t i = 0; i < h.size();) {
+      if (!is_alnum(h[i])) {
+        ++i;
+        continue;
+      }
+      std::size_t j = i;
+      while (j < h.size() && is_alnum(h[j])) ++j;
+      tokens.push_back(h.substr(i, j - i));
+      i = j;
+    }
+    Result r;
+    for (const auto& n : identity) {
+      const bool token_equal = std::find(tokens.begin(), tokens.end(), n.value) != tokens.end();
+      if (token_equal && n.value.size() >= 3) return {n.label, ""};
+      if (r.note.empty() && h.find(n.value) != std::string::npos)
+        r.note = "contains " + n.label + " as part of a longer name, or one shorter than 3 "
+                 "characters; kept, as channel names are";
+    }
+    for (const auto& n : excluded)
+      if (r.note.empty() && h.find(n.value) != std::string::npos)
+        r.note = "contains " + n.label + "; kept, as channel names are";
+    return r;
   }
 
-  /// The label of the first forbidden string in `text`, or "".
-  std::string hit(const std::string& text) const {
-    std::string h = folded(text);
-    for (const auto& a : allowed) erase_all(h, a);
-    for (const auto& n : identity)
-      if (h.find(n.value) != std::string::npos) return n.label;
-    // A kept channel's name may contain an excluded one ("LAH12" / "LAH1").
-    for (const auto& k : kept_channels) erase_all(h, k);
+  /// The rule for a field the copy rewrites.
+  Result text(const std::string& value) const {
+    const std::string h = folded(value);
+    std::vector<Span> own, kept;
+    std::vector<std::string> kept_of;  // the channel name each kept span is
+    for (const auto& a : allowed)
+      for (const auto& s : occurrences(h, a)) own.push_back(s);
+    for (const auto& k : kept_channels)
+      for (const auto& s : occurrences(h, k)) {
+        kept.push_back(s);
+        kept_of.push_back(k);
+      }
+    Result r;
+    auto note = [&](const std::string& n) {
+      if (r.note.empty()) r.note = n;
+    };
+    for (const auto& n : identity) {
+      for (const auto& s : occurrences(h, n.value)) {
+        if (covered_by(s, own)) {
+          note("contains " + n.label + " inside the copy's own name");
+          continue;
+        }
+        bool decided = false;
+        for (std::size_t k = 0; k < kept.size() && !decided; ++k) {
+          if (!(kept[k].first <= s.first && s.second <= kept[k].second)) continue;
+          const Result c = channel(kept_of[k]);
+          if (!c.refuse.empty()) return {c.refuse, ""};
+          note("mentions a kept channel whose name contains " + n.label);
+          decided = true;
+        }
+        if (decided) continue;
+        if (all_digits(n.value) && n.value.size() < 4 &&
+            number_run(h, s.first, s.second) != s) {
+          note("contains " + n.label + " (a number of fewer than 4 digits) inside a longer "
+               "number");
+          continue;
+        }
+        return {n.label, ""};
+      }
+    }
     for (const auto& n : excluded)
-      if (h.find(n.value) != std::string::npos) return n.label;
-    return {};
+      for (const auto& s : occurrences(h, n.value))
+        if (!covered_by(s, kept) && !covered_by(s, own)) return {n.label, ""};
+    return r;
   }
 };
 
@@ -908,8 +1028,11 @@ SourcePlan plan_source(const SessionSource& src, const std::string& path,
 
 Redactor build_redactor(const SourcePlan& p, const std::string& new_name, bool clear_subject,
                         bool clear_location, const std::set<std::string>& excluded,
-                        const std::string& pseudonym) {
+                        const std::set<std::string>& kept, const std::string& pseudonym) {
   Redactor r;
+  for (const auto& k : kept) r.protect.push_back(folded(k));
+  std::sort(r.protect.begin(), r.protect.end(),
+            [](const std::string& a, const std::string& b) { return a.size() > b.size(); });
   for (const auto& n : p.session_names)
     if (n != new_name) r.add(n, new_name, false);
   if (clear_subject)
@@ -979,6 +1102,15 @@ class Verifier {
     rep_.problems.push_back(i);
   }
 
+  /// The source's recording range +- (1 day - 1 us), plain or negated. For a
+  /// field that is not a stored time (an ID), only this window applies: the
+  /// offset-relative one below reaches down to small numbers.
+  bool in_absolute_window(si8 v) const {
+    if (!plan_.has_times || v == fmt::UUTC_NO_ENTRY) return false;
+    const si8 a = v < 0 ? -v : v;
+    return a >= lo_ && a <= hi_;
+  }
+
   bool in_window(si8 v) const {
     if (!plan_.has_times || v == fmt::UUTC_NO_ENTRY) return false;
     const si8 a = v < 0 ? -v : v;  // plain or negated (v > INT64_MIN here)
@@ -1021,8 +1153,7 @@ class Verifier {
                    const std::string& loc, const std::string& field, bool pad_ok = false) {
     ++rep_.text_fields_checked;
     const std::string value = read_string(b, off, len);
-    const std::string hit = scan_.hit(value);
-    if (!hit.empty()) leak(loc, field, "contains " + hit);
+    report(scan_.text(value), loc, field);
     for (std::size_t i = off + value.size(); i < off + len; ++i)
       if (b[i] != 0 && !(pad_ok && b[i] == PAD_BYTE)) {
         leak(loc, field, "holds bytes after its terminator (hidden text)");
@@ -1031,12 +1162,49 @@ class Verifier {
     return value;
   }
 
-  /// A name the copy carries outside any file (a path component).
-  void name(const std::string& value, const std::string& loc) {
-    ++rep_.text_fields_checked;
-    const std::string hit = scan_.hit(value);
-    if (!hit.empty()) leak(loc, "path", "contains " + hit);
+  void report(const Scanner::Result& r, const std::string& loc, const std::string& field) {
+    if (!r.refuse.empty()) leak(loc, field, "contains " + r.refuse);
+    else if (!r.note.empty()) note(loc, field, r.note);
   }
+
+  /// A note: reported, never a refusal. One per distinct field + message.
+  void note(const std::string& loc, const std::string& field, const std::string& msg) {
+    for (const auto& n : rep_.notes)
+      if (n.field == field && n.message == msg) return;
+    rep_.notes.push_back({loc, field, msg});
+  }
+
+  /// A kept channel's name, or a text field holding exactly one: the
+  /// channel rule. Anything else: the rewritten-field rule.
+  void name_field(const std::string& value, const std::string& loc, const std::string& field) {
+    ++rep_.text_fields_checked;
+    if (value.empty() || kept_.count(value))
+      report(scan_.channel(value), loc, field);
+    else
+      report(scan_.text(value), loc, field);
+  }
+
+  /// A path component of the copy: derived from a channel's name (its
+  /// folder, its segments, its record files) unless it is the session's own
+  /// record file.
+  void path_component(const std::string& name, const std::string& loc) {
+    ++rep_.text_fields_checked;
+    const std::string base = name.substr(0, name.rfind('.'));
+    if (base == dst_.session_name()) {
+      report(scan_.text(base), loc, "path");
+      return;
+    }
+    std::string owner = base;  // "<ch>-NNNNNN" -> "<ch>"
+    const auto dash = base.rfind('-');
+    if (dash != std::string::npos && all_digits(base.substr(dash + 1))) owner = base.substr(0, dash);
+    if (!kept_.count(owner)) {
+      report(scan_.text(name), loc, "path");
+      return;
+    }
+    report(scan_.channel(name), loc, "path");
+  }
+
+  void set_kept(std::set<std::string> k) { kept_ = std::move(k); }
 
   void set_scanner(Scanner s) { scan_ = std::move(s); }
 
@@ -1048,7 +1216,12 @@ class Verifier {
       problem(loc, "universal header session_name",
               "does not match the copy's folder name");
     text(d, UH_ANON_NAME, UH_NAME_BYTES, loc, "universal header anonymized_name");
-    text(d, UH_CHANNEL_NAME, UH_NAME_BYTES, loc, "universal header channel_name");
+    {
+      const std::string cn = read_string(d, UH_CHANNEL_NAME, UH_NAME_BYTES);
+      name_field(cn, loc, "universal header channel_name");
+      if (!all_zero(d.subspan(UH_CHANNEL_NAME + cn.size(), UH_NAME_BYTES - cn.size())))
+        leak(loc, "universal header channel_name", "holds bytes after its terminator (hidden text)");
+    }
     for (std::size_t off : {UH_LEVEL_UUID, UH_FILE_UUID, UH_PROV_UUID}) {
       const Uuid u = uuid_at(d, off);
       if (!all_zero(u) && src_uuids_.count(u))
@@ -1349,7 +1522,7 @@ class Verifier {
     // It is copied as is; a value in the recording range is reported.
     if (a.type == "Epoc" || a.type == "Curs") {
       ++rep_.times_checked;
-      if (in_window(read<si8>(b.body, 0)))
+      if (in_absolute_window(read<si8>(b.body, 0)))
         leak(loc, "record id_number", "holds a value inside the source's recording range");
     }
     for (const auto& slot : la->text)
@@ -1381,7 +1554,13 @@ class Verifier {
     for (std::size_t k = 0; k < have; ++k) {
       const std::size_t so = SEIZ_FIXED + want[k] * SEIZ_CHANNEL, dof = SEIZ_FIXED + k * SEIZ_CHANNEL;
       // The name may be kept, redacted or cleared; it must not leak.
-      text(b.body, dof, SEIZ_CHANNEL_NAME, loc, "Seiz channel name");
+      {
+        const std::string en = read_string(b.body, dof, SEIZ_CHANNEL_NAME);
+        name_field(en, loc, "Seiz channel name");
+        if (!all_zero(std::span<const ui1>(b.body).subspan(dof + en.size(),
+                                                            SEIZ_CHANNEL_NAME - en.size())))
+          leak(loc, "Seiz channel name", "holds bytes after its terminator (hidden text)");
+      }
       time_field(read<si8>(a.body, so + SEIZ_CH_ONSET), read<si8>(b.body, dof + SEIZ_CH_ONSET), loc,
                  "Seiz channel onset", true);
       time_field(read<si8>(a.body, so + SEIZ_CH_OFFSET), read<si8>(b.body, dof + SEIZ_CH_OFFSET),
@@ -1399,6 +1578,7 @@ class Verifier {
   VerifyReport& rep_;
   Shifter sh_;
   Scanner scan_;
+  std::set<std::string> kept_;
   si8 lo_ = 0, hi_ = 0;
   std::set<Uuid> src_uuids_;
   bool dst_encrypted_ = false;
@@ -1458,13 +1638,14 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
     }
     v.set_scanner(build_scanner(plan, dname, o.clear_subject, o.clear_location, excluded, dch,
                                 pseudonym));
+    v.set_kept(dch);
   }
   // Every name the copy carries outside its files: each path component.
   {
     std::function<void(const std::string&)> walk = [&](const std::string& rel) {
       for (const auto& e : dst.list_dir(rel)) {
         const std::string p = rel.empty() ? e.name : rel + "/" + e.name;
-        v.name(e.name, p);
+        v.path_component(e.name, p);
         if (e.is_dir) walk(p);
       }
     };
@@ -1673,7 +1854,7 @@ AnonymizeReport anonymize_session(const std::string& src_path, const std::string
     throw std::invalid_argument("the session name and pseudonym must fit 255 bytes");
   if (!o.rename) plan.session_names.clear();  // the name is kept on purpose
   const Redactor red =
-      build_redactor(plan, new_name, o.clear_subject, o.clear_location, excluded, pseudonym);
+      build_redactor(plan, new_name, o.clear_subject, o.clear_location, excluded, kept, pseudonym);
 
   OutputKeys out;
   if (!o.output_password_1.empty()) {
@@ -1727,10 +1908,27 @@ AnonymizeReport anonymize_session(const std::string& src_path, const std::string
       for (const auto& seg : it->second->segments) {
         // Named canonically, as the writer names them: a source folder name
         // may carry anything, and the segment number is all a reader needs.
-        if (!numbers.insert(seg.number).second)
+        // The number is the .tmet header's (@48); the folder name must agree.
+        // A folder whose suffix is not a number, or names another segment,
+        // is refused: which one is right is unknown.
+        const std::string folder = leaf(seg.dir());
+        const std::string fstem = folder.substr(0, folder.size() - 5);
+        const auto dash = fstem.rfind('-');
+        const std::string suffix = dash == std::string::npos ? "" : fstem.substr(dash + 1);
+        const si4 uh_number = read<si4>(src.read_range(seg.tmet, 0, UH), 48);
+        if (!all_digits(suffix) || suffix.size() > 9)
+          throw WriteConflictError("segment folder " + src.describe(seg.dir()) +
+                                   " does not end in a segment number");
+        const int folder_number = std::stoi(suffix);
+        if (uh_number != fmt::SI4_NO_ENTRY && uh_number != folder_number)
+          throw WriteConflictError("segment folder " + src.describe(seg.dir()) + " says segment " +
+                                   std::to_string(folder_number) + " but its metadata says " +
+                                   std::to_string(uh_number));
+        if (!numbers.insert(folder_number).second)
           throw WriteConflictError("two segment folders of channel " + ch +
-                                   " have the same segment number " + std::to_string(seg.number));
-        const std::string stem = canonical_segment_stem(ch, seg.number);
+                                   " have the same segment number " +
+                                   std::to_string(folder_number));
+        const std::string stem = canonical_segment_stem(ch, folder_number);
         const fs::path sdir = cdir / (stem + ".segd");
         fs::create_directory(sdir);
         an.copy_tmet(seg.tmet, sdir / (stem + ".tmet"), ch);
@@ -1740,7 +1938,7 @@ AnonymizeReport anonymize_session(const std::string& src_path, const std::string
         handled.insert(seg.tdat);
         if (src.exists(seg.rdat())) {
           an.copy_records(seg.rdat(), sdir / (stem + ".rdat"), RecordLevel::Segment, ch,
-                          seg.number);
+                          folder_number);
           handled.insert(seg.rdat());
           handled.insert(ridx_of(seg.rdat()));
         }

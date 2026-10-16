@@ -128,12 +128,13 @@ def _signal(n, seed):
     return np.cumsum(rng.normal(size=n)).round(3)
 
 
-def _rich_session(path, password=False, channels=("ch1", "ch2", "ch3"), unknown=True):
+def _rich_session(path, password=False, channels=("ch1", "ch2", "ch3"), unknown=True,
+                  subject=SUBJECT):
     """Three channels (ch1 in two segments), subject metadata, records at all
     three levels including Seiz / Epoc / Curs bodies, an EDFA, an unknown
     type, and a session-level Seiz naming every channel."""
     kw = dict(password1="pw-one", password2="pw-two") if password else {}
-    meta = mef3io.Metadata(subject=SUBJECT, acquisition=mef3io.Acquisition(
+    meta = mef3io.Metadata(subject=subject, acquisition=mef3io.Acquisition(
         session_description="Jane Roe overnight", channel_description="left hippocampus"))
     with mef3io.Writer(str(path), overwrite=True, metadata=meta, **kw) as w:
         for i, ch in enumerate(channels):
@@ -1010,6 +1011,123 @@ def test_lntp_body_is_cut_to_its_template(tmp_path):
     assert b"Jane" not in _all_bytes(tmp_path / "L.mefd")
     lntp = next(r for r in _all_records(tmp_path / "L.mefd") if r["type"] == "LNTP")
     assert lntp["template"] == [7, -7]
+
+
+# ---- review round 2: no false refusals on realistic names, no mangled text
+
+
+def test_rto_session_with_sequential_record_ids_is_published(tmp_path):
+    """Epoc/Curs id_number is checked against the ABSOLUTE window only: the
+    offset-relative one reaches down to small numbers like 1 and 2."""
+    rto = START - 6 * 3600 * SECOND
+    src = _legacy(tmp_path / "rto.mefd", rto=rto)
+    t = START + 5 * SECOND
+    disk = rto - t                                         # meflib: offset applied
+    recs = [_record("Epoc", _epoc_body(t, t + SECOND), disk),
+            _record("Curs", _curs_body(t + SECOND), disk)]
+    recs = [bytearray(r) for r in recs]
+    struct.pack_into("<q", recs[0], RHDR, 1)               # Epoc id 1
+    struct.pack_into("<q", recs[1], RHDR, 2)               # Curs id 2
+    for r in recs:
+        struct.pack_into("<I", r, 0, m.crc32(bytes(r[4:])))
+    _install_records(_src_rdat(src), [bytes(r) for r in recs], [disk, disk])
+    rep = _anon(src, tmp_path / "R.mefd")
+    assert rep.verification.ok and rep.records >= 2
+    got = {r["type"]: r for r in _all_records(tmp_path / "R.mefd")}
+    assert got["Epoc"]["id_number"] == 1 and got["Curs"]["id_number"] == 2
+    assert got["Epoc"]["timestamp"] == t + SHIFT
+
+
+def _named_session(path, channels, subject):
+    with mef3io.Writer(str(path), overwrite=True,
+                       metadata=mef3io.Metadata(subject=subject)) as w:
+        for i, ch in enumerate(channels):
+            w.write(ch, _signal(2560, i), START, FS, precision=3)
+        t = START + SECOND
+        w.write_annotations([{"type": "Note", "time": t, "text": "x"}], channels[0])
+        w.write_annotations([{"type": "Note", "time": t, "text": "x"}])
+    return Path(path)
+
+
+# (session folder, channels, subject): each overlap is a NOTE, never a refusal
+PROBES = {
+    "subject_id 12 vs LAH12": ("p.mefd", ("LAH12", "RAH1"), mef3io.Subject(id="12")),
+    "subject_id 01 vs LA01": ("p.mefd", ("LA01", "LA02"), mef3io.Subject(id="01")),
+    "subject_id P3 vs electrode P3": ("p.mefd", ("P3", "C3"), mef3io.Subject(id="P3")),
+    "name Al vs LAL1": ("p.mefd", ("LAL1", "LAL2"), mef3io.Subject(name_1="Al")),
+    "session eeg vs EEG1": ("eeg.mefd", ("EEG1", "EEG2"), mef3io.Subject()),
+    "name LAH vs LAH1": ("p.mefd", ("LAH1", "LAH2"), mef3io.Subject(name_1="LAH")),
+}
+
+
+@pytest.mark.parametrize("probe", list(PROBES))
+def test_channel_names_overlapping_identity_are_notes_not_refusals(tmp_path, probe):
+    folder, channels, subject = PROBES[probe]
+    src = _named_session(tmp_path / folder, channels, subject)
+    rep = _anon(src, tmp_path / "S001.mefd")
+    assert rep.verification.ok, rep.verification.summary()
+    assert rep.verification.notes, "the overlap must be reported"
+    with mef3io.Reader(str(tmp_path / "S001.mefd")) as r:
+        assert r.channels == sorted(channels)                # kept verbatim
+    for n in rep.verification.notes:                         # never echoes the value
+        assert subject.id not in n.message or not subject.id
+
+
+def test_a_channel_named_with_a_whole_identity_token_is_refused(tmp_path):
+    src = _named_session(tmp_path / "p.mefd", ("Jane_C3", "C4"), mef3io.Subject(name_1="Jane"))
+    with pytest.raises(mef3io.WriteConflictError, match="verification"):
+        _anon(src, tmp_path / "S001.mefd")
+    assert not (tmp_path / "S001.mefd").exists()
+    # excluding it publishes
+    rep = _anon(src, tmp_path / "S002.mefd", exclude_channels=["Jane_C3"])
+    assert rep.verification.ok
+
+
+def test_short_and_numeric_values_are_redacted_as_whole_tokens(tmp_path):
+    src = _named_session(tmp_path / "p.mefd", ("LAH12", "RAH1"), mef3io.Subject(id="12"))
+    t = START + 5 * SECOND
+    _install_records(_src_rdat(src), [_record(
+        "Note", b"seizure at 12:30, 1200 uV, LAH12 spikes, id 12.\0", -t)], [-t])
+    rep = _anon(src, tmp_path / "S001.mefd", text="keep")
+    assert rep.verification.ok, rep.verification.summary()
+    note = next(r for r in _all_records(tmp_path / "S001.mefd")
+                if r["type"] == "Note" and r["level"] == "session")
+    # times, numbers and the kept channel name untouched; the bare ID gone
+    assert note["text"] == "seizure at 12:30, 1200 uV, LAH12 spikes, id ."
+    assert any("longer number" in n.message for n in rep.verification.notes)
+
+
+def test_a_short_value_left_inside_a_word_is_refused_not_mangled(tmp_path):
+    src = _named_session(tmp_path / "rec.mefd", ("c1", "c2"), mef3io.Subject())
+    t = START + 5 * SECOND
+    _install_records(_src_rdat(src), [_record("Note", b"recorded at rec site\0", -t)], [-t])
+    # keep: "rec" the word is replaced, "recorded" is not mangled -- and since
+    # the old name is still a substring there, the scanner refuses the copy
+    with pytest.raises(mef3io.WriteConflictError, match="verification"):
+        _anon(src, tmp_path / "S001.mefd", text="keep")
+    assert not (tmp_path / "S001.mefd").exists()
+    rep = _anon(src, tmp_path / "S002.mefd")                 # drop: publishes
+    assert rep.verification.ok
+
+
+def test_identity_containing_the_copy_name_is_still_found(tmp_path, rich):
+    src = _rich_session(tmp_path / "jane_roe.mefd",
+                        subject=mef3io.Subject(name_1="Jane", id="S0012"))
+    _anon(src, tmp_path / "S001.mefd")
+    bad = _copy(tmp_path / "S001.mefd", tmp_path, "bad")
+    _edit_record(bad / "S001.rdat", b"Epoc",
+                 lambda r, b, n: r.__setitem__(slice(b + 64, b + 70), b"S0012\0"))
+    rep = mef3io.anonymize.verify(src, bad, SHIFT)
+    assert not rep.ok and rep.leaks
+
+
+@pytest.mark.parametrize("folder", ["ch3-000007", "ch3-Jane"])
+def test_segment_number_must_agree_with_its_metadata(tmp_path, folder):
+    src = _rich_session(tmp_path / "jane_roe.mefd")
+    _rename_segment(src, folder, channel="ch3")
+    with pytest.raises(mef3io.WriteConflictError, match="segment"):
+        _anon(src, tmp_path / "S001.mefd")
+    assert not (tmp_path / "S001.mefd").exists()
 
 
 def test_verify_clean_copy_and_wrong_shift(rich):

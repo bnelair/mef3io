@@ -300,7 +300,7 @@ Two rules protect the copy:
 | Subject | `subject_name_1`, `subject_name_2`, `subject_id` and `recording_location` cleared (`clear=`). |
 | Session name | Replaced by the copy's name in every file header, in the names of the session-level annotation files, and in `session_description`. `anonymized_name` is set to `pseudonym` (default: the copy's name). |
 | Descriptions | `session_description`, `channel_description` and `reference_description` cleared. With `clear=("subject", "location")` they are kept, with the old session name replaced and the removed names taken out. |
-| Annotation text | `text="drop"` (default) clears every free-text field; the annotations, their types and their (moved) times stay. `text="keep"` keeps the text and takes out only the names mef3io knows: the old session name, the subject's names, ID and location, and excluded channels. **It does not find dates, ages, other people's names or anything else written in free text**; read the text yourself, or use `"drop"`. A function `text(value, info)` decides itself; the known names are still taken out afterwards. Text that is not valid UTF-8 reaches it with each bad byte as a surrogate (`errors="surrogateescape"`) and is written back byte for byte. An annotation of a type or version mef3io does not know keeps its type and time, but its contents are not copied, since they may hold text or dates nothing can find. |
+| Annotation text | `text="drop"` (default) clears every free-text field; the annotations, their types and their (moved) times stay. `text="keep"` keeps the text and takes out only the names mef3io knows: the old session name, the subject's names, ID and location, and excluded channels (short names and numbers only as whole words or numbers; kept channel names are never changed). **It does not find dates, ages, other people's names or anything else written in free text**; read the text yourself, or use `"drop"`. A function `text(value, info)` decides itself; the known names are still taken out afterwards. Text that is not valid UTF-8 reaches it with each bad byte as a surrogate (`errors="surrogateescape"`) and is written back byte for byte. An annotation of a type or version mef3io does not know keeps its type and time, but its contents are not copied, since they may hold text or dates nothing can find. |
 | Seizure channel lists | An entry naming a kept channel exactly stays. An entry naming an excluded channel (compared without case or surrounding spaces) is removed. Any other entry name is free text: cleared with `text="drop"`, names taken out otherwise. |
 | Identifiers | Every file identifier (level, file and provenance UUID) is new, so nothing links the copy back to the original. |
 | Other programs' data | The private areas other programs may fill in are cleared: the protected and discretionary regions of every file header, of metadata sections 1–3, of every block-index entry and of every data block's header. Every text field is rewritten whole, so nothing hidden after a field's end survives. |
@@ -386,11 +386,32 @@ It confirms that:
   whose bytes look random, is compared rather than searched, so the check
   does not raise false alarms from the signal.
 
-The name search is deliberately stricter than the replacement: it never
-uses the same matcher, so anything the replacement misses stops the copy
-instead of reaching it. The price is that a name contained in an allowed one
-(a subject ID "12" inside a channel called "ch12") is refused too; then use a
-different copy name, or leave the field out with `clear=`.
+The name search never uses the same matcher as the replacement, so anything
+the replacement misses stops the copy instead of reaching it. It follows two
+rules:
+
+- **Fields the copy writes** (descriptions, annotation text, header names):
+  a name that should be gone stops the copy wherever it appears, even inside
+  another word. Three overlaps are reported as **notes** instead: inside the
+  copy's own name, inside a kept channel's name (the next rule decides), and
+  a number of fewer than 4 digits that is part of a longer number ("12" in
+  "12:30" or "1200").
+- **Channel names**, which the copy keeps exactly as they are, and the
+  folder, file and header names made from them: the name is split into
+  parts at anything that is not a letter or digit (`_` and `-` included).
+  The copy is stopped only when a part **equals** a removed name of 3 or more
+  characters ("Jane_C3" when the subject is Jane). A shorter value, or one
+  that is only part of a longer part ("12" in "LAH12", "P3" as the electrode
+  P3, "eeg" in "EEG1"), is a note.
+
+Notes are listed in `report.verification.notes` and printed by `summary()`.
+They never repeat the value itself. Look at them before sharing the copy.
+
+With `text="keep"`, names shorter than 4 characters and numbers are replaced
+only as whole words or whole numbers, so "rec" does not change "recorded"
+and the ID "12" does not change "12:30". But a short name that is left
+inside a longer word still stops the copy. If that happens, use
+`text="drop"` or a `text=` function.
 
 For a source that used meflib's recording-time offset, times are also
 compared with the source's *stored* values (the time of day). A negative

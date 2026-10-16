@@ -97,6 +97,12 @@ struct VerifyReport {
   bool ok = false;
   std::vector<VerifyIssue> problems;   ///< anything wrong, including leaks
   std::vector<VerifyIssue> leaks;      ///< the subset found by the leak scan
+  /// Overlaps reported but NOT refused: an identity value inside a kept
+  /// channel's name as part of a longer token (or shorter than 3
+  /// characters), inside the copy's own name, or a number of fewer than 4
+  /// digits inside a longer number. Worth showing the user; never echoes an
+  /// identifying value.
+  std::vector<VerifyIssue> notes;
   /// Validator findings the source already had (check id, channel, segment):
   /// carried over unchanged by a copy, not introduced by it.
   std::vector<std::string> inherited_findings;
