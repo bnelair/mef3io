@@ -1264,9 +1264,9 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
   // The shift floor, re-checked: below it the leak window cannot tell a
   // leak from a legitimately shifted time.
   if (plan.has_times) {
-    const si8 span = plan.last - plan.first;
+    const si8 span = saturating_add(plan.last, -plan.first);
     const si8 mag = shift == INT64_MIN ? INT64_MAX : (shift < 0 ? -shift : shift);
-    if (mag < span + DAY_US)
+    if (mag < saturating_add(span, DAY_US))
       v.problem(dst_path, "shift", "|shift| is below the session's time span plus one day");
   }
 
@@ -1451,13 +1451,15 @@ AnonymizeReport anonymize_session(const std::string& src_path, const std::string
   // ---- the shift ---------------------------------------------------------
   Shifter sh{plan.rto, o.shift_us};
   if (plan.has_times) {
-    const si8 span = plan.last - plan.first;
-    const si8 mag = o.shift_us == INT64_MIN ? INT64_MAX : (o.shift_us < 0 ? -o.shift_us : o.shift_us);
-    if (mag < span + DAY_US)
+    const si8 span = saturating_add(plan.last, -plan.first);
+    const si8 mag =
+        o.shift_us == INT64_MIN ? INT64_MAX : (o.shift_us < 0 ? -o.shift_us : o.shift_us);
+    const si8 floor = saturating_add(span, DAY_US);
+    if (mag < floor)
       throw std::invalid_argument(
           "|shift_us| (" + std::to_string(mag) + ") must be at least the session's time span "
-          "plus one day (" + std::to_string(span + DAY_US) + " us), so that no shifted time can "
-          "fall inside the original range");
+          "plus one day (" + std::to_string(floor) + " us), so that no shifted time can fall "
+          "inside the original range");
     if (o.shift_us < 0 && plan.first + o.shift_us <= 0)
       throw std::invalid_argument("the shift moves the first time (" + std::to_string(plan.first) +
                                   " uUTC) to 0 or below; shifted times must stay above 0");
