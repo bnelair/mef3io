@@ -642,6 +642,8 @@ Opening a session releases the GIL too: `Reader(...)` (and the writer's
 reopen of an existing session) scans the tree and parses every segment's
 metadata in C++ while other Python threads keep running. So a GUI can open a
 large session on a worker thread without freezing its event loop, and several
-sessions can be opened at once on different threads. The Python-level parts
+sessions can be opened at once on different threads. One `Reader` can also
+be shared across threads: reads, `toc`, `segments` and `records` may run
+concurrently on it. The Python-level parts
 of an open (the warm-start cache, building the open-time warnings) are short
 and run with the GIL as usual.

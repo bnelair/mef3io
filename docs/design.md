@@ -199,9 +199,17 @@ ABI shim (later) converts to codes. Bindings map to Python exceptions.
 - Parallel units: (1) RED block decode/encode — independent blocks, disjoint
   output slices ⇒ deterministic, race-free; (2) per-channel/per-segment file
   IO; (3) metadata open (parallel stat+read of `.tmet`s).
-- Reader is immutable after open ⇒ safe concurrent calls from user threads.
-  Python bindings release the GIL for all C++ work, the constructors
-  (session open, #79) included.
+- Concurrent calls on one Reader from user threads are safe. The Reader is
+  NOT immutable after open: it caches block indices (with LRU eviction) and,
+  in lenient mode, records problems as it meets them. That state is locked,
+  and each call pins the index it is reading, so another thread's eviction
+  never frees it (`core/tests/test_concurrency.cpp`, also under TSan). The
+  collect phase of a read takes these locks only around cache access, never
+  across file I/O or decoding.
+- Python bindings release the GIL for every potentially long call: opening
+  (the `Reader`, `Session` and `SessionWriter` constructors, #79), reads,
+  writes, `toc`, `segments`, `records`, `write_records`, and the
+  session-level functions. Cheap accessors keep it.
 - Writer is single-writer per session (documented; guarded by a lock file or
   advisory check — TBD in implementation), but **internally parallel**:
   block boundaries are computed up front (from `mef_block_len` and the NaN/

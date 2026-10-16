@@ -404,6 +404,24 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
 }  // namespace
 
 namespace {
+// Construct a bound C++ object in place with the GIL RELEASED (#79): opening a
+// session reads and parses metadata for every segment, and holding the GIL
+// for that froze every other Python thread (a GUI's event loop) for seconds.
+// Safe because nothing Python is touched while it is released: every argument
+// is already a C++ value (nanobind converted them before this runs), and
+// `self` is not yet visible to any other thread (nanobind marks the instance
+// ready only after __init__ returns). No callback runs during a constructor;
+// one that is added must re-acquire the GIL, as PyHooks::call does. An
+// exception thrown here re-acquires the GIL while unwinding (the release guard
+// is destroyed first) and leaves the instance unconstructed, as nb::init would.
+// Unsupported: two threads calling __init__ on the SAME not-yet-ready instance
+// (reachable only through an explicit __new__); nanobind does not guard that.
+template <class T, class... Args>
+void construct_nogil(T* self, Args&&... args) {
+  nb::gil_scoped_release release;
+  new (self) T(std::forward<Args>(args)...);
+}
+
 // The cancel/progress hooks of ONE call (#69), bridged to Python.
 //
 // Built and destroyed with the GIL held, on the binding's stack; the work runs
@@ -417,22 +435,6 @@ namespace {
 // is aborted like a cancellation (Cancelled is not a std::exception, so no
 // per-segment containment in the core can swallow it), and the ORIGINAL
 // exception is re-raised to the caller once the GIL is back.
-// Construct a bound C++ object in place with the GIL RELEASED (#79): opening a
-// session reads and parses metadata for every segment, and holding the GIL
-// for that froze every other Python thread (a GUI's event loop) for seconds.
-// Safe because nothing Python is touched while it is released: every argument
-// is already a C++ value (nanobind converted them before this runs), and
-// `self` is not yet visible to any other thread (nanobind marks the instance
-// ready only after __init__ returns). No callback runs during a constructor;
-// one that is added must re-acquire the GIL, as PyHooks::call does. An
-// exception thrown here re-acquires the GIL while unwinding (the release guard
-// is destroyed first) and leaves the instance unconstructed, as nb::init would.
-template <class T, class... Args>
-void construct_nogil(T* self, Args&&... args) {
-  nb::gil_scoped_release release;
-  new (self) T(std::forward<Args>(args)...);
-}
-
 struct PyHooks {
   nb::object progress;
   std::optional<nb::python_error> error;
@@ -1071,11 +1073,14 @@ NB_MODULE(_mef3io, m) {
               }
               recs.push_back(std::move(r));
             }
+            // Converted above, WITH the GIL; the file work runs without it.
+            nb::gil_scoped_release rel;
             w.write_records(ch, recs);
           },
           nb::arg("channel").none(), nb::arg("records"));
 
   m.def("infer_precision", [](nb::ndarray<const mef3io::sf8, nb::ndim<1>, nb::c_contig> d) {
+    nb::gil_scoped_release rel;  // one pass over the data; the argument keeps it alive
     return mef3io::infer_precision(std::span<const mef3io::sf8>(d.data(), d.size()));
   });
 
@@ -1232,7 +1237,11 @@ NB_MODULE(_mef3io, m) {
           nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none())
       .def("segments",
            [](mef3io::Reader& r, const std::string& ch) {
-             auto segs = r.segments(ch);
+             std::vector<mef3io::SegmentInfo> segs;
+             {
+               nb::gil_scoped_release rel;  // metadata only, but every segment of a channel
+               segs = r.segments(ch);
+             }
              nb::list out;
              for (const auto& s : segs) {
                nb::dict d;
@@ -1250,7 +1259,11 @@ NB_MODULE(_mef3io, m) {
            })
       .def("toc",
            [](mef3io::Reader& r, const std::string& ch) {
-             auto entries = r.toc(ch);
+             std::vector<mef3io::BlockIndexEntry> entries;
+             {
+               nb::gil_scoped_release rel;  // reads every segment's .tidx
+               entries = r.toc(ch);
+             }
              nb::list out;
              for (const auto& e : entries) {
                nb::dict d;
@@ -1271,7 +1284,12 @@ NB_MODULE(_mef3io, m) {
             if (!channel.is_none()) ch = nb::cast<std::string>(channel);
             std::optional<int> seg;
             if (!segment.is_none()) seg = nb::cast<int>(segment);
-            auto recs = r.records(ch, seg, record_levels(level));
+            const auto levels = record_levels(level);  // Python objects: converted with the GIL
+            std::vector<mef3io::Record> recs;
+            {
+              nb::gil_scoped_release rel;  // every record file in scope
+              recs = r.records(ch, seg, levels);
+            }
             nb::list out;
             for (const auto& rec : recs) out.append(record_to_dict(rec));
             return out;
