@@ -81,6 +81,7 @@ nav:
       - Benchmarks: benchmarks.md
   - Release notes:
       - All releases: release_notes/index.md
+      - Unreleased: release_notes/unreleased.md
       - "1.3.0": release_notes/1.3.0.md
       - "1.2.0": release_notes/1.2.0.md
       - "1.1.4": release_notes/1.1.4.md

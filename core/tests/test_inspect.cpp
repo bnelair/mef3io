@@ -139,3 +139,31 @@ TEST_CASE("inspect_session honours a cancel token, lenient or not") {
   REQUIRE(calls.front().first == 0);
   REQUIRE(calls.back().first == calls.back().second);
 }
+
+TEST_CASE("inspect_session flags a legacy password match and gates channel descriptions") {
+  // Keyed the way mef3io <= 1.2.0 keyed "bé" / "Ünïcödé": with passwords whose
+  // meflib bytes ARE those legacy bytes (see test_password.cpp).
+  const std::string be = "b\xC3\xA9";
+  const std::string uni = "\xC3\x9Cn\xC3\xAF" "c\xC3\xB6" "d\xC3\xA9";
+  const auto old = write_session("mef3io_inspect_legacy.mefd", "b\xC2\xA9",
+                                 "\xC2\x9Cn\xC2\xAF" "c\xC2\xB6" "d\xC2\xA9");
+  InspectOptions opt;
+  opt.password = uni;
+  const auto s = inspect_session(old, opt);
+  REQUIRE(s.legacy_password_mapping);
+  bool listed = false;
+  for (const auto& w : s.warnings)
+    if (w.code == "legacy-password") listed = !w.blocks_anonymize;
+  REQUIRE(listed);
+  REQUIRE_FALSE(s.channels[0].channel_description.has_value());  // no include_values
+  opt.include_values = true;
+  REQUIRE(inspect_session(old, opt).channels[0].channel_description == "ch1");  // writer default
+
+  const auto fresh = write_session("mef3io_inspect_meflib_keys.mefd", be, uni);
+  InspectOptions plain;
+  plain.password = uni;
+  plain.include_values = true;
+  REQUIRE_FALSE(inspect_session(fresh, plain).legacy_password_mapping);
+  plain.password.clear();  // section 2 locked: no description, even with values
+  REQUIRE_FALSE(inspect_session(fresh, plain).channels[0].channel_description.has_value());
+}

@@ -14,7 +14,6 @@ code should prefer ``mef3io.Reader`` / ``mef3io.Writer``.
 """
 from __future__ import annotations
 
-import warnings
 from typing import Optional, Union
 
 from ._writer import (
@@ -28,6 +27,7 @@ from ._reader import (
     _warn_legacy_password,
     _warning_on_legacy_records,
 )
+from ._warnings import emit as _emit, identity_of as _identity_of
 
 import numpy as np
 
@@ -62,11 +62,9 @@ class MefReader:
         # whose data this very warning describes as intact.
         issues = list(self._r.declaration_issues()) if warn_declarations else []
         if issues:
-            warnings.warn(
-                _declaration_warning_text(issues, str(session_path)),
-                SessionDeclarationWarning,
-                stacklevel=2,
-            )
+            _emit(SessionDeclarationWarning, _declaration_warning_text(issues),
+                  path=self._path_str, details=issues, stacklevel=2,
+                  also=_identity_of(self._r))
         # Only sessions an older mef3io wrote can trigger it (mef_tools always
         # used meflib's mapping), so it costs a legacy user nothing.
         _warn_legacy_password(self._r, str(session_path), stacklevel=2)
@@ -203,8 +201,8 @@ class MefWriter:
             raise ValueError(f"durability must be 'full' or 'fast', not {durability!r}")
         self._path = str(session_path)
         self._w = _mef3io.SessionWriter(self._path, overwrite, password1 or "", password2 or "")
-        warn_unreadable_metadata(self._w.unreadable_metadata)
-        warn_password_interop(password1, password2)
+        warn_unreadable_metadata(self._w.unreadable_metadata, path=self._path)
+        warn_password_interop(password1, password2, path=self._path)
         # "fast" by default, matching mef3io.Writer and the legacy stack this
         # class stands in for — meflib flushes nothing at all. See
         # mef3io.Writer for what an unclean shutdown costs and how
@@ -337,13 +335,13 @@ class MefWriter:
 
             counts = _as_int32_counts(data)
             ufact = 10.0 ** -(precision if precision is not None else 0)
-            with reporting_unreadable_metadata(self._w):
+            with reporting_unreadable_metadata(self._w, self._path):
                 self._w.write_int32(
                     channel, counts, ufact, int(start_uutc),
                     float(sampling_freq), None, bool(new_segment),
                 )
         else:
-            with reporting_unreadable_metadata(self._w):
+            with reporting_unreadable_metadata(self._w, self._path):
                 self._w.write_float(
                     channel, np.ascontiguousarray(data, np.float64), int(start_uutc),
                     float(sampling_freq), int(precision) if precision is not None else -1,
@@ -363,7 +361,7 @@ class MefWriter:
             if "duration" in r and r["duration"] is not None:
                 rec["duration"] = int(r["duration"])
             norm.append(rec)
-        with reporting_unreadable_metadata(self._w):
+        with reporting_unreadable_metadata(self._w, self._path):
             self._w.write_records(channel, norm)
 
     def close(self):

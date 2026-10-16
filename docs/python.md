@@ -166,6 +166,31 @@ warn_declarations=True, strict=True)`
   disagree on its time or length. The header is used, as meflib and pymef do;
   the detail is in `read_raw(...)["block_copy_mismatches"]`.
 
+### Warnings carry the path as data
+
+Every warning mef3io emits is a `mef3io.MefWarning` (a `UserWarning`). Its
+message never contains the session's location (its directory or archive path)
+or its name: they appear as `<session>`, also inside an archive and in the
+session's own file names. **Only those are scrubbed.** Channel names and the
+names of files inside the session (`<session>/ch1.timd/ch1-000001.segd/...`)
+can appear, and they can be identifying too. The session is on the warning
+object instead, with the structured items the message summarises:
+
+```python
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    r = mef3io.Reader(path, strict=False)
+for w in caught:
+    if issubclass(w.category, mef3io.MefWarning):
+        log.warning("%s", w.message)   # no session path or name (channel names may appear)
+        w.message.path                 # the session, as it was passed in
+        w.message.details              # e.g. the Reader.problems entries (may hold paths)
+```
+
+`warnings.filterwarnings("ignore", category=mef3io.MefWarning)` silences all
+of them. Python's `"default"` (and `"module"`) filter action shows each
+warning once per session, not once per process.
+
 ### `read(channel, t0=None, t1=None, n_threads=None, *, cancel=None, progress=None)`
 
 Float64 samples on the uniform fs grid over `[t0, t1)` (whole channel by
@@ -330,12 +355,14 @@ s.start_time, s.end_time                      # first / last sample, all channel
 s.first_time, s.last_time                     # samples AND annotations
 for c in s.channels:
     c.name, c.sampling_frequency, c.number_of_samples
+    c.channel_description                     # with include_values=True, else None
     c.segments                                # SegmentSummary: times, samples, sizes, provenance
     c.gaps                                    # [(start, end), ...] uUTC spans with no samples
 s.records                                     # RecordSummary at every level, with times
 s.encryption                                  # what is encrypted, what the password opened
 s.time_offset                                 # meflib's recording-time offset, in plain words
 s.identity_field("subject_id").present        # True / False / None (locked)
+s.legacy_password_mapping                     # opened only through mef3io <= 1.2.0's password mapping
 [w.code for w in s.warnings]
 s.to_dict()                                   # plain data, ready for json.dumps
 ```
@@ -352,7 +379,7 @@ What it reports:
 | Part | Contents |
 |---|---|
 | Session | name, path, layout, total size, first/last sample and record times, the recording-time offset and how it was read, GMT offset and DST fields |
-| `channels` | sampling rate, units, start/end, stored samples, the segment map (`segments`, the same fields as `Reader.segments()` plus file sizes, declared discontinuities and the offset state), gaps, record count |
+| `channels` | sampling rate, units, the channel description (with `include_values=True`), start/end, stored samples, the segment map (`segments`, the same fields as `Reader.segments()` plus file sizes, declared discontinuities and the offset state), gaps, record count |
 | `records` | every record at the session, channel and segment level: type, time, duration, and `first_time` / `last_time` over everything the record mentions (header time, body times such as `Seiz` onsets, `time + duration`) |
 | `identity` | subject name 1/2, ID and location (section 3), the session, channel and reference descriptions (section 2), `session_name` and `anonymized_name` (every universal header), and record text: where each lives, in how many places it is set, its longest length, how many distinct values. **Values only with `include_values=True`.** |
 | `warnings` | each with a `code`, a plain-words `message`, and `blocks_anonymize`; `s.anonymize_blockers` lists the ones the planned `anonymize_session` (#70) will refuse on |
@@ -363,8 +390,8 @@ Options:
 
 - `include_values=True` returns identity values: subject fields, descriptions,
   record text and the full records (`RecordSummary.fields`, as
-  `Reader.records()` returns them), and the recording-time offset. Off by
-  default. **Names and paths are not de-identified either way**: the session's
+  `Reader.records()` returns them), each channel's `channel_description`, and
+  the recording-time offset. Off by default. **Names and paths are not de-identified either way**: the session's
   folder name (MEF names it after the session, so it usually *is* the
   `session_name`), channel names and file paths, also inside warning and
   problem messages, are always returned. A summary of an identifiable session
@@ -391,6 +418,12 @@ fields. What the password does not open is reported as locked:
 `encryption["access"]` is `"none"`, `"level-1"` or `"full"`, the locked
 sections and record bodies are counted, and values that live there are `None`.
 A password that is given and wrong raises `PasswordError`.
+
+A non-ASCII password that opens the session only through the password mapping
+of mef3io 1.2.0 and earlier (#84) is accepted, as a `Reader` accepts it.
+`inspect` reports it as data: `legacy_password_mapping` is `True` and a
+`legacy-password` warning in `warnings` counts the files. Unlike a `Reader`, it
+does not emit `LegacyPasswordWarning`, as it emits no Python warnings at all.
 
 **Times are never guessed silently.** Every time is absolute UTC. A
 segment's times are resolved with its own offset.

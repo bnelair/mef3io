@@ -1029,3 +1029,31 @@ def test_a_locked_session_that_assumed_nothing_says_so(tmp_path):
     assert "offset-assumed-zero" not in {w.code for w in s.warnings}
     assert "No time reported here depends on it" in s.time_offset["interpretation"]
     assert "offset-assumed-zero" not in next(w for w in s.warnings if w.code == "locked").message
+
+
+# --------------------------------------------------------------------------- channel description (#96)
+
+
+def test_channel_description_is_an_identity_value(tmp_path):
+    """Per channel, from section 2; returned only with include_values, like
+    every identity value. The writer defaults it to the channel name."""
+    md = mef3io.Metadata(acquisition=mef3io.Acquisition(channel_description="left hippocampus"))
+    path = _write(tmp_path / "d.mefd", channels=("ch1",), metadata=md, records=False)
+    plain = _write(tmp_path / "n.mefd", records=False)  # default descriptions
+    assert mef3io.inspect(path, include_values=True).channel("ch1").channel_description \
+        == "left hippocampus"
+    s = mef3io.inspect(plain, include_values=True)
+    assert [c.channel_description for c in s.channels] == ["ch1", "ch2"]
+    assert s.to_dict()["channels"][1]["channel_description"] == "ch2"
+    hidden = mef3io.inspect(path)
+    assert hidden.channel("ch1").channel_description is None
+    assert hidden.identity_field("channel_description").present is True
+
+
+def test_channel_description_is_level_1_gated(encrypted):
+    assert mef3io.inspect(encrypted, include_values=True).channel("ch1").channel_description is None
+    for pw in ("pw1", "pw2"):
+        s = mef3io.inspect(encrypted, pw, include_values=True)
+        assert s.channel("ch1").channel_description == "ch1"
+        assert s.channel("ch2").channel_description == "ch2"
+        assert mef3io.inspect(encrypted, pw).channel("ch1").channel_description is None
