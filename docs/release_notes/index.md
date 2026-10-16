@@ -6,7 +6,7 @@ Newest first.
 | Version | Released | Main changes |
 |---|---|---|
 | [Unreleased](unreleased.md) | — | warnings carry the path as data (`MefWarning`); `inspect()` reports legacy password matches and channel descriptions |
-| [1.3.0](1.3.0.md) | *upcoming* | `inspect()`, cancelling and progress, encrypted data blocks from other writers decoded correctly, safer `extract_session(overwrite=True)` |
+| [1.3.0](1.3.0.md) | 2026-10-16 | `inspect()`, cancelling and progress, encrypted data blocks from other writers decoded correctly, safer `extract_session(overwrite=True)` |
 | [1.2.0](1.2.0.md) | 2026-10-15 | lenient reading (`strict=False`), records at every level, provenance stamp, faster snapshot cache, recording-time-offset fixes |
 | [1.1.4](1.1.4.md) | 2026-09-21 | Windows: `durability="full"` appends and non-ASCII paths |
 | [1.1.3](1.1.3.md) | 2026-09-21 | validator, repair and recovery; appends that cost only the new data; buffer-size declarations fixed |

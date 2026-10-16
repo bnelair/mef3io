@@ -9,7 +9,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from ._cancel import CancelToken, _hooks
-from ._warnings import MefWarning, emit as _emit
+from ._warnings import MefWarning, emit as _emit, identity_of as _identity_of
 
 
 class SessionDeclarationWarning(MefWarning):
@@ -154,7 +154,8 @@ def _warn_legacy_password(impl, path: str, stacklevel: int) -> None:
         shown = ", ".join(channels[:3]) + (", ..." if len(channels) > 3 else "")
         _emit(LegacyPasswordWarning,
               _legacy_password_warning_text(f"{len(channels)} channel(s) ({shown})"),
-              path=path, details=channels, stacklevel=stacklevel + 1)
+              path=path, details=channels, stacklevel=stacklevel + 1,
+              also=_identity_of(impl))
 
 
 @contextlib.contextmanager
@@ -171,7 +172,8 @@ def _warning_on_legacy_records(impl, path: str, stacklevel: int):
         if added:
             _emit(LegacyPasswordWarning,
                   _legacy_password_warning_text(f"{len(added)} record file(s)"),
-                  path=path, details=added, stacklevel=stacklevel)
+                  path=path, details=added, stacklevel=stacklevel,
+                  also=_identity_of(impl))
 
 
 def _unreadable_warning_text(problems: list) -> str:
@@ -369,12 +371,14 @@ class Reader:
             problems = self.problems  # from the cache snapshot on a warm open
             if problems:
                 _emit(UnreadableSegmentWarning, _unreadable_warning_text(problems),
-                      path=self._path, details=problems, stacklevel=2)
+                      path=self._path, details=problems, stacklevel=2,
+                      also=_identity_of(self._impl))
 
         if warn_declarations and self._declaration_issues:
             _emit(SessionDeclarationWarning,
                   _declaration_warning_text(self._declaration_issues),
-                  path=self._path, details=self._declaration_issues, stacklevel=2)
+                  path=self._path, details=self._declaration_issues, stacklevel=2,
+                  also=_identity_of(self._impl))
 
     def _password_protected(self) -> bool:
         # Fail closed: a backend that cannot say is treated as encrypted, so
@@ -632,7 +636,8 @@ class Reader:
         mismatches = out.get("block_copy_mismatches") or []
         if mismatches:
             _emit(BlockCopyWarning, _block_copy_warning_text(mismatches),
-                  path=self._path, details=mismatches, stacklevel=2)
+                  path=self._path, details=mismatches, stacklevel=2,
+                  also=_identity_of(impl))
         return out
 
     def segments(self, channel: str) -> list[dict]:
@@ -755,5 +760,6 @@ class Reader:
                   f"{len(added)} record file(s) could not be read and were "
                   f"SKIPPED. First: {added[0]['segment']} — {added[0]['reason']}. "
                   "Full list in Reader.problems. Open with strict=True to fail instead.",
-                  path=self._path, details=added, stacklevel=2)
+                  path=self._path, details=added, stacklevel=2,
+                  also=_identity_of(impl))
         return out

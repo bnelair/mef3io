@@ -27,7 +27,7 @@ from ._reader import (
     _warn_legacy_password,
     _warning_on_legacy_records,
 )
-from ._warnings import emit as _emit
+from ._warnings import emit as _emit, identity_of as _identity_of
 
 import numpy as np
 
@@ -63,7 +63,8 @@ class MefReader:
         issues = list(self._r.declaration_issues()) if warn_declarations else []
         if issues:
             _emit(SessionDeclarationWarning, _declaration_warning_text(issues),
-                  path=self._path_str, details=issues, stacklevel=2)
+                  path=self._path_str, details=issues, stacklevel=2,
+                  also=_identity_of(self._r))
         # Only sessions an older mef3io wrote can trigger it (mef_tools always
         # used meflib's mapping), so it costs a legacy user nothing.
         _warn_legacy_password(self._r, str(session_path), stacklevel=2)

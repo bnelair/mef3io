@@ -84,7 +84,8 @@ struct InspectChannel {
   std::optional<sf8> sampling_frequency, units_conversion_factor;
   std::optional<std::string> units_description;
   /// Section 2's free-text channel description, as the first segment whose
-  /// section 2 is readable states it. An IDENTITY value, so it is returned
+  /// section 2 is readable states it (segments can differ; the identity
+  /// table lists every distinct value). An IDENTITY value, so it is returned
   /// only with InspectOptions::include_values (like the identity table's
   /// values); nullopt otherwise, and when every section 2 is locked.
   std::optional<std::string> channel_description;

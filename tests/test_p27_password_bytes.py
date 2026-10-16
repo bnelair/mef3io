@@ -18,6 +18,7 @@ universal-header validation fields), so no binary fixture is committed.
 from __future__ import annotations
 
 import hashlib
+import shutil
 import warnings
 
 import numpy as np
@@ -303,3 +304,23 @@ def test_inspect_flags_old_record_files_under_new_metadata(tmp_path, x):
     assert s.legacy_password_mapping is True
     (hit,) = [w for w in s.warnings if w.code == "legacy-password"]
     assert "1 record file(s)" in hit.message and "channel" not in hit.message
+
+
+def test_inspect_flags_a_channel_with_one_old_segment_among_new_ones(tmp_path, x):
+    """An old-keyed segment, then a new segment keyed the meflib way (an
+    append with new_segment=True): one old segment is enough for the flag."""
+    path = tmp_path / "mixed_segments.mefd"
+    _old_mef3io_session(path, x)
+    end = START + int(len(x) / FS * 1e6)
+    with warnings.catch_warnings():  # the writer's own warning is pinned above
+        warnings.simplefilter("ignore", mef3io.LegacyPasswordWarning)
+        with mef3io.Writer(str(path), password1=PW1, password2=PW2) as w:
+            w.write_int32("ch1", x, 0.5, end + 1_000_000, FS, new_segment=True)
+    s = mef3io.inspect(str(path), PW2)
+    assert len(s.channel("ch1").segments) == 2
+    assert s.legacy_password_mapping is True
+    (hit,) = [w for w in s.warnings if w.code == "legacy-password"]
+    assert "1 channel(s) (ch1)" in hit.message
+    # the meflib-keyed segment alone is not flagged
+    shutil.rmtree(next(path.glob("ch1.timd/ch1-000000.segd")))
+    assert mef3io.inspect(str(path), PW2).legacy_password_mapping is False

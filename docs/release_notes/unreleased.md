@@ -9,10 +9,13 @@
   `path` attribute (the session, as you passed it) and `details` (the
   structured items behind the message, such as the `Reader.problems` entries
   or the block-copy mismatches). The message no longer starts with the path,
-  and the session's location and name inside it are replaced by `<session>`,
-  so it can be logged where paths must not be. `warnings.filterwarnings(
+  and the session's location and name inside it are replaced by `<session>`
+  (also the folder inside a renamed archive). Only those are scrubbed: channel
+  names and file names inside the session can still appear, and they can be
+  identifying. `warnings.filterwarnings(
   "ignore", category=mef3io.MefWarning)` silences all of them. Python's
-  default filter still shows each warning once per session
+  `"default"` and `"module"` filter actions show each warning once per
+  session
   ([Warnings carry the path as data](https://bnelair.github.io/mef3io/python/#warnings-carry-the-path-as-data),
   [#96](https://github.com/bnelair/mef3io/issues/96)).
 - **`inspect()` reports a legacy password match.**

@@ -88,8 +88,12 @@ class ChannelSummary:
     ``sampling_frequency``, ``units_conversion_factor`` and
     ``units_description`` come from the first segment whose metadata section 2
     is readable, and are ``None`` when every section 2 is locked (encrypted,
-    no level-1 password). ``channel_description`` is section 2's free-text
-    description from the same segment. It can identify the subject, so, like
+    no level-1 password). Segments CAN differ (each has its own section 2);
+    only the first readable one is reported here. ``channel_description`` is
+    section 2's free-text description from the same segment; every distinct
+    value across segments and channels is in the identity table
+    (``identity_field("channel_description").values``, with
+    ``include_values=True``). It can identify the subject, so, like
     every identity value, it is returned only with ``include_values=True``:
     otherwise it is ``None``, and so it is when section 2 is locked. Its
     presence is always reported in the identity table

@@ -169,10 +169,12 @@ warn_declarations=True, strict=True)`
 ### Warnings carry the path as data
 
 Every warning mef3io emits is a `mef3io.MefWarning` (a `UserWarning`). Its
-message never contains the session's path or name: they appear as
-`<session>`, so the text can be logged where paths must not be. The session
-is on the warning object instead, with the structured items the message
-summarises:
+message never contains the session's location (its directory or archive path)
+or its name: they appear as `<session>`, also inside an archive and in the
+session's own file names. **Only those are scrubbed.** Channel names and the
+names of files inside the session (`<session>/ch1.timd/ch1-000001.segd/...`)
+can appear, and they can be identifying too. The session is on the warning
+object instead, with the structured items the message summarises:
 
 ```python
 with warnings.catch_warnings(record=True) as caught:
@@ -180,13 +182,14 @@ with warnings.catch_warnings(record=True) as caught:
     r = mef3io.Reader(path, strict=False)
 for w in caught:
     if issubclass(w.category, mef3io.MefWarning):
-        log.warning("%s", w.message)   # safe to log: no path in the text
+        log.warning("%s", w.message)   # no session path or name (channel names may appear)
         w.message.path                 # the session, as it was passed in
         w.message.details              # e.g. the Reader.problems entries (may hold paths)
 ```
 
 `warnings.filterwarnings("ignore", category=mef3io.MefWarning)` silences all
-of them. Python's default filter still shows each warning once per session.
+of them. Python's `"default"` (and `"module"`) filter action shows each
+warning once per session, not once per process.
 
 ### `read(channel, t0=None, t1=None, n_threads=None, *, cancel=None, progress=None)`
 

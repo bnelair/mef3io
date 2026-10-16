@@ -1100,6 +1100,13 @@ NB_MODULE(_mef3io, m) {
           "Record files read so far that the password opened only through the "
           "byte mapping mef3io used up to 1.2.0 (issue #84).")
       .def(
+          "session_identity",
+          [](mef3io::Reader& r) {
+            return std::vector<std::string>{r.session().location(), r.session().session_name()};
+          },
+          "[location, name] of the session as the backend sees it: what a warning "
+          "message must not contain (mef3io._warnings.scrub).")
+      .def(
           "declaration_issues",
           [](mef3io::Reader& r) {
             nb::list out;

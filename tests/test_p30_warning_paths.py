@@ -14,7 +14,10 @@ pickling keeps the attributes, and ``-W error`` raises an object that has them.
 """
 from __future__ import annotations
 
+import ast
+import os
 import pickle
+import shutil
 import warnings
 from pathlib import Path
 
@@ -70,13 +73,22 @@ def test_every_warning_class_is_a_mef_warning():
     assert "MefWarning" in mef3io.__all__
 
 
-def test_every_warn_call_goes_through_the_helper():
-    """A bare warnings.warn() would skip the scrub and the path attribute."""
+def test_only_the_helper_touches_the_warnings_module():
+    """A bare warnings.warn() would skip the scrub and the path attribute, so
+    no module but _warnings.py may import `warnings` at all (any spelling,
+    subpackages included)."""
     pkg = Path(mef3io.__file__).parent
-    for f in pkg.glob("*.py"):
-        if f.name == "_warnings.py":
-            continue
-        assert "warnings.warn(" not in f.read_text(encoding="utf-8"), f.name
+    files = [f for f in pkg.rglob("*.py") if f.name != "_warnings.py"]
+    assert any(f.parent.name == "pure" for f in files)  # rglob reaches subpackages
+    for f in files:
+        for node in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                bad = [a.name for a in node.names if a.name.split(".")[0] == "warnings"]
+            elif isinstance(node, ast.ImportFrom):
+                bad = [node.module] if (node.module or "").split(".")[0] == "warnings" else []
+            else:
+                bad = []
+            assert not bad, f"{f.relative_to(pkg)}:{node.lineno} imports {bad}"
 
 
 def test_pickling_keeps_the_attributes():
@@ -141,6 +153,57 @@ def test_session_record_file_name_is_scrubbed(tmp_path):
     (w,) = ws
     text = _assert_path_free(w, path, tmp_path)
     assert "<session>.rdat" in text
+
+
+def test_bare_session_name_is_scrubbed_anywhere_in_the_text(tmp_path):
+    """The name can follow a space, not only a separator: two stray root
+    .rdat files make the core say "no <name>.rdat but 2 .rdat files"."""
+    path = tmp_path / f"{NAME}.mefd"
+    p20._write_segments(path, n_segments=1)
+    for stray in ("other1", "other2"):
+        (path / f"{stray}.rdat").write_bytes(b"\0" * 100)
+    r = mef3io.Reader(str(path), strict=False)
+    _, ws = _record(r.records)
+    (w,) = ws
+    text = _assert_path_free(w, path, tmp_path)
+    assert "no <session>.rdat but 2 .rdat files" in text
+
+
+def test_a_renamed_archive_does_not_leak_its_inner_folder(tmp_path):
+    """The folder inside an archive keeps the original name after the archive
+    file is renamed; the backend's own view of the name is scrubbed too."""
+    src = tmp_path / f"{NAME}.mefd"
+    p20._write_segments(src)
+    p20._corrupt_tmet(p20._segd_dirs(src)[1])
+    for stray in ("other1", "other2"):
+        (src / f"{stray}.rdat").write_bytes(b"\0" * 100)
+    tar = Path(mef3io.archive_session(str(src)))
+    shutil.rmtree(src)
+    renamed = tmp_path / "anon.mefd.tar"
+    os.rename(tar, renamed)
+    r, ws = _record(mef3io.Reader, str(renamed), strict=False)
+    (w,) = ws
+    text = _assert_path_free(w, renamed, tmp_path)
+    assert "<session>::<session>/ch1.timd/" in text
+    _, ws = _record(r.records)
+    (w,) = ws
+    text = _assert_path_free(w, renamed, tmp_path)
+    assert "no <session>.rdat" in text
+
+
+def test_scrub_rules():
+    from mef3io._warnings import scrub
+
+    # bare name after a space, inside parentheses, at the end
+    assert scrub("x Jane y (Jane) Jane", "/d/Jane.mefd") == "x <session> y (<session>) <session>"
+    # part of a longer word is left alone
+    assert scrub("Janeway JaneX", "/d/Jane.mefd") == "Janeway JaneX"
+    # a session NAMED "session" does not eat its own placeholders
+    assert scrub("/d/session.mefd/ch1 and session", "/d/session.mefd") == \
+        "<session>/ch1 and <session>"
+    # backend identity of a renamed archive
+    assert scrub("a.mefd.tar::Old.mefd/x; no Old.rdat", "a.mefd.tar",
+                 also=["a.mefd.tar::Old.mefd", "Old"]) == "<session>::<session>/x; no <session>.rdat"
 
 
 def test_block_copy_warning(tmp_path):
@@ -247,3 +310,24 @@ def test_default_filter_still_warns_once_per_session(tmp_path):
     hits = [w for w in caught if w.category is mef3io.SessionDeclarationWarning]
     assert [w.message.path for w in hits] == [str(a), str(b)]
     assert str(hits[0].message) == str(hits[1].message)  # the path really is out of the text
+
+
+def test_dedup_registry_is_per_calling_file(tmp_path):
+    """Same session, same text, same line number, different files: both show."""
+    from mef3io._warnings import emit
+
+    path = str(tmp_path / "s.mefd")
+    src = "def f(emit, cls, path):\n    emit(cls, 'same text', path=path, stacklevel=2)\n"
+    callers = []
+    for name in ("one.py", "two.py"):
+        ns = {}
+        exec(compile("def g(f, emit, cls, path):\n    f(emit, cls, path)\n", str(tmp_path / name),
+                     "exec"), ns)
+        exec(compile(src, str(tmp_path / ("f_" + name)), "exec"), ns)
+        callers.append(ns)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("default")
+        for _ in range(2):
+            for ns in callers:
+                ns["g"](ns["f"], emit, mef3io.BlockCopyWarning, path)
+    assert sorted(Path(w.filename).name for w in caught) == ["one.py", "two.py"]
