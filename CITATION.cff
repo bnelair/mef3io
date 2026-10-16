@@ -4,7 +4,9 @@ abstract: "mef3io reads and writes MEF 3.0 (Multiscale Electrophysiology Format)
 message: "If you use mef3io in research, please cite it."
 type: software
 authors:
-  - name: "Mayo Clinic — Bioelectronics Neurophysiology and Engineering Lab (BNEL)"
+  - family-names: "Mivalt"
+    given-names: "Filip"
+    affiliation: "Bioelectronics Neurophysiology and Engineering Laboratory (BNEL), Mayo Clinic"
 repository-code: "https://github.com/bnelair/mef3io"
 url: "https://bnelair.github.io/mef3io/"
 license: Apache-2.0

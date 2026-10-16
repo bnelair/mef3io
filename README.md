@@ -19,23 +19,32 @@ sessions written by those tools open in mef3io.
 
 ## MEF 3.0 and the original libraries
 
-- **MEF 3.0 specification**: defined in the header of meflib,
-  [`meflib.h`](https://github.com/msel-source/meflib/blob/multiplatform/meflib/meflib.h)
-  ("Specification for Multiscale Electrophysiology Format (MEF) version
-  3.0"). The format's design is described in Brinkmann et al., *Large-scale
-  electrophysiology: acquisition, compression, encryption, and storage of big
-  data*, J Neurosci Methods 180(1):185-192, 2009,
-  [doi:10.1016/j.jneumeth.2009.03.022](https://doi.org/10.1016/j.jneumeth.2009.03.022).
-- **[meflib](https://github.com/msel-source/meflib)**: the reference C
-  library for MEF 3.0, from the Mayo Systems Electrophysiology Lab (MSEL).
-- **[pymef](https://github.com/msel-source/pymef)**: a Python wrapper over
-  meflib.
-- **[mef_tools](https://github.com/bnelair/mef_tools)**: high-level Python
-  reading and writing built on pymef. mef3io can stand in for it
-  (`from mef3io import MefReader, MefWriter`).
+mef3io grew out of an earlier stack of MEF libraries and stays compatible
+with it: files written by either open in the other. **MEF 3.0 support is
+maintained here, in mef3io, as open source (Apache-2.0).**
 
-mef3io is an independent implementation, tested against all three. New to
-the format? See [MEF 3.0 for students](https://bnelair.github.io/mef3io/students/).
+- **MEF 3.0 specification**: the header of meflib,
+  [`meflib.h`](https://github.com/msel-source/meflib/blob/multiplatform/meflib/meflib.h),
+  is titled "Specification for Multiscale Electrophysiology Format (MEF)
+  version 3.0". The format's design is described in Brinkmann et al.,
+  *Large-scale electrophysiology: acquisition, compression, encryption, and
+  storage of big data*, J Neurosci Methods 180(1):185-192, 2009,
+  [doi:10.1016/j.jneumeth.2009.03.022](https://doi.org/10.1016/j.jneumeth.2009.03.022).
+- **[meflib](https://github.com/msel-source/meflib)**: the original reference
+  C library for MEF 3.0, from the msel-source project.
+- **[pymef](https://github.com/msel-source/pymef)**
+  ([docs](https://pymef.readthedocs.io/)): a Python wrapper over meflib.
+- **[mef_tools](https://github.com/bnelair/mef_tools)** (archived; on PyPI as
+  [`mef-tools`](https://pypi.org/project/mef-tools/)): high-level Python
+  reading and writing built on pymef. mef3io stands in for it:
+  `from mef3io import MefReader, MefWriter`.
+- The older **MEF 2.1** format has its own library and specification,
+  [mef_lib_2_1](https://github.com/benbrinkmann/mef_lib_2_1); mef3io reads
+  and writes MEF 3.0 only.
+
+mef3io is an independent implementation of the specification, tested against
+meflib, pymef and mef_tools. New to the format? See
+[MEF 3.0 for students](https://bnelair.github.io/mef3io/students/).
 
 ## Install
 
@@ -187,5 +196,4 @@ docs/        documentation site source
 If you use mef3io in published work, please cite it via
 [CITATION.cff](https://github.com/bnelair/mef3io/blob/main/CITATION.cff).
 Licensed under [Apache 2.0](https://github.com/bnelair/mef3io/blob/main/LICENSE).
-Developed at the Mayo Clinic Bioelectronics Neurophysiology and Engineering
-Lab (BNEL).
+Maintained by Filip Mivalt, Bioelectronics Neurophysiology and Engineering Laboratory (BNEL) at Mayo Clinic.

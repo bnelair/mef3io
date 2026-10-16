@@ -14,8 +14,9 @@ a regular rate. It was built for long clinical recordings, mainly EEG,
 intracranial EEG (iEEG) and ECG, but nothing in it is specific to the brain
 or heart: EMG, other biosignals or sensor data fit just as well.
 
-A recording is a **session**: a folder `name.mefd` with one folder per
-channel (`name.timd`), each split into **segments** (`name-000000.segd`). A
+A recording is a **session**: a folder such as `recording.mefd` with one
+folder per channel (`ch1.timd`), each split into **segments**
+(`ch1-000000.segd`). A
 segment holds three files: the metadata (`.tmet`: sampling rate, units,
 subject), a small index (`.tidx`) and the compressed samples (`.tdat`).
 Annotations, such as notes or seizure markings, sit in record files beside
@@ -61,6 +62,14 @@ annotations, whether it is encrypted):
 python -m mef3io inspect recording.mefd
 ```
 
-In MATLAB, `r = mef3io.Reader('recording.mefd'); x = r.read(r.channels{1});`.
+In MATLAB:
+
+```matlab
+r = mef3io.Reader('recording.mefd');
+ch = r.channels{1};
+i = r.info(ch);
+x = r.read(ch, i.start_time, i.start_time + 10e6);   % first 10 s
+```
+
 Next: the [Python](python.md) or [MATLAB](matlab.md) guide, and the
 [examples](examples.md).
