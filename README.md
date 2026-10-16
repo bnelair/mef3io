@@ -1,11 +1,12 @@
 # mef3io
 
-Read and write **MEF 3.0** (Multiscale Electrophysiology Format) — the
-compressed, optionally encrypted format used for long intracranial and scalp
-EEG recordings — from **Python**, **MATLAB** and **C++**. One C++ core does
-the work, so every language reads and writes the same files the same way.
-Sessions written by mef3io open in the established MEF 3.0 tools (pymef,
-mef_tools, and viewers built on meflib, the reference C library), and
+Read and write **MEF 3.0 (Multiscale Electrophysiology Format)** files from
+**Python**, **MATLAB** and **C++**. MEF 3.0 is a compressed, optionally
+encrypted file format for long electrophysiology recordings: mainly EEG,
+intracranial EEG (iEEG) and ECG, but it suits any regularly sampled signal,
+such as EMG, other biosignals or sensor data. One C++ core does the work, so
+every language reads and writes the same files the same way. Sessions
+written by mef3io open in the established MEF 3.0 tools listed below, and
 sessions written by those tools open in mef3io.
 
 [![PyPI](https://img.shields.io/pypi/v/mef3io)](https://pypi.org/project/mef3io/)
@@ -15,6 +16,40 @@ sessions written by those tools open in mef3io.
 [![License](https://img.shields.io/github/license/bnelair/mef3io)](https://github.com/bnelair/mef3io/blob/main/LICENSE)
 
 **Documentation: <https://bnelair.github.io/mef3io/>**
+
+## MEF 3.0 and the original libraries
+
+mef3io grew out of an earlier stack of MEF libraries and stays compatible
+with it: files written by either open in the other. **MEF 3.0 support is
+maintained here, in mef3io, as open source (Apache-2.0).**
+
+- **MEF 3.0 specification**: the header of meflib,
+  [`meflib.h`](https://github.com/msel-source/meflib/blob/multiplatform/meflib/meflib.h),
+  is titled "Specification for Multiscale Electrophysiology Format (MEF)
+  version 3.0". The format's design is described in Brinkmann et al.,
+  *Large-scale electrophysiology: acquisition, compression, encryption, and
+  storage of big data*, J Neurosci Methods 180(1):185-192, 2009,
+  [doi:10.1016/j.jneumeth.2009.03.022](https://doi.org/10.1016/j.jneumeth.2009.03.022).
+- **[meflib](https://github.com/msel-source/meflib)**: the original reference
+  C library for MEF 3.0, from the msel-source project.
+- **[pymef](https://github.com/msel-source/pymef)**
+  ([docs](https://pymef.readthedocs.io/)): a Python wrapper over meflib.
+- **[mef_tools](https://github.com/bnelair/mef_tools)** (archived; on PyPI as
+  [`mef-tools`](https://pypi.org/project/mef-tools/)): high-level Python
+  reading and writing built on pymef. mef3io stands in for it:
+  `from mef3io import MefReader, MefWriter`.
+- **MATLAB (legacy):** Richard Jie Cui's
+  [MEF_import](https://github.com/jiecui/MEF_import) (EEGLAB plugin) and
+  [mef_reader_fieldtrip](https://github.com/jiecui/mef_reader_fieldtrip)
+  (FieldTrip reader for MEF 2.1, MEF 3.0 and MED 1.0). mef3io has its own
+  MATLAB interface.
+- The older **MEF 2.1** format has its own library and specification,
+  [mef_lib_2_1](https://github.com/benbrinkmann/mef_lib_2_1); mef3io reads
+  and writes MEF 3.0 only.
+
+mef3io is an independent implementation of the specification, tested against
+meflib, pymef and mef_tools. New to the format? See
+[MEF 3.0 for students](https://bnelair.github.io/mef3io/students/).
 
 ## Install
 
@@ -81,6 +116,11 @@ More: the [Python](https://bnelair.github.io/mef3io/python/),
 - **Protected recordings.** Both MEF 3.0 password levels work as specified:
   the level-1 password opens the technical metadata while the subject's
   identity stays behind the level-2 password.
+- **Looking before reading.** `mef3io.inspect(path)` (or
+  `python -m mef3io inspect`) describes a session — channels, segments,
+  gaps, annotations, encryption, what identifying fields it holds — without
+  reading any samples, and long reads and operations can report progress and
+  be cancelled from another thread (Python and C++).
 - **One file instead of a folder.** A session can be packed into a single
   `.mefd.tar` and read in place, without unpacking.
 
@@ -91,7 +131,8 @@ pymef, but declare some buffer sizes as `0`, which can crash meflib-based
 readers. Opening one warns once. Appending with a current version repairs the
 segment it extends; `mef3io.repair_session` fixes the rest in place — see
 [Validating and repairing](https://bnelair.github.io/mef3io/validation/).
-Changes in every version are listed in the [release notes](https://github.com/bnelair/mef3io/releases).
+Changes in every version, and what an upgrade asks of you, are listed in the
+[release notes](https://bnelair.github.io/mef3io/release_notes/).
 
 ## Scope and limitations
 
@@ -102,6 +143,25 @@ Changes in every version are listed in the [release notes](https://github.com/bn
   signal: the samples and their timing can be decoded without a password, so
   keep confidential recordings on protected storage. See
   [what encryption protects](https://bnelair.github.io/mef3io/encryption_model/#what-encryption-protects).
+- **Data-block encryption.** The MEF 3.0 specification defines encrypted
+  data blocks. Leaving them unencrypted is a habit of past implementations,
+  not the format's design: meflib does not encrypt them unless asked, and
+  the legacy readers mishandle encrypted blocks (pymef crashes on them, and
+  meflib requires the level-2 password even for level-1 blocks). mef3io
+  reads such blocks (some third-party tools write them): a block encrypted at
+  level 1 with either password, one at level 2 with the level-2 password.
+  Recordings mef3io writes today leave data blocks unencrypted and stay fully
+  compatible; encrypted *metadata* works in every direction. mef3io intends
+  to follow the specification here later, which could produce recordings
+  that older tools cannot read; that is not decided yet
+  ([#94](https://github.com/bnelair/mef3io/issues/94),
+  [#92](https://github.com/bnelair/mef3io/issues/92)).
+- **Single-file `.mefd.tar` sessions** are a mef3io addition, not part of
+  MEF 3.0, so meflib, pymef and mef_tools cannot open them directly. They
+  are plain uncompressed tar files, so they can always be unpacked:
+  `mef3io.extract_session`, `tar -xf` (built into Windows 10 and later,
+  macOS and Linux) or the free 7-Zip on Windows. The unpacked `.mefd` folder
+  works with the legacy tools.
 - **Records** (annotations): every record type MEF 3.0 defines is read;
   `Note`, `SyLg` and `EDFA` can be written with their text.
 - **De-identification**: meflib's recording-time offset does not hide the
@@ -136,10 +196,34 @@ benchmarks/  performance comparisons
 docs/        documentation site source
 ```
 
+## Related projects
+
+- [mef3io-studio](https://github.com/bnelair/mef3io-studio): a desktop app for
+  exploring and anonymizing MEF 3.0 recordings; installers are on its
+  Releases page.
+- [mef3io-server](https://github.com/bnelair/mef3io-server): a gRPC server
+  that streams MEF 3.0 data to viewers on a local network.
+
 ## Citing and license
 
 If you use mef3io in published work, please cite it via
 [CITATION.cff](https://github.com/bnelair/mef3io/blob/main/CITATION.cff).
 Licensed under [Apache 2.0](https://github.com/bnelair/mef3io/blob/main/LICENSE).
-Developed at the Mayo Clinic Bioelectronics Neurophysiology and Engineering
-Lab (BNEL).
+Maintained by Filip Mivalt, Bioelectronics Neurophysiology and Engineering
+Laboratory (BNEL) at Mayo Clinic.
+
+## Contributors and credits
+
+**mef3io:** Filip Mivalt (maintainer), Vladimir Sladky.
+
+**The format and the earlier tools**, whose authors we thank for making this
+work possible: Matt Stead, who conceived MEF, and his co-authors of the 2009
+paper Benjamin H. Brinkmann, Mark R. Bower, Keith A. Stengel and Gregory A.
+Worrell; the meflib, pymef and mef_tools contributors, including Jan
+Cimbálník, Daniel P. Crepeau, Max van den Boom, Ben Brinkmann, Eric Larson,
+Václav Křemen and others; and Richard Jie Cui for the MATLAB tools. The full
+list, with what each project did, is in
+[CONTRIBUTORS.md](https://github.com/bnelair/mef3io/blob/main/CONTRIBUTORS.md).
+
+This project follows a
+[code of conduct](https://github.com/bnelair/mef3io/blob/main/CODE_OF_CONDUCT.md).

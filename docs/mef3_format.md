@@ -1,3 +1,7 @@
+---
+description: "MEF 3.0 (Multiscale Electrophysiology Format) on-disk format reference: every file, header and field, checked against meflib."
+---
+
 # The MEF 3.0 on-disk format
 
 A practical reference for the parts of MEF 3.0 that mef3io reads and writes

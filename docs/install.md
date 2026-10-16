@@ -1,3 +1,7 @@
+---
+description: "Install mef3io for Python (pip wheels), MATLAB (MEX bundle) or C++ (CMake) to read and write MEF 3.0 recordings."
+---
+
 # Install
 
 All bindings share **one version**: the repo-root `VERSION` file feeds the

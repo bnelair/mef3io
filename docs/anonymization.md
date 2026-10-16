@@ -1,3 +1,7 @@
+---
+description: "Why meflib's recording-time offset does not de-identify a MEF 3.0 recording, and what mef3io does instead."
+---
+
 # De-identification and the recording-time offset
 
 !!! warning "meflib's recording-time-offset “anonymization” is deprecated in mef3io"

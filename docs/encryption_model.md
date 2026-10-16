@@ -1,3 +1,7 @@
+---
+description: "How MEF 3.0 encryption works and what it protects: the two password levels, metadata and data-block encryption, compatibility with meflib and pymef."
+---
+
 # MEF 3.0 Encryption Model (as implemented by mef3io)
 
 This note explains, once and for record, how encryption actually works in the
@@ -197,6 +201,30 @@ gate the signal itself: the samples are readable without any password (see
     date. Anyone can read it from the bytes, and with the level-2 password
     anyone can read it from an encrypted session too. See
     [De-identification and the recording-time offset](anonymization.md).
+
+## Compatibility with other MEF 3.0 tools
+
+- **Encrypted metadata** (sections 2 and 3, record bodies) interoperates in
+  both directions: pymef and mef_tools read encrypted sessions mef3io writes,
+  and mef3io reads theirs at either password level. (With only the level-1
+  password the legacy reader itself returns no samples, whoever wrote the
+  file; see the [legacy comparison](legacy_comparison.md).)
+- **Encrypted data blocks.** Some recordings have encrypted data blocks
+  (written by some third-party tools; meflib can write them, though not by
+  default). mef3io reads them: a block encrypted at level 1 with either
+  password, one at level 2 with the level-2 password. pymef and meflib
+  handle them poorly (see [Encrypted data blocks](#encrypted-data-blocks)).
+  Recordings mef3io writes leave data blocks unencrypted and stay fully
+  compatible. mef3io 1.2 and earlier decoded such blocks wrongly (they
+  deciphered the whole 256-byte table instead of its first 16 bytes).
+- **Unencrypted data blocks are a habit, not the design.** The format
+  defines data-block encryption; blocks are left unencrypted because of past
+  implementations' defaults (meflib's `RED_ENCRYPTION_LEVEL_DEFAULT` is no
+  encryption) and because the legacy readers mishandle encrypted blocks.
+  mef3io intends to align with the specification later, which may break
+  compatibility with older tools for encrypted data. That is not decided yet:
+  see [#94](https://github.com/bnelair/mef3io/issues/94) and, for a
+  different direction, [#92](https://github.com/bnelair/mef3io/issues/92).
 
 ## Password/key derivation (for completeness)
 
