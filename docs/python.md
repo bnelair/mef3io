@@ -272,6 +272,127 @@ checked in its last segment, unchanged. That covers:
 If a session may have been edited that way, open it without `cache=`: a plain
 open always reads everything.
 
+## Inspecting a session without reading its samples
+
+`mef3io.inspect(path, password="")` returns a `SessionSummary`: everything a
+tool needs to know about a session, read from the metadata and the record
+files only. It **never reads a `.tdat`**. Data files appear only as file sizes,
+so inspecting a terabyte session costs about the same as opening a `Reader`.
+
+```python
+s = mef3io.inspect("session.mefd")            # or "session.mefd.tar", read in place
+
+s.layout, s.total_bytes                       # "directory" / "tar", bytes
+s.start_time, s.end_time                      # first / last sample, all channels (uUTC)
+s.first_time, s.last_time                     # samples AND annotations
+for c in s.channels:
+    c.name, c.sampling_frequency, c.number_of_samples
+    c.segments                                # SegmentSummary: times, samples, sizes, provenance
+    c.gaps                                    # [(start, end), ...] uUTC spans with no samples
+s.records                                     # RecordSummary at every level, with times
+s.encryption                                  # what is encrypted, what the password opened
+s.time_offset                                 # meflib's recording-time offset, in plain words
+s.identity_field("subject_id").present        # True / False / None (locked)
+[w.code for w in s.warnings]
+s.to_dict()                                   # plain data, ready for json.dumps
+```
+
+From the command line:
+
+```bash
+python -m mef3io inspect session.mefd           # text
+python -m mef3io inspect session.mefd --json    # the same as to_dict()
+```
+
+What it reports:
+
+| Part | Contents |
+|---|---|
+| Session | name, path, layout, total size, first/last sample and record times, the recording-time offset and how it was read, GMT offset and DST fields |
+| `channels` | sampling rate, units, start/end, stored samples, the segment map (`segments`, the same fields as `Reader.segments()` plus file sizes, declared discontinuities and the offset state), gaps, record count |
+| `records` | every record at the session, channel and segment level: type, time, duration, and `first_time` / `last_time` over everything the record mentions (header time, body times such as `Seiz` onsets, `time + duration`) |
+| `identity` | subject name 1/2, ID and location (section 3), the session, channel and reference descriptions (section 2), `session_name` and `anonymized_name` (every universal header), and record text: where each lives, in how many places it is set, its longest length, how many distinct values. **Values only with `include_values=True`.** |
+| `warnings` | each with a `code`, a plain-words `message`, and `blocks_anonymize`; `s.anonymize_blockers` lists the ones the planned `anonymize_session` (#70) will refuse on |
+| `problems` | with `strict=False`, what could not be read (same shape as `Reader.problems`) |
+| `incomplete_channels` | channel folders without one complete segment. A segment folder missing its `.tmet`, `.tidx` or `.tdat` is skipped silently by a `Reader`; `inspect` lists it as `readable=False`, counts its files, reports what it may hold as unknown, and warns (`incomplete-segments`) |
+
+Options:
+
+- `include_values=True` returns identity values: subject fields, descriptions,
+  record text and the full records (`RecordSummary.fields`, as
+  `Reader.records()` returns them), and the recording-time offset. Off by
+  default. **Names and paths are not de-identified either way**: the session's
+  folder name (MEF names it after the session, so it usually *is* the
+  `session_name`), channel names and file paths, also inside warning and
+  problem messages, are always returned. A summary of an identifiable session
+  is itself identifiable.
+- `read_index=True` also reads every segment's block index (about 2% of the
+  data), which finds gaps **inside** a segment. Without it, `gaps` lists only
+  the gaps between segments and `gaps_complete` is `False`. An appended
+  recording is usually one segment per channel, so ask for the index when
+  the gaps matter. Gaps come from the index's copy of each block's time and
+  sample count; the authoritative copy, the RED block header, is in the
+  `.tdat` and is never read. `gaps_certain` is `False` when a listed gap
+  might hold data from a segment that could not be read or placed, or when a
+  segment whose times assume offset 0 sits next to one whose non-zero offset
+  was read.
+- `strict=False` reports an unreadable segment or record file in `problems`
+  and a warning, marks the segment `readable=False`, and describes the rest.
+  Strict, the default, raises as a `Reader` does.
+- `cancel=` and `progress=` work as for the other long operations (see
+  [Cancelling and progress](#cancelling-and-progress)).
+
+**Encrypted sessions are described, not refused.** Without a password,
+`inspect` still lists channels, segments, sizes and the plain universal-header
+fields. What the password does not open is reported as locked:
+`encryption["access"]` is `"none"`, `"level-1"` or `"full"`, the locked
+sections and record bodies are counted, and values that live there are `None`.
+A password that is given and wrong raises `PasswordError`.
+
+**Times are never guessed silently.** Every time is absolute UTC. A
+segment's times are resolved with its own offset.
+
+- **Section 3 locked** (the level-1 password, or none on an encrypted
+  session): the offset cannot be read, so times are resolved **assuming
+  offset 0**, as a `Reader` does, and flagged `offset_assumed_zero=True` on
+  the session, the channel, the segment and each record concerned, with an
+  `offset-assumed-zero` warning. mef3io and pymef always write offset 0, so
+  these times are right for almost every file. Under meflib's deprecated date
+  masking they are the masked times, which is what meflib meant a level-1
+  user to see. They are never called verified, and the warning blocks
+  anonymization (which needs the level-2 password anyway).
+- **Segment unreadable** (lenient mode): its times are `None`, with a
+  `times-unresolved` warning.
+
+A channel- or session-level record file is read with the offset all the
+segments in its scope share. When they disagree, or one is unreadable, its
+offset-dependent times are `None` (`RecordSummary.times_known` is `False`, and
+the times in `fields` are `None` too). A locked segment takes part with its
+assumed 0, exactly as in a `Reader`, so against a read non-zero offset it is a
+dispute (`time_offset["status"]` is `"disputed"`), never a silent choice.
+
+**The recording-time offset is reported plainly.** meflib's recording-time
+offset is deprecated as anonymization: the real date stays in section 3 (see
+[De-identification and the recording-time offset](anonymization.md)).
+`time_offset["status"]` is `"none"`, `"applied"`, `"disputed"`, `"locked"` or
+`"unknown"` (no segment readable). It describes the readable segments;
+`segments_unknown` counts the ones that could not be read, whose offset is
+unknown;
+when an offset is set, `date_recoverable` is `True` and `recoverable_by` says
+by whom (`"anyone"` if section 3 is plain, `"level-2 password"` if encrypted),
+with a `legacy-time-offset` warning. The offset's value is itself identifying
+(it is the local midnight of the recording day), so it is returned only with
+`include_values=True`. `ambiguous` is `True` when a time is stored
+non-negative under a non-zero offset, where it cannot be told apart from an
+absolute time; that blocks anonymization. It is checked on the metadata
+universal headers, record header times and, with `read_index=True`, the block
+index (header and entries). The `.tdat` universal header is never checked,
+because `inspect` never opens a `.tdat`.
+
+!!! note "Python first"
+    `inspect` is available in Python and C++ (`mef3io/inspect.hpp`,
+    `inspect_session`). The C ABI and MATLAB bindings come later.
+
 ## Tar archives (single-file sessions)
 
 A session directory can be packed into a single **uncompressed tar** file —
@@ -320,6 +441,7 @@ Reads and the long operations take two optional keyword arguments:
 |---|---|---|
 | `Reader.read`, `Reader.read_raw` | yes | compressed bytes decoded |
 | `archive_session`, `extract_session` | yes | bytes copied |
+| `inspect` | yes (per segment and record file) | bytes of `.tmet` (+ `.tidx` with `read_index=True`) read |
 | `Validator.validate`, `validate_session` | yes | bytes of `.tmet` + `.tidx` + `.tdat` covered |
 | `repair_session` | yes (validation pass only) | as validate |
 | `recover_session` | yes (scan only) | bytes of `.tidx` + `.tdat` covered |

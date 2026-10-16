@@ -13,6 +13,24 @@ The native API:
 
 ::: mef3io.extract_session
 
+## Inspecting a session
+
+See the [Python guide](../python.md#inspecting-a-session-without-reading-its-samples).
+
+::: mef3io.inspect
+
+::: mef3io.SessionSummary
+
+::: mef3io.ChannelSummary
+
+::: mef3io.SegmentSummary
+
+::: mef3io.RecordSummary
+
+::: mef3io.IdentityField
+
+::: mef3io.SummaryWarning
+
 ## Cancelling and progress
 
 See the [Python guide](../python.md#cancelling-and-progress).

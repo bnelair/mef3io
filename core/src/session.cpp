@@ -14,20 +14,10 @@
 #include "mef3io/red.hpp"
 #include "mef3io/validate.hpp"
 #include "mef3io/time.hpp"
+#include "session_layout.hpp"
 
 namespace mef3io {
 namespace {
-
-int segment_number_from_name(const std::string& stem) {
-  // "<channel>-000000" -> 0
-  auto dash = stem.rfind('-');
-  if (dash == std::string::npos) return 0;
-  try {
-    return std::stoi(stem.substr(dash + 1));
-  } catch (...) {
-    return 0;
-  }
-}
 
 // Entry count of a .tidx image, validating the size first. A truncated or
 // empty file (seen on flaky network mounts) must fail loudly — the naive
@@ -50,41 +40,20 @@ Session::Session(const std::string& mefd_path, std::string password, bool strict
 }
 
 void Session::discover() {
-  for (const auto& entry : source_->list_dir("")) {
-    if (!entry.is_dir) continue;
-    if (entry.name.ends_with(".vidd")) continue;  // video channels are out of scope; skip silently
-    if (!entry.name.ends_with(".timd")) continue;
-
+  // The layout rules live in session_layout.hpp, shared with inspect_session.
+  auto layout = detail::discover_layout(*source_);
+  record_only_channels_ = std::move(layout.record_only_channels);
+  for (auto& lc : layout.channels) {
     Channel ch;
-    ch.info.name = entry.name.substr(0, entry.name.size() - 5);
-
-    for (const auto& seg_entry : source_->list_dir(entry.name)) {
-      if (!seg_entry.is_dir || !seg_entry.name.ends_with(".segd")) continue;
-      const std::string seg_stem = seg_entry.name.substr(0, seg_entry.name.size() - 5);
-      const std::string seg_dir = entry.name + "/" + seg_entry.name;
+    ch.info.name = lc.name;
+    for (auto& ls : lc.segments) {
       SegmentReader seg;
-      seg.segment_number = segment_number_from_name(seg_stem);
-      seg.tmet_path = seg_dir + "/" + seg_stem + ".tmet";
-      seg.tidx_path = seg_dir + "/" + seg_stem + ".tidx";
-      seg.tdat_path = seg_dir + "/" + seg_stem + ".tdat";
-      if (source_->exists(seg.tmet_path) && source_->exists(seg.tidx_path) &&
-          source_->exists(seg.tdat_path))
-        ch.segments.push_back(std::move(seg));
+      seg.segment_number = ls.number;
+      seg.tmet_path = std::move(ls.tmet);
+      seg.tidx_path = std::move(ls.tidx);
+      seg.tdat_path = std::move(ls.tdat);
+      ch.segments.push_back(std::move(seg));
     }
-    if (ch.segments.empty()) {
-      // No samples, but records: a channel annotated before its data arrives
-      // (mef3io's own write_annotations(..., "chNew") makes one; pymef reads
-      // it). Not a data channel, but its records are listed.
-      if (source_->exists(entry.name + "/" + ch.info.name + ".rdat"))
-        record_only_channels_.push_back(ch.info.name);
-      continue;
-    }
-
-    std::sort(ch.segments.begin(), ch.segments.end(),
-              [](const SegmentReader& a, const SegmentReader& b) {
-                return a.segment_number < b.segment_number;
-              });
-
     load_channel_basic_info(ch.info.name, ch);
     channel_names_.push_back(ch.info.name);
     channels_.emplace(ch.info.name, std::move(ch));
@@ -393,28 +362,10 @@ std::vector<Record> Session::read_records(std::optional<std::string> channel,
   // Session level: <session>.mefd/<session>.rdat (meflib.c:6343). Any .rdat at
   // the root is accepted, as before.
   if (want_session) {
-    // meflib reads exactly <session>.mefd/<session>.rdat (meflib.c:6335/6343),
-    // the session name being the directory's (or archive's) stem. A file of
-    // another name is accepted only when it is the ONLY .rdat at the root —
-    // with several there is no telling which holds the session's records, and
-    // silently picking the first in listing order is how annotations go
-    // missing.
-    std::string rdat_path;
-    const std::string preferred = source_->session_name() + ".rdat";
-    std::vector<std::string> candidates;
-    for (const auto& e : source_->list_dir(""))
-      if (!e.is_dir && e.name.ends_with(".rdat")) candidates.push_back(e.name);
-    if (std::find(candidates.begin(), candidates.end(), preferred) != candidates.end()) {
-      rdat_path = preferred;
-    } else if (candidates.size() == 1) {
-      rdat_path = candidates.front();
-    } else if (candidates.size() > 1) {
-      std::sort(candidates.begin(), candidates.end());
-      std::string list;
-      for (const auto& c : candidates) list += (list.empty() ? "" : ", ") + c;
-      const std::string reason =
-          "ambiguous session-level records: no " + preferred + " but " +
-          std::to_string(candidates.size()) + " .rdat files at the session root (" + list + ")";
+    // The naming rule (session_layout.hpp) is shared with inspect_session.
+    std::string reason;
+    const std::string rdat_path = detail::session_record_file(*source_, reason);
+    if (!reason.empty()) {
       if (strict_) throw FormatError(reason);
       if (reported_record_files_.insert("<session-root>").second)
         problems_.push_back(SegmentProblem{"", -1, source_->describe(""),

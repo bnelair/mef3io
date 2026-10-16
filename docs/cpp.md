@@ -159,6 +159,7 @@ cancelled call returns `MEF3IO_ERR_CANCELLED`.
 | `metadata.hpp` | `.tmet` loader: CRC → password → decrypt |
 | `red.hpp` | RED block decode + encode (lossless) |
 | `session.hpp` | session tree, indexed reads, block gathering |
+| `inspect.hpp` | `inspect_session`: everything about a session without reading sample data (Python: `mef3io.inspect`) |
 | `source.hpp` | `SessionSource` abstraction: directory vs tar-backed sessions |
 | `tar.hpp` | uncompressed tar session archives: `archive_session`, `TarSource` |
 | `reader.hpp` | gridded reads, NaN fill, scaling, parallel decode |

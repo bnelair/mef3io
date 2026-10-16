@@ -36,7 +36,7 @@ class CancelToken:
     """A flag that stops a running read or long operation.
 
     Pass it as ``cancel=`` to :meth:`Reader.read`, :meth:`Reader.read_raw`,
-    :func:`archive_session`, :func:`extract_session`,
+    :func:`archive_session`, :func:`extract_session`, :func:`inspect`,
     :meth:`Validator.validate`, :func:`validate_session`,
     :func:`repair_session` or :func:`recover_session`, and call
     :meth:`cancel` from any thread. The operation notices between units of
@@ -46,6 +46,10 @@ class CancelToken:
     A token is one-shot: once cancelled it stays cancelled, so create a new
     one per request. One token may be shared by several calls to stop them
     together (for example every channel of one viewer request).
+
+    Cancellation and progress are available in Python and C++ only. MATLAB
+    has neither: a MEX call blocks MATLAB's only interpreter thread, so
+    nothing could call :meth:`cancel` while it runs.
 
     Examples
     --------

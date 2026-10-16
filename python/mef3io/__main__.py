@@ -1,8 +1,9 @@
 """Command-line entry point: ``python -m mef3io <command> ...``.
 
-``validate`` reads; ``repair`` writes. They are separate commands so that
+``inspect`` and ``validate`` read; ``repair`` writes. They are separate commands so that
 neither can be reached by accident from the other::
 
+    python -m mef3io inspect SESSION.mefd [--json] [--values] [--index]
     python -m mef3io validate SESSION.mefd
     python -m mef3io repair SESSION.mefd --check sizing.difference-bytes
     python -m mef3io validate --list-checks
@@ -19,6 +20,7 @@ import sys
 from typing import Sequence
 
 COMMANDS = {
+    "inspect": "describe a session without reading its samples (never writes)",
     "validate": "check a session's declarations against its data (never writes)",
     "repair": "rewrite only the declarations for the checks you name",
     "recover": "after an interrupted write, make the index and data agree again",
@@ -47,6 +49,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"unknown command: {command}\n", file=sys.stderr)
         print(_usage(), file=sys.stderr)
         return 2
+    if command == "inspect":
+        from ._inspect import _main as _inspect_main
+
+        return _inspect_main(rest)
     if command in ("validate", "repair"):
         from .validate import _main
 

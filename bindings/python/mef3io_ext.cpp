@@ -14,6 +14,7 @@
 #include "mef3io/crc.hpp"
 #include "mef3io/errors.hpp"
 #include "mef3io/crypto.hpp"
+#include "mef3io/inspect.hpp"
 #include "mef3io/metadata.hpp"
 #include "mef3io/reader.hpp"
 #include "mef3io/recover.hpp"
@@ -201,6 +202,208 @@ nb::dict record_to_dict(const mef3io::Record& rec) {
 }  // namespace
 
 namespace {
+template <class T>
+nb::object opt_obj(const std::optional<T>& v) {
+  return v ? nb::cast(*v) : nb::none();
+}
+
+nb::object opt_str(const std::string& s) {
+  return s.empty() ? nb::object(nb::none()) : record_str(s);
+}
+
+// inspect_session's result as plain nested dicts/lists: the Python layer
+// (mef3io/_inspect.py) turns them into dataclasses, and a helper process can
+// ship them as JSON unchanged.
+nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
+  nb::dict d;
+  d["name"] = record_str(s.name);
+  d["path"] = s.path;
+  d["layout"] = s.layout;
+  d["total_bytes"] = s.total_bytes;
+  d["archive_bytes"] = opt_obj(s.archive_bytes);
+  d["index_read"] = s.index_read;
+  d["offset_assumed_zero"] = s.offset_assumed_zero;
+
+  nb::dict enc;
+  enc["encrypted"] = s.encryption.encrypted;
+  enc["access"] = s.encryption.access;
+  enc["section2_level"] = s.encryption.section2_level;
+  enc["section3_level"] = s.encryption.section3_level;
+  enc["section2_locked"] = s.encryption.section2_locked;
+  enc["section3_locked"] = s.encryption.section3_locked;
+  enc["record_bodies_locked"] = s.encryption.record_bodies_locked;
+  d["encryption"] = enc;
+
+  nb::dict to;
+  to["status"] = s.time_offset.status;
+  to["segments_with_offset"] = s.time_offset.segments_with_offset;
+  to["segments_locked"] = s.time_offset.segments_locked;
+  to["segments_unknown"] = s.time_offset.segments_unknown;
+  to["date_recoverable"] = s.time_offset.date_recoverable;
+  to["recoverable_by"] = opt_str(s.time_offset.recoverable_by);
+  to["ambiguous"] = s.time_offset.ambiguous;
+  to["value"] = opt_obj(s.time_offset.value);
+  to["interpretation"] = s.time_offset.interpretation;
+  d["time_offset"] = to;
+
+  d["gmt_offset"] = opt_obj(s.gmt_offset);
+  d["dst_start_time"] = opt_obj(s.dst_start_time);
+  d["dst_end_time"] = opt_obj(s.dst_end_time);
+  d["start_time"] = opt_obj(s.start_time);
+  d["end_time"] = opt_obj(s.end_time);
+  d["records_start_time"] = opt_obj(s.records_start_time);
+  d["records_end_time"] = opt_obj(s.records_end_time);
+  d["first_time"] = opt_obj(s.first_time);
+  d["last_time"] = opt_obj(s.last_time);
+
+  nb::list chans;
+  for (const auto& c : s.channels) {
+    nb::dict cd;
+    cd["name"] = record_str(c.name);
+    cd["sampling_frequency"] = opt_obj(c.sampling_frequency);
+    cd["units_conversion_factor"] = opt_obj(c.units_conversion_factor);
+    cd["units_description"] =
+        c.units_description ? record_str(*c.units_description) : nb::object(nb::none());
+    cd["start_time"] = opt_obj(c.start_time);
+    cd["end_time"] = opt_obj(c.end_time);
+    cd["number_of_samples"] = opt_obj(c.number_of_samples);
+    cd["gaps_complete"] = c.gaps_complete;
+    cd["gaps_certain"] = c.gaps_certain;
+    cd["offset_assumed_zero"] = c.offset_assumed_zero;
+    cd["bytes"] = c.bytes;
+    cd["records"] = c.records;
+    nb::list gaps;
+    for (const auto& g : c.gaps) gaps.append(nb::make_tuple(g.start, g.end));
+    cd["gaps"] = gaps;
+    nb::list segs;
+    for (const auto& g : c.segments) {
+      nb::dict sd;
+      sd["segment"] = g.segment_number;
+      sd["path"] = record_str(g.path);
+      sd["readable"] = g.readable;
+      sd["problem"] = opt_str(g.problem);
+      sd["section2_available"] = g.section2_available;
+      sd["section3_available"] = g.section3_available;
+      sd["start_time"] = opt_obj(g.start_time);
+      sd["end_time"] = opt_obj(g.end_time);
+      sd["start_sample"] = opt_obj(g.start_sample);
+      sd["number_of_samples"] = opt_obj(g.number_of_samples);
+      sd["number_of_blocks"] = opt_obj(g.number_of_blocks);
+      sd["number_of_discontinuities"] = opt_obj(g.number_of_discontinuities);
+      sd["time_offset"] = g.time_offset;
+      sd["recording_time_offset"] = opt_obj(g.recording_time_offset);
+      sd["offset_assumed_zero"] = g.offset_assumed_zero;
+      sd["tmet_bytes"] = g.tmet_bytes;
+      sd["tidx_bytes"] = g.tidx_bytes;
+      sd["tdat_bytes"] = g.tdat_bytes;
+      sd["record_bytes"] = g.record_bytes;
+      sd["has_records"] = g.has_records;
+      sd["provenance"] = provenance_dict(g.provenance);
+      sd["unset_declarations"] = g.unset_declarations;
+      segs.append(sd);
+    }
+    cd["segments"] = segs;
+    chans.append(cd);
+  }
+  d["channels"] = chans;
+  nb::list rec_only, video;
+  for (const auto& n : s.record_only_channels) rec_only.append(record_str(n));
+  for (const auto& n : s.video_channels) video.append(record_str(n));
+  d["record_only_channels"] = rec_only;
+  d["video_channels"] = video;
+  nb::list incomplete;
+  for (const auto& n : s.incomplete_channels) incomplete.append(record_str(n));
+  d["incomplete_channels"] = incomplete;
+
+  nb::list recs;
+  for (const auto& r : s.records) {
+    nb::dict rd;
+    rd["type"] = record_str(r.type);
+    rd["level"] = mef3io::record_level_name(r.level);
+    rd["channel"] = r.level == mef3io::RecordLevel::Session ? nb::object(nb::none())
+                                                            : record_str(r.channel);
+    rd["segment"] = r.level == mef3io::RecordLevel::Segment ? nb::object(nb::int_(r.segment))
+                                                            : nb::object(nb::none());
+    rd["time"] = opt_obj(r.time);
+    rd["times_known"] = r.times_known;
+    rd["offset_assumed_zero"] = r.offset_assumed_zero;
+    rd["duration"] = opt_obj(r.duration);
+    rd["first_time"] = opt_obj(r.first_time);
+    rd["last_time"] = opt_obj(r.last_time);
+    rd["text_bytes"] = r.text_bytes;
+    rd["body_locked"] = r.body_locked;
+    if (r.full) {
+      nb::dict fd = record_to_dict(*r.full);
+      // A time inspect could not resolve is NO_ENTRY in the record: None here.
+      if (r.full->time == mef3io::fmt::UUTC_NO_ENTRY) fd["time"] = nb::none();
+      // Seiz per-channel onset/offset: -1 is meflib's NO_ENTRY there; when the
+      // times are unknown, say None like every other time.
+      if (!r.times_known && fd.contains("channels") && !fd["channels"].is_none())
+        for (auto c : nb::borrow<nb::list>(fd["channels"])) {
+          nb::dict cd = nb::borrow<nb::dict>(c);
+          cd["onset"] = nb::none();
+          cd["offset"] = nb::none();
+        }
+      rd["fields"] = fd;
+    } else {
+      rd["fields"] = nb::none();
+    }
+    recs.append(rd);
+  }
+  d["records"] = recs;
+
+  nb::list ids;
+  for (const auto& f : s.identity) {
+    nb::dict fd;
+    fd["name"] = f.name;
+    fd["location"] = f.location;
+    fd["occurrences"] = f.occurrences;
+    fd["locked"] = f.locked;
+    fd["max_length"] = f.max_length;
+    fd["distinct"] = f.distinct;
+    nb::list vals;
+    for (const auto& v : f.values) vals.append(record_str(v));
+    fd["values"] = vals;
+    ids.append(fd);
+  }
+  d["identity"] = ids;
+
+  nb::list warns;
+  for (const auto& w : s.warnings) {
+    nb::dict wd;
+    wd["code"] = w.code;
+    wd["message"] = record_str(w.message);
+    wd["blocks_anonymize"] = w.blocks_anonymize;
+    warns.append(wd);
+  }
+  d["warnings"] = warns;
+
+  nb::list probs;
+  for (const auto& p : s.problems) {
+    nb::dict e;
+    e["channel"] = record_str(p.channel);
+    e["segment_number"] = p.segment_number;
+    e["segment"] = record_str(p.segment);
+    e["reason"] = record_str(p.reason);
+    e["kind"] = p.kind;
+    probs.append(e);
+  }
+  d["problems"] = probs;
+
+  nb::list decl;
+  for (const auto& i : s.declaration_issues) {
+    nb::dict e;
+    e["channel"] = record_str(i.channel);
+    e["segment"] = i.segment_number;
+    e["field"] = i.field;
+    decl.append(e);
+  }
+  d["declaration_issues"] = decl;
+  return d;
+}
+}  // namespace
+
+namespace {
 // The cancel/progress hooks of ONE call (#69), bridged to Python.
 //
 // Built and destroyed with the GIL held, on the binding's stack; the work runs
@@ -367,6 +570,29 @@ NB_MODULE(_mef3io, m) {
       nb::arg("progress") = nb::none(),
       "Make each segment's block index and data agree after an interrupted "
       "write. Dry run unless apply=True.");
+
+  // --- inspect (#67): everything about a session without its samples ---
+  m.def(
+      "inspect_session",
+      [](const std::string& path, const std::string& password, bool strict,
+         bool include_values, bool read_index, const mef3io::CancelToken* cancel,
+         nb::object progress) {
+        mef3io::InspectOptions opts;
+        opts.password = password;
+        opts.strict = strict;
+        opts.include_values = include_values;
+        opts.read_index = read_index;
+        // File I/O over every segment: runs without the GIL (PyHooks::run).
+        PyHooks hooks(cancel, std::move(progress));
+        mef3io::SessionSummary s = hooks.run([&](const mef3io::Control& ctl) {
+          return mef3io::inspect_session(path, opts, ctl);
+        });
+        return summary_to_dict(s);
+      },
+      nb::arg("path"), nb::arg("password") = "", nb::arg("strict") = true,
+      nb::arg("include_values") = false, nb::arg("read_index") = false,
+      nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none(),
+      "Describe a session without reading sample data. See mef3io.inspect.");
 
   // --- validation / repair (dicts in, dicts out; mef3io.validate wraps them) ---
   m.def(

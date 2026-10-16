@@ -30,6 +30,15 @@ def have_cpp_backend() -> bool:
 
 
 from ._archive import archive_session, extract_session  # noqa: E402
+from ._inspect import (  # noqa: E402
+    ChannelSummary,
+    IdentityField,
+    RecordSummary,
+    SegmentSummary,
+    SessionSummary,
+    SummaryWarning,
+    inspect,
+)
 from ._cancel import CancelToken, Cancelled  # noqa: E402
 from ._reader import (  # noqa: E402
     BlockCopyWarning,
@@ -71,6 +80,9 @@ else:  # pragma: no cover - only without the extension
 __all__ = [
     "Reader", "Writer", "Metadata", "Subject", "Acquisition",
     "MefReader", "MefWriter", "archive_session", "extract_session",
+    # Not "inspect": `from mef3io import *` would shadow the standard library's.
+    "SessionSummary", "ChannelSummary", "SegmentSummary",
+    "RecordSummary", "IdentityField", "SummaryWarning",
     "Validator", "Check", "Finding", "Report", "SkippedSegment",
     "available_checks", "describe_check",
     "validate_session", "repair_session", "recover_session",

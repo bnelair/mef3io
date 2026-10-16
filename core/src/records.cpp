@@ -254,6 +254,14 @@ std::vector<RecordField> record_fields(const Record& r) {
 
 std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
                                   const crypto::AccessKeys& keys, bool* offset_dependent) {
+  RecordParseInfo info;
+  auto out = parse_records(rdat, rto, keys, info);
+  if (offset_dependent) *offset_dependent = info.offset_dependent;
+  return out;
+}
+
+std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
+                                  const crypto::AccessKeys& keys, RecordParseInfo& info) {
   std::vector<Record> out;
   TimeConv conv{rto};
   if (rdat.size() < static_cast<std::size_t>(fmt::UNIVERSAL_HEADER_BYTES))
@@ -311,27 +319,37 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
 
     // Decrypt the body if encrypted.
     std::vector<ui1> body(rdat.begin() + body_off, rdat.begin() + body_off + body_bytes);
+    bool body_locked = false;
     if (enc > 0) {
       std::span<const ui1> key;
       if (enc == fmt::LEVEL_1_ENCRYPTION && keys.level1_key)
         key = *keys.level1_key;
       else if (enc == fmt::LEVEL_2_ENCRYPTION && keys.level2_key)
         key = *keys.level2_key;
-      if (key.empty()) throw PasswordError("record body encrypted; insufficient access");
-      // Body is padded to a multiple of 16 for AES.
-      std::size_t pad = (body.size() + 15) & ~std::size_t{15};
-      body.resize(pad, 0);
-      auto dec = crypto::aes128_ecb_decrypt(body, key);
-      body = std::move(dec);
+      if (key.empty() && !info.skip_locked_bodies)
+        throw PasswordError("record body encrypted; insufficient access");
+      if (key.empty()) {
+        body_locked = true;
+      } else {
+        // Body is padded to a multiple of 16 for AES.
+        std::size_t pad = (body.size() + 15) & ~std::size_t{15};
+        body.resize(pad, 0);
+        auto dec = crypto::aes128_ecb_decrypt(body, key);
+        body = std::move(dec);
+      }
     }
     std::span<const ui1> b(body);
 
     Record rec;
     rec.type = type;
+    if (time != fmt::UUTC_NO_ENTRY && time >= 0) info.header_time_non_negative = true;
     rec.time = conv(time);
     rec.version_major = vmaj;
     rec.version_minor = vmin;
-    parse_body(rec, b, conv);
+    if (body_locked)
+      info.locked.push_back(out.size());  // header only: the body stays unread
+    else
+      parse_body(rec, b, conv);
 
     out.push_back(std::move(rec));
 
@@ -339,7 +357,7 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
     // 16-byte boundary when the file uses encryption alignment.
     off = body_off + body_bytes;
   }
-  if (offset_dependent) *offset_dependent = conv.offset_dependent;
+  info.offset_dependent = conv.offset_dependent;
   return out;
 }
 
