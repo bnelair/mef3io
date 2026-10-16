@@ -168,4 +168,33 @@ TEST_CASE("copy_segment: dropping blocks flags the next kept one and renumbers s
   CHECK(st.max_contiguous_blocks == st.blocks - 1);
   CHECK(crc::calculate(std::span<const ui1>(idx).subspan(1024)) == byteio::read<ui4>(idx, 4));
   CHECK(crc::calculate(std::span<const ui1>(dat).subspan(1024)) == byteio::read<ui4>(dat, 4));
+
+  SECTION("a LEADING drop: the first written block is a discontinuity, renumbered") {
+    const auto out2 = dir / "out2";
+    fsys::create_directories(out2);
+    // Clear the source's own flag on block 1 so only the drop can set it.
+    spec.tidx_out = (out2 / "y.tidx").string();
+    spec.tdat_out = (out2 / "y.tdat").string();
+    spec.start_sample = 0;
+    spec.on_block = [&](detail::CopyBlock& b) {
+      b.block[4] = static_cast<ui1>(b.block[4] & ~1u);
+      b.entry[44] = static_cast<ui1>(b.entry[44] & ~1u);
+      return b.index != 0;  // drop the FIRST block
+    };
+    const auto st2 = detail::copy_segment(spec);
+    REQUIRE(st2.blocks >= 1);
+    const auto idx2 = slurp(out2 / "y.tidx");
+    const auto dat2 = slurp(out2 / "y.tdat");
+    std::span<const ui1> e0(idx2.data() + 1024, 56);
+    CHECK((e0[44] & 1) != 0);                      // index flag
+    CHECK((dat2[1024 + 4] & 1) != 0);              // RED header flag
+    CHECK(byteio::read<si8>(e0, 16) == 0);         // renumbered from start_sample
+    std::span<const ui1> blk(dat2.data() + 1024, byteio::read<ui4>(e0, 28));
+    CHECK(crc::calculate(blk.subspan(4)) == byteio::read<ui4>(blk, 0));
+    if (st2.blocks > 1) {
+      std::span<const ui1> e1(idx2.data() + 1024 + 56, 56);
+      CHECK((e1[44] & 1) == 0);                    // only the first is flagged
+    }
+    CHECK(st2.discontinuities == 1);
+  }
 }

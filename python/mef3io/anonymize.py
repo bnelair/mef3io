@@ -351,9 +351,10 @@ def anonymize_session(
     pseudonym : str, optional
         Written to ``anonymized_name`` in every file. Default: the copy's
         session name. The pseudonym and the copy's name must not contain the
-        patient's names, ID or location, or the original session name (4+
-        characters anywhere, shorter values as a whole word): ``ValueError``
-        before anything is written.
+        patient's names (or any of their words), ID or location, or the
+        original session name (3+ characters anywhere, shorter values as a
+        whole word, ignoring case and Latin accents): ``ValueError`` before
+        anything is written.
     clear : iterable of {"subject", "location", "descriptions"}, optional
         What to clear. Default: all three. Leaving ``"descriptions"`` out
         keeps the section-2 descriptions with the old session name replaced

@@ -266,9 +266,10 @@ python -m mef3io anonymize patient.mefd S001.mefd --shift-us -630720000000000
 
 The copy's folder name (`S001` above) becomes its session name everywhere.
 Choose a code that says nothing about the patient: a copy name or
-`pseudonym` that contains the patient's names, ID or location, or the
-original session name (anywhere for 4 or more characters, as a whole word
-for shorter ones), is refused before anything is written.
+`pseudonym` that contains the patient's names (or any of their words), ID or
+location, or the original session name, is refused before anything is
+written. Values of 3 or more characters count anywhere ("Roe1", "XRoe"),
+shorter ones as a whole word; case and accents are ignored as above.
 
 ### Choosing the shift
 
@@ -390,13 +391,25 @@ It confirms that:
   does not raise false alarms from the signal.
 
 The name search never uses the same matcher as the replacement, so anything
-the replacement misses stops the copy instead of reaching it. It follows two
-rules:
+the replacement misses stops the copy instead of reaching it.
+
+**What counts as a name.** Each subject name and the recording location are
+searched as a whole and word by word (every run of 3 or more letters), so
+"Jane Roe" in one field, or "Roe, Jane", also finds "Roe" and "Jane" on their
+own. The subject ID is searched only as a whole: its letters are usually an
+institution's prefix. Values are trimmed and their inner spaces collapsed,
+since fixed-width fields are often padded. Upper and lower case are treated
+alike for the Latin scripts (ASCII, Latin-1 and Latin Extended-A, which
+cover the accented letters of most European languages); the search also
+ignores accents there, so "Muller" or "JIRI" in a copy is found for
+"Müller" or "Jiří". Names in other scripts are matched exactly as stored.
+
+It follows two rules:
 
 - **Fields the copy writes** (descriptions, annotation text, header names):
   a name that should be gone stops the copy wherever it appears, even inside
   another word. Four overlaps are reported as **notes** instead: a value of
-  fewer than 4 characters inside the copy's own name ("12" in "S012"); a
+  fewer than 3 characters inside the copy's own name ("12" in "S012"); a
   value inside a kept channel's name (the next rule decides); a number of
   fewer than 4 digits inside a longer number ("12" in "12:30", "12.5" or
   "1200"; a comma separates numbers, so "1,123" holds the number 123); and a

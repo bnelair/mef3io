@@ -193,10 +193,137 @@ bool is_digit(char c) { return c >= '0' && c <= '9'; }
 // "1,123" holds the number 123.
 bool number_char(char c) { return is_digit(c) || c == ':' || c == '.'; }
 char fold(char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); }
+
+/// Lower case of a Latin-1 Supplement / Latin Extended-A code point (the
+/// Latin scripts of most European names); anything else unchanged. Every
+/// mapping stays in U+0080..U+017F, so its UTF-8 length (2 bytes) is kept.
+unsigned lower_latin(unsigned cp) {
+  if (cp >= 0xC0 && cp <= 0xDE && cp != 0xD7) return cp + 0x20;
+  if (cp >= 0x100 && cp <= 0x137 && cp % 2 == 0 && cp != 0x130) return cp + 1;
+  if (cp >= 0x139 && cp <= 0x148 && cp % 2 == 1) return cp + 1;
+  if (cp >= 0x14A && cp <= 0x177 && cp % 2 == 0) return cp + 1;
+  if (cp == 0x178) return 0xFF;
+  if (cp >= 0x179 && cp <= 0x17E && cp % 2 == 1) return cp + 1;
+  return cp;
+}
+
+/// Case-fold `s`: ASCII, Latin-1 Supplement and Latin Extended-A. Length-
+/// preserving (the Redactor replaces at the positions it finds in the folded
+/// copy); bytes that are not valid 2-byte UTF-8 pass through unchanged.
 std::string folded(std::string s) {
-  std::transform(s.begin(), s.end(), s.begin(), fold);
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    const auto b = static_cast<unsigned char>(s[i]);
+    if (b < 0x80) {
+      s[i] = fold(s[i]);
+      continue;
+    }
+    if (b >= 0xC2 && b <= 0xC5 && i + 1 < s.size() &&
+        (static_cast<unsigned char>(s[i + 1]) & 0xC0) == 0x80) {
+      const unsigned cp = ((b & 0x1Fu) << 6) | (static_cast<unsigned char>(s[i + 1]) & 0x3Fu);
+      const unsigned lc = lower_latin(cp);
+      s[i] = static_cast<char>(0xC0 | (lc >> 6));
+      s[i + 1] = static_cast<char>(0x80 | (lc & 0x3F));
+      ++i;
+    }
+  }
   return s;
 }
+
+/// The SCANNER's fold (fail-closed side): case-folded as above, then the
+/// diacritics of those Latin letters removed, so "Muller" and "Jiri" are
+/// found for "Müller" and "Jiří". Not length-preserving; only the scanner,
+/// which works entirely in this folded space, uses it.
+std::string scan_folded(const std::string& in) {
+  // Base letters of U+0100..U+017F, in order (ligatures handled below).
+  static const char* const EXT_A =
+      "aaaaaaccccccccddddeeeeeeeeeegggggggghhhhiiiiiiiiiiiijjkkklllllll"
+      "lllnnnnnnnnnoooooooorrrrrrssssssssttttttuuuuuuuuuuuuwwyyyzzzzzzs";
+  static_assert(sizeof("aaaaaaccccccccddddeeeeeeeeeegggggggghhhhiiiiiiiiiiiijjkkklllllll"
+                       "lllnnnnnnnnnoooooooorrrrrrssssssssttttttuuuuuuuuuuuuwwyyyzzzzzzs") ==
+                0x80 + 1);
+  static const char* const LATIN1 =  // U+00E0..U+00FF (after folding)
+      "aaaaaa\x01" "ceeeeiiiidnooooo\x02ouuuuy\x03y";
+  const std::string f = folded(in);
+  std::string out;
+  out.reserve(f.size());
+  for (std::size_t i = 0; i < f.size(); ++i) {
+    const auto b = static_cast<unsigned char>(f[i]);
+    if (b >= 0xC2 && b <= 0xC5 && i + 1 < f.size() &&
+        (static_cast<unsigned char>(f[i + 1]) & 0xC0) == 0x80) {
+      const unsigned cp = ((b & 0x1Fu) << 6) | (static_cast<unsigned char>(f[i + 1]) & 0x3Fu);
+      if (cp == 0xDF) { out += "ss"; ++i; continue; }
+      if (cp == 0xE6) { out += "ae"; ++i; continue; }
+      if (cp == 0xFE) { out += "th"; ++i; continue; }
+      if (cp == 0x132 || cp == 0x133) { out += "ij"; ++i; continue; }
+      if (cp == 0x152 || cp == 0x153) { out += "oe"; ++i; continue; }
+      if (cp >= 0xE0 && cp <= 0xFF && cp != 0xF7) {
+        out += LATIN1[cp - 0xE0];
+        ++i;
+        continue;
+      }
+      if (cp >= 0x100 && cp <= 0x17F) {
+        out += EXT_A[cp - 0x100];
+        ++i;
+        continue;
+      }
+    }
+    out += f[i];
+  }
+  return out;
+}
+
+/// A stored value as a name: trimmed, inner whitespace collapsed to one
+/// space (fixed-width fields are often space-padded).
+std::string normalized(const std::string& s) {
+  std::string out;
+  bool space = false;
+  for (char c : s) {
+    if (std::isspace(static_cast<unsigned char>(c))) {
+      space = !out.empty();
+      continue;
+    }
+    if (space) out += ' ';
+    space = false;
+    out += c;
+  }
+  return out;
+}
+
+/// The words of a name: letter runs of 3+ characters (non-ASCII bytes count
+/// as letters; a character is counted once however many bytes it has).
+std::vector<std::string> name_words(const std::string& v) {
+  std::vector<std::string> out;
+  auto letter = [](unsigned char c) { return c >= 0x80 || std::isalpha(c); };
+  for (std::size_t i = 0; i < v.size();) {
+    if (!letter(static_cast<unsigned char>(v[i]))) {
+      ++i;
+      continue;
+    }
+    std::size_t j = i, chars = 0;
+    while (j < v.size() && letter(static_cast<unsigned char>(v[j]))) {
+      if ((static_cast<unsigned char>(v[j]) & 0xC0) != 0x80) ++chars;
+      ++j;
+    }
+    if (chars >= 3) out.push_back(v.substr(i, j - i));
+    i = j;
+  }
+  return out;
+}
+
+/// What to search for, for one subject or location value: the whole value
+/// (normalized) and each of its words ("Roe, Jane" -> "Roe, Jane", "Roe",
+/// "Jane").
+std::vector<std::string> identity_variants(const std::string& value, bool words = true) {
+  std::vector<std::string> out;
+  const std::string whole = normalized(value);
+  if (whole.empty()) return out;
+  out.push_back(whole);
+  if (words)
+    for (const auto& w : name_words(whole))
+    if (std::find(out.begin(), out.end(), w) == out.end()) out.push_back(w);
+  return out;
+}
+
 std::string trimmed(const std::string& s) {
   std::size_t a = 0, b = s.size();
   while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
@@ -351,7 +478,7 @@ struct Scanner {
 
   /// The rule for a kept channel's name and anything derived from it.
   Result channel(const std::string& name) const {
-    const std::string h = folded(name);
+    const std::string h = scan_folded(name);
     const std::vector<std::string> tokens = alnum_tokens(h);
     Result r;
     for (const auto& n : identity) {
@@ -381,7 +508,7 @@ struct Scanner {
 
   /// The rule for a field the copy rewrites.
   Result text(const std::string& value) const {
-    const std::string h = folded(value);
+    const std::string h = scan_folded(value);
     std::vector<Span> own, kept;
     std::vector<std::string> kept_of;  // the channel name each kept span is
     for (const auto& a : allowed)
@@ -397,8 +524,8 @@ struct Scanner {
     };
     for (const auto& n : identity) {
       for (const auto& s : occurrences(h, n.value)) {
-        if (n.value.size() < 4 && covered_by(s, own)) {
-          note("contains " + n.label + " (shorter than 4 characters) inside the copy's own name");
+        if (n.value.size() < 3 && covered_by(s, own)) {
+          note("contains " + n.label + " (shorter than 3 characters) inside the copy's own name");
           continue;
         }
         bool decided = false;
@@ -1033,6 +1160,9 @@ struct SourcePlan {
   bool has_times = false;
   std::set<std::string> session_names;    // folder stem + every stored session_name
   std::set<std::string> subject_values, location_values, anonymized_values;
+  /// The subject IDs among subject_values: searched whole, never word by word
+  /// (an ID's letters are usually an institution's prefix: "EEG-0042").
+  std::set<std::string> id_values;
   std::set<Uuid> uuids;
 };
 
@@ -1068,6 +1198,9 @@ SourcePlan plan_source(const SessionSource& src, const std::string& path,
     if (dst)
       for (const auto& v : f.values)
         if (!v.empty()) dst->insert(v);
+    if (f.name == "subject_id")
+      for (const auto& v : f.values)
+        if (!v.empty()) p.id_values.insert(v);
   }
   return p;
 }
@@ -1079,15 +1212,18 @@ Redactor build_redactor(const SourcePlan& p, const std::string& new_name, bool c
   for (const auto& k : kept) r.protect.push_back(folded(k));
   std::sort(r.protect.begin(), r.protect.end(),
             [](const std::string& a, const std::string& b) { return a.size() > b.size(); });
+  // Every value normalized; subject and location values also word by word.
   for (const auto& n : p.session_names)
-    if (n != new_name) r.add(n, new_name, false);
+    if (n != new_name) r.add(normalized(n), new_name, false);
   if (clear_subject)
-    for (const auto& v : p.subject_values) r.add(v, "", false);
+    for (const auto& v : p.subject_values)
+      for (const auto& w : identity_variants(v, !p.id_values.count(v))) r.add(w, "", false);
   if (clear_location)
-    for (const auto& v : p.location_values) r.add(v, "", false);
+    for (const auto& v : p.location_values)
+      for (const auto& w : identity_variants(v)) r.add(w, "", false);
   for (const auto& v : p.anonymized_values)
-    if (v != pseudonym && v != new_name) r.add(v, "", false);
-  for (const auto& c : excluded) r.add(trimmed(c), "", true);
+    if (v != pseudonym && v != new_name) r.add(normalized(v), "", false);
+  for (const auto& c : excluded) r.add(normalized(c), "", true);
   return r;
 }
 
@@ -1097,21 +1233,25 @@ Scanner build_scanner(const SourcePlan& p, const std::string& new_name, bool cle
   Scanner s;
   auto add = [](std::vector<Scanner::Needle>& v, const std::string& value, const char* label,
                 bool session = false) {
-    if (value.size() < 2) return;  // as the rewrite: too short to search for
-    v.push_back({folded(value), label, session});
+    const std::string n = normalized(value);
+    if (n.size() < 2) return;  // as the rewrite: too short to search for
+    v.push_back({scan_folded(n), label, session});
   };
   for (const auto& n : p.session_names)
     if (n != new_name) add(s.identity, n, "the source's session name", true);
   if (clear_subject)
-    for (const auto& v : p.subject_values) add(s.identity, v, "a subject name or ID");
+    for (const auto& v : p.subject_values)
+      for (const auto& w : identity_variants(v, !p.id_values.count(v)))
+        add(s.identity, w, "a subject name or ID");
   if (clear_location)
-    for (const auto& v : p.location_values) add(s.identity, v, "the recording location");
+    for (const auto& v : p.location_values)
+      for (const auto& w : identity_variants(v)) add(s.identity, w, "the recording location");
   for (const auto& v : p.anonymized_values)
     if (v != pseudonym && v != new_name) add(s.identity, v, "the source's anonymized name");
-  for (const auto& c : excluded) add(s.excluded, trimmed(c), "an excluded channel's name");
-  s.allowed = {folded(new_name)};
-  if (!pseudonym.empty()) s.allowed.push_back(folded(pseudonym));
-  for (const auto& k : kept) s.kept_channels.push_back(folded(k));
+  for (const auto& c : excluded) add(s.excluded, c, "an excluded channel's name");
+  s.allowed = {scan_folded(new_name)};
+  if (!pseudonym.empty()) s.allowed.push_back(scan_folded(pseudonym));
+  for (const auto& k : kept) s.kept_channels.push_back(scan_folded(k));
   // Longest first, so a kept name containing another is removed whole.
   auto longest = [](const std::string& a, const std::string& b) { return a.size() > b.size(); };
   std::sort(s.allowed.begin(), s.allowed.end(), longest);
@@ -1898,8 +2038,10 @@ AnonymizeReport anonymize_session(const std::string& src_path, const std::string
                                 "destination folder must be named after it");
   const std::string pseudonym = o.pseudonym.empty() ? new_name : o.pseudonym;
   // The copy's own names are written everywhere, so they must not carry what
-  // the copy removes: 4+ characters anywhere in them, shorter values as a
-  // whole word. Refused before anything is written.
+  // the copy removes: a value of 3+ characters anywhere in them ("Roe1",
+  // "XRoe"), a shorter one as a whole word. Subject and location values are
+  // also checked word by word; everything in the scanner's folded space
+  // (case and Latin diacritics). Refused before anything is written.
   {
     struct Value {
       std::string value;
@@ -1912,18 +2054,20 @@ AnonymizeReport anonymize_session(const std::string& src_path, const std::string
       else if (f.name == "subject_id") what = "the patient's ID";
       else if (f.name == "recording_location") what = "the recording location";
       if (what)
-        for (const auto& v : f.values) values.push_back({v, what});
+        for (const auto& v : f.values)
+          for (const auto& w : identity_variants(v, f.name != "subject_id"))
+            values.push_back({w, what});
     }
     if (o.rename)
       for (const auto& n : plan.session_names)
         values.push_back({n, "the original session name"});
     auto check = [&](const std::string& name, const char* which) {
-      const std::string h = folded(name);
+      const std::string h = scan_folded(name);
       const auto tokens = alnum_tokens(h);
       for (const auto& v : values) {
-        const std::string f = folded(trimmed(v.value));
+        const std::string f = scan_folded(normalized(v.value));
         if (f.size() < 2) continue;
-        const bool hit = f.size() >= 4 ? h.find(f) != std::string::npos
+        const bool hit = f.size() >= 3 ? h.find(f) != std::string::npos
                                        : std::find(tokens.begin(), tokens.end(), f) != tokens.end();
         if (hit)
           throw std::invalid_argument(std::string(which) + " contains " + v.what +

@@ -62,7 +62,12 @@ identity value of 3+ chars; for subject/location (not the source session
 name) also a 3+-letter value equal to a letter/digit part ("Roe1") or a
 4+-char value inside a token ("JaneRoe"); else NOTE (256-channel montages
 hit "12"/"P3"/"EEG"). The copy name/pseudonym holding an identity value
-(4+ substring, shorter whole token) is a ValueError before any write. Identity checks run before excusing the copy's own name ("S0012"
+(3+ substring, shorter whole token; own-name excuse only for <3 chars) is a
+ValueError before any write. Needles: values normalized (trim + collapse
+spaces); subject names + location ALSO word by word (3+ letters), the ID
+never (its letters are a prefix). Case fold covers ASCII + Latin-1 +
+Latin Ext-A and is LENGTH-PRESERVING (the redactor replaces at folded
+offsets); the scanner additionally strips those diacritics (fail closed). Identity checks run before excusing the copy's own name ("S0012"
 vs copy "S001"). Epoc/Curs id_number: absolute window only (the rto window
 reaches small ints). Redactor: <4 chars = whole tokens, numeric = whole
 numbers, never inside kept channel names. Segment number = `.tmet` UH @48,

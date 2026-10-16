@@ -416,15 +416,15 @@ def test_encrypted_input_to_plain_and_to_reencrypted_output(tmp_path):
     b = _read_all(tmp_path / "plain.mefd")
     for ch in a:
         np.testing.assert_array_equal(a[ch][1], b[ch][1])
-    rep = _anon(src, tmp_path / "enc2.mefd", password="pw-two",
+    rep = _anon(src, tmp_path / "K2.mefd", password="pw-two",
                 output_password=("new-one", "new-two"))
     assert rep.output_encrypted and rep.verification.ok
-    c = _read_all(tmp_path / "enc2.mefd", "new-two")
+    c = _read_all(tmp_path / "K2.mefd", "new-two")
     for ch in a:
         np.testing.assert_array_equal(a[ch][1], c[ch][1])
     with pytest.raises(mef3io.PasswordError):
-        mef3io.Reader(str(tmp_path / "enc2.mefd"), "pw-two").info("ch1")
-    tmet = _tmets(tmp_path / "enc2.mefd")[0].read_bytes()
+        mef3io.Reader(str(tmp_path / "K2.mefd"), "pw-two").info("ch1")
+    tmet = _tmets(tmp_path / "K2.mefd")[0].read_bytes()
     assert tmet[1024] == 1 and tmet[1025] == 2                     # s2 L1, s3 L2
     with pytest.raises(ValueError):
         _anon(src, tmp_path / "Y.mefd", password="pw-two", output_password="only-one")
@@ -1194,6 +1194,90 @@ def test_segment_number_must_agree_with_its_metadata(tmp_path, folder):
     with pytest.raises(mef3io.WriteConflictError, match="segment"):
         _anon(src, tmp_path / "S001.mefd")
     assert not (tmp_path / "S001.mefd").exists()
+
+
+# ---- review round 4: names split, padded, accented; the copy's own name
+
+
+def _note_session(tmp_path, subject, text, channels=("c1", "c2")):
+    src = _named_session(tmp_path / "p.mefd", channels, subject)
+    t = START + 5 * SECOND
+    _install_records(_src_rdat(src), [_record("Note", text, -t)], [-t])
+    return src
+
+
+def _session_note(path):
+    return next(r for r in _all_records(path) if r["level"] == "session")["text"]
+
+
+def test_a_full_name_in_one_field_is_searched_word_by_word(tmp_path):
+    src = _note_session(tmp_path, mef3io.Subject(name_1="Jane Roe"),
+                        b"Roe was asleep; Jane ok\0")
+    rep = _anon(src, tmp_path / "S001.mefd", text="keep")
+    assert rep.verification.ok
+    out = _session_note(tmp_path / "S001.mefd")
+    assert "Roe" not in out and "Jane" not in out and out.endswith("ok")
+    # the words also stop a copy that still holds one
+    bad = tmp_path / "bad" / "S001.mefd"
+    shutil.copytree(tmp_path / "S001.mefd", bad)
+    _edit_record(bad / "S001.rdat", b"Note", lambda r, b, n: r.__setitem__(slice(b, b + 5), b"Roe! "))
+    assert not mef3io.anonymize.verify(src, bad, SHIFT).ok
+
+
+def test_roe1_is_refused_when_the_name_is_in_one_field(tmp_path):
+    src = _named_session(tmp_path / "p.mefd", ("Roe1", "C4"), mef3io.Subject(name_1="Jane Roe"))
+    with pytest.raises(mef3io.WriteConflictError, match="verification"):
+        _anon(src, tmp_path / "S001.mefd")
+    assert not (tmp_path / "S001.mefd").exists()
+
+
+def test_an_id_is_not_split_into_words(tmp_path):
+    """An ID's letters are a prefix, not a name: ID "EEG-0042" must not stop
+    a channel called EEG1."""
+    src = _named_session(tmp_path / "p.mefd", ("EEG1", "EEG2"), mef3io.Subject(id="EEG-0042"))
+    rep = _anon(src, tmp_path / "S001.mefd")
+    assert rep.verification.ok
+
+
+def test_padded_values_are_trimmed(tmp_path):
+    src = _note_session(tmp_path, mef3io.Subject(name_1="Jane ", name_2=" Roe  "),
+                        b"Jane. Roe. ok\0")
+    rep = _anon(src, tmp_path / "S001.mefd", text="keep")
+    assert rep.verification.ok
+    out = _session_note(tmp_path / "S001.mefd")
+    assert "Jane" not in out and "Roe" not in out and out.endswith("ok")
+
+
+def test_accented_names_fold_case(tmp_path):
+    src = _note_session(tmp_path, mef3io.Subject(name_1="Jiří", name_2="Müller"),
+                        "MÜLLER JIŘÍ ok\0".encode())
+    rep = _anon(src, tmp_path / "S001.mefd", text="keep")
+    assert rep.verification.ok
+    out = _session_note(tmp_path / "S001.mefd")
+    assert "MÜLLER" not in out and "JIŘÍ" not in out and out.endswith("ok")
+
+
+@pytest.mark.parametrize("plant", [b"Muller", b"JIRI", b"jiri"])
+def test_the_scanner_also_folds_diacritics(tmp_path, plant):
+    src = _note_session(tmp_path, mef3io.Subject(name_1="Jiří", name_2="Müller"), b"x ok\0")
+    _anon(src, tmp_path / "S001.mefd", text="keep")
+    bad = tmp_path / "bad" / "S001.mefd"
+    shutil.copytree(tmp_path / "S001.mefd", bad)
+    _edit_record(bad / "S001.rdat", b"Note",
+                 lambda r, b, n: r.__setitem__(slice(b, b + len(plant) + 1), plant + b"\0"))
+    rep = mef3io.anonymize.verify(src, bad, SHIFT)
+    assert not rep.ok and rep.leaks
+
+
+@pytest.mark.parametrize("dst", ["Roe1.mefd", "XRoe.mefd", "S_muller.mefd"])
+def test_copy_names_with_a_glued_or_accent_free_name_are_refused(tmp_path, dst):
+    src = _named_session(tmp_path / "p.mefd", ("c1", "c2"),
+                         mef3io.Subject(name_1="Jane", name_2="Roe Müller"))
+    with pytest.raises(ValueError, match="patient's name"):
+        _anon(src, tmp_path / dst)
+    with pytest.raises(ValueError, match="patient's name"):
+        _anon(src, tmp_path / "S001.mefd", pseudonym=dst[:-5])
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["p.mefd"]
 
 
 def test_verify_clean_copy_and_wrong_shift(rich):
