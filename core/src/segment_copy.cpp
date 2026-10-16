@@ -87,6 +87,9 @@ CopyStats copy_segment(const SegmentCopySpec& spec) {
   OutFile tidx(spec.tidx_out);
 
   si8 run_blocks = 0, run_samples = 0, run_bytes = 0;
+  bool dropped_since_kept = false;
+  bool renumber = spec.start_sample.has_value();
+  si8 next_sample = spec.start_sample.value_or(0);
   std::uint64_t prev_end = UH;  // source: blocks must be in file order, non-overlapping
 
   for (std::size_t first = 0; first < n_entries; first += ENTRIES_PER_CHUNK) {
@@ -151,7 +154,22 @@ CopyStats copy_segment(const SegmentCopySpec& spec) {
                          " fails its CRC: the data is damaged, and copying it would hide that");
 
         CopyBlock cb{global, entry_at(b), block};
-        if (spec.on_block && !spec.on_block(cb)) continue;
+        if (spec.on_block && !spec.on_block(cb)) {
+          dropped_since_kept = true;
+          renumber = true;
+          continue;
+        }
+        if (dropped_since_kept) {
+          // The samples between this block and the previous kept one are gone.
+          const ui1 flag = fmt::RedBlockHeader::DISCONTINUITY_MASK;
+          byteio::write<ui1>(block, 4, static_cast<ui1>(byteio::read<ui1>(block, 4) | flag));
+          byteio::write<ui1>(cb.entry, 44,
+                             static_cast<ui1>(byteio::read<ui1>(cb.entry, 44) | flag));
+          dropped_since_kept = false;
+        }
+        if (renumber) byteio::write<si8>(cb.entry, 16, next_sample);
+        next_sample = byteio::read<si8>(cb.entry, 16) +
+                      static_cast<si8>(byteio::read<ui4>(block, 32));
 
         byteio::write<ui4>(block, 0, crc::calculate(std::span<const ui1>(block).subspan(4)));
         const si8 new_offset = static_cast<si8>(tdat.bytes());

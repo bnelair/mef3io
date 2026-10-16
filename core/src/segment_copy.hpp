@@ -28,6 +28,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <span>
 #include <string>
 
@@ -72,11 +73,21 @@ struct SegmentCopySpec {
   /// `is_tdat` tells the two files apart. Counts and maximum sizes are set by
   /// the engine afterwards.
   std::function<void(std::span<ui1> uh, bool is_tdat)> on_header;
+  /// Renumber every kept block's channel-wide start_sample (.tidx +16)
+  /// contiguously from this value. Unset: entries keep their own numbers
+  /// until a block is dropped; from then on each kept block continues from
+  /// the previous kept one (start + samples), so the numbering stays dense.
+  std::optional<si8> start_sample;
   const Control* control = nullptr;
   /// Called with the number of source bytes consumed since the last call.
   std::function<void(std::uint64_t)> on_progress;
 };
 
+/// Dropping blocks: the next KEPT block after a dropped one is flagged as a
+/// discontinuity (RED header flag and index flag, inside the re-sealed CRC),
+/// since the samples between them are gone; the contiguous-run statistics are
+/// computed after that, so they describe what was written.
+///
 /// Copy one segment's index and data. Throws on any integrity failure, on I/O
 /// failure and (via `control`) on cancellation; the caller removes the
 /// partial output.
