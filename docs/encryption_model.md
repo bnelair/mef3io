@@ -6,6 +6,100 @@ choose level-1 or level-2 encryption") does **not** match what meflib/pymef
 produce on disk. mef3io follows the real behavior, and this document is the
 reference for why.
 
+## What encryption protects
+
+*In plain words, for anyone deciding whether MEF passwords are enough to
+protect a recording.*
+
+**MEF 3.0 encryption protects the subject fields (name, ID, recording
+location) and the text of annotations. It does not protect the signal, or
+when it was recorded (unless the session uses a recording-time offset), or
+the names of the session and its channels.**
+Someone who has the files but no password can still decode every stored
+sample and see when each piece of the recording starts. Do not put
+identifying information (a patient's name or record number) in session,
+channel or folder names: they are never encrypted.
+
+What is encrypted in an encrypted session, and what is not:
+
+| What | Where it is stored | Encrypted? |
+|---|---|---|
+| Subject name, subject ID, recording location | metadata section 3 (`.tmet`) | **yes**, level-2 password |
+| Recording-time offset, GMT offset, daylight-saving start/end | metadata section 3 | **yes**, level-2 password |
+| Sampling rate, conversion factor to physical units (e.g. µV), units, filter settings, channel/session/reference descriptions, sample and block totals (this copy only: the index and data blocks below keep their own, in plain text) | metadata section 2 (`.tmet`) | **yes**, level-1 password |
+| Annotation contents: note text, seizure and event details | record bodies (`.rdat`) | **yes**, level-2 password, when the writer encrypts them: mef3io always does, the legacy Python stack (`mef_tools`/`pymef`) does not |
+| Annotation type, time and size (the size of its contents, to within 16 bytes) | record headers (`.rdat`) and record index (`.ridx`) | no |
+| Recording start and end time, session and channel names, anonymized name (if the writer filled it), number of blocks or records, file IDs, mef3io's [provenance stamp](mef3_format.md#provenance-region-mef3io-12-frozen-format) | the 1024-byte header at the start of **every** file | no |
+| Every data block's start time, sample count, position in the file, smallest and largest sample, and gap flag | block index (`.tidx`) | no |
+| Every data block's start time, sample count, scale factor and compression table | data block header (`.tdat`) | no ([with one exception](#encrypted-data-blocks)) |
+| **The samples themselves** (compressed) | data block (`.tdat`) | **no**: meflib writes data blocks unencrypted by default, and so does mef3io |
+| File and folder names, file sizes | the file system | no |
+
+So, **without any password**, anyone with the files can recover:
+
+- **The stored samples of every channel, exactly.** Decoding a data block
+  needs nothing from the encrypted sections. What is missing is the
+  conversion factor, so the values come out in the recorder's integer
+  units rather than microvolts: the waveform, its spectrum and every event
+  in it are intact; only the scale (and its sign) and the units are
+  unknown.
+- **The timing.** The start time and sample count of every block, and so
+  the gaps and the sampling rate (samples per block divided by the time
+  between blocks). In a session without a recording-time offset, which
+  includes every session mef3io creates, these are real dates and times.
+  Only a session that uses meflib's recording-time offset shows
+  times of day instead, with the date in encrypted section 3; mef3io never
+  creates such sessions (see [De-identification](anonymization.md)).
+- **When and what kind of annotation** was made, but not its text.
+
+**mef3io refusing to open an encrypted session without a password is a
+choice of this library, not protection.** The bytes it would need to decode
+the signal are not encrypted, and other code can read them directly.
+
+**If the signal itself must stay confidential, protect the storage**:
+encrypted disks or volumes, file permissions, access-controlled servers and
+encrypted transfer. Use MEF passwords on top of that, for what they do
+protect (subject identity and annotation text), not instead of it. To share
+a recording without its identity and dates, see
+[De-identification](anonymization.md).
+
+Also worth knowing:
+
+- **The level-2 password also unlocks level 1.** Whoever has it can read
+  everything. To let someone see the technical metadata (conversion factor
+  and units, filter settings, descriptions) but not the subject fields or
+  annotation text, give them only the level-1 password.
+- **Passwords are short and can be guessed offline.** At most 16
+  characters count, and only one byte of each. Every file stores check
+  values derived from an unsalted SHA-256 hash of each password in plain
+  text, so anyone with the files can test guesses as fast as their computer
+  allows. A short or common password protects little. For compatibility,
+  use at most 15 characters (meflib refuses longer passwords; mef3io
+  ignores everything past the 16th) and ASCII characters only: for non-ASCII
+  characters mef3io currently keeps a different byte than meflib, so the two
+  would not accept the same password.
+- **In an unencrypted session nothing is hidden**, including section 3. A
+  recording-time offset there hides no date: it is stored right next to the
+  times it shifts ([details](anonymization.md)).
+
+### Encrypted data blocks
+
+MEF 3.0 does let a writer mark individual data blocks as encrypted, but this
+is not a way to protect the signal. meflib then encrypts only the first 16
+bytes of the block's 256-byte compression table; the samples' compressed
+bytes, the block's start time and sample count, and its index entry
+(including its smallest and largest sample) all stay in plain text (see the
+[data block section of the format reference](mef3_format.md#data-file-tdat-1024-b-uh-concatenated-red-blocks)).
+How much of the signal that hides has not been established, and the legacy
+stack barely supports it: pymef crashes on an encrypted block, and meflib
+needs the level-2 password even for blocks encrypted at level 1. mef3io
+reads such blocks, but never writes them.
+
+A format extension that would also hide the signal and its timing without the
+password is being explored in
+[#92](https://github.com/bnelair/mef3io/issues/92). It is an exploration, not a
+plan: MEF 3.0 as described here is what mef3io reads and writes.
+
 ## TL;DR
 
 There are effectively **two** encryption states for a MEF 3.0 time-series file,
@@ -22,7 +116,9 @@ are supplied.
 
 Time-series **data blocks** (`.tdat` RED blocks) are written **unencrypted**
 even in an encrypted session — meflib's `RED_ENCRYPTION_LEVEL_DEFAULT` is
-`NO_ENCRYPTION`. Only metadata sections 2/3 and record bodies are encrypted.
+`NO_ENCRYPTION`. Only metadata sections 2/3 and record bodies are encrypted,
+so the samples and their timing decode without a password (see
+[What encryption protects](#what-encryption-protects)).
 A block that another writer DID encrypt has only the first 16 bytes of its
 statistics table enciphered; see the RED block section of
 [mef3_format.md](mef3_format.md).
@@ -84,8 +180,11 @@ The two-level scheme still matters for *who can read what*:
   throwing — the signal metadata is still readable, the identifying metadata is
   not.
 
-This lets a data-sharing workflow hand out the level-1 password for signal
-access while withholding subject identity behind the level-2 password.
+This lets a data-sharing workflow hand out the level-1 password for the
+technical metadata (conversion factor, units, filter settings) while withholding
+subject identity behind the level-2 password. The level-1 password does not
+gate the signal itself: the samples are readable without any password (see
+[What encryption protects](#what-encryption-protects)).
 
 !!! note "Section 3 is plain text in an unencrypted session"
     Without a level-2 password, section 3 is stored unencrypted (level `-2`).
@@ -97,7 +196,12 @@ access while withholding subject identity behind the level-2 password.
 
 ## Password/key derivation (for completeness)
 
-- Password bytes = terminal byte of each UTF-8 character, up to 16, zero-padded.
+- Password bytes, zero-padded to 16: meflib keeps the low byte of each
+  character's Unicode code point and accepts at most 15 characters
+  (meflib.c:2439; the limit is enforced in `check_password`, meflib.c:1056,
+  meflib.h:260); mef3io currently keeps the last UTF-8 byte of each
+  character, up to 16 characters. The two are only guaranteed to agree on
+  ASCII passwords of at most 15 characters ([#84](https://github.com/bnelair/mef3io/issues/84)).
 - Level-1 validation field = `SHA256(L1_bytes)[:16]`.
 - Level-2 validation field = `SHA256(L2_bytes)[:16] XOR L1_bytes`.
 - Verifying a password: try it as L1 (does its SHA-256 prefix match the L1

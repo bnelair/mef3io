@@ -138,7 +138,9 @@ class Reader:
         Password for encrypted sessions. A **level-2** password unlocks
         everything; a **level-1** password reads the signal and technical
         metadata but leaves subject metadata locked. Empty for unencrypted
-        sessions.
+        sessions. MEF encryption does not cover the samples themselves:
+        refusing an encrypted session without a password is mef3io's
+        policy, not protection (see the encryption model in the docs).
     backend : {"cpp", "pure"}, optional
         Which implementation to use. Defaults to the C++ backend; the pure
         backend is not yet implemented.

@@ -36,7 +36,9 @@ every binding carries the same version number.
 - **Encryption that works** — the two-level password model is implemented as
   specified: a level-1 password reads the signal and technical metadata while
   subject identity stays locked. (The legacy reader returns zero samples and
-  garbage metadata at level 1 — [details](legacy_comparison.md).)
+  garbage metadata at level 1 — [details](legacy_comparison.md).) Encryption
+  hides identity and annotation text, not the samples themselves — see
+  [what it protects](encryption_model.md#what-encryption-protects).
 - **Deterministic** — output is byte-identical regardless of thread count.
 
 ## Quick taste (Python)
@@ -72,8 +74,9 @@ The same session opens in MATLAB (`mef3io.Reader('session.mefd')`) and C++
 ## Scope and limitations
 
 - MEF video files are out of scope; a session's video folders are skipped.
-- Encryption is all or nothing per session — see the
-  [encryption model](encryption_model.md).
+- Encryption is all or nothing per session, and protects identity and
+  annotation text, not the signal — see
+  [what encryption protects](encryption_model.md#what-encryption-protects).
 - Every record type MEF 3.0 defines is read; `Note`, `SyLg` and `EDFA` can be
   written with their text.
 - The pure-Python fallback backend is not implemented.

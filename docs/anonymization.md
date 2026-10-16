@@ -33,6 +33,12 @@ encryption, the offset hides nothing. Even with it, other parts of the
 session can still give the date away (see
 [What else the offset leaves in place](#what-else-the-offset-leaves-in-place)).
 
+MEF encryption itself is no substitute for de-identification either: it
+hides the subject fields and annotation text, but the signal and its timing
+stay readable without any password (in an offset session, as times of day).
+See
+[What encryption protects](encryption_model.md#what-encryption-protects).
+
 **What this means for you.**
 
 - Treat a session "anonymized" this way as **identifiable** data: it holds
@@ -342,7 +348,8 @@ The same behaviour is pinned in more detail by `tests/test_p22_records.py`.
   already has a level-2 password, give out only the level-1 password to
   people who need the signal but not the date. Record bodies written
   unencrypted, file and folder names, and the session name stay readable
-  whatever the password.
+  whatever the password, and so do the samples and their times of day
+  ([What encryption protects](encryption_model.md#what-encryption-protects)).
 - **To share it de-identified, re-share it through `anonymize_session` once
   that ships** ([#70](https://github.com/bnelair/mef3io/issues/70)). It will
   produce a copy with every date moved, the offset set to 0 and identity

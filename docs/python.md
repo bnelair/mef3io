@@ -28,7 +28,10 @@ block_length=None, n_threads=0)`
   `overwrite=False`, an existing session is **reopened for appending** —
   state is recovered from disk, so this works across program runs.
 - Encryption: pass **both** passwords (MEF has no "level-1 only" files; see
-  the [encryption model](encryption_model.md)).
+  the [encryption model](encryption_model.md)). It encrypts the subject
+  fields, technical metadata and annotation text, **not the samples or their
+  timing**, which decode without a password; see
+  [What encryption protects](encryption_model.md#what-encryption-protects).
 - **Appending to an encrypted session needs the level-2 password.** That
   includes sessions at offset 0. Section 3, which holds the recording-time
   offset every new time is stored against, is level-2 encrypted, and without
@@ -121,7 +124,10 @@ with mef3io.Reader("session.mefd") as r:          # password="..." if encrypted
 - A **level-2 password** unlocks everything; a **level-1 password** reads the
   signal and technical metadata while section-3 subject metadata stays locked
   (`info()["section3_available"] == False`, subject fields `None`) and
-  records are unavailable.
+  records are unavailable. Without a password the Reader refuses an
+  encrypted session; that is mef3io's policy, not protection, because the
+  samples themselves are not encrypted
+  ([details](encryption_model.md#what-encryption-protects)).
 
 ### `read(channel, t0=None, t1=None, n_threads=None, *, cancel=None, progress=None)`
 

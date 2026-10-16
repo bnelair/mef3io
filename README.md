@@ -79,8 +79,8 @@ More: the [Python](https://bnelair.github.io/mef3io/python/),
   and `from mef3io import MefReader, MefWriter` runs code written for the
   legacy `mef_tools` package with only the import changed.
 - **Protected recordings.** Both MEF 3.0 password levels work as specified:
-  the level-1 password opens the signal while the subject's identity stays
-  behind the level-2 password.
+  the level-1 password opens the technical metadata while the subject's
+  identity stays behind the level-2 password.
 - **One file instead of a folder.** A session can be packed into a single
   `.mefd.tar` and read in place, without unpacking.
 
@@ -98,8 +98,10 @@ Changes in every version are listed in the [release notes](https://github.com/bn
 - **Video** files (`.vidd`) are out of scope; a session's video folders are
   skipped.
 - **Encryption** is all or nothing per session: unencrypted, or both password
-  levels set. See the
-  [encryption model](https://bnelair.github.io/mef3io/encryption_model/).
+  levels set. It protects the subject's identity and annotation text, not the
+  signal: the samples and their timing can be decoded without a password, so
+  keep confidential recordings on protected storage. See
+  [what encryption protects](https://bnelair.github.io/mef3io/encryption_model/#what-encryption-protects).
 - **Records** (annotations): every record type MEF 3.0 defines is read;
   `Note`, `SyLg` and `EDFA` can be written with their text.
 - **De-identification**: meflib's recording-time offset does not hide the
