@@ -150,14 +150,16 @@ class MefReader:
         for the fields. Returns ``None`` (with a printed warning) on failure,
         as the legacy API did.
         """
-        try:
-            with _warning_on_legacy_records(self._r, self._path_str, stacklevel=4):
+        # The warning sits OUTSIDE the try: under -W error it must propagate,
+        # not be mistaken for a failed read and swallowed.
+        with _warning_on_legacy_records(self._r, self._path_str, stacklevel=4):
+            try:
                 if channel is None:
                     return self._r.records()
                 return self._r.records(channel, level="channel")
-        except Exception:
-            print("WARNING: read of annotations record failed, no annotations returned")
-            return None
+            except Exception:
+                print("WARNING: read of annotations record failed, no annotations returned")
+                return None
 
     def close(self):
         self._r = None

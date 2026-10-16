@@ -174,6 +174,13 @@ def test_old_record_files_warn_even_when_the_metadata_is_new(tmp_path, x):
         anns = mef3io.MefReader(str(path), password2=PW2).get_annotations()
     assert [a["text"] for a in anns] == ["old"]
     assert rec[0].filename == __file__
+    with warnings.catch_warnings():  # -W error must surface, not read as a failed read
+        warnings.simplefilter("error", mef3io.LegacyPasswordWarning)
+        with pytest.raises(mef3io.LegacyPasswordWarning):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", mef3io.LegacyPasswordWarning)
+                reader = mef3io.MefReader(str(path), password2=PW2)
+            reader.get_annotations()
 
 
 # --- writing: always meflib's rule ------------------------------------------------

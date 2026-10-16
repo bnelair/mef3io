@@ -133,13 +133,18 @@ def _warn_legacy_password(impl, path: str, stacklevel: int) -> None:
 @contextlib.contextmanager
 def _warning_on_legacy_records(impl, path: str, stacklevel: int):
     """Warn about record files a records() call opened via the old mapping."""
+    # finally: a strict call can read an old-keyed file and then fail on the
+    # next one. The list is cumulative and deduplicated, so a file not
+    # announced now would never be announced.
     before = len(impl.legacy_password_record_files())
-    yield
-    added = impl.legacy_password_record_files()[before:]
-    if added:
-        warnings.warn(_legacy_password_warning_text(
-            f"{len(added)} record file(s) (first: {added[0]})", path),
-            LegacyPasswordWarning, stacklevel=stacklevel)
+    try:
+        yield
+    finally:
+        added = impl.legacy_password_record_files()[before:]
+        if added:
+            warnings.warn(_legacy_password_warning_text(
+                f"{len(added)} record file(s) (first: {added[0]})", path),
+                LegacyPasswordWarning, stacklevel=stacklevel)
 
 
 def _unreadable_warning_text(problems: list, path: str) -> str:
