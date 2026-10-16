@@ -41,9 +41,8 @@ maintained here, in mef3io, as open source (Apache-2.0).**
 - **MATLAB (legacy):**
   [MEF_import](https://github.com/jiecui/MEF_import) (EEGLAB plugin) and
   [mef_reader_fieldtrip](https://github.com/jiecui/mef_reader_fieldtrip)
-  (FieldTrip reader for MEF 2.1, MEF 3.0 and MED 1.0), published by Richard
-  Jie Cui. mef3io has its own
-  MATLAB interface.
+  (FieldTrip reader for MEF 2.1, MEF 3.0 and MED 1.0), published by
+  Richard Jie Cui. mef3io has its own MATLAB interface.
 - The older **MEF 2.1** format has its own library and specification,
   [mef_lib_2_1](https://github.com/benbrinkmann/mef_lib_2_1); mef3io reads
   and writes MEF 3.0 only.
@@ -224,8 +223,8 @@ work possible: Matt Stead, who conceived MEF, and his co-authors of the 2009
 paper Benjamin H. Brinkmann, Mark R. Bower, Keith A. Stengel and Gregory A.
 Worrell; the meflib, pymef and mef_tools contributors, including Jan
 Cimbálník, Daniel P. Crepeau, Max van den Boom, Ben Brinkmann, Eric Larson,
-Václav Křemen and others; and Richard Jie Cui, who published the MATLAB tools. The full
-list, with what each project did, is in
+Václav Křemen and others; and Richard Jie Cui, who published the MATLAB
+tools. The full list, with what each project did, is in
 [CONTRIBUTORS.md](https://github.com/bnelair/mef3io/blob/main/CONTRIBUTORS.md).
 
 This project follows a
