@@ -39,5 +39,6 @@ Matt Stead, Keith A. Stengel, Max van den Boom, Vince Vasoli,
 Gregory A. Worrell and [@nelagri](https://github.com/nelagri).
 
 Names come from the projects' public commit histories, the author lines in
-their source files, the 2009 paper and the maintainer's records. If you contributed to any of these tools and are missing
-or misnamed, please open an issue.
+their source files, the 2009 paper and the maintainer's records. If you
+contributed to any of these tools and are missing or misnamed, please open an
+issue.
