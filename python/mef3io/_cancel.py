@@ -47,6 +47,10 @@ class CancelToken:
     one per request. One token may be shared by several calls to stop them
     together (for example every channel of one viewer request).
 
+    Cancellation and progress are available in Python and C++ only. MATLAB
+    has neither: a MEX call blocks MATLAB's only interpreter thread, so
+    nothing could call :meth:`cancel` while it runs.
+
     Examples
     --------
     >>> token = mef3io.CancelToken()

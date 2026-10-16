@@ -356,6 +356,9 @@ def inspect(
     ``.tdat``**: those are measured by size only, so the cost does not grow
     with the amount of data recorded.
 
+    Available in Python and C++ (``mef3io::inspect_session``) only; there is
+    no MATLAB or C ABI equivalent yet.
+
     Parameters
     ----------
     path : str or os.PathLike
