@@ -1280,6 +1280,45 @@ def test_copy_names_with_a_glued_or_accent_free_name_are_refused(tmp_path, dst):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["p.mefd"]
 
 
+# ---- review round 5
+
+
+@pytest.mark.parametrize("location, channels", [
+    ("EEG Lab", ("EEG1", "EEG2")),
+    ("ECG room 2", ("ECG", "EEG1")),
+])
+def test_location_words_do_not_refuse_channel_names(tmp_path, location, channels):
+    src = _named_session(tmp_path / "p.mefd", channels,
+                         mef3io.Subject(recording_location=location))
+    rep = _anon(src, tmp_path / "S001.mefd")                 # the default path
+    assert rep.verification.ok, rep.verification.summary()
+    with mef3io.Reader(str(tmp_path / "S001.mefd")) as r:
+        assert r.channels == sorted(channels)
+
+
+def test_location_words_are_still_redacted_in_text(tmp_path):
+    src = _note_session(tmp_path, mef3io.Subject(recording_location="Springfield General"),
+                        b"moved to Springfield ok\0")
+    rep = _anon(src, tmp_path / "S001.mefd", text="keep")
+    assert rep.verification.ok
+    assert "Springfield" not in _session_note(tmp_path / "S001.mefd")
+
+
+def test_the_digits_of_a_subject_id_are_redacted_as_a_number(tmp_path):
+    src = _note_session(tmp_path, mef3io.Subject(id="EEG-0042"),
+                        b"pt 0042 seen on EEG1, EEG ok\0", channels=("EEG1", "EEG2"))
+    rep = _anon(src, tmp_path / "S001.mefd", text="keep")
+    assert rep.verification.ok, rep.verification.summary()
+    assert _session_note(tmp_path / "S001.mefd") == "pt  seen on EEG1, EEG ok"
+    # a copy still holding it is refused
+    bad = tmp_path / "bad" / "S001.mefd"
+    shutil.copytree(tmp_path / "S001.mefd", bad)
+    _edit_record(bad / "S001.rdat", b"Note", lambda r, b, n: r.__setitem__(slice(b, b + 5), b"0042 "))
+    assert not mef3io.anonymize.verify(src, bad, SHIFT).ok
+    with pytest.raises(ValueError, match="patient's ID"):    # nor in the copy's name
+        _anon(src, tmp_path / "P0042.mefd")
+
+
 def test_verify_clean_copy_and_wrong_shift(rich):
     src, dst, _ = rich
     rep = mef3io.anonymize.verify(src, dst, SHIFT)

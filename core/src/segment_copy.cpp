@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <vector>
 
 #include "mef3io/byteio.hpp"
@@ -88,6 +89,7 @@ CopyStats copy_segment(const SegmentCopySpec& spec) {
 
   si8 run_blocks = 0, run_samples = 0, run_bytes = 0;
   bool dropped_since_kept = false;
+  bool kept_any = false;
   bool renumber = spec.start_sample.has_value();
   si8 next_sample = spec.start_sample.value_or(0);
   std::uint64_t prev_end = UH;  // source: blocks must be in file order, non-overlapping
@@ -155,10 +157,20 @@ CopyStats copy_segment(const SegmentCopySpec& spec) {
 
         CopyBlock cb{global, entry_at(b), block};
         if (spec.on_block && !spec.on_block(cb)) {
+          // PRECONDITION (#103): dropping a segment's LEADING blocks needs
+          // spec.start_sample -- the channel-wide sample index the copy
+          // continues from (the previous kept segment's start + samples).
+          // The engine sees one segment and cannot know it; guessing 0 would
+          // renumber a non-first segment from the start of the channel.
+          if (!kept_any && !spec.start_sample)
+            throw std::invalid_argument(
+                "copy_segment: dropping a segment's first block needs "
+                "SegmentCopySpec::start_sample (the channel-wide sample index to continue from)");
           dropped_since_kept = true;
           renumber = true;
           continue;
         }
+        kept_any = true;
         if (dropped_since_kept) {
           // The samples between this block and the previous kept one are gone.
           const ui1 flag = fmt::RedBlockHeader::DISCONTINUITY_MASK;

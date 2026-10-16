@@ -1012,8 +1012,10 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
              " only through the password-to-key mapping that mef3io used up to 1.2.0, which "
              "differs from meflib's for non-ASCII characters (issue #84). The data is read "
              "correctly, but meflib and pymef cannot open these files with this password. "
-             "To make it readable everywhere, make a re-keyed copy with anonymize_session and "
-             "output_password=(level1, level2), which also de-identifies it.",
+             "A re-keyed copy is anonymize_session with output_password=(level1, level2), but "
+             "it also de-identifies the copy and shifts every time (by at least the "
+             "recording's span + 1 day); a pure re-key is transform_session (#73), once it "
+             "exists.",
          false);
   }
   if (!out.declaration_issues.empty())

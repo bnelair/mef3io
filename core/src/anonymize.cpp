@@ -313,6 +313,24 @@ std::vector<std::string> name_words(const std::string& v) {
 /// What to search for, for one subject or location value: the whole value
 /// (normalized) and each of its words ("Roe, Jane" -> "Roe, Jane", "Roe",
 /// "Jane").
+/// Digit runs of 3+ digits in a subject ID ("EEG-0042" -> "0042"), searched
+/// as whole numbers: an ID's number is what identifies, its letters usually
+/// an institution's prefix.
+std::vector<std::string> id_digit_runs(const std::string& value) {
+  std::vector<std::string> out;
+  for (std::size_t i = 0; i < value.size();) {
+    if (!is_digit(value[i])) {
+      ++i;
+      continue;
+    }
+    std::size_t j = i;
+    while (j < value.size() && is_digit(value[j])) ++j;
+    if (j - i >= 3 && j - i < value.size()) out.push_back(value.substr(i, j - i));
+    i = j;
+  }
+  return out;
+}
+
 std::vector<std::string> identity_variants(const std::string& value, bool words = true) {
   std::vector<std::string> out;
   const std::string whole = normalized(value);
@@ -466,6 +484,10 @@ struct Scanner {
     std::string value;  // case-folded
     std::string label;  // what it is (never the value)
     bool session_name = false;  // the source's session name: a looser channel rule
+    /// A word of the recording location ("EEG Lab" -> "eeg", "lab"): searched
+    /// in rewritten fields only, never in channel names, where such words are
+    /// ordinary electrode and montage labels.
+    bool location_word = false;
   };
   struct Result {
     std::string refuse;  // label of a forbidden string; "" = none
@@ -482,6 +504,7 @@ struct Scanner {
     const std::vector<std::string> tokens = alnum_tokens(h);
     Result r;
     for (const auto& n : identity) {
+      if (n.location_word) continue;
       const std::string& v = n.value;
       const bool token_equal = std::find(tokens.begin(), tokens.end(), v) != tokens.end();
       if (token_equal && v.size() >= 3) return {n.label, ""};
@@ -1216,8 +1239,11 @@ Redactor build_redactor(const SourcePlan& p, const std::string& new_name, bool c
   for (const auto& n : p.session_names)
     if (n != new_name) r.add(normalized(n), new_name, false);
   if (clear_subject)
-    for (const auto& v : p.subject_values)
+    for (const auto& v : p.subject_values) {
       for (const auto& w : identity_variants(v, !p.id_values.count(v))) r.add(w, "", false);
+      if (p.id_values.count(v))
+        for (const auto& d : id_digit_runs(normalized(v))) r.add(d, "", false);  // Number mode
+    }
   if (clear_location)
     for (const auto& v : p.location_values)
       for (const auto& w : identity_variants(v)) r.add(w, "", false);
@@ -1240,12 +1266,20 @@ Scanner build_scanner(const SourcePlan& p, const std::string& new_name, bool cle
   for (const auto& n : p.session_names)
     if (n != new_name) add(s.identity, n, "the source's session name", true);
   if (clear_subject)
-    for (const auto& v : p.subject_values)
+    for (const auto& v : p.subject_values) {
       for (const auto& w : identity_variants(v, !p.id_values.count(v)))
         add(s.identity, w, "a subject name or ID");
+      if (p.id_values.count(v))
+        for (const auto& d : id_digit_runs(normalized(v))) add(s.identity, d, "a subject ID");
+    }
   if (clear_location)
-    for (const auto& v : p.location_values)
-      for (const auto& w : identity_variants(v)) add(s.identity, w, "the recording location");
+    for (const auto& v : p.location_values) {
+      const auto vs = identity_variants(v);
+      for (std::size_t i = 0; i < vs.size(); ++i) {
+        add(s.identity, vs[i], "the recording location");
+        if (i > 0) s.identity.back().location_word = true;  // [0] is the whole value
+      }
+    }
   for (const auto& v : p.anonymized_values)
     if (v != pseudonym && v != new_name) add(s.identity, v, "the source's anonymized name");
   for (const auto& c : excluded) add(s.excluded, c, "an excluded channel's name");
@@ -2057,6 +2091,9 @@ AnonymizeReport anonymize_session(const std::string& src_path, const std::string
         for (const auto& v : f.values)
           for (const auto& w : identity_variants(v, f.name != "subject_id"))
             values.push_back({w, what});
+      if (f.name == "subject_id")
+        for (const auto& v : f.values)
+          for (const auto& d : id_digit_runs(normalized(v))) values.push_back({d, "the patient's ID"});
     }
     if (o.rename)
       for (const auto& n : plan.session_names)

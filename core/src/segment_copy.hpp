@@ -77,6 +77,9 @@ struct SegmentCopySpec {
   /// contiguously from this value. Unset: entries keep their own numbers
   /// until a block is dropped; from then on each kept block continues from
   /// the previous kept one (start + samples), so the numbering stays dense.
+  /// REQUIRED when the hook may drop a segment's FIRST block (std::
+  /// invalid_argument otherwise): only the caller knows the channel-wide
+  /// count the segment continues from.
   std::optional<si8> start_sample;
   const Control* control = nullptr;
   /// Called with the number of source bytes consumed since the last call.

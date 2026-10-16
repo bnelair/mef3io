@@ -64,8 +64,12 @@ name) also a 3+-letter value equal to a letter/digit part ("Roe1") or a
 hit "12"/"P3"/"EEG"). The copy name/pseudonym holding an identity value
 (3+ substring, shorter whole token; own-name excuse only for <3 chars) is a
 ValueError before any write. Needles: values normalized (trim + collapse
-spaces); subject names + location ALSO word by word (3+ letters), the ID
-never (its letters are a prefix). Case fold covers ASCII + Latin-1 +
+spaces); subject names + location ALSO word by word (3+ letters) -- but
+location WORDS never in the channel rule ("EEG Lab" vs EEG1) -- and the ID
+whole plus each 3+-digit run as a whole number ("EEG-0042" -> "0042"; its
+letters are a prefix). Engine: dropping a segment's FIRST block requires
+`SegmentCopySpec::start_sample` (invalid_argument otherwise; #103 passes the
+channel-wide count). Case fold covers ASCII + Latin-1 +
 Latin Ext-A and is LENGTH-PRESERVING (the redactor replaces at folded
 offsets); the scanner additionally strips those diacritics (fail closed). Identity checks run before excusing the copy's own name ("S0012"
 vs copy "S001"). Epoc/Curs id_number: absolute window only (the rto window

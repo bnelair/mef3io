@@ -197,4 +197,14 @@ TEST_CASE("copy_segment: dropping blocks flags the next kept one and renumbers s
     }
     CHECK(st2.discontinuities == 1);
   }
+
+  SECTION("a LEADING drop without start_sample is refused (precondition for #103)") {
+    const auto out3 = dir / "out3";
+    fsys::create_directories(out3);
+    spec.tidx_out = (out3 / "z.tidx").string();
+    spec.tdat_out = (out3 / "z.tdat").string();
+    spec.start_sample.reset();
+    spec.on_block = [](detail::CopyBlock& b) { return b.index != 0; };
+    CHECK_THROWS_AS(detail::copy_segment(spec), std::invalid_argument);
+  }
 }

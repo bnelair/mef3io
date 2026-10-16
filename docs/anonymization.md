@@ -396,8 +396,12 @@ the replacement misses stops the copy instead of reaching it.
 **What counts as a name.** Each subject name and the recording location are
 searched as a whole and word by word (every run of 3 or more letters), so
 "Jane Roe" in one field, or "Roe, Jane", also finds "Roe" and "Jane" on their
-own. The subject ID is searched only as a whole: its letters are usually an
-institution's prefix. Values are trimmed and their inner spaces collapsed,
+own. The subject ID is searched as a whole and, for each run of 3 or more
+digits in it, as that number standing on its own ("EEG-0042" also finds
+"0042", but not "EEG": an ID's letters are usually an institution's prefix).
+The location's single words are searched in the text the copy writes, not in
+channel names, where words such as "EEG" or "ECG" are ordinary labels; the
+location as a whole still counts there. Values are trimmed and their inner spaces collapsed,
 since fixed-width fields are often padded. Upper and lower case are treated
 alike for the Latin scripts (ASCII, Latin-1 and Latin Extended-A, which
 cover the accented letters of most European languages); the search also
@@ -423,7 +427,10 @@ It follows two rules:
   characters ("Jane_C3" when the subject is Jane), when a removed name of
   3 or more letters stands next to digits ("Roe1"), or when a removed name of
   4 or more characters is inside a part ("JaneRoe"). Anything shorter or
-  looser ("12" in "LAH12", "P3" as the electrode P3) is a note. The
+  looser ("12" in "LAH12", "P3" as the electrode P3) is a note. This rule
+  is strict on purpose: a subject named "Ann" stops a copy with a channel
+  called "ANN1", and the way out is to leave that channel out with
+  `exclude_channels=`. The
   **original session name** follows only the first of these rules, because
   recorders often name sessions after the montage: "eeg" in a channel
   "EEG1" is a note.
