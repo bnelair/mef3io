@@ -8,35 +8,36 @@
 
 Contributions are welcome; see [CONTRIBUTING.md](https://github.com/bnelair/mef3io/blob/main/CONTRIBUTING.md).
 
-## The format and the earlier tools
+## Past tools
 
-mef3io builds on years of work by the people who created MEF and its first
-libraries. They are not authors of mef3io, but without their work it would not
-exist, and we thank them for it.
+mef3io builds on the earlier MEF libraries and tools listed below, and we
+thank everyone who contributed to them.
 
-- **The idea and the format:** **Matt Stead** conceived the Multiscale
-  Electrophysiology Format. The design was published by Benjamin H. Brinkmann,
-  Mark R. Bower, Keith A. Stengel, Gregory A. Worrell and Matt Stead:
-  *Large-scale electrophysiology: acquisition, compression, encryption, and
-  storage of big data*, J Neurosci Methods 180(1):185-192, 2009,
-  [doi:10.1016/j.jneumeth.2009.03.022](https://doi.org/10.1016/j.jneumeth.2009.03.022).
-- **[meflib](https://github.com/msel-source/meflib)**, the reference C library
-  and MEF 3.0 specification: Jan Cimbálník, Daniel P. Crepeau, Max van den Boom,
-  Ben Brinkmann.
-- **[mef_lib_2_1](https://github.com/benbrinkmann/mef_lib_2_1)**, the MEF 2.1
-  library and specification: Ben Brinkmann.
-- **[pymef](https://github.com/msel-source/pymef)**, the Python wrapper of
-  meflib: Jan Cimbálník, Max van den Boom, Eric Larson, Daniel P. Crepeau,
-  Bruno Aristimunha, Clemens Brunner, [@nelagri](https://github.com/nelagri).
-- **[mef_tools](https://github.com/bnelair/mef_tools)**, high-level Python
-  reading and writing on pymef: Filip Mivalt, Václav Křemen,
-  Vladimir Sladky.
-- **MATLAB:** [MEF_import](https://github.com/jiecui/MEF_import)
-  (an EEGLAB plugin) and
-  [mef_reader_fieldtrip](https://github.com/jiecui/mef_reader_fieldtrip)
-  (a FieldTrip reader for MEF 2.1, MEF 3.0 and MED 1.0, with contributions
-  from Max van den Boom), published by Richard Jie Cui.
+- [meflib](https://github.com/msel-source/meflib)
+- [pymef](https://github.com/msel-source/pymef)
+- [mef_tools](https://github.com/bnelair/mef_tools)
+- [mef_lib_2_1](https://github.com/benbrinkmann/mef_lib_2_1)
+- [matmef](https://github.com/MultimodalNeuroimagingLab/matmef)
+- [mef_reader_fieldtrip](https://github.com/MultimodalNeuroimagingLab/mef_reader_fieldtrip)
+- [MEF_import](https://github.com/jiecui/MEF_import)
+- [mefreader](https://github.com/msel-source/mefreader)
+- [mefwriter](https://github.com/msel-source/mefwriter)
+- [mef3-analysis-tools](https://github.com/msel-source/mef3-analysis-tools)
+- [eeg_view_python](https://github.com/msel-source/eeg_view_python)
 
-Names come from each project's commit history, the 2009 paper and the
-maintainer's records. If you
-contributed to any of these and are missing or misnamed, please open an issue.
+The format's design is described in Brinkmann et al., *Large-scale
+electrophysiology: acquisition, compression, encryption, and storage of big
+data*, J Neurosci Methods 180(1):185-192, 2009,
+[doi:10.1016/j.jneumeth.2009.03.022](https://doi.org/10.1016/j.jneumeth.2009.03.022).
+
+## Past tools contributors
+
+Bruno Aristimunha, Mark R. Bower, Benjamin H. Brinkmann, Clemens Brunner,
+Jan Cimbálník, Daniel P. Crepeau, Richard Jie Cui, Arnaud Delorme,
+Václav Křemen, Eric Larson, Filip Mivalt, Vladimir Sladky, Matt Stead,
+Keith A. Stengel, Max van den Boom, Gregory A. Worrell and
+[@nelagri](https://github.com/nelagri).
+
+Names come from the projects' public commit histories, the 2009 paper and the
+maintainer's records. If you contributed to any of these tools and are missing
+or misnamed, please open an issue.
