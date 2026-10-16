@@ -474,7 +474,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
       widen(ic.start_time, ic.end_time, is.start_time);
       widen(ic.start_time, ic.end_time, is.end_time);
       if (is.offset_assumed_zero) ic.offset_assumed_zero = out.offset_assumed_zero = true;
-      if (st.rto_assumed) ch_assumed = true;
+      if (is.offset_assumed_zero) ch_assumed = true;  // a time actually assumed 0
       else if (st.rto && *st.rto != 0) ch_verified_offset = true;
       if (opt.read_index) {
         spans.insert(spans.end(), seg_spans.begin(), seg_spans.end());
@@ -852,11 +852,15 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
         "relative to it are reported as unknown rather than guessed.";
   } else {
     to.interpretation =
-        "Metadata section 3 is encrypted and the password does not open it, so the "
-        "recording-time offset cannot be read. Times were resolved ASSUMING offset 0, as the "
-        "Reader does (offset_assumed_zero): right for every session mef3io or pymef wrote, which "
-        "always use 0; under meflib's deprecated date masking they are the masked times, which "
-        "is what meflib meant a level-1 user to see. They are not verified.";
+        std::string(
+            "Metadata section 3 is encrypted and the password does not open it, so the "
+            "recording-time offset cannot be read.") +
+        (out.offset_assumed_zero
+             ? " Times stored relative to it were resolved ASSUMING offset 0, as the Reader does "
+               "(offset_assumed_zero): right for every session mef3io or pymef wrote, which "
+               "always use 0; under meflib's deprecated date masking they are the masked times, "
+               "which is what meflib meant a level-1 user to see. They are not verified."
+             : " No time reported here depends on it: the stored times are absolute.");
   }
   if (to.segments_unknown)
     to.interpretation += " " + std::to_string(to.segments_unknown) +
@@ -864,8 +868,11 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
                          "so this description covers the readable ones only.";
   if (to.segments_locked && to.status != "locked")
     to.interpretation += " " + std::to_string(to.segments_locked) +
-                         " segment(s) keep section 3 locked; their times assume offset 0 and "
-                         "are not verified.";
+                         " segment(s) keep section 3 locked" +
+                         (out.offset_assumed_zero
+                              ? std::string("; times that depend on their offset assume 0 and "
+                                            "are not verified.")
+                              : std::string("."));
 
   out.identity = identity.finish();
 
@@ -921,15 +928,21 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
          "in " + std::to_string(out.encryption.section2_locked) + " segment(s), section 3 in " +
              std::to_string(out.encryption.section3_locked) + ", " +
              std::to_string(out.encryption.record_bodies_locked) +
-             " record bod(ies)). Those values are reported as locked, not guessed (times: see "
-             "offset-assumed-zero); the level-2 password opens everything.",
+             " record bod(ies)). Those values are reported as locked, not guessed" +
+             (out.offset_assumed_zero ? std::string(" (times: see offset-assumed-zero)")
+                                      : std::string()) +
+             "; the level-2 password opens everything.",
          true);
   if (to.status == "applied" || to.status == "disputed")
     warn("legacy-time-offset",
          "This session uses meflib's recording-time offset, which is deprecated as "
          "anonymization: the real recording date is stored in metadata section 3 and can be "
          "recovered by " + std::string(offset_plain ? "anyone" : "anyone with the level-2 password") +
-             ". Times here are the true UTC times. Treat the session as identifiable.",
+             ". Times read with that offset are the true UTC times" +
+             (out.offset_assumed_zero ? std::string(" (not those that assume 0; see "
+                                                    "offset-assumed-zero)")
+                                      : std::string()) +
+             ". Treat the session as identifiable.",
          false);
   if (to.status == "disputed")
     warn("time-offset-disputed",
@@ -942,14 +955,20 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
              "). Such a value cannot be told apart from an absolute time, so where it really "
              "lies is uncertain.",
          true);
-  if (out.offset_assumed_zero)
+  if (out.offset_assumed_zero) {
+    std::size_t assumed_segments = 0, assumed_records = 0;
+    for (const auto& ic : out.channels)
+      for (const auto& is : ic.segments) assumed_segments += is.offset_assumed_zero;
+    for (const auto& r : out.records) assumed_records += r.offset_assumed_zero;
     warn("offset-assumed-zero",
-         "Metadata section 3 is locked in " + std::to_string(to.segments_locked) +
-             " segment(s), so their recording-time offset cannot be read. Their times (and the "
-             "records that depend on it) assume offset 0, as the Reader does: right for "
+         "Metadata section 3 is locked, so the recording-time offset cannot be read. The times "
+         "of " + std::to_string(assumed_segments) + " segment(s) and " +
+             std::to_string(assumed_records) +
+             " record(s) depend on it and assume offset 0, as the Reader does: right for "
              "sessions mef3io and pymef wrote, the masked times under meflib's deprecated date "
              "masking. Not verified; the level-2 password resolves them.",
          true);
+  }
   bool times_unknown = false;
   for (const auto& ic : out.channels)
     for (const auto& is : ic.segments)

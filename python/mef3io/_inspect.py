@@ -27,8 +27,9 @@ class SegmentSummary:
     """One segment, from its metadata only.
 
     Times are absolute uUTC (UTC). With section 3 locked (level-1 password,
-    or none) they are resolved ASSUMING offset 0, as :class:`mef3io.Reader`
-    does, and ``offset_assumed_zero`` is ``True``: not verified. They are
+    or none) a time stored relative to the offset is resolved ASSUMING
+    offset 0, as :class:`mef3io.Reader` does, and ``offset_assumed_zero`` is
+    ``True``: not verified (absolute stored times need no assumption). They are
     ``None`` only for a segment that could not be read. ``time_offset`` is
     ``"none"``, ``"applied"`` (meflib's offset is set), ``"locked"`` (section
     3 encrypted and not opened) or ``"unknown"`` (the segment is unreadable);
@@ -78,7 +79,9 @@ class ChannelSummary:
     block index (whose copy of each block's time and count is used; the
     authoritative RED block header lives in the ``.tdat``, which is never
     read). ``gaps_certain`` is ``False`` when a listed gap may not be one,
-    because a segment that could not be read or placed may hold data there. ``number_of_samples`` counts stored samples (gaps excluded).
+    because a segment that could not be read or placed may hold data there,
+    or because a segment whose times assume offset 0 sits next to one whose
+    non-zero offset was read. ``number_of_samples`` counts stored samples (gaps excluded).
     ``bytes`` is every file of the channel; ``records`` counts its channel-
     and segment-level records.
     """
@@ -114,8 +117,8 @@ class RecordSummary:
     ``last_time`` span every time the record mentions — the header, the body
     times (Seiz onsets/offsets, Epoc timestamp/end, Curs trace timestamp) and
     ``time + duration`` — which is what a time range must cover. They are
-    ``None`` when the file's times depend on an offset that is locked or
-    disputed or belongs to an unreadable segment; ``times_known`` is then
+    ``None`` when the file's times depend on an offset that is disputed or
+    unknown (an unreadable segment in scope); ``times_known`` is then
     ``False``, and the times inside ``fields`` are ``None`` too — never a
     placeholder. ``offset_assumed_zero`` is ``True`` when they were placed
     with an assumed offset 0 because a section 3 in their scope is locked

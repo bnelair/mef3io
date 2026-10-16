@@ -1012,3 +1012,20 @@ def test_inspect_progress_stays_monotonic_past_a_failed_segment(session):
     assert s.problems
     assert all(a[0] <= b[0] for a, b in zip(calls, calls[1:]))
     assert calls[-1][0] == calls[-1][1] == calls[0][1]
+
+
+def test_a_locked_session_that_assumed_nothing_says_so(tmp_path):
+    """Round 7: section 3 locked, but every stored time absolute and no
+    records — nothing was assumed, and nothing claims it was."""
+    path = _write(tmp_path / "e.mefd", password1="pw1", password2="pw2", records=False)
+    for tmet in _tmets(path):
+        raw = bytearray(tmet.read_bytes())
+        for off in (16, 24):
+            struct.pack_into("<q", raw, off, -struct.unpack_from("<q", raw, off)[0])
+        struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
+        tmet.write_bytes(bytes(raw))
+    s = mef3io.inspect(path, "pw1")
+    assert s.time_offset["status"] == "locked" and not s.offset_assumed_zero
+    assert "offset-assumed-zero" not in {w.code for w in s.warnings}
+    assert "No time reported here depends on it" in s.time_offset["interpretation"]
+    assert "offset-assumed-zero" not in next(w for w in s.warnings if w.code == "locked").message

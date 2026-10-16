@@ -333,7 +333,9 @@ Options:
   the gaps matter. Gaps come from the index's copy of each block's time and
   sample count; the authoritative copy, the RED block header, is in the
   `.tdat` and is never read. `gaps_certain` is `False` when a listed gap
-  might hold data from a segment that could not be read or placed.
+  might hold data from a segment that could not be read or placed, or when a
+  segment whose times assume offset 0 sits next to one whose non-zero offset
+  was read.
 - `strict=False` reports an unreadable segment or record file in `problems`
   and a warning, marks the segment `readable=False`, and describes the rest.
   Strict, the default, raises as a `Reader` does.
