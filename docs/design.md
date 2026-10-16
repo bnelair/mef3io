@@ -200,7 +200,8 @@ ABI shim (later) converts to codes. Bindings map to Python exceptions.
   output slices ⇒ deterministic, race-free; (2) per-channel/per-segment file
   IO; (3) metadata open (parallel stat+read of `.tmet`s).
 - Reader is immutable after open ⇒ safe concurrent calls from user threads.
-  Python bindings release the GIL for all C++ work.
+  Python bindings release the GIL for all C++ work, the constructors
+  (session open, #79) included.
 - Writer is single-writer per session (documented; guarded by a lock file or
   advisory check — TBD in implementation), but **internally parallel**:
   block boundaries are computed up front (from `mef_block_len` and the NaN/

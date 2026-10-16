@@ -417,6 +417,22 @@ namespace {
 // is aborted like a cancellation (Cancelled is not a std::exception, so no
 // per-segment containment in the core can swallow it), and the ORIGINAL
 // exception is re-raised to the caller once the GIL is back.
+// Construct a bound C++ object in place with the GIL RELEASED (#79): opening a
+// session reads and parses metadata for every segment, and holding the GIL
+// for that froze every other Python thread (a GUI's event loop) for seconds.
+// Safe because nothing Python is touched while it is released: every argument
+// is already a C++ value (nanobind converted them before this runs), and
+// `self` is not yet visible to any other thread (nanobind marks the instance
+// ready only after __init__ returns). No callback runs during a constructor;
+// one that is added must re-acquire the GIL, as PyHooks::call does. An
+// exception thrown here re-acquires the GIL while unwinding (the release guard
+// is destroyed first) and leaves the instance unconstructed, as nb::init would.
+template <class T, class... Args>
+void construct_nogil(T* self, Args&&... args) {
+  nb::gil_scoped_release release;
+  new (self) T(std::forward<Args>(args)...);
+}
+
 struct PyHooks {
   nb::object progress;
   std::optional<nb::python_error> error;
@@ -855,7 +871,13 @@ NB_MODULE(_mef3io, m) {
 
   // --- Session (P2 low-level reads) ---
   nb::class_<mef3io::Session>(m, "Session")
-      .def(nb::init<const std::string&, std::string>(), nb::arg("path"), nb::arg("password") = "")
+      // Opening scans the tree and parses every segment's metadata: without
+      // the GIL (#79), like every other long call. See construct_nogil.
+      .def("__init__",
+           [](mef3io::Session* self, const std::string& path, std::string password) {
+             construct_nogil(self, path, std::move(password));
+           },
+           nb::arg("path"), nb::arg("password") = "")
       .def_prop_ro("channels", &mef3io::Session::channels)
       .def("channel_info",
            [](mef3io::Session& s, const std::string& name) {
@@ -932,8 +954,15 @@ NB_MODULE(_mef3io, m) {
     return d;
   };
   nb::class_<mef3io::SessionWriter>(m, "SessionWriter")
-      .def(nb::init<const std::string&, bool, std::string, std::string>(), nb::arg("path"),
-           nb::arg("overwrite") = false, nb::arg("password1") = "", nb::arg("password2") = "")
+      // Removes the old tree (overwrite=True) or hydrates every channel's
+      // state from disk: without the GIL (#79). See construct_nogil.
+      .def("__init__",
+           [](mef3io::SessionWriter* self, const std::string& path, bool overwrite,
+              std::string password1, std::string password2) {
+             construct_nogil(self, path, overwrite, std::move(password1), std::move(password2));
+           },
+           nb::arg("path"), nb::arg("overwrite") = false, nb::arg("password1") = "",
+           nb::arg("password2") = "")
       .def("set_block_length", &mef3io::SessionWriter::set_block_length)
       .def("set_units", &mef3io::SessionWriter::set_units)
       .def_prop_ro("unreadable_metadata",
@@ -1054,8 +1083,15 @@ NB_MODULE(_mef3io, m) {
   auto opt_time = [](nb::object o) { return opt_si8(o, "t0/t1"); };
 
   nb::class_<mef3io::Reader>(m, "Reader")
-      .def(nb::init<const std::string&, std::string, int, bool>(), nb::arg("path"),
-           nb::arg("password") = "", nb::arg("n_threads") = 0, nb::arg("strict") = true)
+      // The open (tree scan, every .tmet parsed and decrypted) is the long
+      // part of a Reader's life: without the GIL (#79). See construct_nogil.
+      .def("__init__",
+           [](mef3io::Reader* self, const std::string& path, std::string password, int n_threads,
+              bool strict) {
+             construct_nogil(self, path, std::move(password), n_threads, strict);
+           },
+           nb::arg("path"), nb::arg("password") = "", nb::arg("n_threads") = 0,
+           nb::arg("strict") = true)
       .def("set_threads", &mef3io::Reader::set_threads)
       .def("problems",
            [](mef3io::Reader& r) {

@@ -239,6 +239,13 @@ class Reader:
         flags a file that can mislead *other* MEF readers. Set ``False``, or
         filter the warning category, to silence it.
 
+    Notes
+    -----
+    The open itself (scanning the tree, parsing every segment's metadata)
+    runs in C++ with the GIL released, as reads do, so opening a large
+    session on a worker thread does not freeze other Python threads (a GUI's
+    event loop, for instance).
+
     Examples
     --------
     >>> with mef3io.Reader("session.mefd") as r:

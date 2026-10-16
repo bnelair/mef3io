@@ -250,6 +250,18 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   and exits non-zero on either failure. Measured there: 1.6x faster per
   block than mef_tools, in a file 1.8x smaller, growth 1.00x — WITH the
   durability barriers the legacy stack does not have.
+- **EVERY potentially long binding call RELEASES THE GIL** (#79). Opening is
+  where all the metadata parsing happens (64 ch x 60 seg: a 616 ms open froze
+  every other Python thread for 613 ms). Reads/writes and the session-level
+  functions run through `PyHooks::run`; the `Reader`, `Session` and
+  `SessionWriter` CONSTRUCTORS are bound as `__init__` lambdas that call
+  `construct_nogil` (placement-new under `nb::gil_scoped_release`), NOT
+  `nb::init<...>`, which holds the GIL. Rule while released: touch no Python
+  object (arguments are already C++ values; `self` is invisible to other
+  threads until __init__ returns); a callback re-acquires the GIL
+  (`PyHooks::call`). A new long call or constructor must do the same, and add
+  a case to `tests/test_p31_gil_release.py`, which measures the main thread's
+  longest stall while a worker opens a 2400-segment session.
 - **The MAIN use case is a session appended to for DAYS TO MONTHS** (5-20 min
   blocks per channel). Two consequences, both load-bearing. (1) An append must
   be O(NEW data), never O(total blocks) — section 2 describes ALL of a segment's
