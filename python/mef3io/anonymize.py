@@ -350,7 +350,10 @@ def anonymize_session(
         so that no copied time can fall inside the original range.
     pseudonym : str, optional
         Written to ``anonymized_name`` in every file. Default: the copy's
-        session name.
+        session name. The pseudonym and the copy's name must not contain the
+        patient's names, ID or location, or the original session name (4+
+        characters anywhere, shorter values as a whole word): ``ValueError``
+        before anything is written.
     clear : iterable of {"subject", "location", "descriptions"}, optional
         What to clear. Default: all three. Leaving ``"descriptions"`` out
         keeps the section-2 descriptions with the old session name replaced

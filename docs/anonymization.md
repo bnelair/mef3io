@@ -265,7 +265,10 @@ python -m mef3io anonymize patient.mefd S001.mefd --shift-us -630720000000000
 ```
 
 The copy's folder name (`S001` above) becomes its session name everywhere.
-Choose a code that says nothing about the patient.
+Choose a code that says nothing about the patient: a copy name or
+`pseudonym` that contains the patient's names, ID or location, or the
+original session name (anywhere for 4 or more characters, as a whole word
+for shorter ones), is refused before anything is written.
 
 ### Choosing the shift
 
@@ -392,26 +395,32 @@ rules:
 
 - **Fields the copy writes** (descriptions, annotation text, header names):
   a name that should be gone stops the copy wherever it appears, even inside
-  another word. Three overlaps are reported as **notes** instead: inside the
-  copy's own name, inside a kept channel's name (the next rule decides), and
-  a number of fewer than 4 digits that is part of a longer number ("12" in
-  "12:30" or "1200").
+  another word. Four overlaps are reported as **notes** instead: a value of
+  fewer than 4 characters inside the copy's own name ("12" in "S012"); a
+  value inside a kept channel's name (the next rule decides); a number of
+  fewer than 4 digits inside a longer number ("12" in "12:30", "12.5" or
+  "1200"; a comma separates numbers, so "1,123" holds the number 123); and a
+  word of fewer than 4 letters inside a longer word ("Ann" in "channel",
+  "Lee" in "asleep"). Standing on its own, such a word or number is removed
+  by the copy, or stops it.
 - **Channel names**, which the copy keeps exactly as they are, and the
   folder, file and header names made from them: the name is split into
   parts at anything that is not a letter or digit (`_` and `-` included).
-  The copy is stopped only when a part **equals** a removed name of 3 or more
-  characters ("Jane_C3" when the subject is Jane). A shorter value, or one
-  that is only part of a longer part ("12" in "LAH12", "P3" as the electrode
-  P3, "eeg" in "EEG1"), is a note.
+  The copy is stopped when a part **equals** a removed name of 3 or more
+  characters ("Jane_C3" when the subject is Jane), when a removed name of
+  3 or more letters stands next to digits ("Roe1"), or when a removed name of
+  4 or more characters is inside a part ("JaneRoe"). Anything shorter or
+  looser ("12" in "LAH12", "P3" as the electrode P3) is a note. The
+  **original session name** follows only the first of these rules, because
+  recorders often name sessions after the montage: "eeg" in a channel
+  "EEG1" is a note.
 
 Notes are listed in `report.verification.notes` and printed by `summary()`.
 They never repeat the value itself. Look at them before sharing the copy.
 
 With `text="keep"`, names shorter than 4 characters and numbers are replaced
 only as whole words or whole numbers, so "rec" does not change "recorded"
-and the ID "12" does not change "12:30". But a short name that is left
-inside a longer word still stops the copy. If that happens, use
-`text="drop"` or a `text=` function.
+and the ID "12" does not change "12:30"; those overlaps are notes.
 
 For a source that used meflib's recording-time offset, times are also
 compared with the source's *stored* values (the time of day). A negative

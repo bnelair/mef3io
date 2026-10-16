@@ -54,11 +54,15 @@ Anonymize (#70) invariants, all test-pinned (`tests/test_p29_anonymize.py`):
 (1) `verify` is FIELD-WISE and INDEPENDENT of the rewrite (own matcher, so
 a rewrite gap fails closed). Rewritten fields: plain case-insensitive
 substring scan; excused only inside the copy's own name or a kept channel
-name (NOTE), or a <4-digit number inside a longer number (NOTE). Kept
-channel names (+ paths, UH channel_name, Seiz entries derived from them):
-tokens split on non-alphanumerics incl. `_`; REFUSE only a token EQUAL to an
-identity value of 3+ chars, else NOTE (256-channel montages hit "12"/"P3"/
-"EEG"). Identity checks run before excusing the copy's own name ("S0012"
+name (<4 chars only), a kept channel name, a <4-digit number inside a
+longer number (`,` separates), or a <4-letter word inside a longer word --
+all NOTES. Kept channel names (+ paths, UH channel_name, Seiz entries):
+tokens split on non-alphanumerics incl. `_`; REFUSE a token EQUAL to an
+identity value of 3+ chars; for subject/location (not the source session
+name) also a 3+-letter value equal to a letter/digit part ("Roe1") or a
+4+-char value inside a token ("JaneRoe"); else NOTE (256-channel montages
+hit "12"/"P3"/"EEG"). The copy name/pseudonym holding an identity value
+(4+ substring, shorter whole token) is a ValueError before any write. Identity checks run before excusing the copy's own name ("S0012"
 vs copy "S001"). Epoc/Curs id_number: absolute window only (the rto window
 reaches small ints). Redactor: <4 chars = whole tokens, numeric = whole
 numbers, never inside kept channel names. Segment number = `.tmet` UH @48,

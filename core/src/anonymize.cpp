@@ -168,7 +168,7 @@ struct Shifter {
 //         run of letters and digits; '_' and everything else end it), so
 //         "rec" does not turn "recorded" into nonsense;
 //       - purely numeric: whole numbers only (a number is a maximal run of
-//         digits and ':' '.' ','), so ID "12" leaves "12:30" and "1200";
+//         digits, ':' and '.'), so ID "12" leaves "12:30" and "1200";
 //       - excluded channel names: whole tokens.
 //   * Scanner (the CHECK, in verify): its own code, never the Redactor's.
 //       - A field the copy REWRITES: a plain case-insensitive substring
@@ -189,7 +189,9 @@ bool is_alnum(char c) {
   return u >= 0x80 || std::isalnum(u);
 }
 bool is_digit(char c) { return c >= '0' && c <= '9'; }
-bool number_char(char c) { return is_digit(c) || c == ':' || c == '.' || c == ','; }
+// ':' and '.' join digits into one number ("12:30", "12.5"); ',' does not, so
+// "1,123" holds the number 123.
+bool number_char(char c) { return is_digit(c) || c == ':' || c == '.'; }
 char fold(char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); }
 std::string folded(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(), fold);
@@ -203,6 +205,42 @@ std::string trimmed(const std::string& s) {
 }
 bool all_digits(const std::string& s) {
   return !s.empty() && std::all_of(s.begin(), s.end(), is_digit);
+}
+bool all_letters(const std::string& s) {
+  return !s.empty() && std::all_of(s.begin(), s.end(), [](char c) {
+    const auto u = static_cast<unsigned char>(c);
+    return u >= 0x80 || std::isalpha(u);
+  });
+}
+
+/// Maximal alphanumeric runs of `h` ('_', '-' and everything else split).
+std::vector<std::string> alnum_tokens(const std::string& h) {
+  std::vector<std::string> tokens;
+  for (std::size_t i = 0; i < h.size();) {
+    if (!is_alnum(h[i])) {
+      ++i;
+      continue;
+    }
+    std::size_t j = i;
+    while (j < h.size() && is_alnum(h[j])) ++j;
+    tokens.push_back(h.substr(i, j - i));
+    i = j;
+  }
+  return tokens;
+}
+
+/// A token split further where letters meet digits: "roe1" -> "roe", "1".
+std::vector<std::string> letter_digit_parts(const std::string& token) {
+  std::vector<std::string> parts;
+  std::size_t i = 0;
+  while (i < token.size()) {
+    const bool d = is_digit(token[i]);
+    std::size_t j = i;
+    while (j < token.size() && is_digit(token[j]) == d) ++j;
+    parts.push_back(token.substr(i, j - i));
+    i = j;
+  }
+  return parts;
 }
 /// How a channel name is compared for exclusion: trimmed, case-folded.
 std::string channel_key(const std::string& s) { return folded(trimmed(s)); }
@@ -224,7 +262,7 @@ bool covered_by(const Span& s, const std::vector<Span>& by) {
   return false;
 }
 
-/// The maximal number-like run (digits and : . ,) around [a, b), with
+/// The maximal number-like run (digits, ':' and '.') around [a, b), with
 /// punctuation trimmed from both ends.
 Span number_run(const std::string& h, std::size_t a, std::size_t b) {
   while (a > 0 && number_char(h[a - 1])) --a;
@@ -300,6 +338,7 @@ struct Scanner {
   struct Needle {
     std::string value;  // case-folded
     std::string label;  // what it is (never the value)
+    bool session_name = false;  // the source's session name: a looser channel rule
   };
   struct Result {
     std::string refuse;  // label of a forbidden string; "" = none
@@ -313,21 +352,23 @@ struct Scanner {
   /// The rule for a kept channel's name and anything derived from it.
   Result channel(const std::string& name) const {
     const std::string h = folded(name);
-    std::vector<std::string> tokens;
-    for (std::size_t i = 0; i < h.size();) {
-      if (!is_alnum(h[i])) {
-        ++i;
-        continue;
-      }
-      std::size_t j = i;
-      while (j < h.size() && is_alnum(h[j])) ++j;
-      tokens.push_back(h.substr(i, j - i));
-      i = j;
-    }
+    const std::vector<std::string> tokens = alnum_tokens(h);
     Result r;
     for (const auto& n : identity) {
-      const bool token_equal = std::find(tokens.begin(), tokens.end(), n.value) != tokens.end();
-      if (token_equal && n.value.size() >= 3) return {n.label, ""};
+      const std::string& v = n.value;
+      const bool token_equal = std::find(tokens.begin(), tokens.end(), v) != tokens.end();
+      if (token_equal && v.size() >= 3) return {n.label, ""};
+      if (!n.session_name) {
+        // A patient's name glued to digits or another word: "Roe1",
+        // "JaneRoe". (The source session name keeps the looser rule above:
+        // recorders name sessions after the montage, "EEG" / "EEG1".)
+        for (const auto& t : tokens) {
+          if (v.size() >= 4 && t.find(v) != std::string::npos) return {n.label, ""};
+          if (v.size() >= 3 && all_letters(v))
+            for (const auto& part : letter_digit_parts(t))
+              if (part == v) return {n.label, ""};
+        }
+      }
       if (r.note.empty() && h.find(n.value) != std::string::npos)
         r.note = "contains " + n.label + " as part of a longer name, or one shorter than 3 "
                  "characters; kept, as channel names are";
@@ -356,8 +397,8 @@ struct Scanner {
     };
     for (const auto& n : identity) {
       for (const auto& s : occurrences(h, n.value)) {
-        if (covered_by(s, own)) {
-          note("contains " + n.label + " inside the copy's own name");
+        if (n.value.size() < 4 && covered_by(s, own)) {
+          note("contains " + n.label + " (shorter than 4 characters) inside the copy's own name");
           continue;
         }
         bool decided = false;
@@ -373,6 +414,11 @@ struct Scanner {
             number_run(h, s.first, s.second) != s) {
           note("contains " + n.label + " (a number of fewer than 4 digits) inside a longer "
                "number");
+          continue;
+        }
+        if (all_letters(n.value) && n.value.size() < 4 &&
+            token_run(h, s.first, s.second) != s) {
+          note("contains " + n.label + " (fewer than 4 letters) inside a longer word");
           continue;
         }
         return {n.label, ""};
@@ -1049,12 +1095,13 @@ Scanner build_scanner(const SourcePlan& p, const std::string& new_name, bool cle
                       bool clear_location, const std::set<std::string>& excluded,
                       const std::set<std::string>& kept, const std::string& pseudonym) {
   Scanner s;
-  auto add = [](std::vector<Scanner::Needle>& v, const std::string& value, const char* label) {
+  auto add = [](std::vector<Scanner::Needle>& v, const std::string& value, const char* label,
+                bool session = false) {
     if (value.size() < 2) return;  // as the rewrite: too short to search for
-    v.push_back({folded(value), label});
+    v.push_back({folded(value), label, session});
   };
   for (const auto& n : p.session_names)
-    if (n != new_name) add(s.identity, n, "the source's session name");
+    if (n != new_name) add(s.identity, n, "the source's session name", true);
   if (clear_subject)
     for (const auto& v : p.subject_values) add(s.identity, v, "a subject name or ID");
   if (clear_location)
@@ -1850,6 +1897,42 @@ AnonymizeReport anonymize_session(const std::string& src_path, const std::string
     throw std::invalid_argument("rename=False keeps the source's session name, so the "
                                 "destination folder must be named after it");
   const std::string pseudonym = o.pseudonym.empty() ? new_name : o.pseudonym;
+  // The copy's own names are written everywhere, so they must not carry what
+  // the copy removes: 4+ characters anywhere in them, shorter values as a
+  // whole word. Refused before anything is written.
+  {
+    struct Value {
+      std::string value;
+      const char* what;
+    };
+    std::vector<Value> values;
+    for (const auto& f : plan.summary.identity) {
+      const char* what = nullptr;
+      if (f.name == "subject_name_1" || f.name == "subject_name_2") what = "the patient's name";
+      else if (f.name == "subject_id") what = "the patient's ID";
+      else if (f.name == "recording_location") what = "the recording location";
+      if (what)
+        for (const auto& v : f.values) values.push_back({v, what});
+    }
+    if (o.rename)
+      for (const auto& n : plan.session_names)
+        values.push_back({n, "the original session name"});
+    auto check = [&](const std::string& name, const char* which) {
+      const std::string h = folded(name);
+      const auto tokens = alnum_tokens(h);
+      for (const auto& v : values) {
+        const std::string f = folded(trimmed(v.value));
+        if (f.size() < 2) continue;
+        const bool hit = f.size() >= 4 ? h.find(f) != std::string::npos
+                                       : std::find(tokens.begin(), tokens.end(), f) != tokens.end();
+        if (hit)
+          throw std::invalid_argument(std::string(which) + " contains " + v.what +
+                                      "; choose another");
+      }
+    };
+    check(new_name, "the new session name (the destination folder's name)");
+    if (pseudonym != new_name) check(pseudonym, "the pseudonym");
+  }
   if (pseudonym.size() > UH_NAME_BYTES - 1 || new_name.size() > UH_NAME_BYTES - 1)
     throw std::invalid_argument("the session name and pseudonym must fit 255 bytes");
   if (!o.rename) plan.session_names.clear();  // the name is kept on purpose

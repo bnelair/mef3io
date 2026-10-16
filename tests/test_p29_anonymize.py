@@ -280,9 +280,9 @@ def test_time_zone_fields_are_set_whatever_the_source_held(tmp_path):
         _reseal(raw, TMET)
         tmet.write_bytes(bytes(raw))
     assert struct.unpack_from("<i", _tmets(src)[0].read_bytes(), S3 + 24)[0] == -21600
-    rep = _anon(src, tmp_path / "TZ.mefd")
+    rep = _anon(src, tmp_path / "Z9.mefd")
     assert rep.verification.ok
-    for tmet in _tmets(tmp_path / "TZ.mefd"):
+    for tmet in _tmets(tmp_path / "Z9.mefd"):
         assert struct.unpack_from("<qqqi", tmet.read_bytes(), S3) == \
             (0, UUTC_NO_ENTRY, UUTC_NO_ENTRY, 0)
 
@@ -575,8 +575,38 @@ def test_destination_refusals(tmp_path, rich):
         _anon(src, tmp_path / "busy.mefd")
     with pytest.raises(ValueError):
         _anon(src, tmp_path / "other.mefd", rename=False)
-    rep = _anon(src, tmp_path / "jane_roe.mefd", rename=False)
-    assert rep.session_name == "jane_roe" and rep.verification.ok
+    # rename=False keeps a name that carries the patient's: refused
+    with pytest.raises(ValueError, match="patient's name"):
+        _anon(src, tmp_path / "jane_roe.mefd", rename=False)
+    plain = _named_session(tmp_path / "x" / "night7.mefd", ("c1", "c2"), SUBJECT)
+    rep = _anon(plain, tmp_path / "night7.mefd", rename=False)
+    assert rep.session_name == "night7" and rep.verification.ok
+
+
+@pytest.mark.parametrize("dst, pseudonym, what", [
+    ("S001.mefd", "Jane Roe", "patient's name"),            # pseudonym = the name
+    ("S001.mefd", "jane", "patient's name"),
+    ("P_MRN4711_anon.mefd", None, "patient's ID"),          # copy name holds the ID
+    ("Jane_Roe.mefd", None, "patient's name"),
+])
+def test_the_copys_own_names_must_not_carry_the_identity(tmp_path, rich, dst, pseudonym, what):
+    src, _, _ = rich
+    with pytest.raises(ValueError, match=what):
+        _anon(src, tmp_path / dst, pseudonym=pseudonym)
+    assert list(tmp_path.iterdir()) == []                    # nothing written
+
+
+def test_the_copy_name_must_not_carry_the_source_session_name(tmp_path):
+    src = _named_session(tmp_path / "x" / "night7.mefd", ("c1", "c2"), mef3io.Subject())
+    with pytest.raises(ValueError, match="original session name"):
+        _anon(src, tmp_path / "night7_copy.mefd")
+    assert not (tmp_path / "night7_copy.mefd").exists()
+
+
+def test_a_short_identity_inside_the_copy_name_is_a_note(tmp_path):
+    src = _named_session(tmp_path / "p.mefd", ("c1", "c2"), mef3io.Subject(id="12"))
+    rep = _anon(src, tmp_path / "S012.mefd")
+    assert rep.verification.ok and any("own name" in n.message for n in rep.verification.notes)
 
 
 def test_cancel_leaves_nothing_behind(tmp_path, rich):
@@ -1056,7 +1086,7 @@ PROBES = {
     "subject_id P3 vs electrode P3": ("p.mefd", ("P3", "C3"), mef3io.Subject(id="P3")),
     "name Al vs LAL1": ("p.mefd", ("LAL1", "LAL2"), mef3io.Subject(name_1="Al")),
     "session eeg vs EEG1": ("eeg.mefd", ("EEG1", "EEG2"), mef3io.Subject()),
-    "name LAH vs LAH1": ("p.mefd", ("LAH1", "LAH2"), mef3io.Subject(name_1="LAH")),
+    "session LAH vs LAH1": ("lah.mefd", ("LAH1", "LAH2"), mef3io.Subject()),
 }
 
 
@@ -1097,17 +1127,53 @@ def test_short_and_numeric_values_are_redacted_as_whole_tokens(tmp_path):
     assert any("longer number" in n.message for n in rep.verification.notes)
 
 
-def test_a_short_value_left_inside_a_word_is_refused_not_mangled(tmp_path):
+def test_a_short_word_inside_a_longer_word_is_a_note_not_mangled(tmp_path):
     src = _named_session(tmp_path / "rec.mefd", ("c1", "c2"), mef3io.Subject())
     t = START + 5 * SECOND
     _install_records(_src_rdat(src), [_record("Note", b"recorded at rec site\0", -t)], [-t])
-    # keep: "rec" the word is replaced, "recorded" is not mangled -- and since
-    # the old name is still a substring there, the scanner refuses the copy
-    with pytest.raises(mef3io.WriteConflictError, match="verification"):
-        _anon(src, tmp_path / "S001.mefd", text="keep")
-    assert not (tmp_path / "S001.mefd").exists()
-    rep = _anon(src, tmp_path / "S002.mefd")                 # drop: publishes
+    rep = _anon(src, tmp_path / "S001.mefd", text="keep")
     assert rep.verification.ok
+    assert any("longer word" in n.message for n in rep.verification.notes)
+    note = next(r for r in _all_records(tmp_path / "S001.mefd") if r["level"] == "session")
+    assert note["text"] == "recorded at S001 site"        # the word replaced, "recorded" intact
+
+
+def test_three_letter_names_in_everyday_words(tmp_path):
+    src = _named_session(tmp_path / "p.mefd", ("c1", "c2"), mef3io.Subject(name_1="Ann"))
+    t = START + 5 * SECOND
+    _install_records(_src_rdat(src), [
+        _record("Note", b"artifact on channel 3\0", -t),
+        _record("Note", b"Ann was asleep\0", -t)], [-t, -t])
+    rep = _anon(src, tmp_path / "S001.mefd", text="keep")
+    assert rep.verification.ok and any("longer word" in n.message
+                                       for n in rep.verification.notes)
+    texts = [r["text"] for r in _all_records(tmp_path / "S001.mefd") if r["level"] == "session"]
+    assert texts == ["artifact on channel 3", " was asleep"]
+    # A standalone "Ann" left in a copy is refused by verify
+    bad = tmp_path / "bad" / "S001.mefd"
+    shutil.copytree(tmp_path / "S001.mefd", bad)
+    _edit_record(bad / "S001.rdat", b"Note",
+                 lambda r, b, n: r.__setitem__(slice(b, b + 9), b"Ann slept"))
+    assert not mef3io.anonymize.verify(src, bad, SHIFT).ok
+
+
+def test_a_comma_separates_numbers(tmp_path):
+    src = _named_session(tmp_path / "p.mefd", ("c1", "c2"), mef3io.Subject(id="123"))
+    t = START + 5 * SECOND
+    _install_records(_src_rdat(src), [_record("Note", b"ids 1,123 and 123,9 ok\0", -t)], [-t])
+    rep = _anon(src, tmp_path / "S001.mefd", text="keep")
+    assert rep.verification.ok
+    note = next(r for r in _all_records(tmp_path / "S001.mefd") if r["level"] == "session")
+    assert note["text"] == "ids 1, and ,9 ok"
+
+
+@pytest.mark.parametrize("channel", ["Roe1", "JaneRoe", "Jane2"])
+def test_a_patient_name_glued_into_a_channel_name_is_refused(tmp_path, channel):
+    src = _named_session(tmp_path / "p.mefd", (channel, "C4"),
+                         mef3io.Subject(name_1="Jane", name_2="Roe"))
+    with pytest.raises(mef3io.WriteConflictError, match="verification"):
+        _anon(src, tmp_path / "S001.mefd")
+    assert not (tmp_path / "S001.mefd").exists()
 
 
 def test_identity_containing_the_copy_name_is_still_found(tmp_path, rich):
