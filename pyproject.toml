@@ -5,12 +5,12 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "mef3io"
 dynamic = ["version"]
-description = "Read and write MEF 3.0 electrophysiology recordings: one C++ core for Python, MATLAB and C++"
+description = "Read and write MEF 3.0 (Multiscale Electrophysiology Format) recordings: EEG, iEEG, ECG and other regularly sampled signals, from Python, MATLAB and C++"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "Mayo Clinic — BNEL" }]
-keywords = ["MEF", "MEF3", "MEF 3.0", "Multiscale Electrophysiology Format", "EEG", "iEEG", "SEEG", "ECoG", "electrophysiology", "neuroscience", "meflib", "pymef"]
+keywords = ["MEF", "MEF3", "MEF 3.0", "Multiscale Electrophysiology Format", "EEG", "iEEG", "SEEG", "ECoG", "ECG", "biosignals", "electrophysiology", "neuroscience", "meflib", "pymef"]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Science/Research",

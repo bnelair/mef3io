@@ -1,3 +1,7 @@
+---
+description: "C++ and C ABI guide to mef3io, a MEF 3.0 (Multiscale Electrophysiology Format) read/write library."
+---
+
 # C++ and C ABI guide
 
 The core (`core/`) is a self-contained C++17/20 static library — no external

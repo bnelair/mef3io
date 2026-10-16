@@ -1,14 +1,20 @@
+---
+description: "Read and write MEF 3.0 (Multiscale Electrophysiology Format) recordings such as EEG, iEEG and ECG from Python, MATLAB and C++, compatible with meflib, pymef and mef_tools."
+---
+
 # mef3io
 
 **MEF 3.0 read and write — one C++ core, identical behavior in Python, MATLAB,
 and C++.**
 
-[MEF 3.0](https://msel.mayo.edu/codes.html) (Multiscale Electrophysiology
-Format) is a compressed, encryptable format for long-term electrophysiology
-recordings. mef3io implements it once, in C++17/20, and wraps that core
-thinly for each language — so float scaling, NaN-gap handling, precision
-inference, appends, and encryption behave exactly the same everywhere, and
-every binding carries the same version number.
+**MEF 3.0 (Multiscale Electrophysiology Format)** is a compressed,
+encryptable file format for long electrophysiology recordings: mainly EEG,
+intracranial EEG (iEEG) and ECG, but it suits any regularly sampled signal,
+such as EMG, other biosignals or sensor data. mef3io implements it once, in
+C++17/20, and wraps that core thinly for Python, MATLAB and C++, so float
+scaling, NaN-gap handling, precision inference, appends, and encryption
+behave exactly the same everywhere, and every binding carries the same
+version number.
 
 !!! tip "Long recordings"
     These files run for days to months and reach tens of gigabytes **per
@@ -45,6 +51,25 @@ every binding carries the same version number.
   be cancelled from another thread (Python and C++).
 - **Encrypted data blocks** written by some third-party tools are read too;
   see [compatibility](encryption_model.md#compatibility-with-other-mef-30-tools).
+
+## MEF 3.0 and the original libraries
+
+- **Specification**: defined in meflib's header,
+  [`meflib.h`](https://github.com/msel-source/meflib/blob/multiplatform/meflib/meflib.h)
+  ("Specification for Multiscale Electrophysiology Format (MEF) version
+  3.0"); the design is described in Brinkmann et al., *Large-scale
+  electrophysiology: acquisition, compression, encryption, and storage of big
+  data*, J Neurosci Methods 180(1):185-192, 2009,
+  [doi:10.1016/j.jneumeth.2009.03.022](https://doi.org/10.1016/j.jneumeth.2009.03.022).
+- **[meflib](https://github.com/msel-source/meflib)**: the reference C
+  library, from the Mayo Systems Electrophysiology Lab (MSEL).
+- **[pymef](https://github.com/msel-source/pymef)**: a Python wrapper over
+  meflib.
+- **[mef_tools](https://github.com/bnelair/mef_tools)**: high-level Python
+  reading and writing built on pymef.
+
+mef3io is an independent implementation, tested against all three. New to
+the format? Start with [MEF 3.0 for students](students.md).
 
 ## Quick taste (Python)
 
@@ -83,6 +108,13 @@ The same session opens in MATLAB (`mef3io.Reader('session.mefd')`) and C++
 - Encryption is all or nothing per session, and protects identity and
   annotation text, not the signal — see
   [what encryption protects](encryption_model.md#what-encryption-protects).
+- Single-file `.mefd.tar` sessions are a mef3io addition, not part of
+  MEF 3.0: legacy tools need them unpacked first (`extract_session`,
+  `tar -xf`, or 7-Zip on Windows); see the [Python guide](python.md#tar-archives-single-file-sessions).
+- Data blocks are written unencrypted, as by every MEF 3.0 implementation so
+  far, although the format defines their encryption; aligning with the
+  specification is under discussion
+  ([compatibility](encryption_model.md#compatibility-with-other-mef-30-tools)).
 - Every record type MEF 3.0 defines is read; `Note`, `SyLg` and `EDFA` can be
   written with their text.
 - The pure-Python fallback backend is not implemented.

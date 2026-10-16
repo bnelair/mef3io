@@ -1,3 +1,7 @@
+---
+description: "How MEF 3.0 encryption works and what it protects: the two password levels, metadata and data-block encryption, compatibility with meflib and pymef."
+---
+
 # MEF 3.0 Encryption Model (as implemented by mef3io)
 
 This note explains, once and for record, how encryption actually works in the
@@ -209,6 +213,14 @@ gate the signal itself: the samples are readable without any password (see
   Recordings mef3io writes leave data blocks unencrypted and stay fully
   compatible. mef3io 1.2 and earlier decoded such blocks wrongly (they
   deciphered the whole 256-byte table instead of its first 16 bytes).
+- **Unencrypted data blocks are a habit, not the design.** The format
+  defines data-block encryption; blocks are left unencrypted because of past
+  implementations' defaults (meflib's `RED_ENCRYPTION_LEVEL_DEFAULT` is no
+  encryption) and because the legacy readers mishandle encrypted blocks.
+  mef3io intends to align with the specification later, which may break
+  compatibility with older tools for encrypted data. That is not decided yet:
+  see [#94](https://github.com/bnelair/mef3io/issues/94) and, for a
+  different direction, [#92](https://github.com/bnelair/mef3io/issues/92).
 
 ## Password/key derivation (for completeness)
 

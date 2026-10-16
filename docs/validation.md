@@ -1,3 +1,7 @@
+---
+description: "Validate, repair and recover MEF 3.0 sessions with mef3io: buffer-size declarations, interrupted writes, and the validate/repair/recover command line."
+---
+
 # Validating and repairing a session
 
 A MEF 3.0 session declares, in metadata section 2 and the universal headers, a

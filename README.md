@@ -1,11 +1,12 @@
 # mef3io
 
-Read and write **MEF 3.0** (Multiscale Electrophysiology Format) — the
-compressed, optionally encrypted format used for long intracranial and scalp
-EEG recordings — from **Python**, **MATLAB** and **C++**. One C++ core does
-the work, so every language reads and writes the same files the same way.
-Sessions written by mef3io open in the established MEF 3.0 tools (pymef,
-mef_tools, and viewers built on meflib, the reference C library), and
+Read and write **MEF 3.0 (Multiscale Electrophysiology Format)** files from
+**Python**, **MATLAB** and **C++**. MEF 3.0 is a compressed, optionally
+encrypted file format for long electrophysiology recordings: mainly EEG,
+intracranial EEG (iEEG) and ECG, but it suits any regularly sampled signal,
+such as EMG, other biosignals or sensor data. One C++ core does the work, so
+every language reads and writes the same files the same way. Sessions
+written by mef3io open in the established MEF 3.0 tools listed below, and
 sessions written by those tools open in mef3io.
 
 [![PyPI](https://img.shields.io/pypi/v/mef3io)](https://pypi.org/project/mef3io/)
@@ -15,6 +16,26 @@ sessions written by those tools open in mef3io.
 [![License](https://img.shields.io/github/license/bnelair/mef3io)](https://github.com/bnelair/mef3io/blob/main/LICENSE)
 
 **Documentation: <https://bnelair.github.io/mef3io/>**
+
+## MEF 3.0 and the original libraries
+
+- **MEF 3.0 specification**: defined in the header of meflib,
+  [`meflib.h`](https://github.com/msel-source/meflib/blob/multiplatform/meflib/meflib.h)
+  ("Specification for Multiscale Electrophysiology Format (MEF) version
+  3.0"). The format's design is described in Brinkmann et al., *Large-scale
+  electrophysiology: acquisition, compression, encryption, and storage of big
+  data*, J Neurosci Methods 180(1):185-192, 2009,
+  [doi:10.1016/j.jneumeth.2009.03.022](https://doi.org/10.1016/j.jneumeth.2009.03.022).
+- **[meflib](https://github.com/msel-source/meflib)**: the reference C
+  library for MEF 3.0, from the Mayo Systems Electrophysiology Lab (MSEL).
+- **[pymef](https://github.com/msel-source/pymef)**: a Python wrapper over
+  meflib.
+- **[mef_tools](https://github.com/bnelair/mef_tools)**: high-level Python
+  reading and writing built on pymef. mef3io can stand in for it
+  (`from mef3io import MefReader, MefWriter`).
+
+mef3io is an independent implementation, tested against all three. New to
+the format? See [MEF 3.0 for students](https://bnelair.github.io/mef3io/students/).
 
 ## Install
 
@@ -108,14 +129,25 @@ Changes in every version, and what an upgrade asks of you, are listed in the
   signal: the samples and their timing can be decoded without a password, so
   keep confidential recordings on protected storage. See
   [what encryption protects](https://bnelair.github.io/mef3io/encryption_model/#what-encryption-protects).
-- **Encrypted data blocks.** Some recordings have encrypted data blocks
-  (written by some third-party tools; meflib can write them, though not by
-  default). mef3io reads them: a block encrypted
-  at level 1 with either password, one at level 2 with the level-2 password.
-  Because of known bugs, pymef crashes on such blocks and
-  meflib requires the level-2 password even for level-1 blocks. Recordings
-  mef3io writes leave data blocks unencrypted (as meflib does by default) and
-  stay fully compatible; encrypted *metadata* works in every direction.
+- **Data-block encryption.** The MEF 3.0 specification defines encrypted
+  data blocks. Leaving them unencrypted is a habit of past implementations,
+  not the format's design: meflib does not encrypt them unless asked, and
+  the legacy readers mishandle encrypted blocks (pymef crashes on them, and
+  meflib requires the level-2 password even for level-1 blocks). mef3io
+  reads such blocks (some third-party tools write them): a block encrypted at
+  level 1 with either password, one at level 2 with the level-2 password.
+  Recordings mef3io writes today leave data blocks unencrypted and stay fully
+  compatible; encrypted *metadata* works in every direction. mef3io intends
+  to follow the specification here later, which could produce recordings
+  that older tools cannot read; that is not decided yet
+  ([#94](https://github.com/bnelair/mef3io/issues/94),
+  [#92](https://github.com/bnelair/mef3io/issues/92)).
+- **Single-file `.mefd.tar` sessions** are a mef3io addition, not part of
+  MEF 3.0, so meflib, pymef and mef_tools cannot open them directly. They
+  are plain uncompressed tar files, so they can always be unpacked:
+  `mef3io.extract_session`, `tar -xf` (built into Windows 10 and later,
+  macOS and Linux) or the free 7-Zip on Windows. The unpacked `.mefd` folder
+  works with the legacy tools.
 - **Records** (annotations): every record type MEF 3.0 defines is read;
   `Note`, `SyLg` and `EDFA` can be written with their text.
 - **De-identification**: meflib's recording-time offset does not hide the

@@ -1,3 +1,7 @@
+---
+description: "Python guide to mef3io: read and write MEF 3.0 EEG/iEEG recordings with Reader and Writer, inspect sessions, cancel long reads, tar archives and the mef_tools drop-in."
+---
+
 # Python guide
 
 ```python
@@ -443,6 +447,13 @@ left untouched, output is deterministic (same session ⇒ identical bytes), and
 any tar tool restores the directory (`tar -xf session.mefd.tar`). Foreign
 archives work too (GNU/bsdtar/`tarfile`, with or without directory entries);
 compressed input (`.tar.gz` etc.) is rejected with a clear error.
+
+!!! note "A mef3io addition, not part of MEF 3.0"
+    meflib, pymef and mef_tools cannot open a `.mefd.tar` directly. It is a
+    plain uncompressed tar file, so it can always be unpacked:
+    `extract_session`, `tar -xf session.mefd.tar` (built into Windows 10 and
+    later, macOS and Linux) or the free 7-Zip on Windows. The unpacked
+    `.mefd` folder works with the legacy tools.
 
 Tar sessions are **read-only**: `Writer` refuses `.tar` paths. To modify one,
 unpack it first — `extract_session` is the exact inverse (archive → extract →

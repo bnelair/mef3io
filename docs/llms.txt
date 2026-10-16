@@ -1,0 +1,30 @@
+# mef3io
+
+> mef3io reads and writes MEF 3.0 (Multiscale Electrophysiology Format) recordings from Python, MATLAB and C++, with one C++ core behind all three. MEF 3.0 is a compressed, optionally encrypted format for long electrophysiology recordings (mainly EEG, intracranial EEG and ECG; any regularly sampled signal fits). Files mef3io writes open in meflib, pymef and mef_tools, and theirs open in mef3io.
+
+Install: `pip install mef3io` (Python 3.10+, numpy only). MATLAB: the mef3io-matlab zip on each GitHub release. C++: add `core/` to a CMake project. Times are microseconds since the Unix epoch (uUTC). Gaps read back as NaN. `from mef3io import MefReader, MefWriter` replaces the legacy mef_tools API. Apache-2.0.
+
+## Docs
+
+- [Overview](https://bnelair.github.io/mef3io/): what mef3io is, scope and limitations
+- [MEF 3.0 for students](https://bnelair.github.io/mef3io/students/): the format in plain words, when to use it
+- [Install](https://bnelair.github.io/mef3io/install/): wheels, MATLAB bundle, building from source
+- [Python guide](https://bnelair.github.io/mef3io/python/): Reader, Writer, inspect, cancel/progress, tar archives, caching, mef_tools drop-in
+- [MATLAB guide](https://bnelair.github.io/mef3io/matlab/): the +mef3io classes
+- [C++ and C ABI guide](https://bnelair.github.io/mef3io/cpp/): the core library and the flat C API
+- [Examples](https://bnelair.github.io/mef3io/examples/): runnable scripts
+
+## Reference
+
+- [MEF 3.0 on-disk format](https://bnelair.github.io/mef3io/mef3_format/): every file and field
+- [Encryption model](https://bnelair.github.io/mef3io/encryption_model/): the two password levels and what they protect
+- [Validation and repair](https://bnelair.github.io/mef3io/validation/): checking, repairing and recovering sessions
+- [Long recordings](https://bnelair.github.io/mef3io/long_recordings/): months-long appends, durability
+- [De-identification](https://bnelair.github.io/mef3io/anonymization/): why meflib's recording-time offset is not anonymization
+- [Release notes](https://bnelair.github.io/mef3io/release_notes/): changes and upgrade notes per version
+
+## Optional
+
+- [Source code](https://github.com/bnelair/mef3io)
+- [meflib](https://github.com/msel-source/meflib): the reference C library; its meflib.h is the MEF 3.0 specification
+- [pymef](https://github.com/msel-source/pymef) and [mef_tools](https://github.com/bnelair/mef_tools): the legacy Python stack

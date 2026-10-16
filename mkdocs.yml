@@ -1,5 +1,5 @@
 site_name: mef3io
-site_description: MEF 3.0 read/write — one C++ core with Python and MATLAB bindings
+site_description: Read and write MEF 3.0 (Multiscale Electrophysiology Format) EEG, iEEG and ECG recordings from Python, MATLAB and C++ - one C++ core, compatible with meflib, pymef and mef_tools
 site_url: https://bnelair.github.io/mef3io/
 repo_url: https://github.com/bnelair/mef3io
 repo_name: bnelair/mef3io
@@ -54,6 +54,7 @@ plugins:
 nav:
   - Home: index.md
   - Getting started:
+      - MEF 3.0 for students: students.md
       - Install: install.md
       - Examples: examples.md
   - Guides:

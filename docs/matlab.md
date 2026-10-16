@@ -1,3 +1,7 @@
+---
+description: "MATLAB guide to mef3io: read and write MEF 3.0 (Multiscale Electrophysiology Format) recordings with the +mef3io Reader and Writer classes."
+---
+
 # MATLAB guide
 
 The MATLAB binding wraps the same C++ core as the Python package — identical
@@ -116,6 +120,13 @@ for sharing and safe archiving:
 tarPath = mef3io.archiveSession('session.mefd');   % -> 'session.mefd.tar'
 r = mef3io.Reader(tarPath);                        % no extraction needed
 ```
+
+!!! note "A mef3io addition, not part of MEF 3.0"
+    meflib, pymef and mef_tools cannot open a `.mefd.tar` directly. It is a
+    plain uncompressed tar file, so it can always be unpacked:
+    `mef3io.extractSession`, `tar -xf session.mefd.tar` (built into Windows 10 and
+    later, macOS and Linux) or the free 7-Zip on Windows. The unpacked
+    `.mefd` folder works with the legacy tools.
 
 Windowed reads stay cheap (the archive is uncompressed, so only the needed
 byte ranges are fetched), and any tar tool restores the directory
