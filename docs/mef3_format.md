@@ -106,7 +106,7 @@ offset only moves the date into `recording_time_offset` in section 3 of
 every `.tmet`, which is plain text unless the session is encrypted, so
 `−stored + rto` gives the real date back to anyone. mef3io therefore never
 creates an offset session (a new session gets `rto = 0`), and
-de-identification is planned as a separate copy
+de-identification is a separate copy made by `anonymize_session`
 ([#70](https://github.com/bnelair/mef3io/issues/70)). See
 [De-identification and the recording-time offset](anonymization.md).
 
@@ -173,7 +173,7 @@ Offsets are relative to the region; add 960 for the position in the file.
 | 3 | `header-repair` | `repair_session`: declarations rewritten, samples untouched |
 | 4 | `recovery` | `recover_session`: index and data reconciled after an interrupted write |
 | 5 | `metadata-update` | reserved: descriptive metadata rewritten in place |
-| 6 | — | reserved for anonymize (#70), not yet assigned |
+| 6 | `anonymize` | the file belongs to a de-identified copy made by `anonymize_session` (#70); stamped on every file of the copy |
 | 7 | — | reserved for rename (#72), not yet assigned |
 | 8 | — | reserved for transform (#73), not yet assigned |
 | 9 | `segment-repaired` | stamped on a channel's **last** segment's `.tmet` when `repair_session` or `recover_session` modified **another** segment of that channel. The last segment itself was not repaired: that file only records that something earlier in its channel was. |

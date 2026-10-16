@@ -324,3 +324,19 @@ def test_inspect_flags_a_channel_with_one_old_segment_among_new_ones(tmp_path, x
     # the meflib-keyed segment alone is not flagged
     shutil.rmtree(next(path.glob("ch1.timd/ch1-000000.segd")))
     assert mef3io.inspect(str(path), PW2).legacy_password_mapping is False
+
+
+def test_anonymize_session_re_keys_an_old_session(tmp_path, x):
+    """The hint in LegacyPasswordWarning and inspect: a copy made with
+    anonymize_session(..., output_password=...) opens with the SAME passwords
+    under meflib's mapping, with no fallback."""
+    path = tmp_path / "old.mefd"
+    _old_mef3io_session(path, x)
+    rep = mef3io.anonymize_session(path, tmp_path / "S001.mefd", -7000 * 86_400_000_000,
+                                   password=PW2, output_password=(PW1, PW2))
+    assert rep.verification.ok
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", mef3io.LegacyPasswordWarning)
+        for pw in (PW2, PW1):
+            with mef3io.Reader(str(tmp_path / "S001.mefd"), password=pw) as r:
+                np.testing.assert_array_equal(r.read("ch1"), x * 0.5)

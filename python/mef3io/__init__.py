@@ -30,6 +30,8 @@ def have_cpp_backend() -> bool:
 
 
 from ._archive import archive_session, extract_session  # noqa: E402
+from . import anonymize  # noqa: E402  (mef3io.anonymize.verify, ...)
+from .anonymize import AnonymizeReport, VerifyReport, anonymize_session  # noqa: E402
 from ._inspect import (  # noqa: E402
     ChannelSummary,
     IdentityField,
@@ -83,6 +85,7 @@ else:  # pragma: no cover - only without the extension
 __all__ = [
     "Reader", "Writer", "Metadata", "Subject", "Acquisition",
     "MefReader", "MefWriter", "archive_session", "extract_session",
+    "anonymize_session", "AnonymizeReport", "VerifyReport",
     # Not "inspect": `from mef3io import *` would shadow the standard library's.
     "SessionSummary", "ChannelSummary", "SegmentSummary",
     "RecordSummary", "IdentityField", "SummaryWarning",

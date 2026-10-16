@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "mef3io/anonymize.hpp"
 #include "mef3io/control.hpp"
 #include "mef3io/crc.hpp"
 #include "mef3io/errors.hpp"
@@ -407,6 +408,36 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
 }  // namespace
 
 namespace {
+nb::dict verify_report_dict(const mef3io::VerifyReport& r) {
+  auto issues = [](const std::vector<mef3io::VerifyIssue>& v) {
+    nb::list l;
+    for (const auto& i : v) {
+      nb::dict d;
+      d["location"] = i.location;
+      d["field"] = i.field;
+      d["message"] = i.message;
+      l.append(d);
+    }
+    return l;
+  };
+  nb::dict d;
+  d["ok"] = r.ok;
+  d["problems"] = issues(r.problems);
+  d["leaks"] = issues(r.leaks);
+  d["notes"] = issues(r.notes);
+  d["inherited_findings"] = r.inherited_findings;
+  d["channels"] = r.channels;
+  d["excluded_channels"] = r.excluded_channels;
+  d["segments"] = r.segments;
+  d["blocks"] = r.blocks;
+  d["records"] = r.records;
+  d["times_checked"] = r.times_checked;
+  d["text_fields_checked"] = r.text_fields_checked;
+  return d;
+}
+}  // namespace
+
+namespace {
 // Construct a bound C++ object in place with the GIL RELEASED (#79): opening a
 // session reads and parses metadata for every segment, and holding the GIL
 // for that froze every other Python thread (a GUI's event loop) for seconds.
@@ -591,6 +622,134 @@ NB_MODULE(_mef3io, m) {
       nb::arg("progress") = nb::none(),
       "Make each segment's block index and data agree after an interrupted "
       "write. Dry run unless apply=True.");
+
+  // --- anonymize (#70): a de-identified copy, every time shifted ---
+  m.def(
+      "anonymize_session",
+      [](const std::string& src, const std::string& dst, std::int64_t shift_us,
+         const std::string& pseudonym, bool clear_subject, bool clear_location,
+         bool clear_descriptions, const std::string& text, nb::object text_fn, bool rename,
+         const std::string& password, const std::string& output_password_1,
+         const std::string& output_password_2, std::vector<std::string> channels,
+         std::vector<std::string> exclude_channels, const mef3io::CancelToken* cancel,
+         nb::object progress) {
+        PyHooks hooks(cancel, std::move(progress));
+        mef3io::AnonymizeOptions o;
+        o.shift_us = shift_us;
+        o.pseudonym = pseudonym;
+        o.clear_subject = clear_subject;
+        o.clear_location = clear_location;
+        o.clear_descriptions = clear_descriptions;
+        if (text == "drop") o.text = mef3io::RecordTextPolicy::Drop;
+        else if (text == "keep") o.text = mef3io::RecordTextPolicy::Keep;
+        else if (text == "callback") o.text = mef3io::RecordTextPolicy::Callback;
+        else throw nb::value_error("text must be 'drop', 'keep' or a callable");
+        if (o.text == mef3io::RecordTextPolicy::Callback) {
+          if (!PyCallable_Check(text_fn.ptr())) throw nb::type_error("text must be callable");
+          // Called on the copying thread with the GIL released; take it for
+          // the call. A raised exception aborts the copy (nothing is left
+          // behind) and is re-raised unchanged, like a progress callback's.
+          o.text_fn = [&hooks, &text_fn](const std::string& value,
+                                         const mef3io::RecordTextField& f) -> std::string {
+            nb::gil_scoped_acquire gil;
+            if (hooks.error) throw mef3io::Cancelled("text callback raised");
+            try {
+              nb::dict info;
+              info["record_type"] = f.record_type;
+              info["field"] = f.field;
+              info["level"] = mef3io::record_level_name(f.level);
+              info["channel"] = f.channel;
+              info["segment"] = f.segment;
+              info["time"] = f.time;
+              // Record text is bytes from a file and need not be valid UTF-8:
+              // decode with surrogateescape so every byte survives, and
+              // encode the result back the same way.
+              PyObject* raw = PyUnicode_DecodeUTF8(value.data(),
+                                                   static_cast<Py_ssize_t>(value.size()),
+                                                   "surrogateescape");
+              if (!raw) throw nb::python_error();
+              nb::object arg = nb::steal(raw);
+              nb::object r = text_fn(arg, info);
+              if (r.is_none()) return std::string();
+              if (!nb::isinstance<nb::str>(r)) {
+                PyErr_SetString(PyExc_TypeError, "the text callable must return a str or None");
+                throw nb::python_error();
+              }
+              PyObject* enc = PyUnicode_AsEncodedString(r.ptr(), "utf-8", "surrogateescape");
+              if (!enc) throw nb::python_error();
+              nb::object b = nb::steal(enc);
+              return std::string(PyBytes_AS_STRING(enc),
+                                 static_cast<std::size_t>(PyBytes_GET_SIZE(enc)));
+            } catch (nb::python_error& e) {
+              hooks.error.emplace(std::move(e));
+              throw mef3io::Cancelled("text callback raised");
+            }
+          };
+        }
+        o.rename = rename;
+        o.password = password;
+        o.output_password_1 = output_password_1;
+        o.output_password_2 = output_password_2;
+        o.channels = std::move(channels);
+        o.exclude_channels = std::move(exclude_channels);
+        mef3io::AnonymizeReport r = hooks.run([&](const mef3io::Control& ctl) {
+          return mef3io::anonymize_session(src, dst, o, ctl);
+        });
+        nb::dict out;
+        out["destination"] = r.destination;
+        out["session_name"] = r.session_name;
+        out["pseudonym"] = r.pseudonym;
+        out["shift_us"] = r.shift_us;
+        out["source_recording_time_offset"] = r.source_recording_time_offset;
+        out["channels_kept"] = r.channels_kept;
+        out["channels_excluded"] = r.channels_excluded;
+        out["segments"] = r.segments;
+        out["blocks"] = r.blocks;
+        out["blocks_reencrypted"] = r.blocks_reencrypted;
+        out["blocks_decrypted"] = r.blocks_decrypted;
+        out["records"] = r.records;
+        out["record_text_fields_changed"] = r.record_text_fields_changed;
+        out["record_bodies_cleared"] = r.record_bodies_cleared;
+        out["seizure_channel_entries_dropped"] = r.seizure_channel_entries_dropped;
+        out["bytes_written"] = r.bytes_written;
+        out["output_encrypted"] = r.output_encrypted;
+        out["not_copied"] = r.not_copied;
+        out["notes"] = r.notes;
+        out["verification"] = verify_report_dict(r.verification);
+        return out;
+      },
+      nb::arg("src"), nb::arg("dst"), nb::arg("shift_us"), nb::arg("pseudonym") = "",
+      nb::arg("clear_subject") = true, nb::arg("clear_location") = true,
+      nb::arg("clear_descriptions") = true, nb::arg("text") = "drop",
+      nb::arg("text_fn") = nb::none(), nb::arg("rename") = true, nb::arg("password") = "",
+      nb::arg("output_password_1") = "", nb::arg("output_password_2") = "",
+      nb::arg("channels") = std::vector<std::string>{},
+      nb::arg("exclude_channels") = std::vector<std::string>{},
+      nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none(),
+      "Write a de-identified copy of a session (see mef3io.anonymize_session).");
+  m.def(
+      "verify_anonymized",
+      [](const std::string& src, const std::string& dst, std::int64_t shift_us,
+         const std::string& password, const std::string& output_password, bool clear_subject,
+         bool clear_location, bool clear_descriptions, const mef3io::CancelToken* cancel,
+         nb::object progress) {
+        PyHooks hooks(cancel, std::move(progress));
+        mef3io::VerifyOptions o;
+        o.password = password;
+        o.output_password = output_password;
+        o.clear_subject = clear_subject;
+        o.clear_location = clear_location;
+        o.clear_descriptions = clear_descriptions;
+        mef3io::VerifyReport r = hooks.run([&](const mef3io::Control& ctl) {
+          return mef3io::verify_anonymized(src, dst, shift_us, o, ctl);
+        });
+        return verify_report_dict(r);
+      },
+      nb::arg("src"), nb::arg("dst"), nb::arg("shift_us"), nb::arg("password") = "",
+      nb::arg("output_password") = "", nb::arg("clear_subject") = true,
+      nb::arg("clear_location") = true, nb::arg("clear_descriptions") = true,
+      nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none(),
+      "Check a de-identified copy against its source (see mef3io.anonymize.verify).");
 
   // --- inspect (#67): everything about a session without its samples ---
   m.def(

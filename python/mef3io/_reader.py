@@ -97,9 +97,12 @@ class LegacyPasswordWarning(MefWarning):
     fallback to the old mapping, and this warning says so (on open for the
     metadata, from :meth:`Reader.records` for record files): the data is intact,
     but meflib and pymef cannot open that session with that password. To make
-    it readable everywhere, re-encrypt it into a new session with the same
-    password once ``transform_session`` (issue #73) is available; until then,
-    reading it into a new session with :class:`Writer` does the same.
+    it readable everywhere, make a re-keyed copy:
+    :func:`anonymize_session` with ``output_password=(level1, level2)``
+    re-encrypts every file with meflib's mapping. That copy is NOT a pure
+    re-key: it is de-identified and every time is shifted (by at least the
+    recording's span + 1 day). A pure re-key is ``transform_session``
+    (issue #73), once it exists.
 
     The fallback cannot tell who wrote a file: it also accepts a SECOND
     password, the one whose old-mapping bytes equal the real key (for a
@@ -141,9 +144,11 @@ def _legacy_password_warning_text(what: str) -> str:
         "mapping that mef3io used up to 1.2.0, which differs from meflib's for "
         "non-ASCII characters (issue #84); such files were most likely encrypted "
         "by one of those versions. The data is read correctly, but meflib and "
-        "pymef cannot open these files with this password. Re-encrypt the "
-        "session (transform_session, issue #73, or rewrite it with "
-        "mef3io.Writer) to make it readable everywhere."
+        "pymef cannot open these files with this password. A re-keyed copy is "
+        "mef3io.anonymize_session(..., output_password=(level1, level2)), but it "
+        "also de-identifies the copy and shifts every time (by at least the "
+        "recording's span + 1 day); a pure re-key is transform_session (#73), once it "
+        "exists."
     )
 
 

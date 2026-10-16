@@ -44,7 +44,53 @@ abstraction: DirectorySource/TarSource), `tar` (uncompressed .mefd.tar session
 archives: TarIndex/TarSource/`archive_session`), `reader` (gridding, NaN fill,
 scaling, parallel decode), `records` (read+write), `writer` (segment writer),
 `session_writer` (precision inference, quantization, NaN splitting, segments),
-`parallel.hpp`.
+`parallel.hpp`, `anonymize` (`anonymize_session` + `verify_anonymized`, #70;
+see below), `segment_copy.hpp` (internal streaming block-copy engine:
+per-block edit/drop hook, re-seals block CRCs, repacks + rewrites `.tidx`
+offsets, renumbers start_sample and flags the block after a drop as a
+discontinuity, returns section-2 stats; reused by cut/merge #103).
+
+Anonymize (#70) invariants, all test-pinned (`tests/test_p29_anonymize.py`):
+(1) `verify` is FIELD-WISE and INDEPENDENT of the rewrite (own matcher, so
+a rewrite gap fails closed). Rewritten fields: plain case-insensitive
+substring scan; excused only inside the copy's own name or a kept channel
+name (<4 chars only), a kept channel name, a <4-digit number inside a
+longer number (`,` separates), or a <4-letter word inside a longer word --
+all NOTES. Kept channel names (+ paths, UH channel_name, Seiz entries):
+tokens split on non-alphanumerics incl. `_`; REFUSE a token EQUAL to an
+identity value of 3+ chars; for subject/location (not the source session
+name) also a 3+-letter value equal to a letter/digit part ("Roe1") or a
+4+-char value inside a token ("JaneRoe"); else NOTE (256-channel montages
+hit "12"/"P3"/"EEG"). The copy name/pseudonym holding an identity value
+(3+ substring, shorter whole token; own-name excuse only for <3 chars) is a
+ValueError before any write. Needles: values normalized (trim + collapse
+spaces); subject names + location ALSO word by word (3+ letters) -- but
+location WORDS never in the channel rule ("EEG Lab" vs EEG1) -- and the ID
+whole plus each 3+-digit run as a whole number ("EEG-0042" -> "0042"; its
+letters are a prefix). Engine: dropping a segment's FIRST block requires
+`SegmentCopySpec::start_sample` (invalid_argument otherwise; #103 passes the
+channel-wide count). Case fold covers ASCII + Latin-1 +
+Latin Ext-A and is LENGTH-PRESERVING (the redactor replaces at folded
+offsets); the scanner additionally strips those diacritics (fail closed). Identity checks run before excusing the copy's own name ("S0012"
+vs copy "S001"). Epoc/Curs id_number: absolute window only (the rto window
+reaches small ints). Redactor: <4 chars = whole tokens, numeric = whole
+numbers, never inside kept channel names. Segment number = `.tmet` UH @48,
+folder suffix must agree; times are checked one field at a time against the
+source range +-1 day, plain or negated -- never a sliding window, never
+size/count fields, RED payload + stats compared, not scanned. (2) Build in
+`<dst>.partial`, fsync, verify, THEN rename; any failure/cancel removes it.
+(3) Never re-seal a failing block or record CRC. (4) Source-encrypted RED
+blocks are re-encrypted at their level with the new keys, decrypted only
+with no output passwords; never silently downgraded. (5) |shift| >= span +
+1 day, all times stay > 0. (6) Sentinels (UUTC_NO_ENTRY, 0, body -1) never
+shifted; every time keeps its stored sign; output rto 0, GMT 0, DST
+NO_ENTRY. (7) Every text field is REWRITTEN whole (`write_string`
+zero-fills; a guarded "if changed" left hidden bytes after the NUL), and
+foreign regions are zeroed: UH, s1/s2/s3, `.tidx` entry 40/45/48, RED
+header 5/8. Segment folders renamed canonically. Unknown record bodies are
+dropped. (8) Inner inspect/validate calls get a cancel-only `Control`
+(passing progress restarts the caller's sequence). (9) pymef SEGFAULTS on
+unknown or `UnRc` record types: oracle tests must not include them.
 
 Tar session archives: `archive_session(dir)` packs a session into ONE
 deterministic uncompressed ustar (`name.mefd.tar`); readers in all languages
@@ -492,8 +538,9 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   `overwrite_universal_header` and the .tmet rewrite) `HeaderRepair`,
   recovery `Recovery`. RULE (core/src/last_segment.hpp): when repair or
   recovery modifies a NON-last segment, it ALSO stamps the channel's LAST
-  segment's .tmet with `SegmentRepaired` (code 9; 6/7/8 are reserved for
-  anonymize #70 / rename #72 / transform #73 and deliberately unassigned).
+  segment's .tmet with `SegmentRepaired` (code 9; 6 = `Anonymize`, stamped
+  on every file of an anonymized copy; 7/8 stay reserved for rename #72 /
+  transform #73 and deliberately unassigned).
   Header-only (region + header CRC), backed up. Always reported, naming the
   file: repair = an Info finding `provenance.last-segment`, recovery =
   `RecoveryReport.notes`. `provenance.last-segment` is NOT a registered check,

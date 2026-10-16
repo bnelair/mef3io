@@ -79,8 +79,10 @@ def warn_legacy_password_segments(entries, stacklevel=3, path=None):
             f"{len(entries)} segment(s) were appended to whose password matched only "
             f"through the password-to-key mapping that mef3io used up to 1.2.0 (issue #84; "
             f"most likely written by one of those versions). They keep their old keys, so meflib and pymef cannot open them "
-            "with this password; new segments use meflib's mapping. Re-encrypt the session "
-            "(transform_session, issue #73) to make it readable everywhere. "
+            "with this password; new segments use meflib's mapping. A re-keyed copy is "
+            "mef3io.anonymize_session(..., output_password=(level1, level2)), but it also "
+            "de-identifies the copy and shifts every time (by at least the recording's span "
+            "+ 1 day); a pure re-key is transform_session (#73), once it exists. "
             "The segments are listed in the warning's details.",
             path=path, details=entries, stacklevel=stacklevel)
 

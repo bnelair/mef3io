@@ -166,3 +166,20 @@ ones that say data was skipped. A bare `warnings.warn` reintroduces that, and
 anywhere else in the package). `emit` also keeps one warning registry per
 (session, calling file), so the default filter still shows a warning once
 per session rather than once per process.
+
+## 11. A de-identified copy is checked by something that does not trust the copier
+
+`anonymize_session` (#70) publishes nothing `verify` has not passed, and
+`verify` must not share logic with the rewrite it checks. The first review
+round found six leaks that survived with `verify().ok == True` — text after a
+field's NUL, foreign per-block regions, segment folder names, names glued to
+other words — each because the check asked the same question the rewrite had
+answered. Rules:
+
+- The name scan is a dumb case-insensitive substring search; refusing a copy
+  over a false alarm is acceptable, publishing a leak is not.
+- Rewrite every text field whole, and zero every region another writer may
+  fill; never "leave it if unchanged".
+- Every new field the copy carries needs a planted-leak test in
+  `tests/test_p29_anonymize.py` that shows `verify` catching it in the copy
+  AND the rewrite removing it from a source.

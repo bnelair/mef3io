@@ -13,6 +13,11 @@ neither can be reached by accident from the other::
 ``recover`` is the only one that may touch the block index or the data file,
 and only after an interrupted write. It is a dry run unless ``--apply`` is
 given.
+
+``anonymize`` never touches the source; it writes a new, de-identified copy::
+
+    python -m mef3io anonymize SRC.mefd DST.mefd --shift-us N
+    python -m mef3io anonymize SRC.mefd DST.mefd --reference-date 2000-01-03 --tz Europe/Prague
 """
 from __future__ import annotations
 
@@ -24,6 +29,7 @@ COMMANDS = {
     "validate": "check a session's declarations against its data (never writes)",
     "repair": "rewrite only the declarations for the checks you name",
     "recover": "after an interrupted write, make the index and data agree again",
+    "anonymize": "write a de-identified copy: every time shifted, identity removed",
 }
 
 
@@ -61,6 +67,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .validate import _recover_main
 
         return _recover_main(rest)
+    if command == "anonymize":
+        from .anonymize import _main as _anonymize_main
+
+        return _anonymize_main(rest)
     raise AssertionError(f"unhandled command {command}")  # pragma: no cover
 
 
