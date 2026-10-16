@@ -73,6 +73,15 @@ maintained here, in mef3io, as open source (Apache-2.0).**
   [`mef-tools`](https://pypi.org/project/mef-tools/)): high-level Python
   reading and writing built on pymef. mef3io stands in for it:
   `from mef3io import MefReader, MefWriter`.
+- **MATLAB (legacy):**
+  [matmef](https://github.com/MultimodalNeuroimagingLab/matmef) (a MATLAB
+  wrapper over meflib),
+  [mef_reader_fieldtrip](https://github.com/MultimodalNeuroimagingLab/mef_reader_fieldtrip)
+  (FieldTrip reader for MEF 2.1, MEF 3.0 and MED 1.0) and
+  [MEF_import](https://github.com/jiecui/MEF_import) (EEGLAB plugin). mef3io
+  has its own MATLAB interface.
+- The full list of earlier tools and their contributors is on
+  [Contributors and credits](contributors.md).
 - The older **MEF 2.1** format has its own library and specification,
   [mef_lib_2_1](https://github.com/benbrinkmann/mef_lib_2_1); mef3io reads
   and writes MEF 3.0 only.
