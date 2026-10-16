@@ -184,7 +184,9 @@ counts.
   valid file (breaks the legacy writer). Decrypt a section only when its stored
   level is strictly positive; unencrypted files carry -1/-2 (`0xFF`/`0xFE`).
   Full explanation: `docs/encryption_model.md`.
-- **Password scheme**: password bytes = terminal byte of each UTF-8 char, 16,
+- **Password scheme**: password bytes = low byte of each character's Unicode
+  code point (meflib's rule; mef3io <= 1.2.0 wrongly took the last UTF-8 byte,
+  #84, still accepted on read with a warning — see CLAUDE.md), 16,
   zero-padded. L1 field = SHA256(L1)[:16]. L2 field = SHA256(L2)[:16] XOR L1.
   L2 access derives putative L1 = SHA256(pwd)[:16] XOR L2field, check its hash.
 - **RED data blocks are written UNENCRYPTED** even in encrypted sessions

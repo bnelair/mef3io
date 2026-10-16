@@ -78,11 +78,17 @@ class LegacyPasswordWarning(UserWarning):
 
     mef3io now writes with meflib's mapping and reads with it first. A session
     an older mef3io encrypted with a non-ASCII password still opens, through a
-    fallback to the old mapping, and this warning says so: the data is intact,
+    fallback to the old mapping, and this warning says so (on open for the
+    metadata, from :meth:`Reader.records` for record files): the data is intact,
     but meflib and pymef cannot open that session with that password. To make
     it readable everywhere, re-encrypt it into a new session with the same
     password once ``transform_session`` (issue #73) is available; until then,
     reading it into a new session with :class:`Writer` does the same.
+
+    The fallback cannot tell who wrote a file: it also accepts a SECOND
+    password, the one whose old-mapping bytes equal the real key (for a
+    session keyed with ``"b©"``, also ``"bé"``), whoever wrote it. That is
+    inherent to any compatibility fallback and is why it is announced.
 
     Appending to such a session keeps the existing segments' keys (rewriting
     them would mean re-encrypting them); new segments use meflib's mapping.
@@ -102,15 +108,15 @@ class PasswordInteropWarning(UserWarning):
     """
 
 
-def _legacy_password_warning_text(channels: list, path: str) -> str:
-    shown = ", ".join(channels[:3]) + (", ..." if len(channels) > 3 else "")
+def _legacy_password_warning_text(what: str, path: str) -> str:
     return (
-        f"{path}: the password opened {len(channels)} channel(s) ({shown}) only "
-        "through the password-to-key mapping that mef3io used up to 1.2.0, which "
-        "differs from meflib's for non-ASCII characters (issue #84). The data "
-        "is read correctly, but meflib and pymef cannot open these files with "
-        "this password. Re-encrypt the session (transform_session, issue #73, "
-        "or rewrite it with mef3io.Writer) to make it readable everywhere."
+        f"{path}: the password opened {what} only through the password-to-key "
+        "mapping that mef3io used up to 1.2.0, which differs from meflib's for "
+        "non-ASCII characters (issue #84); such files were most likely encrypted "
+        "by one of those versions. The data is read correctly, but meflib and "
+        "pymef cannot open these files with this password. Re-encrypt the "
+        "session (transform_session, issue #73, or rewrite it with "
+        "mef3io.Writer) to make it readable everywhere."
     )
 
 
@@ -118,7 +124,8 @@ def _warn_legacy_password(impl, path: str, stacklevel: int) -> None:
     fn = getattr(impl, "legacy_password_channels", None)
     channels = list(fn()) if fn is not None else []
     if channels:
-        warnings.warn(_legacy_password_warning_text(channels, path),
+        shown = ", ".join(channels[:3]) + (", ..." if len(channels) > 3 else "")
+        warnings.warn(_legacy_password_warning_text(f"{len(channels)} channel(s) ({shown})", path),
                       LegacyPasswordWarning, stacklevel=stacklevel + 1)
 
 
@@ -700,7 +707,13 @@ class Reader:
         """
         impl = self._ensure_impl()
         before = len(impl.problems())
+        legacy_before = len(impl.legacy_password_record_files())
         out = impl.records(channel, segment, level)
+        legacy = impl.legacy_password_record_files()[legacy_before:]
+        if legacy:
+            warnings.warn(_legacy_password_warning_text(
+                f"{len(legacy)} record file(s) (first: {legacy[0]})", self._path),
+                LegacyPasswordWarning, stacklevel=2)
         added = impl.problems()[before:]
         if added:
             # Lenient only (strict raises): a record file that could not be

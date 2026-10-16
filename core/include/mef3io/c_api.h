@@ -118,6 +118,8 @@ int mef3io_reader_problem_kind(mef3io_reader* r, int32_t index, int32_t* out);
  * older mef3io with a non-ASCII password, and meflib/pymef cannot open it with
  * that password. 0 for everything else. Bindings surface it as a warning. */
 int mef3io_reader_n_legacy_password_channels(mef3io_reader* r, int32_t* out);
+/* The same for record (.rdat) files read so far; grows as records are read. */
+int mef3io_reader_n_legacy_password_record_files(mef3io_reader* r, int32_t* out);
 
 /* Why `password` will not behave as expected in other MEF readers (more than
  * 15 characters, or a character above U+00FF), copied into `buf`; an empty

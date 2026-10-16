@@ -186,6 +186,12 @@ int mef3io_reader_n_legacy_password_channels(mef3io_reader* r, int32_t* out) {
   });
 }
 
+int mef3io_reader_n_legacy_password_record_files(mef3io_reader* r, int32_t* out) {
+  if (!r || !out) return fail_argument("NULL argument");
+  return guarded(
+      [&] { *out = static_cast<int32_t>(r->impl.legacy_password_record_files().size()); });
+}
+
 int mef3io_password_interop_issue(const char* password, char* buf, size_t buf_bytes) {
   if (!password || !buf) return fail_argument("NULL argument");
   return guarded([&] { copy_str(buf, buf_bytes, mef3io::crypto::password_interop_issue(password)); });

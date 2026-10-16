@@ -202,6 +202,14 @@ class Session {
 
   /// Segments that failed to load, in lenient mode. Always empty when strict.
   const std::vector<SegmentProblem>& problems() const { return problems_; }
+
+  /// Record (.rdat) files read so far whose password matched only through
+  /// the byte mapping mef3io used up to 1.2.0 (issue #84). Grows as records
+  /// are read; deduplicated. (Metadata is reported per channel instead, via
+  /// ChannelInfo::legacy_password_mapping, because it is read at open.)
+  const std::vector<std::string>& legacy_password_record_files() const {
+    return legacy_password_record_files_;
+  }
   bool strict() const { return strict_; }
 
   const std::vector<std::string>& channels() const { return channel_names_; }
@@ -343,6 +351,7 @@ class Session {
   std::map<std::string, Channel> channels_;
   bool strict_ = true;
   std::vector<SegmentProblem> problems_;
+  std::vector<std::string> legacy_password_record_files_;
   std::set<std::string> reported_record_files_;  // record files already in problems_
   std::vector<std::string> record_only_channels_;  // records but no segments (yet)
 };

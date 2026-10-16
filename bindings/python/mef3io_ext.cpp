@@ -1092,6 +1092,11 @@ NB_MODULE(_mef3io, m) {
           "Channels whose metadata the password opened only through the byte "
           "mapping mef3io used up to 1.2.0 (issue #84).")
       .def(
+          "legacy_password_record_files",
+          [](mef3io::Reader& r) { return r.legacy_password_record_files(); },
+          "Record files read so far that the password opened only through the "
+          "byte mapping mef3io used up to 1.2.0 (issue #84).")
+      .def(
           "declaration_issues",
           [](mef3io::Reader& r) {
             nb::list out;

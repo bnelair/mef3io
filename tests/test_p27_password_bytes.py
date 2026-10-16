@@ -143,7 +143,32 @@ def test_the_validator_and_records_read_an_old_session(tmp_path, x):
     with pytest.warns(mef3io.LegacyPasswordWarning):
         r = mef3io.Reader(str(path), password=PW2)
     with r:
-        assert [a["text"] for a in r.records()] == ["héllo"]
+        with pytest.warns(mef3io.LegacyPasswordWarning, match="record file"):
+            assert [a["text"] for a in r.records()] == ["héllo"]
+
+
+def test_old_record_files_warn_even_when_the_metadata_is_new(tmp_path, x):
+    # A session whose .tmet files are keyed the meflib way but whose .rdat is
+    # not (records written separately by an older mef3io): the open is quiet,
+    # records() is the only place that can say so.
+    old = tmp_path / "old.mefd"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", mef3io.PasswordInteropWarning)
+        w = mef3io.Writer(str(old), password1=_old_bytes_as_password(PW1),
+                          password2=_old_bytes_as_password(PW2))
+        w.write_int32("ch1", x, 0.5, START, FS)
+        w.write_annotations([{"time": START + 1_000_000, "text": "old"}])
+        w.close()
+    path = tmp_path / "mixed.mefd"
+    _write(path, PW1, PW2, x)
+    for ext in (".rdat", ".ridx"):
+        (path / f"mixed{ext}").write_bytes((old / f"old{ext}").read_bytes())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", mef3io.LegacyPasswordWarning)
+        r = mef3io.Reader(str(path), password=PW2)
+    with r:
+        with pytest.warns(mef3io.LegacyPasswordWarning, match="1 record file"):
+            assert [a["text"] for a in r.records()] == ["old"]
 
 
 # --- writing: always meflib's rule ------------------------------------------------

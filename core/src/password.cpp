@@ -83,7 +83,10 @@ std::string password_interop_issue(const std::string& password) {
   if (chars > kMax)
     out = "it has " + std::to_string(chars) +
           " characters; meflib and pymef refuse passwords longer than 15 characters, so only "
-          "mef3io will open this session (and characters past the 16th are ignored)";
+          "mef3io will open this session" +
+          (chars > static_cast<std::size_t>(fmt::PASSWORD_BYTES)
+               ? std::string(" (and characters past the 16th are ignored)")
+               : std::string());
   else if (utf8_bytes > kMax)
     out = "it is " + std::to_string(utf8_bytes) +
           " bytes long in UTF-8; pymef (and so mef_tools) copies the password into a 16-byte "

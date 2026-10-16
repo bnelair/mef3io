@@ -333,6 +333,13 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     plhs[0] = mxCreateDoubleScalar(n);
     return;
   }
+  if (cmd == "reader_legacy_password_record_files") {
+    need_args(nrhs, 2, "reader_legacy_password_record_files");
+    int32_t n = 0;
+    check(mef3io_reader_n_legacy_password_record_files(get_reader(prhs[1]), &n));
+    plhs[0] = mxCreateDoubleScalar(n);
+    return;
+  }
   if (cmd == "password_interop_issue") {
     need_args(nrhs, 2, "password_interop_issue");
     std::string pw = get_string(prhs[1], "password");

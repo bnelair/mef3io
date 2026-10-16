@@ -225,8 +225,12 @@ gate the signal itself: the samples are readable without any password (see
   the old rule gives different bytes), with the old rule. A match through
   the old rule opens the session and raises `LegacyPasswordWarning`
   (MATLAB: `mef3io:legacyPassword`; C: `mef3io_reader_n_legacy_password_
-  channels`): the data is intact, but meflib and pymef cannot open that
-  session with that password. Re-encrypting it into a new session makes it
+  channels`, and from `records()` for record files): the data is intact, but
+  meflib and pymef cannot open that session with that password. The
+  fallback cannot tell who wrote a file, so it also accepts a second
+  password, the one whose old-rule bytes equal the real key (a session
+  keyed with `b©` also opens with `bé`); that is inherent to any such
+  fallback, and the warning announces every use of it. Re-encrypting it into a new session makes it
   readable everywhere (`transform_session`,
   [#73](https://github.com/bnelair/mef3io/issues/73), once available; until
   then, read it and write it again with `mef3io.Writer`). New files are
