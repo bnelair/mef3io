@@ -196,4 +196,5 @@ docs/        documentation site source
 If you use mef3io in published work, please cite it via
 [CITATION.cff](https://github.com/bnelair/mef3io/blob/main/CITATION.cff).
 Licensed under [Apache 2.0](https://github.com/bnelair/mef3io/blob/main/LICENSE).
-Maintained by Filip Mivalt, Bioelectronics Neurophysiology and Engineering Laboratory (BNEL) at Mayo Clinic.
+Maintained by Filip Mivalt, Bioelectronics Neurophysiology and Engineering
+Laboratory (BNEL) at Mayo Clinic.

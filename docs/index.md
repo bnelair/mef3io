@@ -135,4 +135,5 @@ The same session opens in MATLAB (`mef3io.Reader('session.mefd')`) and C++
 What changed in each version is in the
 [release notes](release_notes/index.md).
 
-Maintained by Filip Mivalt, Bioelectronics Neurophysiology and Engineering Laboratory (BNEL) at Mayo Clinic.
+Maintained by Filip Mivalt, Bioelectronics Neurophysiology and Engineering
+Laboratory (BNEL) at Mayo Clinic.

@@ -67,8 +67,8 @@ In MATLAB:
 ```matlab
 r = mef3io.Reader('recording.mefd');
 ch = r.channels{1};
-i = r.info(ch);
-x = r.read(ch, i.start_time, i.start_time + 10e6);   % first 10 s
+meta = r.info(ch);
+x = r.read(ch, meta.start_time, meta.start_time + 10e6);   % first 10 s
 ```
 
 Next: the [Python](python.md) or [MATLAB](matlab.md) guide, and the
