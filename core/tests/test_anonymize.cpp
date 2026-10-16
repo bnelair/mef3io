@@ -12,7 +12,11 @@
 
 #include "mef3io/anonymize.hpp"
 #include "mef3io/byteio.hpp"
+#include "mef3io/crc.hpp"
 #include "mef3io/reader.hpp"
+#include "mef3io/source.hpp"
+
+#include "../src/segment_copy.hpp"
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
 
@@ -113,4 +117,55 @@ TEST_CASE("anonymize_session refuses, and leaves nothing behind") {
   CHECK_THROWS_AS(anonymize_session(src, (dir / "A.mefd").string(), o, ctl), Cancelled);
   CHECK_FALSE(fsys::exists(dir / "A.mefd"));
   CHECK_FALSE(fsys::exists(dir / "A.mefd.partial"));
+}
+
+TEST_CASE("copy_segment: dropping blocks flags the next kept one and renumbers samples") {
+  const auto dir = fresh("mef3io_copy_drop");
+  const std::string path = (dir / "c.mefd").string();
+  {
+    SessionWriter w(path, true);
+    std::vector<si4> x(50000);
+    for (std::size_t i = 0; i < x.size(); ++i) x[i] = static_cast<si4>(i % 97);
+    w.write_int32("a", x, 1.0, START, 1000.0, {}, false);
+  }
+  auto src = open_session_source(path);
+  const std::string seg = "a.timd/a-000000.segd/a-000000";
+  const auto out = dir / "out";
+  fsys::create_directories(out);
+  detail::SegmentCopySpec spec;
+  spec.source = src.get();
+  spec.tidx_rel = seg + ".tidx";
+  spec.tdat_rel = seg + ".tdat";
+  spec.tidx_out = (out / "x.tidx").string();
+  spec.tdat_out = (out / "x.tdat").string();
+  std::size_t total = 0;
+  spec.on_block = [&](detail::CopyBlock& b) {
+    ++total;
+    return b.index != 1;  // drop the second block
+  };
+  const auto st = detail::copy_segment(spec);
+  REQUIRE(total >= 3);
+  CHECK(st.blocks == static_cast<si8>(total - 1));
+
+  const auto idx = slurp(out / "x.tidx");
+  const auto dat = slurp(out / "x.tdat");
+  si8 expect_sample = 0, off = 1024;
+  for (si8 i = 0; i < st.blocks; ++i) {
+    std::span<const ui1> e(idx.data() + 1024 + i * 56, 56);
+    const si8 fo = byteio::read<si8>(e, 0);
+    CHECK(fo == off);
+    const ui4 nb = byteio::read<ui4>(e, 28), ns = byteio::read<ui4>(e, 24);
+    CHECK(byteio::read<si8>(e, 16) == expect_sample);  // dense after the drop
+    const bool discont = (e[44] & 1) != 0, hdr_discont = (dat[fo + 4] & 1) != 0;
+    CHECK(discont == hdr_discont);
+    if (i == 1) CHECK(discont);  // the block after the dropped one
+    std::span<const ui1> blk(dat.data() + fo, nb);
+    CHECK(crc::calculate(blk.subspan(4)) == byteio::read<ui4>(blk, 0));
+    expect_sample += ns;
+    off += nb;
+  }
+  CHECK(st.discontinuities == 2);
+  CHECK(st.max_contiguous_blocks == st.blocks - 1);
+  CHECK(crc::calculate(std::span<const ui1>(idx).subspan(1024)) == byteio::read<ui4>(idx, 4));
+  CHECK(crc::calculate(std::span<const ui1>(dat).subspan(1024)) == byteio::read<ui4>(dat, 4));
 }

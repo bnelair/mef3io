@@ -12,7 +12,9 @@
   (recording-time offset 0, GMT offset 0, no daylight-saving dates). Subject
   names, ID and location, the session name, descriptions, annotation text
   (drop, keep with names removed, or your own function), file identifiers and
-  other programs' private header areas are removed or replaced. Channels can
+  other programs' private header areas are removed or replaced (keeping
+  annotation text removes only the names mef3io knows, not dates or other
+  names written in it). Channels can
   be left out (`exclude_channels=` or `channels=`), and nothing of a left-out
   channel stays in the copy. Samples are copied without decoding, so they are
   bit-identical. The copy is checked by `mef3io.anonymize.verify` before it is

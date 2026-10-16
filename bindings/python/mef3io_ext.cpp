@@ -639,13 +639,25 @@ NB_MODULE(_mef3io, m) {
               info["channel"] = f.channel;
               info["segment"] = f.segment;
               info["time"] = f.time;
-              nb::object r = text_fn(value, info);
+              // Record text is bytes from a file and need not be valid UTF-8:
+              // decode with surrogateescape so every byte survives, and
+              // encode the result back the same way.
+              PyObject* raw = PyUnicode_DecodeUTF8(value.data(),
+                                                   static_cast<Py_ssize_t>(value.size()),
+                                                   "surrogateescape");
+              if (!raw) throw nb::python_error();
+              nb::object arg = nb::steal(raw);
+              nb::object r = text_fn(arg, info);
               if (r.is_none()) return std::string();
               if (!nb::isinstance<nb::str>(r)) {
                 PyErr_SetString(PyExc_TypeError, "the text callable must return a str or None");
                 throw nb::python_error();
               }
-              return nb::cast<std::string>(r);
+              PyObject* enc = PyUnicode_AsEncodedString(r.ptr(), "utf-8", "surrogateescape");
+              if (!enc) throw nb::python_error();
+              nb::object b = nb::steal(enc);
+              return std::string(PyBytes_AS_STRING(enc),
+                                 static_cast<std::size_t>(PyBytes_GET_SIZE(enc)));
             } catch (nb::python_error& e) {
               hooks.error.emplace(std::move(e));
               throw mef3io::Cancelled("text callback raised");

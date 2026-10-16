@@ -237,6 +237,13 @@ left behind.
 If you anonymize several recordings of one patient with the **same** shift,
 they stay in the right order and the right distance apart.
 
+### What it costs
+
+The copy itself reads the source once and writes the copy once; data blocks
+are streamed, never held whole. The check that follows reads the source's
+data and the copy again, so in total the source is read twice and the copy
+once.
+
 ### Quick start
 
 ```python
@@ -293,10 +300,11 @@ Two rules protect the copy:
 | Subject | `subject_name_1`, `subject_name_2`, `subject_id` and `recording_location` cleared (`clear=`). |
 | Session name | Replaced by the copy's name in every file header, in the names of the session-level annotation files, and in `session_description`. `anonymized_name` is set to `pseudonym` (default: the copy's name). |
 | Descriptions | `session_description`, `channel_description` and `reference_description` cleared. With `clear=("subject", "location")` they are kept, with the old session name replaced and the removed names taken out. |
-| Annotation text | `text="drop"` (default) clears every free-text field; the annotations, their types and their (moved) times stay. `text="keep"` keeps the text with the removed names taken out. A function `text(value, info)` decides itself; the names are still taken out afterwards. An annotation of a type or version mef3io does not know keeps its type and time, but its contents are not copied, since they may hold text or dates nothing can find. |
+| Annotation text | `text="drop"` (default) clears every free-text field; the annotations, their types and their (moved) times stay. `text="keep"` keeps the text and takes out only the names mef3io knows: the old session name, the subject's names, ID and location, and excluded channels. **It does not find dates, ages, other people's names or anything else written in free text**; read the text yourself, or use `"drop"`. A function `text(value, info)` decides itself; the known names are still taken out afterwards. Text that is not valid UTF-8 reaches it with each bad byte as a surrogate (`errors="surrogateescape"`) and is written back byte for byte. An annotation of a type or version mef3io does not know keeps its type and time, but its contents are not copied, since they may hold text or dates nothing can find. |
+| Seizure channel lists | An entry naming a kept channel exactly stays. An entry naming an excluded channel (compared without case or surrounding spaces) is removed. Any other entry name is free text: cleared with `text="drop"`, names taken out otherwise. |
 | Identifiers | Every file identifier (level, file and provenance UUID) is new, so nothing links the copy back to the original. |
-| Other programs' data | The private areas other programs may fill in the headers (protected and discretionary regions) are cleared. |
-| Files | Every file is written new, so file dates are those of the copy. Files that are not part of the MEF layout are not copied (listed in `report.not_copied`). |
+| Other programs' data | The private areas other programs may fill in are cleared: the protected and discretionary regions of every file header, of metadata sections 1–3, of every block-index entry and of every data block's header. Every text field is rewritten whole, so nothing hidden after a field's end survives. |
+| Files | Every file is written new, so file dates are those of the copy. Segment folders and files are named as mef3io names them (`<channel>-000000.segd`), whatever the source called them. Files that are not part of the MEF layout are not copied (listed in `report.not_copied`). |
 | Samples | Not decoded, not re-encoded: byte-identical. |
 | Provenance | Every file is stamped with operation 6, `anonymize`. |
 
@@ -368,11 +376,26 @@ It confirms that:
   stored form, and the time-zone fields hold their set values;
 - the annotations match in number, order and type;
 - **no date leaked.** Every time field, one field at a time, is compared with
-  the source's recording dates (widened by a day, plain or negated); every
-  text field is searched for the names that should be gone; no source
-  identifier is reused. Sizes, counts and sample values are never read as
-  times, and the compressed data, whose bytes look random, is compared
-  rather than searched, so the check does not raise false alarms.
+  the source's recording dates (widened by a day, plain or negated), and so
+  is the ID number of `Epoc` and `Curs` annotations, which a recorder may
+  fill with a time; every text field, every name in a seizure's channel list
+  and every folder and file name is searched for the names that should be
+  gone, as plain text, ignoring case and word boundaries; every byte after a
+  text field's end must be empty; no source identifier is reused. Sizes,
+  counts and sample values are never read as times, and the compressed data,
+  whose bytes look random, is compared rather than searched, so the check
+  does not raise false alarms from the signal.
+
+The name search is deliberately stricter than the replacement: it never
+uses the same matcher, so anything the replacement misses stops the copy
+instead of reaching it. The price is that a name contained in an allowed one
+(a subject ID "12" inside a channel called "ch12") is refused too; then use a
+different copy name, or leave the field out with `clear=`.
+
+For a source that used meflib's recording-time offset, times are also
+compared with the source's *stored* values (the time of day). A negative
+shift that lands the copy within a few days of 1 January 1970 can therefore
+be refused although nothing leaked; choose a later date.
 
 The report never repeats a name it found, so it can be logged.
 

@@ -150,3 +150,20 @@ Every finding in the two review rounds was reproduced before being acted on, and
 several confident-sounding ones dissolved under it. Agent output is a lead, not
 a verdict. When a fix lands, reproduce the original failure against the fix —
 the sentinel-saturation fix in §3 looked right and was wrong.
+
+## 10. A de-identified copy is checked by something that does not trust the copier
+
+`anonymize_session` (#70) publishes nothing `verify` has not passed, and
+`verify` must not share logic with the rewrite it checks. The first review
+round found six leaks that survived with `verify().ok == True` — text after a
+field's NUL, foreign per-block regions, segment folder names, names glued to
+other words — each because the check asked the same question the rewrite had
+answered. Rules:
+
+- The name scan is a dumb case-insensitive substring search; refusing a copy
+  over a false alarm is acceptable, publishing a leak is not.
+- Rewrite every text field whole, and zero every region another writer may
+  fill; never "leave it if unchanged".
+- Every new field the copy carries needs a planted-leak test in
+  `tests/test_p29_anonymize.py` that shows `verify` catching it in the copy
+  AND the rewrite removing it from a source.

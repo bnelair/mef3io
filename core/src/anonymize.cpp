@@ -73,7 +73,7 @@ constexpr ui1 ENC_MASK =
     fmt::RedBlockHeader::LEVEL_1_ENCRYPTION_MASK | fmt::RedBlockHeader::LEVEL_2_ENCRYPTION_MASK;
 
 // Universal-header field offsets (meflib.h:330-362).
-constexpr std::size_t UH_START = 16, UH_END = 24, UH_SESSION_NAME = 308, UH_ANON_NAME = 564,
+constexpr std::size_t UH_START = 16, UH_END = 24, UH_CHANNEL_NAME = 52, UH_SESSION_NAME = 308, UH_ANON_NAME = 564,
                       UH_NAME_BYTES = 256, UH_LEVEL_UUID = 820, UH_FILE_UUID = 836,
                       UH_PROV_UUID = 852, UH_L1_FIELD = 868, UH_L2_FIELD = 884,
                       UH_PROTECTED = 900, UH_PROTECTED_BYTES = 60;
@@ -159,51 +159,64 @@ struct Shifter {
 };
 
 // ---------------------------------------------------------------------------
-// Text: word-bounded, ASCII-case-insensitive search and replace of the names
-// a copy must not carry.
+// Text. Two matchers, deliberately unrelated:
+//   * Redactor (the REWRITE): replaces the names a copy must not carry.
+//     Identity values (session names, subject fields, location, anonymized
+//     names) are replaced wherever they occur as a substring; excluded
+//     channel names only at word boundaries (letters and digits continue a
+//     word, '_' does not), so excluding "LAH1" leaves a kept "LAH12" intact.
+//   * Scanner (the CHECK, in verify): a plain case-insensitive substring
+//     search, after removing only the strings the copy is allowed to carry.
+//     It never uses the Redactor, so a gap in the rewrite fails closed.
 // ---------------------------------------------------------------------------
 
-bool is_word(ui1 c) { return c >= 0x80 || std::isalnum(c) || c == '_'; }
+bool continues_word(ui1 c) { return c >= 0x80 || std::isalnum(c); }
 char fold(char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); }
+std::string folded(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(), fold);
+  return s;
+}
+std::string trimmed(const std::string& s) {
+  std::size_t a = 0, b = s.size();
+  while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+  while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+  return s.substr(a, b - a);
+}
+/// How a channel name is compared for exclusion: trimmed, case-folded.
+std::string channel_key(const std::string& s) { return folded(trimmed(s)); }
 
 struct Redactor {
   struct Rule {
-    std::string needle;       // lower-cased
+    std::string needle;       // case-folded
     std::string replacement;
-    std::string label;        // what it is, for reports (never the value)
+    bool word = false;        // match only at word boundaries
   };
   std::vector<Rule> rules;
 
-  void add(const std::string& value, const std::string& replacement, const std::string& label) {
+  void add(const std::string& value, const std::string& replacement, bool word) {
     // One- and zero-byte values would match nearly any text.
     if (value.size() < 2) return;
-    std::string n(value);
-    std::transform(n.begin(), n.end(), n.begin(), fold);
-    if (n == [&] {
-          std::string r(replacement);
-          std::transform(r.begin(), r.end(), r.begin(), fold);
-          return r;
-        }())
-      return;
+    const std::string n = folded(value);
+    if (n == folded(replacement)) return;
     for (const auto& r : rules)
       if (r.needle == n) return;
-    rules.push_back({n, replacement, label});
+    rules.push_back({n, replacement, word});
     // Longest first, so "Jane Doe" is replaced before "Jane".
     std::stable_sort(rules.begin(), rules.end(),
                      [](const Rule& a, const Rule& b) { return a.needle.size() > b.needle.size(); });
   }
 
-  /// Position of the first word-bounded match of `rule` in `text` at or after
-  /// `from`, or npos.
-  static std::size_t find(const std::string& text, const std::string& needle, std::size_t from) {
+  static std::size_t find(const std::string& text, const Rule& r, std::size_t from) {
+    const std::string& needle = r.needle;
     if (needle.empty() || text.size() < needle.size()) return std::string::npos;
     for (std::size_t i = from; i + needle.size() <= text.size(); ++i) {
       bool eq = true;
       for (std::size_t k = 0; k < needle.size() && eq; ++k) eq = fold(text[i + k]) == needle[k];
       if (!eq) continue;
-      const bool left = i == 0 || !is_word(static_cast<ui1>(text[i - 1]));
-      const bool right =
-          i + needle.size() == text.size() || !is_word(static_cast<ui1>(text[i + needle.size()]));
+      if (!r.word) return i;
+      const bool left = i == 0 || !continues_word(static_cast<ui1>(text[i - 1]));
+      const bool right = i + needle.size() == text.size() ||
+                         !continues_word(static_cast<ui1>(text[i + needle.size()]));
       if (left && right) return i;
     }
     return std::string::npos;
@@ -212,18 +225,42 @@ struct Redactor {
   std::string apply(std::string text) const {
     for (const auto& r : rules) {
       std::size_t pos = 0;
-      while ((pos = find(text, r.needle, pos)) != std::string::npos) {
+      while ((pos = find(text, r, pos)) != std::string::npos) {
         text.replace(pos, r.needle.size(), r.replacement);
         pos += r.replacement.size();
       }
     }
     return text;
   }
+};
 
-  /// The label of the first rule that matches, or "".
-  std::string match(const std::string& text) const {
-    for (const auto& r : rules)
-      if (find(text, r.needle, 0) != std::string::npos) return r.label;
+/// verify's text check. Never shares code with the Redactor.
+struct Scanner {
+  struct Needle {
+    std::string value;  // case-folded
+    std::string label;  // what it is (never the value)
+  };
+  std::vector<Needle> identity;          // must not occur anywhere
+  std::vector<Needle> excluded;          // excluded channel names
+  std::vector<std::string> allowed;      // the copy's own names (folded)
+  std::vector<std::string> kept_channels;  // folded
+
+  static void erase_all(std::string& hay, const std::string& s) {
+    if (s.empty()) return;
+    std::size_t p = 0;
+    while ((p = hay.find(s, p)) != std::string::npos) hay.replace(p, s.size(), "\x01");
+  }
+
+  /// The label of the first forbidden string in `text`, or "".
+  std::string hit(const std::string& text) const {
+    std::string h = folded(text);
+    for (const auto& a : allowed) erase_all(h, a);
+    for (const auto& n : identity)
+      if (h.find(n.value) != std::string::npos) return n.label;
+    // A kept channel's name may contain an excluded one ("LAH12" / "LAH1").
+    for (const auto& k : kept_channels) erase_all(h, k);
+    for (const auto& n : excluded)
+      if (h.find(n.value) != std::string::npos) return n.label;
     return {};
   }
 };
@@ -352,6 +389,24 @@ struct BodyLayout {
 constexpr std::size_t SEIZ_FIXED = 1312, SEIZ_CHANNEL = 272, SEIZ_CHANNEL_NAME = 256,
                       SEIZ_NCH = 24, SEIZ_CH_ONSET = 256, SEIZ_CH_OFFSET = 264;
 
+/// Bytes of an LNTP body that carry data: the length field and the template.
+/// mefrec.h says si4 elements; pymef writes si8 (pymef3_file.c:4159). Same
+/// detection as records.cpp: si8 only when every high word sign-extends its
+/// low word. Bounded by the body.
+std::size_t lntp_bytes(const std::vector<ui1>& b) {
+  if (b.size() < 8) return b.size();
+  const si8 declared = read<si8>(b, 0);
+  const std::size_t room = b.size() - 8;
+  const std::size_t n = declared > 0 ? static_cast<std::size_t>(declared) : 0;
+  bool wide = n > 0 && n <= room / 8;
+  for (std::size_t i = 0; wide && i < n; ++i) {
+    const si4 lo = read<si4>(b, 8 + i * 8), hi = read<si4>(b, 8 + i * 8 + 4);
+    wide = hi == (lo < 0 ? -1 : 0);
+  }
+  const std::size_t width = wide ? 8 : 4;
+  return 8 + std::min(n, room / width) * width;
+}
+
 const BodyLayout* layout_of(const RawRecord& r) {
   static const std::map<std::string, BodyLayout> table = {
       {"Note", {0, {}, {}, 0, false}},
@@ -437,19 +492,25 @@ class Anonymizer {
  public:
   Anonymizer(const SessionSource& src, const AnonymizeOptions& o, const Shifter& sh,
              const Redactor& red, std::string new_name, std::string pseudonym,
-             std::set<std::string> excluded, OutputKeys out, const Control& ctl,
+             std::set<std::string> excluded, std::set<std::string> kept, OutputKeys out,
+             const Control& ctl,
              std::function<void(std::uint64_t)> progress, AnonymizeReport& report)
       : src_(src), o_(o), sh_(sh), red_(red), name_(std::move(new_name)),
-        pseudonym_(std::move(pseudonym)), excluded_(std::move(excluded)), out_(std::move(out)),
-        ctl_(ctl), progress_(std::move(progress)), rep_(report) {}
+        pseudonym_(std::move(pseudonym)), kept_(std::move(kept)), out_(std::move(out)),
+        ctl_(ctl), progress_(std::move(progress)), rep_(report) {
+    for (const auto& c : excluded) excluded_.insert(channel_key(c));
+  }
 
   std::vector<std::string> written;  // every output file, for the flush
 
   /// Patch a universal header in place (any file type). Counts, maximum
   /// sizes and the CRCs are the caller's.
-  void patch_uh(std::span<ui1> uh, const std::string& what) {
+  void patch_uh(std::span<ui1> uh, const std::string& what, const std::string& channel) {
     write<si8>(uh, UH_START, sh_(read<si8>(uh, UH_START), what + " start time"));
     write<si8>(uh, UH_END, sh_(read<si8>(uh, UH_END), what + " end time"));
+    // Every text field is rewritten whole: write_string zero-fills the field,
+    // so nothing hidden after a terminator survives.
+    write_string(uh, UH_CHANNEL_NAME, UH_NAME_BYTES, channel);
     write_string(uh, UH_SESSION_NAME, UH_NAME_BYTES, name_);
     write_string(uh, UH_ANON_NAME, UH_NAME_BYTES, pseudonym_);
     const Uuid old_level = uuid_at(uh, UH_LEVEL_UUID);
@@ -502,6 +563,7 @@ class Anonymizer {
   }
 
   void copy_tmet(const std::string& rel, const fs::path& out, const std::string& channel) {
+    // (out is named canonically by the caller)
     ctl_.check();
     TmetImage t = open_tmet(src_, rel, o_.password);
     if (t.rto != sh_.rto)
@@ -513,22 +575,27 @@ class Anonymizer {
     auto s2 = b.subspan(S2, S2_BYTES);
     auto s3 = b.subspan(S3, S3_BYTES);
     // Section 2: descriptions, and the regions meflib leaves to writers.
+    // Every text field is REWRITTEN, never left as is: write_string
+    // zero-fills the whole field, so bytes hidden after a terminator go.
     for (std::size_t off : {S2_CHANNEL_DESC, S2_SESSION_DESC, S2_REFERENCE_DESC}) {
       const std::string old = read_string(s2, off, S2_DESC_BYTES);
-      const std::string now = o_.clear_descriptions ? std::string() : red_.apply(old);
-      if (now != old) write_string(s2, off, S2_DESC_BYTES, now);
+      write_string(s2, off, S2_DESC_BYTES,
+                   o_.clear_descriptions ? std::string() : red_.apply(old));
     }
+    write_string(s2, S2_UNITS, S2_UNITS_BYTES,
+                 red_.apply(read_string(s2, S2_UNITS, S2_UNITS_BYTES)));
     std::fill(s2.begin() + S2_REGIONS, s2.end(), ui1{0});
     // Section 3: time-zone fields SET, identity cleared.
     write<si8>(s3, S3_RTO, 0);
     write<si8>(s3, S3_DST_START, fmt::UUTC_NO_ENTRY);
     write<si8>(s3, S3_DST_END, fmt::UUTC_NO_ENTRY);
     write<si4>(s3, S3_GMT, 0);
-    if (o_.clear_subject)
-      for (std::size_t off : {S3_NAME1, S3_NAME2, S3_ID})
-        std::fill_n(s3.begin() + static_cast<std::ptrdiff_t>(off), S3_SUBJECT_BYTES, ui1{0});
-    if (o_.clear_location)
-      std::fill_n(s3.begin() + S3_LOCATION, S3_LOCATION_BYTES, ui1{0});
+    for (std::size_t off : {S3_NAME1, S3_NAME2, S3_ID})
+      write_string(s3, off, S3_SUBJECT_BYTES,
+                   o_.clear_subject ? std::string() : read_string(s3, off, S3_SUBJECT_BYTES));
+    write_string(s3, S3_LOCATION, S3_LOCATION_BYTES,
+                 o_.clear_location ? std::string()
+                                   : read_string(s3, S3_LOCATION, S3_LOCATION_BYTES));
     std::fill(s3.begin() + S3_REGIONS, s3.end(), ui1{0});
     // Section 1: encryption levels of the COPY; regions cleared.
     auto s1 = b.subspan(S1, S1_BYTES);
@@ -541,7 +608,7 @@ class Anonymizer {
       auto e3 = crypto::aes128_ecb_encrypt(s3, *out_.keys.level2_key);
       std::copy(e3.begin(), e3.end(), s3.begin());
     }
-    patch_uh(b.first(UH), channel + " metadata");
+    patch_uh(b.first(UH), channel + " metadata", channel);
     // Bounded CRCs: the record is exactly TMET bytes.
     write<ui4>(b, 4, crc::calculate(std::span<const ui1>(b).subspan(UH, TMET - UH)));
     write<ui4>(b, 0, crc::calculate(std::span<const ui1>(b).subspan(4, UH - 4)));
@@ -551,8 +618,7 @@ class Anonymizer {
   }
 
   void copy_segment_data(const detail::LayoutSegment& seg, const fs::path& dir,
-                         const std::string& channel) {
-    const std::string stem = fs::path(seg.tmet).stem().string();
+                         const std::string& channel, const std::string& stem) {
     detail::SegmentCopySpec spec;
     spec.source = &src_;
     spec.tidx_rel = seg.tidx;
@@ -566,6 +632,13 @@ class Anonymizer {
       const std::string what = "block " + std::to_string(cb.index) + " of " + where;
       write<si8>(cb.block, 40, sh_(read<si8>(cb.block, 40), what + " start time"));
       write<si8>(cb.entry, 8, sh_(read<si8>(cb.entry, 8), "index entry " + what));
+      // Regions meflib leaves to writers, zero in everything it writes:
+      // index entry protected (40, 4 B), RED-protected (45, 3 B) and
+      // discretionary (48, 8 B); block header protected (5, 3 B) and
+      // discretionary (8, 8 B). Inside the block CRC, which is re-sealed.
+      std::fill_n(cb.entry.begin() + 40, 4, ui1{0});
+      std::fill_n(cb.entry.begin() + 45, 11, ui1{0});
+      std::fill_n(cb.block.begin() + 5, 11, ui1{0});
       const ui1 flags = read<ui1>(cb.block, 4);
       const ui1 level_mask = flags & ENC_MASK;
       if (level_mask) {
@@ -595,7 +668,7 @@ class Anonymizer {
       return true;
     };
     spec.on_header = [&](std::span<ui1> uh, bool is_tdat) {
-      patch_uh(uh, channel + (is_tdat ? " data" : " index"));
+      patch_uh(uh, channel + (is_tdat ? " data" : " index"), channel);
     };
     const auto st = detail::copy_segment(spec);
     written.push_back(spec.tidx_out);
@@ -646,7 +719,18 @@ class Anonymizer {
       e[6] = r.vmin;
       e[7] = static_cast<ui1>(enc);
       write<si8>(e, 8, offset);
-      const si8 idx_time = f.has_ridx ? read<si8>(f.ridx[i], 16) : r.time;
+      // The index entry is matched to its record by file offset, never by
+      // position; an index that names no such offset is refused.
+      si8 idx_time = r.time;
+      if (f.has_ridx) {
+        const auto it = std::find_if(f.ridx.begin(), f.ridx.end(), [&](const auto& x) {
+          return read<si8>(x, 8) == f.record_offsets[i];
+        });
+        if (it == f.ridx.end())
+          throw FormatError("record index of " + where + " has no entry for record " +
+                            std::to_string(i) + "; which time is right is unknown");
+        idx_time = read<si8>(*it, 16);
+      }
       write<si8>(e, 16, sh_(idx_time, "record index entry " + std::to_string(i) + " of " + where));
       ridx.insert(ridx.end(), e.begin(), e.end());
       ++rep_.records;
@@ -654,7 +738,7 @@ class Anonymizer {
     const si8 n = static_cast<si8>(f.records.size());
     auto seal = [&](std::vector<ui1>& file, si8 max, const std::string& what) {
       std::span<ui1> uh(file.data(), UH);
-      patch_uh(uh, what);
+      patch_uh(uh, what, channel);
       write<si8>(uh, 32, n);
       write<si8>(uh, 40, max);
       write<ui4>(file, 4, crc::calculate(std::span<const ui1>(file).subspan(UH)));
@@ -677,7 +761,11 @@ class Anonymizer {
       if (!r.body.empty()) ++rep_.record_bodies_cleared;
       return {};
     }
-    if (lay->keep_whole) return r.body;
+    if (lay->keep_whole) {  // LNTP: the template, re-padded (nothing after it is data)
+      std::vector<ui1> b(r.body.begin(),
+                         r.body.begin() + static_cast<std::ptrdiff_t>(lntp_bytes(r.body)));
+      return b;
+    }
     std::vector<ui1> b(r.body);
     if (lay->variable_text_from != SIZE_MAX) {
       const std::size_t from = lay->variable_text_from;
@@ -692,9 +780,8 @@ class Anonymizer {
       write<si8>(b, off, sh_(read<si8>(b, off), what + " body time", true));
     for (const auto& slot : lay->text) {
       tf.field = slot.name;
-      const std::string old = read_string(b, slot.offset, slot.bytes);
-      const std::string now = text_field(old, tf);
-      if (now != old) write_string(b, slot.offset, slot.bytes, now);
+      write_string(b, slot.offset, slot.bytes,
+                   text_field(read_string(b, slot.offset, slot.bytes), tf));
     }
     if (r.type != "Seiz") {
       b.resize(lay->fixed);  // what follows the fixed part is padding
@@ -710,10 +797,17 @@ class Anonymizer {
       std::vector<ui1> e(b.begin() + static_cast<std::ptrdiff_t>(SEIZ_FIXED + c * SEIZ_CHANNEL),
                          b.begin() + static_cast<std::ptrdiff_t>(SEIZ_FIXED + (c + 1) * SEIZ_CHANNEL));
       const std::string name = read_string(e, 0, SEIZ_CHANNEL_NAME);
-      if (excluded_.count(name)) {
+      if (excluded_.count(channel_key(name))) {  // trimmed, case-insensitive
         ++rep_.seizure_channel_entries_dropped;
         continue;
       }
+      // A kept channel's exact name stays. Anything else is free text: with
+      // text="drop" it is cleared, otherwise redacted. Rewritten whole.
+      std::string now = name;
+      if (!kept_.count(name))
+        now = o_.text == RecordTextPolicy::Drop ? std::string() : red_.apply(name);
+      if (now != name) ++rep_.record_text_fields_changed;
+      write_string(e, 0, SEIZ_CHANNEL_NAME, now);
       for (std::size_t off : {SEIZ_CH_ONSET, SEIZ_CH_OFFSET})
         write<si8>(e, off, sh_(read<si8>(e, off), what + " channel " + std::to_string(c) + " time",
                                true));
@@ -729,7 +823,8 @@ class Anonymizer {
   const Shifter& sh_;
   const Redactor& red_;
   std::string name_, pseudonym_;
-  std::set<std::string> excluded_;
+  std::set<std::string> excluded_;  // channel_key()s
+  std::set<std::string> kept_;
   OutputKeys out_;
   const Control& ctl_;
   std::function<void(std::uint64_t)> progress_;
@@ -737,6 +832,13 @@ class Anonymizer {
   std::map<Uuid, Uuid> level_map_;
   crypto::AccessKeys seg_keys_;
 };
+
+/// "<channel>-NNNNNN": how mef3io's writer names a segment (writer.cpp).
+std::string canonical_segment_stem(const std::string& channel, int number) {
+  char buf[16];
+  std::snprintf(buf, sizeof buf, "%06d", number);
+  return channel + "-" + buf;
+}
 
 std::string leaf(const std::string& rel) {
   const auto p = rel.rfind('/');
@@ -809,15 +911,42 @@ Redactor build_redactor(const SourcePlan& p, const std::string& new_name, bool c
                         const std::string& pseudonym) {
   Redactor r;
   for (const auto& n : p.session_names)
-    if (n != new_name) r.add(n, new_name, "the source's session name");
+    if (n != new_name) r.add(n, new_name, false);
   if (clear_subject)
-    for (const auto& v : p.subject_values) r.add(v, "", "a subject name or ID");
+    for (const auto& v : p.subject_values) r.add(v, "", false);
   if (clear_location)
-    for (const auto& v : p.location_values) r.add(v, "", "the recording location");
+    for (const auto& v : p.location_values) r.add(v, "", false);
   for (const auto& v : p.anonymized_values)
-    if (v != pseudonym && v != new_name) r.add(v, "", "the source's anonymized name");
-  for (const auto& c : excluded) r.add(c, "", "an excluded channel's name");
+    if (v != pseudonym && v != new_name) r.add(v, "", false);
+  for (const auto& c : excluded) r.add(trimmed(c), "", true);
   return r;
+}
+
+Scanner build_scanner(const SourcePlan& p, const std::string& new_name, bool clear_subject,
+                      bool clear_location, const std::set<std::string>& excluded,
+                      const std::set<std::string>& kept, const std::string& pseudonym) {
+  Scanner s;
+  auto add = [](std::vector<Scanner::Needle>& v, const std::string& value, const char* label) {
+    if (value.size() < 2) return;  // as the rewrite: too short to search for
+    v.push_back({folded(value), label});
+  };
+  for (const auto& n : p.session_names)
+    if (n != new_name) add(s.identity, n, "the source's session name");
+  if (clear_subject)
+    for (const auto& v : p.subject_values) add(s.identity, v, "a subject name or ID");
+  if (clear_location)
+    for (const auto& v : p.location_values) add(s.identity, v, "the recording location");
+  for (const auto& v : p.anonymized_values)
+    if (v != pseudonym && v != new_name) add(s.identity, v, "the source's anonymized name");
+  for (const auto& c : excluded) add(s.excluded, trimmed(c), "an excluded channel's name");
+  s.allowed = {folded(new_name)};
+  if (!pseudonym.empty()) s.allowed.push_back(folded(pseudonym));
+  for (const auto& k : kept) s.kept_channels.push_back(folded(k));
+  // Longest first, so a kept name containing another is removed whole.
+  auto longest = [](const std::string& a, const std::string& b) { return a.size() > b.size(); };
+  std::sort(s.allowed.begin(), s.allowed.end(), longest);
+  std::sort(s.kept_channels.begin(), s.kept_channels.end(), longest);
+  return s;
 }
 
 // ---------------------------------------------------------------------------
@@ -885,23 +1014,41 @@ class Verifier {
                   std::to_string(sh_.shift) + " us in the same sign convention)");
   }
 
-  void text(const std::string& value, const std::string& loc, const std::string& field) {
+  /// A fixed-width text field of the copy, `len` bytes at `off`: no
+  /// forbidden string in it, and nothing hidden after its terminator (every
+  /// byte zero, or the 0x7e record padding when `pad_ok`). Returns the text.
+  std::string text(std::span<const ui1> b, std::size_t off, std::size_t len,
+                   const std::string& loc, const std::string& field, bool pad_ok = false) {
     ++rep_.text_fields_checked;
-    const std::string hit = red_.match(value);
+    const std::string value = read_string(b, off, len);
+    const std::string hit = scan_.hit(value);
     if (!hit.empty()) leak(loc, field, "contains " + hit);
+    for (std::size_t i = off + value.size(); i < off + len; ++i)
+      if (b[i] != 0 && !(pad_ok && b[i] == PAD_BYTE)) {
+        leak(loc, field, "holds bytes after its terminator (hidden text)");
+        break;
+      }
+    return value;
   }
 
-  void set_redactor(Redactor r) { red_ = std::move(r); }
+  /// A name the copy carries outside any file (a path component).
+  void name(const std::string& value, const std::string& loc) {
+    ++rep_.text_fields_checked;
+    const std::string hit = scan_.hit(value);
+    if (!hit.empty()) leak(loc, "path", "contains " + hit);
+  }
+
+  void set_scanner(Scanner s) { scan_ = std::move(s); }
 
   void check_uh(std::span<const ui1> s, std::span<const ui1> d, const std::string& loc) {
     time_field(read<si8>(s, UH_START), read<si8>(d, UH_START), loc, "universal header start_time");
     time_field(read<si8>(s, UH_END), read<si8>(d, UH_END), loc, "universal header end_time");
-    const std::string sn = read_string(d, UH_SESSION_NAME, UH_NAME_BYTES);
+    const std::string sn = text(d, UH_SESSION_NAME, UH_NAME_BYTES, loc, "universal header session_name");
     if (sn != dst_.session_name())
       problem(loc, "universal header session_name",
               "does not match the copy's folder name");
-    text(sn, loc, "universal header session_name");
-    text(read_string(d, UH_ANON_NAME, UH_NAME_BYTES), loc, "universal header anonymized_name");
+    text(d, UH_ANON_NAME, UH_NAME_BYTES, loc, "universal header anonymized_name");
+    text(d, UH_CHANNEL_NAME, UH_NAME_BYTES, loc, "universal header channel_name");
     for (std::size_t off : {UH_LEVEL_UUID, UH_FILE_UUID, UH_PROV_UUID}) {
       const Uuid u = uuid_at(d, off);
       if (!all_zero(u) && src_uuids_.count(u))
@@ -961,25 +1108,23 @@ class Verifier {
     const std::pair<std::size_t, const char*> s3_text[] = {
         {S3_NAME1, "subject_name_1"}, {S3_NAME2, "subject_name_2"}, {S3_ID, "subject_id"}};
     for (const auto& [off, name] : s3_text) {
-      const std::string v = read_string(ds3, off, S3_SUBJECT_BYTES);
+      const std::string v = text(ds3, off, S3_SUBJECT_BYTES, drel, name);
       if (o_.clear_subject && !v.empty()) leak(drel, name, "is not cleared");
-      text(v, drel, name);
     }
     {
-      const std::string v = read_string(ds3, S3_LOCATION, S3_LOCATION_BYTES);
+      const std::string v =
+          text(ds3, S3_LOCATION, S3_LOCATION_BYTES, drel, "recording_location");
       if (o_.clear_location && !v.empty()) leak(drel, "recording_location", "is not cleared");
-      text(v, drel, "recording_location");
     }
     const std::pair<std::size_t, const char*> s2_text[] = {
         {S2_CHANNEL_DESC, "channel_description"},
         {S2_SESSION_DESC, "session_description"},
         {S2_REFERENCE_DESC, "reference_description"}};
     for (const auto& [off, name] : s2_text) {
-      const std::string v = read_string(ds2, off, S2_DESC_BYTES);
+      const std::string v = text(ds2, off, S2_DESC_BYTES, drel, name);
       if (o_.clear_descriptions && !v.empty()) leak(drel, name, "is not cleared");
-      text(v, drel, name);
     }
-    text(read_string(ds2, S2_UNITS, S2_UNITS_BYTES), drel, "units_description");
+    text(ds2, S2_UNITS, S2_UNITS_BYTES, drel, "units_description");
     if (!all_zero(ds2.subspan(S2_REGIONS)))
       problem(drel, "section 2 protected/discretionary regions", "are not cleared");
     if (!all_zero(ds3.subspan(S3_REGIONS)))
@@ -1051,10 +1196,13 @@ class Verifier {
           const auto sent = std::span<const ui1>(se).subspan(b * ENTRY, ENTRY);
           const auto dent = std::span<const ui1>(de).subspan(b * ENTRY, ENTRY);
           time_field(read<si8>(sent, 8), read<si8>(dent, 8), loc, "index entry start_time");
-          if (!std::equal(sent.begin() + 16, sent.begin() + 44, dent.begin() + 16) ||
-              !std::equal(sent.begin() + 45, sent.end(), dent.begin() + 45) ||
+          if (!std::equal(sent.begin() + 16, sent.begin() + 40, dent.begin() + 16) ||
               (sent[44] & ~ENC_MASK) != (dent[44] & ~ENC_MASK))
             problem(loc, "index entry", "differs from the source's beyond its time");
+          // meflib's per-entry protected (40, 4 B), RED-protected (45, 3 B)
+          // and discretionary (48, 8 B) regions: another writer's bytes.
+          if (!all_zero(dent.subspan(40, 4)) || !all_zero(dent.subspan(45, 11)))
+            leak(loc, "index entry regions", "are not cleared");
           const auto nb = read<ui4>(sent, 28);
           std::span<const ui1> sblk(sbuf.data() + (read<si8>(sent, 0) - slo), nb);
           std::span<const ui1> dblk(dbuf.data() + (read<si8>(dent, 0) - dlo), nb);
@@ -1074,8 +1222,11 @@ class Verifier {
     if (crc::calculate(d.subspan(4)) != read<ui4>(d, 0))
       problem(loc, "block CRC", "does not verify");
     const ui1 sf = s[4], df = d[4];
-    if ((sf & ~ENC_MASK) != (df & ~ENC_MASK) || !std::equal(s.begin() + 5, s.begin() + 40, d.begin() + 5))
+    if ((sf & ~ENC_MASK) != (df & ~ENC_MASK) ||
+        !std::equal(s.begin() + 16, s.begin() + 40, d.begin() + 16))
       problem(loc, "block header", "differs from the source's beyond its time and encryption");
+    // Protected (5, 3 B) and discretionary (8, 8 B) regions of the header.
+    if (!all_zero(d.subspan(5, 11))) leak(loc, "block header regions", "are not cleared");
     time_field(read<si8>(s, 40), read<si8>(d, 40), loc, "block header start_time");
     // The statistics table, compared in the clear.
     std::array<ui1, red::STATISTICS_BYTES> ss{}, ds{};
@@ -1141,14 +1292,24 @@ class Verifier {
       }
       time_field(a.time, b.time, loc, "record header time");
       if (d.has_ridx) {
-        const auto& e = d.ridx[i];
-        time_field(s.has_ridx ? read<si8>(s.ridx[i], 16) : a.time, read<si8>(e, 16), loc,
-                   "record index time");
-        if (read<si8>(e, 8) != d.record_offsets[i])
-          problem(loc, "record index offset", "does not point at the record");
+        // Index entries are matched to records by file offset, not position.
+        const auto* de = index_entry(d, i);
+        const auto* se = s.has_ridx ? index_entry(s, i) : nullptr;
+        if (!de) {
+          problem(loc, "record index", "has no entry pointing at the record");
+        } else {
+          time_field(se ? read<si8>(*se, 16) : a.time, read<si8>(*de, 16), loc,
+                     "record index time");
+        }
       }
       check_body(a, b, loc, excluded);
     }
+  }
+
+  static const std::array<ui1, RIDX>* index_entry(const RawRecordFile& f, std::size_t i) {
+    for (const auto& e : f.ridx)
+      if (read<si8>(e, 8) == f.record_offsets[i]) return &e;
+    return nullptr;
   }
 
   void check_body(const RawRecord& a, const RawRecord& b, const std::string& loc,
@@ -1165,25 +1326,36 @@ class Verifier {
       problem(loc, "record body", "is not a valid " + a.type + " body");
       return;
     }
-    if (la->keep_whole) {
-      if (!std::equal(a.body.begin(), a.body.end(), b.body.begin(), b.body.end()) &&
-          !(b.body.size() >= a.body.size() &&
-            std::equal(a.body.begin(), a.body.end(), b.body.begin())))
+    if (la->keep_whole) {  // LNTP: the template only, then padding
+      const std::size_t n = lntp_bytes(a.body);
+      if (b.body.size() < n || !std::equal(a.body.begin(), a.body.begin() + n, b.body.begin()))
         problem(loc, "record body", "differs from the source's");
+      else if (!std::all_of(b.body.begin() + n, b.body.end(),
+                            [](ui1 c) { return c == PAD_BYTE || c == 0; }))
+        leak(loc, "record body", "holds bytes after the template");
       return;
     }
     if (la->variable_text_from != SIZE_MAX) {
       const std::size_t from = la->variable_text_from;
       if (from && !std::equal(a.body.begin(), a.body.begin() + from, b.body.begin()))
         problem(loc, "record body", "duration differs from the source's");
-      text(read_string(b.body, from, b.body.size() - from), loc, "record text");
+      text(b.body, from, b.body.size() - from, loc, "record text", true);
       return;
     }
     for (std::size_t off : la->times)
       time_field(read<si8>(a.body, off), read<si8>(b.body, off), loc,
                  "record body time at " + std::to_string(off), true);
-    for (const auto& slot : la->text) text(read_string(b.body, slot.offset, slot.bytes), loc,
-                                           std::string("record ") + slot.name);
+    // Epoc / Curs id_number (+0) is an si8 a recorder may fill with a time.
+    // It is copied as is; a value in the recording range is reported.
+    if (a.type == "Epoc" || a.type == "Curs") {
+      ++rep_.times_checked;
+      if (in_window(read<si8>(b.body, 0)))
+        leak(loc, "record id_number", "holds a value inside the source's recording range");
+    }
+    for (const auto& slot : la->text)
+      text(b.body, slot.offset, slot.bytes, loc, std::string("record ") + slot.name);
+    if (b.body.size() > lb->fixed && a.type != "Seiz")
+      leak(loc, "record body", "holds bytes after its fixed part");
     if (a.type != "Seiz") return;
     // Channel entries: the source's minus the excluded, in order, shifted.
     std::vector<std::size_t> want;
@@ -1193,9 +1365,14 @@ class Verifier {
       return std::min(room, static_cast<std::size_t>(std::max<si4>(declared, 0)));
     };
     for (std::size_t c = 0; c < entries(a); ++c)
-      if (!excluded.count(read_string(a.body, SEIZ_FIXED + c * SEIZ_CHANNEL, SEIZ_CHANNEL_NAME)))
+      if (!excluded.count(
+              channel_key(read_string(a.body, SEIZ_FIXED + c * SEIZ_CHANNEL, SEIZ_CHANNEL_NAME))))
         want.push_back(c);
     const std::size_t have = entries(b);
+    if (!std::all_of(b.body.begin() + static_cast<std::ptrdiff_t>(
+                                          std::min(b.body.size(), SEIZ_FIXED + have * SEIZ_CHANNEL)),
+                     b.body.end(), [](ui1 c) { return c == PAD_BYTE || c == 0; }))
+      leak(loc, "record body", "holds bytes after its channel entries");
     if (have != want.size() || read<si4>(b.body, SEIZ_NCH) != static_cast<si4>(have)) {
       problem(loc, "Seiz channels", "the copy lists " + std::to_string(have) + ", expected " +
                                         std::to_string(want.size()));
@@ -1203,10 +1380,8 @@ class Verifier {
     }
     for (std::size_t k = 0; k < have; ++k) {
       const std::size_t so = SEIZ_FIXED + want[k] * SEIZ_CHANNEL, dof = SEIZ_FIXED + k * SEIZ_CHANNEL;
-      const std::string name = read_string(b.body, dof, SEIZ_CHANNEL_NAME);
-      if (excluded.count(name)) leak(loc, "Seiz channel name", "names an excluded channel");
-      if (name != read_string(a.body, so, SEIZ_CHANNEL_NAME))
-        problem(loc, "Seiz channel " + std::to_string(k), "name differs from the source's");
+      // The name may be kept, redacted or cleared; it must not leak.
+      text(b.body, dof, SEIZ_CHANNEL_NAME, loc, "Seiz channel name");
       time_field(read<si8>(a.body, so + SEIZ_CH_ONSET), read<si8>(b.body, dof + SEIZ_CH_ONSET), loc,
                  "Seiz channel onset", true);
       time_field(read<si8>(a.body, so + SEIZ_CH_OFFSET), read<si8>(b.body, dof + SEIZ_CH_OFFSET),
@@ -1223,7 +1398,7 @@ class Verifier {
   std::function<void(std::uint64_t)> progress_;
   VerifyReport& rep_;
   Shifter sh_;
-  Redactor red_;
+  Scanner scan_;
   si8 lo_ = 0, hi_ = 0;
   std::set<Uuid> src_uuids_;
   bool dst_encrypted_ = false;
@@ -1232,7 +1407,7 @@ class Verifier {
 
 std::string finding_key(const Finding& f) {
   return f.check_id + " | " + f.channel + " | segment " + std::to_string(f.segment_number) +
-         " | " + f.field;
+         " | " + f.field + " | " + f.message;
 }
 
 VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
@@ -1248,9 +1423,12 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
   std::set<std::string> dch;
   for (const auto& c : dlayout.channels) dch.insert(c.name);
   for (const auto& c : dlayout.record_only_channels) dch.insert(c);
-  std::set<std::string> excluded;
+  std::set<std::string> excluded, excluded_keys;
   for (const auto& c : plan.all_channels)
-    if (!dch.count(c)) excluded.insert(c);
+    if (!dch.count(c)) {
+      excluded.insert(c);
+      excluded_keys.insert(channel_key(c));
+    }
   rep.channels.assign(dch.begin(), dch.end());
   rep.excluded_channels.assign(excluded.begin(), excluded.end());
 
@@ -1278,8 +1456,23 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
       const auto uh = dst.read_range(dlayout.channels.front().segments.front().tmet, 0, UH);
       pseudonym = read_string(uh, UH_ANON_NAME, UH_NAME_BYTES);
     }
-    v.set_redactor(
-        build_redactor(plan, dname, o.clear_subject, o.clear_location, excluded, pseudonym));
+    v.set_scanner(build_scanner(plan, dname, o.clear_subject, o.clear_location, excluded, dch,
+                                pseudonym));
+  }
+  // Every name the copy carries outside its files: each path component.
+  {
+    std::function<void(const std::string&)> walk = [&](const std::string& rel) {
+      for (const auto& e : dst.list_dir(rel)) {
+        const std::string p = rel.empty() ? e.name : rel + "/" + e.name;
+        v.name(e.name, p);
+        if (e.is_dir) walk(p);
+      }
+    };
+    walk("");
+    for (const auto& dc : dlayout.channels)
+      for (const auto& ds : dc.segments)
+        if (leaf(ds.dir()) != canonical_segment_stem(dc.name, ds.number) + ".segd")
+          v.problem(ds.dir(), "segment folder", "is not named <channel>-NNNNNN.segd");
   }
 
   // Validator: nothing new on the copy.
@@ -1292,15 +1485,19 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
     const Report sr = validate_session(src_path, vo, inner);
     vo.password = o.output_password;
     const Report dr = validate_session(dst_path, vo, inner);
-    std::set<std::string> known;
-    for (const auto& f : sr.findings) known.insert(finding_key(f));
+    // Compared as a multiset: each source finding excuses one copy finding.
+    std::map<std::string, int> known;
+    for (const auto& f : sr.findings) ++known[finding_key(f)];
     for (const auto& f : dr.findings) {
       if (f.severity == Severity::Info) continue;
       const std::string key = finding_key(f);
-      if (known.count(key))
+      auto it = known.find(key);
+      if (it != known.end() && it->second > 0) {
+        --it->second;
         rep.inherited_findings.push_back(key);
-      else
+      } else {
         v.problem(f.path, f.check_id, "the validator reports on the copy: " + f.message);
+      }
     }
     for (const auto& s : dr.skipped)
       v.problem(s.path, "validator", "could not check a segment of the copy: " + s.reason);
@@ -1320,9 +1517,10 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
       v.problem(dc.name, "segments", "the copy holds " + std::to_string(dc.segments.size()) +
                                          ", the source " + std::to_string(sc.segments.size()));
     for (const auto& ds : dc.segments) {
+      // Matched by segment NUMBER: the copy names its folders canonically.
       const auto ss = std::find_if(sc.segments.begin(), sc.segments.end(),
                                    [&](const detail::LayoutSegment& x) {
-                                     return leaf(x.dir()) == leaf(ds.dir());
+                                     return x.number == ds.number;
                                    });
       if (ss == sc.segments.end()) {
         v.problem(ds.dir(), "segment", "has no counterpart in the source");
@@ -1332,7 +1530,7 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
       v.check_segment_data(*ss, ds);
       ++rep.segments;
       const bool s_rec = src.exists(ss->rdat()), d_rec = dst.exists(ds.rdat());
-      if (s_rec && d_rec) v.check_records(ss->rdat(), ds.rdat(), excluded);
+      if (s_rec && d_rec) v.check_records(ss->rdat(), ds.rdat(), excluded_keys);
       else if (s_rec != d_rec)
         v.problem(ds.dir(), "segment records", "present in only one of source and copy");
     }
@@ -1341,7 +1539,7 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
   for (const auto& c : dch) {
     const std::string rel = c + ".timd/" + c + ".rdat";
     const bool s_rec = src.exists(rel), d_rec = dst.exists(rel);
-    if (s_rec && d_rec) v.check_records(rel, rel, excluded);
+    if (s_rec && d_rec) v.check_records(rel, rel, excluded_keys);
     else if (s_rec != d_rec) v.problem(rel, "channel records", "present in only one of source and copy");
   }
   {
@@ -1351,7 +1549,7 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
     if (!s_rel.empty() && !d_rel.empty()) {
       if (d_rel != dname + ".rdat")
         v.problem(d_rel, "session records", "are not named after the copy's session");
-      v.check_records(s_rel, d_rel, excluded);
+      v.check_records(s_rel, d_rel, excluded_keys);
     } else if (s_rel.empty() != d_rel.empty() || !amb_d.empty()) {
       v.problem(dst_path, "session records", "present in only one of source and copy");
     }
@@ -1508,7 +1706,8 @@ AnonymizeReport anonymize_session(const std::string& src_path, const std::string
   try {
     progress.start();
     fs::create_directories(root);
-    Anonymizer an(src, o, sh, red, new_name, pseudonym, excluded, out, ctl, on_bytes, rep);
+    Anonymizer an(src, o, sh, red, new_name, pseudonym, excluded, kept, out, ctl, on_bytes,
+                  rep);
 
     std::set<std::string> handled;  // source-relative paths copied
     std::map<std::string, const detail::LayoutChannel*> data;
@@ -1524,16 +1723,23 @@ AnonymizeReport anonymize_session(const std::string& src_path, const std::string
       }
       const auto it = data.find(ch);
       if (it == data.end()) continue;  // record-only channel
+      std::set<int> numbers;
       for (const auto& seg : it->second->segments) {
-        const fs::path sdir = cdir / leaf(seg.dir());
+        // Named canonically, as the writer names them: a source folder name
+        // may carry anything, and the segment number is all a reader needs.
+        if (!numbers.insert(seg.number).second)
+          throw WriteConflictError("two segment folders of channel " + ch +
+                                   " have the same segment number " + std::to_string(seg.number));
+        const std::string stem = canonical_segment_stem(ch, seg.number);
+        const fs::path sdir = cdir / (stem + ".segd");
         fs::create_directory(sdir);
-        an.copy_tmet(seg.tmet, sdir / leaf(seg.tmet), ch);
-        an.copy_segment_data(seg, sdir, ch);
+        an.copy_tmet(seg.tmet, sdir / (stem + ".tmet"), ch);
+        an.copy_segment_data(seg, sdir, ch, stem);
         handled.insert(seg.tmet);
         handled.insert(seg.tidx);
         handled.insert(seg.tdat);
         if (src.exists(seg.rdat())) {
-          an.copy_records(seg.rdat(), sdir / leaf(seg.rdat()), RecordLevel::Segment, ch,
+          an.copy_records(seg.rdat(), sdir / (stem + ".rdat"), RecordLevel::Segment, ch,
                           seg.number);
           handled.insert(seg.rdat());
           handled.insert(ridx_of(seg.rdat()));

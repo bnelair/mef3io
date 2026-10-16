@@ -2,10 +2,12 @@
 //
 // anonymize_session() writes a NEW session: every time shifted by one
 // constant, the time-zone fields set to fixed values, identity removed. The
-// source is never modified. One streaming pass reads the source once and
-// writes the copy once; RED blocks are never decoded or re-encoded, only
-// their start time (and, for encrypted blocks, the first 16 statistics bytes)
-// is patched and the block CRC re-sealed, so samples are bit-identical.
+// source is never modified. The copy pass reads the source once and writes
+// the copy once (verify then re-reads the source data and the copy). RED
+// blocks are never decoded or re-encoded: only their start time (and, for
+// encrypted blocks, the first 16 statistics bytes) is patched, the regions
+// other writers may fill are zeroed, and the block CRC re-sealed, so samples
+// are bit-identical.
 //
 // verify_anonymized() compares a copy against its source: the validator,
 // block payloads and statistics, every time (exactly the shift), the records,

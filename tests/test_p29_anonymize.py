@@ -238,7 +238,10 @@ def test_record_times_move_at_every_level_and_in_every_body(rich):
             if x.get(key) is not None:
                 assert y[key] == x[key] + SHIFT, key
         if x["type"] == "Seiz":
-            assert [c["name"] for c in y["channels"]] == [c["name"] for c in x["channels"]]
+            # kept channels keep their names; any other entry name is free
+            # text and text="drop" clears it
+            assert [c["name"] for c in y["channels"]] == \
+                [c["name"] if c["name"] in ("ch1", "ch2", "ch3") else "" for c in x["channels"]]
             for c1, c2 in zip(x["channels"], y["channels"]):
                 for k in ("onset", "offset"):
                     assert c2[k] == (c1[k] if c1[k] == -1 else c1[k] + SHIFT)
@@ -743,6 +746,55 @@ def _plant_text(path, where, text):
     p.write_bytes(bytes(raw))
 
 
+def _edit_record(rdat, rtype, fn):
+    """Apply fn(raw, body_offset, body_bytes) to the first record of `rtype`
+    in a plain .rdat, then reseal the record and the file."""
+    rdat = Path(rdat)
+    raw = bytearray(rdat.read_bytes())
+    off = UH
+    while off < len(raw):
+        n = struct.unpack_from("<I", raw, off + 12)[0]
+        if bytes(raw[off + 4:off + 8]) == rtype:
+            fn(raw, off + RHDR, n)
+            struct.pack_into("<I", raw, off, m.crc32(bytes(raw[off + 4:off + RHDR + n])))
+            _reseal(raw)
+            rdat.write_bytes(bytes(raw))
+            return
+        off += RHDR + n
+    raise AssertionError(f"no {rtype!r} record")
+
+
+def _poke(rel_glob, off, data, body_end=None):
+    """Write `data` at `off` of the first file matching `rel_glob`, resealed."""
+    def plant(p):
+        f = p / _first(p, rel_glob)
+        raw = bytearray(f.read_bytes())
+        raw[off:off + len(data)] = data
+        _reseal(raw, body_end)
+        f.write_bytes(bytes(raw))
+    return plant
+
+
+def _poke_block(off, data):
+    """Write `data` into block 0's header of ch1, block CRC and file resealed."""
+    def plant(p):
+        f = p / _first(p, "ch1.timd/*/*.tdat")
+        raw = bytearray(f.read_bytes())
+        n = struct.unpack_from("<I", raw, UH + 36)[0]
+        raw[UH + off:UH + off + len(data)] = data
+        struct.pack_into("<I", raw, UH, m.crc32(bytes(raw[UH + 4:UH + n])))
+        _reseal(raw)
+        f.write_bytes(bytes(raw))
+    return plant
+
+
+def _rename_segment(p, new_stem, channel="ch1"):
+    seg = next((p / f"{channel}.timd").glob("*.segd"))
+    for f in list(seg.iterdir()):
+        f.rename(seg / (new_stem + f.suffix))
+    seg.rename(seg.parent / (new_stem + ".segd"))
+
+
 T_NEG = -(START + 10 * SECOND)        # a source time, stored negated
 T_POS = START + 10 * SECOND           # ... and plain
 
@@ -766,7 +818,37 @@ PLANTS = {
     "channel_description": lambda p: _plant_text(p, "channel_description", b"Jane"),
     "subject_name_1": lambda p: _plant_text(p, "subject_name_1", b"Roe"),
     "session_name": lambda p: _plant_text(p, "session_name", b"jane_roe"),
+    # review round 1
+    "hidden text after a description's NUL":
+        _poke("ch1.timd/*/*.tmet", S2 + 1, b"hidden", TMET),
+    "hidden text after units' NUL": _poke("ch1.timd/*/*.tmet", S2 + 6208 + 4, b"x", TMET),
+    "hidden text after a record text NUL": lambda p: _edit_record(
+        p / "S001.rdat", b"Epoc", lambda r, b, n: r.__setitem__(slice(b + 64 + 1, b + 64 + 3), b"zz")),
+    "Seiz entry name": lambda p: _edit_record(
+        p / "S001.rdat", b"Seiz", lambda r, b, n: r.__setitem__(
+            slice(b + 1312 + 3 * 272, b + 1312 + 3 * 272 + 5), b"Jane\0")),
+    "Seiz entry name, excluded channel": None,   # see the exclusion test below
+    "tidx entry protected region": _poke("ch1.timd/*/*.tidx", UH + 40, b"\x01"),
+    "tidx entry RED-protected region": _poke("ch1.timd/*/*.tidx", UH + 45, b"\x01"),
+    "tidx entry discretionary region": _poke("ch1.timd/*/*.tidx", UH + 48, b"\x01"),
+    "RED header protected region": _poke_block(5, b"\x01"),
+    "RED header discretionary region": _poke_block(8, b"\x01"),
+    "segment folder name": lambda p: _rename_segment(p, "ch1-Jane-000000"),
+    "name glued to a word": lambda p: _edit_record(
+        p / "S001.rdat", b"Epoc", lambda r, b, n: r.__setitem__(slice(b + 64, b + 72), b"JaneRoe\0")),
+    "name glued with underscores": lambda p: _edit_record(
+        p / "S001.rdat", b"Curs", lambda r, b, n: r.__setitem__(
+            slice(b + 32, b + 46), b"x_Jane_Roe_20\0")),
+    "Epoc id_number": lambda p: _edit_record(
+        p / "S001.rdat", b"Epoc", lambda r, b, n: struct.pack_into("<q", r, b, T_POS)),
+    "Curs id_number (negated)": lambda p: _edit_record(
+        p / "S001.rdat", b"Curs", lambda r, b, n: struct.pack_into("<q", r, b, T_NEG)),
+    "UH channel_name": _poke("ch1.timd/*/*.tmet", 52, b"Jane\0", TMET),
+    "hidden text after UH channel_name": _poke("ch1.timd/*/*.tidx", 52 + 4, b"zz"),
+    "LNTP bytes after the template": lambda p: _edit_record(
+        p / "S001.rdat", b"LNTP", lambda r, b, n: r.__setitem__(slice(b + 24, b + 28), b"Jane")),
 }
+PLANTS = {k: v for k, v in PLANTS.items() if v is not None}
 
 
 @pytest.mark.parametrize("name", list(PLANTS))
@@ -781,6 +863,153 @@ def test_verify_catches_a_planted_leak(tmp_path, rich, name):
     for p in rep.problems:
         for s in ("Jane", "Roe", "MRN4711", "jane_roe"):
             assert s not in p.message
+
+
+# ---- the same leaks planted in the SOURCE: the rewrite must remove them
+
+
+def _all_bytes(path):
+    return b"".join(p.read_bytes() for p in Path(path).rglob("*") if p.is_file())
+
+
+def _src_rdat(src):
+    return Path(src) / f"{Path(src).stem}.rdat"
+
+
+def test_rewrite_zeroes_hidden_text_tails(tmp_path):
+    src = _rich_session(tmp_path / "jane_roe.mefd")
+    for tmet in _tmets(src):     # text hidden after the terminators
+        raw = bytearray(tmet.read_bytes())
+        for off in (S2 + 1000, S2 + 6208 + 10, S3 + 156 + 50, 52 + 100):  # desc, units, name_2, UH
+            raw[off:off + 6] = b"SECRET"
+        _reseal(raw, TMET)
+        tmet.write_bytes(bytes(raw))
+    _edit_record(_src_rdat(src), b"Epoc",
+                 lambda r, b, n: r.__setitem__(slice(b + 64 + 10, b + 64 + 16), b"SECRET"))
+    _edit_record(_src_rdat(src), b"Seiz",
+                 lambda r, b, n: r.__setitem__(slice(b + 1312 + 100, b + 1312 + 106), b"SECRET"))
+    assert b"SECRET" in _all_bytes(src)
+    rep = _anon(src, tmp_path / "K.mefd", clear=("location",), text="keep")
+    assert rep.verification.ok
+    assert b"SECRET" not in _all_bytes(tmp_path / "K.mefd")
+
+
+def test_rewrite_handles_seizure_entry_names(tmp_path):
+    src = _rich_session(tmp_path / "jane_roe.mefd", channels=("LAH1", "LAH12", "RAH3"))
+    t = START + 5 * SECOND
+    body = _seiz_body(t, t + SECOND, [(" lah1 ", t, t), ("Jane Roe", t, t), ("LAH12", t, t)])
+    _install_records(_src_rdat(src), [_record("Seiz", body, -t)], [-t])
+    for text, want in (("drop", ["", "LAH12"]), ("keep", [" ", "LAH12"])):
+        dst = tmp_path / f"{text}.mefd"
+        rep = _anon(src, dst, exclude_channels=["LAH1"], text=text)
+        assert rep.verification.ok and rep.seizure_channel_entries_dropped == 1
+        seiz = next(r for r in _all_records(dst) if r["type"] == "Seiz")
+        assert [c["name"] for c in seiz["channels"]] == want    # " lah1 " dropped
+        blob = _all_bytes(dst)
+        assert b"Jane" not in blob and b"lah1 " not in blob
+
+
+def test_rewrite_clears_foreign_block_and_entry_regions(tmp_path):
+    src = _rich_session(tmp_path / "jane_roe.mefd")
+    for plant in (_poke("ch1.timd/*/*.tidx", UH + 40, b"\x11\x22\x33\x44"),
+                  _poke("ch1.timd/*/*.tidx", UH + 45, b"\x55" * 11),
+                  _poke_block(5, b"\x66" * 11)):
+        plant(src)
+    rep = _anon(src, tmp_path / "R.mefd")
+    assert rep.verification.ok
+    tidx = next((tmp_path / "R.mefd").glob("ch1.timd/*/*.tidx")).read_bytes()
+    tdat = next((tmp_path / "R.mefd").glob("ch1.timd/*/*.tdat")).read_bytes()
+    assert tidx[UH + 40:UH + 44] == b"\0" * 4 and tidx[UH + 45:UH + 56] == b"\0" * 11
+    assert tdat[UH + 5:UH + 16] == b"\0" * 11
+
+
+def test_rewrite_names_segments_canonically(tmp_path):
+    src = _rich_session(tmp_path / "jane_roe.mefd")
+    _rename_segment(src, "ch3-Jane-Roe-000000", channel="ch3")
+    rep = _anon(src, tmp_path / "N.mefd")
+    assert rep.verification.ok
+    names = [p.name for p in (tmp_path / "N.mefd").rglob("*")]
+    assert "ch3-000000.segd" in names and not [n for n in names if "Jane" in n]
+
+
+def test_redaction_and_scan_see_names_glued_to_words(tmp_path):
+    src = _rich_session(tmp_path / "jane_roe.mefd")
+    t = START + 5 * SECOND
+    _install_records(_src_rdat(src), [_record("Note", b"JaneRoe and Jane_Roe_2020 ok\0", -t)],
+                     [-t])
+    rep = _anon(src, tmp_path / "G.mefd", text="keep")
+    assert rep.verification.ok
+    note = next(r for r in _all_records(tmp_path / "G.mefd") if r["type"] == "Note"
+                and r["level"] == "session")
+    assert "jane" not in note["text"].lower() and "roe" not in note["text"].lower()
+    assert note["text"].endswith("ok")
+
+
+def test_a_time_in_an_id_number_is_refused_not_published(tmp_path):
+    src = _rich_session(tmp_path / "jane_roe.mefd")
+    _edit_record(_src_rdat(src), b"Epoc", lambda r, b, n: struct.pack_into("<q", r, b, T_POS))
+    with pytest.raises(mef3io.WriteConflictError, match="id_number"):
+        _anon(src, tmp_path / "I.mefd")
+    assert not (tmp_path / "I.mefd").exists() and not (tmp_path / "I.mefd.partial").exists()
+
+
+def test_rewrite_sets_the_uh_channel_name(tmp_path):
+    src = _rich_session(tmp_path / "jane_roe.mefd")
+    _poke("ch1.timd/*/*.tidx", 52, b"Jane Roe\0")(src)
+    rep = _anon(src, tmp_path / "U.mefd")
+    assert rep.verification.ok
+    tidx = next((tmp_path / "U.mefd").glob("ch1.timd/*/*.tidx")).read_bytes()
+    assert tidx[52:308] == b"ch1" + b"\0" * 253
+
+
+def test_a_callable_sees_non_utf8_text_intact(tmp_path):
+    src = _rich_session(tmp_path / "jane_roe.mefd")
+    t = START + 5 * SECOND
+    _install_records(_src_rdat(src), [_record("Note", b"caf\xe9 \xff ok\0", -t)], [-t])
+    seen = []
+
+    def same(text, info):
+        seen.append(text)
+        return text
+
+    rep = _anon(src, tmp_path / "U8.mefd", text=same)
+    assert rep.verification.ok
+    assert "caf\udce9 \udcff ok" in seen
+    raw = (tmp_path / "U8.mefd" / "U8.rdat").read_bytes()
+    assert b"caf\xe9 \xff ok\0" in raw                      # every byte round-trips
+
+
+def test_record_index_is_matched_by_offset(tmp_path):
+    src = _rich_session(tmp_path / "jane_roe.mefd")
+    t1, t2 = START + 5 * SECOND, START + 9 * SECOND
+    rdat = _src_rdat(src)
+    _install_records(rdat, [_record("Note", b"a\0", -t1), _record("Note", b"b\0", -t2)],
+                     [-t1, -t2])
+    ridx = rdat.with_suffix(".ridx")              # same entries, stored in reverse order
+    raw = bytearray(ridx.read_bytes())
+    e1, e2 = raw[UH:UH + 24], raw[UH + 24:UH + 48]
+    raw[UH:UH + 48] = e2 + e1
+    _reseal(raw)
+    ridx.write_bytes(bytes(raw))
+    rep = _anon(src, tmp_path / "O.mefd", text="keep")
+    assert rep.verification.ok
+    out = (tmp_path / "O.mefd" / "O.ridx").read_bytes()
+    out_rdat = (tmp_path / "O.mefd" / "O.rdat").read_bytes()
+    for k in range(2):
+        off, t = struct.unpack_from("<qq", out, UH + 24 * k + 8)
+        assert struct.unpack_from("<q", out_rdat, off + 16)[0] == t   # entry time = its record's
+
+
+def test_lntp_body_is_cut_to_its_template(tmp_path):
+    src = _rich_session(tmp_path / "jane_roe.mefd")
+    t = START + 5 * SECOND
+    body = struct.pack("<q", 2) + struct.pack("<2i", 7, -7) + b"Jane Roe was here"
+    _install_records(_src_rdat(src), [_record("LNTP", body, -t)], [-t])
+    rep = _anon(src, tmp_path / "L.mefd")
+    assert rep.verification.ok
+    assert b"Jane" not in _all_bytes(tmp_path / "L.mefd")
+    lntp = next(r for r in _all_records(tmp_path / "L.mefd") if r["type"] == "LNTP")
+    assert lntp["template"] == [7, -7]
 
 
 def test_verify_clean_copy_and_wrong_shift(rich):

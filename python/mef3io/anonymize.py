@@ -296,10 +296,12 @@ def anonymize_session(
     ``<dst>.partial/``, checked with :func:`verify`, and only then moved to
     ``dst``. A failure, a refusal or a cancel leaves nothing behind.
 
-    One streaming pass reads the source once and writes the copy once. Data
-    blocks are never decoded or re-encoded: only their start time (and, for
-    encrypted blocks, the 16 encrypted statistics bytes) changes, so the
-    samples are bit-identical.
+    The copy pass reads the source once and writes the copy once, streaming
+    data blocks; :func:`verify` then reads the source's data and the copy
+    again. Data blocks are never decoded or re-encoded: only their start time
+    (and, for encrypted blocks, the 16 encrypted statistics bytes) changes,
+    and the regions other programs may fill are cleared, so the samples are
+    bit-identical.
 
     **What changes.** Every time moves by ``shift_us``, each stored in the
     sign convention it came in: universal-header start/end in every file,
@@ -346,12 +348,18 @@ def anonymize_session(
         Record free text (Note/SyLg/EDFA text, Seiz markers and annotation,
         Epoc type and text, Curs name, CSti and ESti strings). ``"drop"``
         (default) clears it; the records themselves, their types and shifted
-        times are kept. ``"keep"`` keeps it, with names the copy removes (the
-        old session name, cleared subject and location values, excluded
-        channel names) redacted. A callable ``text(value, info)`` returns the
-        new text (``None`` clears); the same redaction is applied after it.
-        Python only. ``info`` is a dict with ``record_type``, ``field``,
-        ``level``, ``channel``, ``segment`` and ``time`` (shifted, uUTC).
+        times are kept. ``"keep"`` keeps it, with only the names mef3io knows
+        removed (the old session name, cleared subject and location values,
+        excluded channel names). It does **not** find dates, ages, other
+        people's names or anything else written in free text. A callable
+        ``text(value, info)`` returns the new text (``None`` clears); the same
+        redaction is applied after it. Text that is not valid UTF-8 is passed
+        with ``errors="surrogateescape"`` and encoded back the same way, so
+        every byte survives a callable that returns it unchanged. Python only.
+        ``info`` is a dict with ``record_type``, ``field``, ``level``,
+        ``channel``, ``segment`` and ``time`` (shifted, uUTC). Names in a
+        seizure's channel list that are not a kept channel's exact name are
+        cleared with ``"drop"`` and redacted otherwise.
     rename : bool, optional
         ``True`` (default) gives the copy the stem of ``dst`` as its session
         name everywhere. ``False`` keeps the source's session name, and the
