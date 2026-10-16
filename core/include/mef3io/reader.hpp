@@ -50,9 +50,9 @@ class Reader {
   /// Segments that could not be read. Always empty in strict mode, where such
   /// a segment throws instead. Non-empty means parts of this session read back
   /// as gaps that are NOT gaps in the recording.
-  const std::vector<SegmentProblem>& problems() const { return session_.problems(); }
+  std::vector<SegmentProblem> problems() const { return session_.problems(); }
   /// See Session::legacy_password_record_files.
-  const std::vector<std::string>& legacy_password_record_files() const {
+  std::vector<std::string> legacy_password_record_files() const {
     return session_.legacy_password_record_files();
   }
 

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <span>
@@ -34,11 +35,16 @@ struct SegmentReader {
   std::string tidx_path;
   std::string tdat_path;
   int segment_number = 0;
-  std::optional<TimeSeriesMetadata> metadata;      // loaded lazily
-  std::vector<ui1> tidx_bytes;                      // loaded lazily (whole file)
-  std::uint64_t index_last_used = 0;                // for cache eviction
+  std::optional<TimeSeriesMetadata> metadata;      // loaded at open (state_mu_)
+  /// The block index, loaded lazily (whole file) and shared: a call holds its
+  /// own reference (a PIN) for as long as it reads it, so evicting it from the
+  /// cache (another thread's trim) never frees bytes in use. Guarded by
+  /// Session::index_mu_.
+  std::shared_ptr<const std::vector<ui1>> tidx;
+  std::uint64_t index_last_used = 0;                // for cache eviction (index_mu_)
   /// Why this segment could not be read, in lenient mode. Empty means fine.
   /// Set once: a segment that failed is not retried on every later call.
+  /// Guarded by Session::state_mu_.
   std::string load_error;
 };
 
@@ -201,13 +207,18 @@ class Session {
   Session(const std::string& mefd_path, std::string password = "", bool strict = true);
 
   /// Segments that failed to load, in lenient mode. Always empty when strict.
-  const std::vector<SegmentProblem>& problems() const { return problems_; }
+  /// A copy: lenient reads on other threads may append while you look.
+  std::vector<SegmentProblem> problems() const {
+    std::lock_guard<std::mutex> lock(state_mu_);
+    return problems_;
+  }
 
   /// Record (.rdat) files read so far whose password matched only through
   /// the byte mapping mef3io used up to 1.2.0 (issue #84). Grows as records
   /// are read; deduplicated. (Metadata is reported per channel instead, via
   /// ChannelInfo::legacy_password_mapping, because it is read at open.)
-  const std::vector<std::string>& legacy_password_record_files() const {
+  std::vector<std::string> legacy_password_record_files() const {
+    std::lock_guard<std::mutex> lock(state_mu_);
     return legacy_password_record_files_;
   }
   bool strict() const { return strict_; }
@@ -324,7 +335,7 @@ class Session {
   /// segment is worse than a skipped one.
   template <class F>
   bool with_segment(const std::string& channel, SegmentReader& seg, F&& fn) {
-    if (!seg.load_error.empty()) return false;
+    if (segment_failed(seg)) return false;
     if (strict_) {
       fn();
       return true;
@@ -333,21 +344,30 @@ class Session {
       fn();
       return true;
     } catch (const std::exception& e) {
-      seg.load_error = e.what();
-      problems_.push_back(SegmentProblem{channel, seg.segment_number,
-                                         source_->describe(seg.tmet_path), e.what()});
+      std::lock_guard<std::mutex> lock(state_mu_);
+      if (seg.load_error.empty()) {  // two threads can fail the same segment at once
+        seg.load_error = e.what();
+        problems_.push_back(SegmentProblem{channel, seg.segment_number,
+                                           source_->describe(seg.tmet_path), e.what()});
+      }
       return false;
     }
   }
-  std::span<const ui1> segment_index(SegmentReader& seg);
+  bool segment_failed(const SegmentReader& seg) const {
+    std::lock_guard<std::mutex> lock(state_mu_);
+    return !seg.load_error.empty();
+  }
+  /// The segment's block index, PINNED: the returned reference keeps the bytes
+  /// alive even if another thread evicts them from the cache meanwhile.
+  std::shared_ptr<const std::vector<ui1>> segment_index(SegmentReader& seg);
   /// Drop the least recently used block indices until the cache fits its
   /// budget.
   ///
   /// The index is ~2% of the data, so a session of a few hundred gigabytes
   /// holds several GB of it — and a reader that touches every channel used to
   /// keep all of it resident for the life of the Session. Called only at the
-  /// END of a public operation, never while a caller holds a span into one of
-  /// these buffers.
+  /// END of a public operation. Concurrent calls on one Session are safe: a
+  /// call that is still reading an evicted index holds its own pin.
   void trim_index_cache();
 
   std::string mefd_path_;
@@ -356,6 +376,14 @@ class Session {
   std::vector<std::string> channel_names_;
   std::map<std::string, Channel> channels_;
   bool strict_ = true;
+  // Concurrent calls on ONE Session (several threads reading one Reader, now
+  // that the bindings release the GIL) share this mutable state, so it is
+  // locked. Two mutexes, never held together and never across file I/O or a
+  // decode: state_mu_ for what lenient reads and records append (problems,
+  // failed segments, legacy record files, metadata), index_mu_ for the block
+  // index cache. Uncontended locks cost nanoseconds against a file read.
+  mutable std::mutex state_mu_;
+  mutable std::mutex index_mu_;
   std::vector<SegmentProblem> problems_;
   std::vector<std::string> legacy_password_record_files_;
   std::set<std::string> reported_record_files_;  // record files already in problems_

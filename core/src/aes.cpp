@@ -1,5 +1,6 @@
 // mef3io — AES-128 (FIPS 197), ECB mode. Compact reference implementation.
 // MEF encrypts metadata sections and record bodies with AES-128-ECB.
+#include <array>
 #include <cstring>
 
 #include "mef3io/crypto.hpp"
@@ -28,13 +29,17 @@ constexpr ui1 sbox[256] = {
     0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
     0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16};
 
-ui1 rsbox[256];
-bool rsbox_ready = false;
-void init_rsbox() {
-  if (rsbox_ready) return;
-  for (int i = 0; i < 256; ++i) rsbox[sbox[i]] = static_cast<ui1>(i);
-  rsbox_ready = true;
+// The inverse S-box, computed at COMPILE time. It used to be filled lazily on
+// the first decrypt behind an unsynchronised flag: a data race (TSan-confirmed)
+// once two threads decrypted at once — parallel RED block decryption, or two
+// encrypted sessions opened on different threads now that the open releases
+// the GIL (#79). No mutable global state here.
+constexpr std::array<ui1, 256> make_rsbox() {
+  std::array<ui1, 256> r{};
+  for (int i = 0; i < 256; ++i) r[sbox[i]] = static_cast<ui1>(i);
+  return r;
 }
+constexpr std::array<ui1, 256> rsbox = make_rsbox();
 
 constexpr ui1 rcon[11] = {0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36};
 
@@ -146,7 +151,6 @@ std::vector<ui1> aes128_ecb_encrypt(std::span<const ui1> data, std::span<const u
 
 std::vector<ui1> aes128_ecb_decrypt(std::span<const ui1> data, std::span<const ui1> key) {
   check(data, key);
-  init_rsbox();
   RoundKey rk;
   key_expansion(rk, key);
   std::vector<ui1> out(data.begin(), data.end());

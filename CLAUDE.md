@@ -241,15 +241,43 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   (f) `Session` CACHES each segment's `.tidx`, and the index is ~2% of the
   data, so an unbounded cache is O(session) — several GB resident on a
   few-hundred-GB recording. Capped via `set_index_cache_bytes` (default
-  256 MB) with LRU eviction, done ONLY at the end of a public call:
-  `segment_index` hands out a SPAN into those bytes, so evicting mid-read is
-  a use-after-free. (g) Benchmark the real shape with
+  256 MB) with LRU eviction, done at the end of a public call.
+  `segment_index` returns a `shared_ptr` PIN (the cache holds one reference,
+  each call reading the index another), so an eviction — including one by
+  ANOTHER THREAD's call on the same Session — never frees bytes in use. It
+  used to hand out a raw span, and 4 threads reading one Session with a tiny
+  budget crashed ("double free or corruption"). Cache state is under
+  `index_mu_`; problems/failed segments/legacy record files/metadata under
+  `state_mu_`; never held across file I/O or a decode, never both at once.
+  Pinned by core/tests/test_concurrency.cpp (TSan recipe in its header) and
+  tests/test_p31. (g) Benchmark the real shape with
   `benchmarks/long_session_benchmark.py` (24 h x 16 ch @ 512 Hz, 10-min
   appends, windowed reads): watch GROWTH (must stay ~1.00), write/read
   AMPLIFICATION and duty cycle. It validates + dry-run recovers at the end
   and exits non-zero on either failure. Measured there: 1.6x faster per
   block than mef_tools, in a file 1.8x smaller, growth 1.00x — WITH the
   durability barriers the legacy stack does not have.
+- **EVERY potentially long binding call RELEASES THE GIL** (#79). Opening is
+  where all the metadata parsing happens (64 ch x 60 seg: a 616 ms open froze
+  every other Python thread for 613 ms). Reads/writes and the session-level
+  functions run through `PyHooks::run`; `toc`, `segments`, `records`,
+  `write_records`, `Session.read_runs` and `infer_precision` convert their
+  arguments, then wrap the core call in `nb::gil_scoped_release`; the
+  `Reader`, `Session` and `SessionWriter` CONSTRUCTORS are bound as
+  `__init__` lambdas that call `construct_nogil` (placement-new under
+  `nb::gil_scoped_release`), NOT `nb::init<...>`, which holds the GIL.
+  Building the result (dicts, lists) happens after, with the GIL. Rule while
+  released: touch no Python object (arguments are already C++ values; `self`
+  is invisible to other threads until __init__ returns); a callback
+  re-acquires the GIL (`PyHooks::call`). Cheap accessors (`info`,
+  `channels`, `problems`) keep the GIL. CONSEQUENCE: calls on ONE
+  Reader/Session can now really overlap, so its mutable state must be locked
+  (see (f) above) and core globals must be immutable (the AES inverse S-box
+  is `constexpr` now; it was lazily filled behind an unsynchronised flag, a
+  TSan-confirmed race). A new long call or constructor must release the GIL
+  too, and add a case to `tests/test_p31_gil_release.py`, which measures the
+  main thread's longest stall (best of 3; skips a call under 40 ms) while a
+  worker runs the call on a 2400-segment channel.
 - **The MAIN use case is a session appended to for DAYS TO MONTHS** (5-20 min
   blocks per channel). Two consequences, both load-bearing. (1) An append must
   be O(NEW data), never O(total blocks) — section 2 describes ALL of a segment's
