@@ -18,6 +18,7 @@ universal-header validation fields), so no binary fixture is committed.
 from __future__ import annotations
 
 import hashlib
+import shutil
 import warnings
 
 import numpy as np
@@ -251,3 +252,91 @@ def test_a_damaged_old_record_file_is_a_problem_not_a_legacy_read(tmp_path, x):
             r.records()
         assert [p["kind"] for p in r.problems] == ["records"]
     assert not [w for w in rec if issubclass(w.category, mef3io.LegacyPasswordWarning)]
+
+
+# --- inspect(): the same condition, reported as data ----------------------------
+
+
+def test_inspect_flags_an_old_mef3io_session_without_warning(tmp_path, x):
+    """inspect() accepts the fallback like the Reader, and REPORTS it (a flag
+    and a "legacy-password" entry) instead of emitting LegacyPasswordWarning,
+    as it reports every other condition. Studio gap #96."""
+    path = tmp_path / "old.mefd"
+    _old_mef3io_session(path, x)
+    for pw in (PW2, PW1):  # level 2, level 1
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", mef3io.LegacyPasswordWarning)
+            s = mef3io.inspect(str(path), pw)
+        assert s.legacy_password_mapping is True
+        hit = [w for w in s.warnings if w.code == "legacy-password"]
+        assert len(hit) == 1 and "1 channel(s) (ch1)" in hit[0].message
+        assert not hit[0].blocks_anonymize
+        assert s.to_dict()["legacy_password_mapping"] is True
+
+
+def test_inspect_does_not_flag_meflib_keyed_or_plain_sessions(tmp_path, x):
+    new = tmp_path / "new.mefd"
+    _write(new, PW1, PW2, x)
+    plain = tmp_path / "plain.mefd"
+    _write(plain, "", "", x)
+    for path, pw in ((new, PW2), (new, PW1), (new, ""), (plain, "")):
+        s = mef3io.inspect(str(path), pw)
+        assert s.legacy_password_mapping is False
+        assert "legacy-password" not in {w.code for w in s.warnings}
+
+
+def test_inspect_flags_old_record_files_under_new_metadata(tmp_path, x):
+    """Only the record file is old-keyed: the Reader can only say so from
+    records(); inspect reads the record files, so it says so up front."""
+    old = tmp_path / "old.mefd"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", mef3io.PasswordInteropWarning)
+        w = mef3io.Writer(str(old), password1=_old_bytes_as_password(PW1),
+                          password2=_old_bytes_as_password(PW2))
+        w.write_int32("ch1", x, 0.5, START, FS)
+        w.write_annotations([{"time": START + 1_000_000, "text": "old"}])
+        w.close()
+    path = tmp_path / "mixed.mefd"
+    _write(path, PW1, PW2, x)
+    for ext in (".rdat", ".ridx"):
+        (path / f"mixed{ext}").write_bytes((old / f"old{ext}").read_bytes())
+    s = mef3io.inspect(str(path), PW2)
+    assert s.legacy_password_mapping is True
+    (hit,) = [w for w in s.warnings if w.code == "legacy-password"]
+    assert "1 record file(s)" in hit.message and "channel" not in hit.message
+
+
+def test_inspect_flags_a_channel_with_one_old_segment_among_new_ones(tmp_path, x):
+    """An old-keyed segment, then a new segment keyed the meflib way (an
+    append with new_segment=True): one old segment is enough for the flag."""
+    path = tmp_path / "mixed_segments.mefd"
+    _old_mef3io_session(path, x)
+    end = START + int(len(x) / FS * 1e6)
+    with warnings.catch_warnings():  # the writer's own warning is pinned above
+        warnings.simplefilter("ignore", mef3io.LegacyPasswordWarning)
+        with mef3io.Writer(str(path), password1=PW1, password2=PW2) as w:
+            w.write_int32("ch1", x, 0.5, end + 1_000_000, FS, new_segment=True)
+    s = mef3io.inspect(str(path), PW2)
+    assert len(s.channel("ch1").segments) == 2
+    assert s.legacy_password_mapping is True
+    (hit,) = [w for w in s.warnings if w.code == "legacy-password"]
+    assert "1 channel(s) (ch1)" in hit.message
+    # the meflib-keyed segment alone is not flagged
+    shutil.rmtree(next(path.glob("ch1.timd/ch1-000000.segd")))
+    assert mef3io.inspect(str(path), PW2).legacy_password_mapping is False
+
+
+def test_anonymize_session_re_keys_an_old_session(tmp_path, x):
+    """The hint in LegacyPasswordWarning and inspect: a copy made with
+    anonymize_session(..., output_password=...) opens with the SAME passwords
+    under meflib's mapping, with no fallback."""
+    path = tmp_path / "old.mefd"
+    _old_mef3io_session(path, x)
+    rep = mef3io.anonymize_session(path, tmp_path / "S001.mefd", -7000 * 86_400_000_000,
+                                   password=PW2, output_password=(PW1, PW2))
+    assert rep.verification.ok
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", mef3io.LegacyPasswordWarning)
+        for pw in (PW2, PW1):
+            with mef3io.Reader(str(tmp_path / "S001.mefd"), password=pw) as r:
+                np.testing.assert_array_equal(r.read("ch1"), x * 0.5)

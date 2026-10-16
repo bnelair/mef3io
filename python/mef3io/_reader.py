@@ -4,15 +4,15 @@ delegating all real work to the backend."""
 from __future__ import annotations
 
 import contextlib
-import warnings
 from typing import Callable, Optional
 
 import numpy as np
 
 from ._cancel import CancelToken, _hooks
+from ._warnings import MefWarning, emit as _emit, identity_of as _identity_of
 
 
-class SessionDeclarationWarning(UserWarning):
+class SessionDeclarationWarning(MefWarning):
     """A session leaves size declarations unset that other readers rely on.
 
     Raised on open, once per process per session (Python's default warning
@@ -29,10 +29,15 @@ class SessionDeclarationWarning(UserWarning):
 
     or per call with ``Reader(path, warn_declarations=False)``. To see the
     detail, or to fix it, use :class:`mef3io.Validator`.
+
+    Like every :class:`MefWarning`, the message carries no path:
+    ``w.message.path`` is the session and ``w.message.details`` the unset
+    declarations (dicts with ``channel``, ``segment`` and ``field``, as
+    :attr:`Reader.declaration_issues`).
     """
 
 
-class UnreadableSegmentWarning(UserWarning):
+class UnreadableSegmentWarning(MefWarning):
     """Part of this session could not be read and is being skipped.
 
     Only ever raised by a Reader opened ``strict=False``. The skipped segments'
@@ -44,10 +49,16 @@ class UnreadableSegmentWarning(UserWarning):
     Strict is the default. An unreported CRC failure is how corrupt scaling
     reaches an analysis unnoticed; lenient mode exists to salvage the intact
     99% of an archive, not to relax the checks.
+
+    Also raised by :class:`Writer` (and the compat ``MefWriter``) for segment
+    metadata it had to skip; ``details`` are then the strings of
+    ``Writer.unreadable_metadata``. From a Reader, ``details`` are the
+    :attr:`Reader.problems` dicts it is about. ``w.message.path`` is the
+    session; the message itself carries no path (see :class:`MefWarning`).
     """
 
 
-class BlockCopyWarning(UserWarning):
+class BlockCopyWarning(MefWarning):
     """A block's two stored copies of its start time or sample count disagree.
 
     Every RED block records its start time and sample count TWICE — once in the
@@ -65,10 +76,14 @@ class BlockCopyWarning(UserWarning):
     :meth:`Reader.read_raw`. Silence it like any warning::
 
         warnings.filterwarnings("ignore", category=mef3io.BlockCopyWarning)
+
+    ``w.message.details`` holds the same mismatch dicts and
+    ``w.message.path`` the session; the message carries no path (see
+    :class:`MefWarning`).
     """
 
 
-class LegacyPasswordWarning(UserWarning):
+class LegacyPasswordWarning(MefWarning):
     """The password opened this session only through mef3io's OLD byte mapping.
 
     MEF derives a 16-byte key from the password one byte per character.
@@ -82,9 +97,11 @@ class LegacyPasswordWarning(UserWarning):
     fallback to the old mapping, and this warning says so (on open for the
     metadata, from :meth:`Reader.records` for record files): the data is intact,
     but meflib and pymef cannot open that session with that password. To make
-    it readable everywhere, re-encrypt it into a new session with the same
-    password once ``transform_session`` (issue #73) is available; until then,
-    reading it into a new session with :class:`Writer` does the same.
+    it readable everywhere, make a re-keyed copy:
+    :func:`anonymize_session` with ``output_password=(level1, level2)``
+    re-encrypts every file with meflib's mapping (the copy is also
+    de-identified, every time shifted). A plain re-key without anonymizing is
+    ``transform_session`` (issue #73), once available.
 
     The fallback cannot tell who wrote a file: it also accepts a SECOND
     password, the one whose old-mapping bytes equal the real key (for a
@@ -93,10 +110,17 @@ class LegacyPasswordWarning(UserWarning):
 
     Appending to such a session keeps the existing segments' keys (rewriting
     them would mean re-encrypting them); new segments use meflib's mapping.
+
+    ``w.message.details`` lists what matched that way: channel names (on
+    open), record file paths (from :meth:`Reader.records`) or segment paths
+    (from :class:`Writer`). ``w.message.path`` is the session; the message
+    carries no path (see :class:`MefWarning`). :func:`mef3io.inspect` does not
+    emit it: it reports the same condition as
+    ``SessionSummary.legacy_password_mapping``.
     """
 
 
-class PasswordInteropWarning(UserWarning):
+class PasswordInteropWarning(MefWarning):
     """A password that other MEF readers handle differently than you may expect.
 
     Raised by :class:`Writer` for a password longer than 15 characters (meflib
@@ -106,18 +130,22 @@ class PasswordInteropWarning(UserWarning):
     session). The session is still written; the warning only tells you about
     its reach. Short Latin-1 passwords (ASCII, or e.g. ``"é"``, ``"ü"``) raise
     nothing.
+
+    ``w.message.path`` is the session being written; ``details`` is
+    ``("level-1",)`` or ``("level-2",)``, which password it is about. The
+    password itself never appears in the warning.
     """
 
 
-def _legacy_password_warning_text(what: str, path: str) -> str:
+def _legacy_password_warning_text(what: str) -> str:
     return (
-        f"{path}: the password opened {what} only through the password-to-key "
+        f"the password opened {what} only through the password-to-key "
         "mapping that mef3io used up to 1.2.0, which differs from meflib's for "
         "non-ASCII characters (issue #84); such files were most likely encrypted "
         "by one of those versions. The data is read correctly, but meflib and "
-        "pymef cannot open these files with this password. Re-encrypt the "
-        "session (transform_session, issue #73, or rewrite it with "
-        "mef3io.Writer) to make it readable everywhere."
+        "pymef cannot open these files with this password. To make it readable "
+        "everywhere, make a re-keyed copy with mef3io.anonymize_session(..., "
+        "output_password=(level1, level2)) (which also de-identifies it)."
     )
 
 
@@ -126,8 +154,10 @@ def _warn_legacy_password(impl, path: str, stacklevel: int) -> None:
     channels = list(fn()) if fn is not None else []
     if channels:
         shown = ", ".join(channels[:3]) + (", ..." if len(channels) > 3 else "")
-        warnings.warn(_legacy_password_warning_text(f"{len(channels)} channel(s) ({shown})", path),
-                      LegacyPasswordWarning, stacklevel=stacklevel + 1)
+        _emit(LegacyPasswordWarning,
+              _legacy_password_warning_text(f"{len(channels)} channel(s) ({shown})"),
+              path=path, details=channels, stacklevel=stacklevel + 1,
+              also=_identity_of(impl))
 
 
 @contextlib.contextmanager
@@ -142,16 +172,17 @@ def _warning_on_legacy_records(impl, path: str, stacklevel: int):
     finally:
         added = impl.legacy_password_record_files()[before:]
         if added:
-            warnings.warn(_legacy_password_warning_text(
-                f"{len(added)} record file(s) (first: {added[0]})", path),
-                LegacyPasswordWarning, stacklevel=stacklevel)
+            _emit(LegacyPasswordWarning,
+                  _legacy_password_warning_text(f"{len(added)} record file(s)"),
+                  path=path, details=added, stacklevel=stacklevel,
+                  also=_identity_of(impl))
 
 
-def _unreadable_warning_text(problems: list, path: str) -> str:
+def _unreadable_warning_text(problems: list) -> str:
     chans = sorted({p["channel"] for p in problems})
     first = problems[0]
     return (
-        f"{path}: {len(problems)} segment(s) could not be read and were SKIPPED "
+        f"{len(problems)} segment(s) could not be read and were SKIPPED "
         f"across channel(s) {', '.join(chans)}; their time spans read back as NaN, "
         f"which is indistinguishable from a real recording gap. "
         f"First: {first['segment']} — {first['reason']}. "
@@ -159,7 +190,7 @@ def _unreadable_warning_text(problems: list, path: str) -> str:
     )
 
 
-def _block_copy_warning_text(mismatches: list, path: str) -> str:
+def _block_copy_warning_text(mismatches: list) -> str:
     times = sum(1 for m in mismatches
                 if m["index_start_uutc"] != m["header_start_uutc"])
     counts = sum(1 for m in mismatches
@@ -171,7 +202,7 @@ def _block_copy_warning_text(mismatches: list, path: str) -> str:
         parts.append(f"{counts} block(s) disagree on sample count")
     first = mismatches[0]
     return (
-        f"{path}: the block index and the RED block headers disagree — "
+        "the block index and the RED block headers disagree — "
         + " and ".join(parts)
         + f". First: {first['segment']} block {first['block_index']} "
         f"(index t={first['index_start_uutc']} n={first['index_number_of_samples']}, "
@@ -182,7 +213,7 @@ def _block_copy_warning_text(mismatches: list, path: str) -> str:
     )
 
 
-def _declaration_warning_text(issues: list, path: str) -> str:
+def _declaration_warning_text(issues: list) -> str:
     fields: dict[str, int] = {}
     channels = set()
     for issue in issues:
@@ -190,7 +221,7 @@ def _declaration_warning_text(issues: list, path: str) -> str:
         channels.add(issue["channel"])
     listed = ", ".join(f"{name} ({n} segment(s))" for name, n in sorted(fields.items()))
     return (
-        f"{path}: metadata section 2 leaves size declarations unset across "
+        f"metadata section 2 leaves size declarations unset across "
         f"{len(channels)} channel(s): {listed}. "
         "This does NOT affect reading with mef3io — every buffer is sized from the "
         "block headers themselves, and the data is intact. It does affect "
@@ -341,18 +372,15 @@ class Reader:
         if not self._strict:
             problems = self.problems  # from the cache snapshot on a warm open
             if problems:
-                warnings.warn(
-                    _unreadable_warning_text(problems, self._path),
-                    UnreadableSegmentWarning,
-                    stacklevel=2,
-                )
+                _emit(UnreadableSegmentWarning, _unreadable_warning_text(problems),
+                      path=self._path, details=problems, stacklevel=2,
+                      also=_identity_of(self._impl))
 
         if warn_declarations and self._declaration_issues:
-            warnings.warn(
-                _declaration_warning_text(self._declaration_issues, self._path),
-                SessionDeclarationWarning,
-                stacklevel=2,
-            )
+            _emit(SessionDeclarationWarning,
+                  _declaration_warning_text(self._declaration_issues),
+                  path=self._path, details=self._declaration_issues, stacklevel=2,
+                  also=_identity_of(self._impl))
 
     def _password_protected(self) -> bool:
         # Fail closed: a backend that cannot say is treated as encrypted, so
@@ -609,11 +637,9 @@ class Reader:
             out = impl.read_raw(channel, t0, t1, int(n_threads), **hooks)
         mismatches = out.get("block_copy_mismatches") or []
         if mismatches:
-            warnings.warn(
-                _block_copy_warning_text(mismatches, self._path),
-                BlockCopyWarning,
-                stacklevel=2,
-            )
+            _emit(BlockCopyWarning, _block_copy_warning_text(mismatches),
+                  path=self._path, details=mismatches, stacklevel=2,
+                  also=_identity_of(impl))
         return out
 
     def segments(self, channel: str) -> list[dict]:
@@ -732,9 +758,10 @@ class Reader:
             # Lenient only (strict raises): a record file that could not be
             # read was skipped. Say so — a missing annotation is otherwise
             # indistinguishable from one that was never written.
-            warnings.warn(
-                f"{self._path}: {len(added)} record file(s) could not be read and were "
-                f"SKIPPED. First: {added[0]['segment']} — {added[0]['reason']}. "
-                "Full list in Reader.problems. Open with strict=True to fail instead.",
-                UnreadableSegmentWarning, stacklevel=2)
+            _emit(UnreadableSegmentWarning,
+                  f"{len(added)} record file(s) could not be read and were "
+                  f"SKIPPED. First: {added[0]['segment']} — {added[0]['reason']}. "
+                  "Full list in Reader.problems. Open with strict=True to fail instead.",
+                  path=self._path, details=added, stacklevel=2,
+                  also=_identity_of(impl))
         return out

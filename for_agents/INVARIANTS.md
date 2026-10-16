@@ -151,7 +151,23 @@ several confident-sounding ones dissolved under it. Agent output is a lead, not
 a verdict. When a fix lands, reproduce the original failure against the fix —
 the sentinel-saturation fix in §3 looked right and was wrong.
 
-## 10. A de-identified copy is checked by something that does not trust the copier
+## 10. A warning's text never carries a path
+
+Every Python warning is a `MefWarning` raised through `_warnings.emit`, which
+puts the session in `w.message.path`, the structured items in `.details`, and
+scrubs the session's location and name out of the text (including a renamed
+archive's inner folder name and the bare name after a space). Only those:
+channel and file names inside the session still appear, and can be
+identifying — the docs must not promise more. Until #96 every
+message started with the full path, so a caller that must keep paths out of
+its logs (mef3io-studio) had to swallow every mef3io warning — including the
+ones that say data was skipped. A bare `warnings.warn` reintroduces that, and
+`tests/test_p30_warning_paths.py` fails on one (it bans importing `warnings`
+anywhere else in the package). `emit` also keeps one warning registry per
+(session, calling file), so the default filter still shows a warning once
+per session rather than once per process.
+
+## 11. A de-identified copy is checked by something that does not trust the copier
 
 `anonymize_session` (#70) publishes nothing `verify` has not passed, and
 `verify` must not share logic with the rewrite it checks. The first review

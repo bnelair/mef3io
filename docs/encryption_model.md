@@ -258,10 +258,12 @@ gate the signal itself: the samples are readable without any password (see
   fallback cannot tell who wrote a file, so it also accepts a second
   password, the one whose old-rule bytes equal the real key (a session
   keyed with `b©` also opens with `bé`); that is inherent to any such
-  fallback, and the warning announces every use of it. Re-encrypting it into a new session makes it
-  readable everywhere (`transform_session`,
-  [#73](https://github.com/bnelair/mef3io/issues/73), once available; until
-  then, read it and write it again with `mef3io.Writer`). New files are
+  fallback, and the warning announces every use of it. A re-keyed copy makes it
+  readable everywhere: `mef3io.anonymize_session(...,
+  output_password=(level1, level2))` re-encrypts every file with meflib's
+  mapping, and also de-identifies the copy
+  ([De-identification](anonymization.md)). A plain re-key is `transform_session`
+  ([#73](https://github.com/bnelair/mef3io/issues/73)), once available. New files are
   never written with the old rule. Appending to an old segment keeps that
   segment's keys (changing them would mean re-encrypting it) and warns; a
   new segment uses meflib's rule.

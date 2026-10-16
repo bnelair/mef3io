@@ -213,6 +213,12 @@ class Session {
   bool strict() const { return strict_; }
 
   const std::vector<std::string>& channels() const { return channel_names_; }
+  /// The session's name (SessionSource::session_name: for an archive, the
+  /// folder INSIDE it, which survives a rename of the archive file).
+  std::string session_name() const { return source_->session_name(); }
+  /// Where the session root is, as error messages and problems() print it:
+  /// the directory, or "<archive>::<root folder>" for a tar.
+  std::string location() const { return source_->describe(""); }
   const ChannelInfo& channel_info(const std::string& name) const;
 
   // Decode all blocks of `channel` overlapping [t0, t1] (absolute uUTC;

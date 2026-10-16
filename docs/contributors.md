@@ -1,5 +1,5 @@
 ---
-description: Who built mef3io, and the people behind MEF and its earlier libraries.
+description: The people behind mef3io, and the earlier MEF tools and their contributors.
 ---
 
 --8<-- "CONTRIBUTORS.md"

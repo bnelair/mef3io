@@ -50,6 +50,7 @@ from ._reader import (  # noqa: E402
     SessionDeclarationWarning,
     UnreadableSegmentWarning,
 )
+from ._warnings import MefWarning  # noqa: E402
 from ._writer import Writer  # noqa: E402
 from .metadata import Acquisition, Metadata, Subject  # noqa: E402
 from .validate import (  # noqa: E402
@@ -92,6 +93,7 @@ __all__ = [
     "available_checks", "describe_check",
     "validate_session", "repair_session", "recover_session",
     "RecoveryReport", "RecoveredSegment",
+    "MefWarning",
     "BlockCopyWarning",
     "LegacyPasswordWarning",
     "PasswordInteropWarning",
