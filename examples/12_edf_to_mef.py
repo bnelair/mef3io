@@ -110,7 +110,8 @@ def open_with_pyedflib(path: str):
             onsets=np.arange(f.datarecords_in_file) * record_s,
             annotations=[(float(o), float(d) if d > 0 else None, str(t))
                          for o, d, t in zip(*f.readAnnotations())],
-            patient={"name": f.getPatientName(), "code": f.getPatientCode()},
+            patient={k: "" if v.strip() == "X" else v.strip()  # EDF+: "X" = unknown
+                     for k, v in (("name", f.getPatientName()), ("code", f.getPatientCode()))},
         )
 
 
@@ -265,6 +266,9 @@ def convert(edf_path, mef_path, timezone=None, copy_patient=False, overwrite=Fal
             gmt_offset=int(edf["start"].replace(tzinfo=tz).utcoffset().total_seconds()))
         if copy_patient:
             subject.name_1, subject.id = edf["patient"]["name"], edf["patient"]["code"]
+            if not (subject.name_1 or subject.id):
+                print("warning: no patient name or code found to copy (plain EDF/BDF has "
+                      "only a free-text patient field, which is not copied)")
 
         taken, channels = set(), {}
         for sig in edf["signals"]:
@@ -294,6 +298,12 @@ def convert(edf_path, mef_path, timezone=None, copy_patient=False, overwrite=Fal
 
 
 # --- 4. verify ----------------------------------------------------------------
+def check(ok: bool, message: str) -> None:
+    """Like assert, but not removed by python -O."""
+    if not ok:
+        raise AssertionError(message)
+
+
 def verify(mef_path, result, password="") -> None:
     """Re-read the EDF and the session, chunk by chunk, and compare.
 
@@ -307,21 +317,21 @@ def verify(mef_path, result, password="") -> None:
         for name, ch in result["channels"].items():
             sig, p = edf["signals"][ch["index"]], ch["precision"]
             if not ch["lowered"]:
-                assert 10.0**-p <= abs(sig["gain"]) or sig["gain"] == 0, f"{name}: too coarse"
+                check(10.0**-p <= abs(sig["gain"]) or sig["gain"] == 0, f"{name}: too coarse")
             stored = 0
             for k0, k1 in chunks(edf):
                 want = sig["read"](k0, k1) * sig["gain"] + sig["offset"]
                 t0 = start_uutc + round(edf["onsets"][k0] * 1e6)
                 got = r.read(name, t0, t0 + len(want) * 1e6 / sig["fs"])
                 err = np.abs(got - want).max(initial=0)  # NaN (a misplaced gap) fails too
-                assert err <= 0.5 * 10.0**-p + 1e-9 * max(1.0, sig["peak"]), \
-                    f"{name}: max error {err}"
+                check(err <= 0.5 * 10.0**-p + 1e-9 * max(1.0, sig["peak"]),
+                      f"{name}: max error {err}")
                 stored += len(want)
-            assert r.info(name)["number_of_samples"] == stored, f"{name}: sample count"
+            check(r.info(name)["number_of_samples"] == stored, f"{name}: sample count")
         key = lambda x: (x["time"], x["type"], x["text"], x.get("duration"))  # noqa: E731
         got = sorted(map(key, r.records()))
-        assert got == sorted(map(key, records_for(edf["annotations"], start_uutc))), \
-            "annotations differ"
+        check(got == sorted(map(key, records_for(edf["annotations"], start_uutc))),
+              "annotations differ")
 
 
 # --- demo ---------------------------------------------------------------------
@@ -353,16 +363,26 @@ def main(argv=None) -> int:
     ap.add_argument("--copy-patient", action="store_true",
                     help="copy the EDF patient name and code (off by default)")
     ap.add_argument("--overwrite", action="store_true", help="replace an existing session")
+    ap.add_argument("--encrypt", action="store_true",
+                    help="protect the session with two passwords (asked for, not typed here)")
     a = ap.parse_args(argv)
+    keys = {}
+    if a.encrypt:
+        import getpass
+
+        keys = dict(password1=getpass.getpass("Level-1 password (signals): "),
+                    password2=getpass.getpass("Level-2 password (everything): "))
+        if not (keys["password1"] and keys["password2"]):
+            ap.error("--encrypt needs both passwords")
     if a.edf is None:  # demo
         tmp = Path(tempfile.mkdtemp())
         a.edf, a.mefd, a.timezone, a.overwrite = str(tmp / "demo.edf"), str(tmp / "demo.mefd"), "UTC", True
         make_demo_edf(a.edf)
     if a.mefd is None:
         ap.error("give the output session path (ending in .mefd)")
-    result = convert(a.edf, a.mefd, a.timezone, a.copy_patient, a.overwrite)
-    verify(a.mefd, result)
-    with mef3io.Reader(a.mefd) as r:
+    result = convert(a.edf, a.mefd, a.timezone, a.copy_patient, a.overwrite, **keys)
+    verify(a.mefd, result, keys.get("password2", ""))
+    with mef3io.Reader(a.mefd, keys.get("password2", "")) as r:
         for name, ch in result["channels"].items():
             info = r.info(name)
             print(f"{name}: {info['sampling_frequency']:g} Hz, {info['units_description']}, "

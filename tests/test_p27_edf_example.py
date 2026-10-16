@@ -159,6 +159,26 @@ def test_existing_session_is_not_replaced_without_overwrite(tmp_path):
     ex.verify(out, ex.convert(src, out, "UTC", overwrite=True))
 
 
+def test_command_line_encrypts_without_passwords_on_the_command_line(tmp_path, monkeypatch, capsys):
+    src, out = tmp_path / "e.edf", str(tmp_path / "e.mefd")
+    _write_edf(src, patient=True)
+    answers = iter(["one", "two"])
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": next(answers))
+    assert ex.main([str(src), out, "--timezone", "UTC", "--copy-patient", "--encrypt"]) == 0
+    assert "verified" in capsys.readouterr().out
+    with pytest.raises(mef3io.PasswordError):
+        mef3io.Reader(out)
+    with mef3io.Reader(out, "two") as r:
+        assert r.metadata.subject.id == "MRN123"
+
+
+def test_copy_patient_warns_when_nothing_to_copy(tmp_path, capsys):
+    src = tmp_path / "x.edf"
+    _write_edf(src)  # no patient fields
+    ex.convert(src, str(tmp_path / "x.mefd"), "UTC", copy_patient=True)
+    assert "no patient name or code" in capsys.readouterr().out
+
+
 def test_demo_runs_end_to_end(capsys):
     assert ex.main([]) == 0
     assert "verified" in capsys.readouterr().out

@@ -111,10 +111,14 @@ there is no gap ([more](long_recordings.md#finding-the-data-without-reading-it))
 
 An EDF header holds the patient name, code, birth date and sex in plain text.
 The script **does not copy them** unless you pass `--copy-patient`, which
-copies the name and code into the subject fields. In a session without
-passwords those fields are readable by anyone with the files; to protect
-them, encrypt the session: `convert(..., password1="...", password2="...")`
-and then `verify(..., password="<the level-2 password>")`
+copies the name and code of an EDF+ or BDF+ file into the subject fields.
+(A plain EDF or BDF file has only a free-text patient field; it is not
+copied, and the script says so.) In a session without passwords those fields
+are readable by anyone with the files. To protect them, encrypt the session:
+add `--encrypt`, and the script asks for the two passwords (they are not
+typed on the command line, where others could see them). From Python, use
+`convert(..., password1="...", password2="...")` and then
+`verify(..., password="<the level-2 password>")`
 ([what encryption protects](../encryption_model.md#what-encryption-protects)).
 
 Leaving the name out does not make a recording anonymous: the start date,
@@ -127,8 +131,8 @@ annotation text and file names can identify a person too. See
 checks per channel that every sample is within half a count of the EDF value
 at the same time, that each count is no coarser than the EDF step (unless a
 warning said so), that no extra samples fill a gap, and that every annotation
-was written with the same time, type, text and duration. It uses the script's own EDF reading, so it confirms the
-conversion, not the EDF reader. With mef3io 1.3 or later you can also look at
+was written with the same time, type, text and duration. It uses the
+script's own EDF reading, so it confirms the conversion, not the EDF reader. With mef3io 1.3 or later you can also look at
 the session without reading any samples:
 
 ```bash
