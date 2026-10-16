@@ -594,7 +594,10 @@ NB_MODULE(_mef3io, m) {
       PyObject* text = PyUnicode_DecodeUTF8(msg, static_cast<Py_ssize_t>(std::strlen(msg)),
                                             "replace");
       if (!text) return;
-      PyObject* exc = PyObject_CallOneArg(type, text);
+      // PyObject_CallFunctionObjArgs, not PyObject_CallOneArg: the latter is
+      // missing from nanobind's macOS symbol list (darwin-ld-cpython.sym), so
+      // the extension failed to link on macOS.
+      PyObject* exc = PyObject_CallFunctionObjArgs(type, text, nullptr);
       Py_DECREF(text);
       if (!exc) return;  // the constructor's error is set
       PyObject_SetAttrString(exc, "code", nb::str(r.code.c_str()).ptr());
