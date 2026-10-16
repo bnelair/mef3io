@@ -13,8 +13,8 @@ protect a recording.*
 
 **MEF 3.0 encryption protects the subject fields (name, ID, recording
 location) and the text of annotations. It does not protect the signal, or
-(in a session created by mef3io) when it was recorded, or the names of the
-session and its channels.**
+when it was recorded (unless the session uses a recording-time offset), or
+the names of the session and its channels.**
 Someone who has the files but no password can still decode every stored
 sample and see when each piece of the recording starts. Do not put
 identifying information (a patient's name or record number) in session,
@@ -45,8 +45,9 @@ So, **without any password**, anyone with the files can recover:
   unknown.
 - **The timing.** The start time and sample count of every block, and so
   the gaps and the sampling rate (samples per block divided by the time
-  between blocks). In a session created by mef3io these are real dates
-  and times. Only a session that uses meflib's recording-time offset shows
+  between blocks). In a session without a recording-time offset, which
+  includes every session mef3io creates, these are real dates and times.
+  Only a session that uses meflib's recording-time offset shows
   times of day instead, with the date in encrypted section 3; mef3io never
   creates such sessions (see [De-identification](anonymization.md)).
 - **When and what kind of annotation** was made, but not its text.
@@ -197,9 +198,10 @@ gate the signal itself: the samples are readable without any password (see
 
 - Password bytes, zero-padded to 16: meflib keeps the low byte of each
   character's Unicode code point and accepts at most 15 characters
-  (meflib.c:2439, meflib.h:260); mef3io currently keeps the last UTF-8 byte
-  of each character, up to 16 characters. The two agree on ASCII passwords
-  only ([#84](https://github.com/bnelair/mef3io/issues/84)).
+  (meflib.c:2439; the limit is enforced in `check_password`, meflib.c:1056,
+  meflib.h:260); mef3io currently keeps the last UTF-8 byte of each
+  character, up to 16 characters. The two are only guaranteed to agree on
+  ASCII passwords of at most 15 characters ([#84](https://github.com/bnelair/mef3io/issues/84)).
 - Level-1 validation field = `SHA256(L1_bytes)[:16]`.
 - Level-2 validation field = `SHA256(L2_bytes)[:16] XOR L1_bytes`.
 - Verifying a password: try it as L1 (does its SHA-256 prefix match the L1
