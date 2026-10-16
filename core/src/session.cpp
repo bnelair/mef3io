@@ -265,12 +265,6 @@ void Session::read_record_file(std::vector<Record>& out, const std::string& rdat
     auto uh = fmt::UniversalHeader::parse(bytes);
     crypto::AccessKeys keys = crypto::validate_password(
         password_, uh.level_1_password_validation_field, uh.level_2_password_validation_field);
-    if (keys.legacy_password_mapping) {
-      const auto where = source_->describe(rdat_path);
-      if (std::find(legacy_password_record_files_.begin(), legacy_password_record_files_.end(),
-                    where) == legacy_password_record_files_.end())
-        legacy_password_record_files_.push_back(where);
-    }
     bool offset_dependent = false;
     auto recs = parse_records(bytes, rto.value_or(0), keys, &offset_dependent);
     // A disputed offset only matters to times stored negated (offset
@@ -294,6 +288,14 @@ void Session::read_record_file(std::vector<Record>& out, const std::string& rdat
                                                ? ". records(level=\"channel\") and "
                                                  "records(level=\"segment\") still read"
                                                : "")));
+    // Only a file that was actually read: one that failed above is a problem,
+    // not a successful read through the old password mapping.
+    if (keys.legacy_password_mapping) {
+      const auto where = source_->describe(rdat_path);
+      if (std::find(legacy_password_record_files_.begin(), legacy_password_record_files_.end(),
+                    where) == legacy_password_record_files_.end())
+        legacy_password_record_files_.push_back(where);
+    }
     for (auto& rec : recs) {
       rec.level = level;
       rec.channel = channel;

@@ -26,6 +26,7 @@ from ._reader import (
     SessionDeclarationWarning,
     _declaration_warning_text,
     _warn_legacy_password,
+    _warning_on_legacy_records,
 )
 
 import numpy as np
@@ -49,6 +50,7 @@ class MefReader:
         warn_declarations: bool = True,
     ):
         self._r = _mef3io.Reader(str(session_path), password2 or "")
+        self._path_str = str(session_path)
         # The legacy drop-in is exactly the entry point people with legacy-
         # written sessions use, so it must carry the same open-time warning as
         # mef3io.Reader — otherwise the population most affected is the one
@@ -149,9 +151,10 @@ class MefReader:
         as the legacy API did.
         """
         try:
-            if channel is None:
-                return self._r.records()
-            return self._r.records(channel, level="channel")
+            with _warning_on_legacy_records(self._r, self._path_str, stacklevel=4):
+                if channel is None:
+                    return self._r.records()
+                return self._r.records(channel, level="channel")
         except Exception:
             print("WARNING: read of annotations record failed, no annotations returned")
             return None

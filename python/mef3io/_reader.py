@@ -3,6 +3,7 @@ backend). Thin: adds context-manager support and pandas-friendly helpers while
 delegating all real work to the backend."""
 from __future__ import annotations
 
+import contextlib
 import warnings
 from typing import Callable, Optional
 
@@ -127,6 +128,18 @@ def _warn_legacy_password(impl, path: str, stacklevel: int) -> None:
         shown = ", ".join(channels[:3]) + (", ..." if len(channels) > 3 else "")
         warnings.warn(_legacy_password_warning_text(f"{len(channels)} channel(s) ({shown})", path),
                       LegacyPasswordWarning, stacklevel=stacklevel + 1)
+
+
+@contextlib.contextmanager
+def _warning_on_legacy_records(impl, path: str, stacklevel: int):
+    """Warn about record files a records() call opened via the old mapping."""
+    before = len(impl.legacy_password_record_files())
+    yield
+    added = impl.legacy_password_record_files()[before:]
+    if added:
+        warnings.warn(_legacy_password_warning_text(
+            f"{len(added)} record file(s) (first: {added[0]})", path),
+            LegacyPasswordWarning, stacklevel=stacklevel)
 
 
 def _unreadable_warning_text(problems: list, path: str) -> str:
@@ -707,13 +720,8 @@ class Reader:
         """
         impl = self._ensure_impl()
         before = len(impl.problems())
-        legacy_before = len(impl.legacy_password_record_files())
-        out = impl.records(channel, segment, level)
-        legacy = impl.legacy_password_record_files()[legacy_before:]
-        if legacy:
-            warnings.warn(_legacy_password_warning_text(
-                f"{len(legacy)} record file(s) (first: {legacy[0]})", self._path),
-                LegacyPasswordWarning, stacklevel=2)
+        with _warning_on_legacy_records(impl, self._path, stacklevel=4):
+            out = impl.records(channel, segment, level)
         added = impl.problems()[before:]
         if added:
             # Lenient only (strict raises): a record file that could not be

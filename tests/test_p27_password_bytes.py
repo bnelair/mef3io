@@ -167,8 +167,13 @@ def test_old_record_files_warn_even_when_the_metadata_is_new(tmp_path, x):
         warnings.simplefilter("error", mef3io.LegacyPasswordWarning)
         r = mef3io.Reader(str(path), password=PW2)
     with r:
-        with pytest.warns(mef3io.LegacyPasswordWarning, match="1 record file"):
+        with pytest.warns(mef3io.LegacyPasswordWarning, match="1 record file") as rec:
             assert [a["text"] for a in r.records()] == ["old"]
+    assert rec[0].filename == __file__  # points at the caller
+    with pytest.warns(mef3io.LegacyPasswordWarning, match="1 record file") as rec:
+        anns = mef3io.MefReader(str(path), password2=PW2).get_annotations()
+    assert [a["text"] for a in anns] == ["old"]
+    assert rec[0].filename == __file__
 
 
 # --- writing: always meflib's rule ------------------------------------------------
@@ -216,3 +221,26 @@ def test_the_writer_is_silent_for_passwords_every_reader_accepts(tmp_path, x, pw
         warnings.simplefilter("error", mef3io.PasswordInteropWarning)
         _write(tmp_path / "w.mefd", pw, "lvl2", x)
 
+
+
+def test_a_damaged_old_record_file_is_a_problem_not_a_legacy_read(tmp_path, x):
+    old = tmp_path / "old.mefd"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", mef3io.PasswordInteropWarning)
+        w = mef3io.Writer(str(old), password1=_old_bytes_as_password(PW1),
+                          password2=_old_bytes_as_password(PW2))
+        w.write_int32("ch1", x, 0.5, START, FS)
+        w.write_annotations([{"time": START + 1_000_000, "text": "old"}])
+        w.close()
+    rdat = old / "old.rdat"
+    b = bytearray(rdat.read_bytes())
+    b[1024 + 24 + 2] ^= 0xFF  # inside the first record body: its CRC fails
+    rdat.write_bytes(bytes(b))
+    with pytest.warns(mef3io.LegacyPasswordWarning):  # the metadata, on open
+        r = mef3io.Reader(str(old), password=PW2, strict=False)
+    with r:
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            r.records()
+        assert [p["kind"] for p in r.problems] == ["records"]
+    assert not [w for w in rec if issubclass(w.category, mef3io.LegacyPasswordWarning)]
