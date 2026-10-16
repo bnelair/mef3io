@@ -5,7 +5,7 @@ promises: per-channel rates kept, samples within half a stored count, the start
 time converted with the zone the user names (and refused without one), EDF+
 annotations as Note/EDFA records, EDF+D gaps as NaN at the right time, and
 patient identity copied only on request. Needs the optional pyedflib
-(``pip install "mef3io[edf]"``); skipped cleanly without it.
+(``pip install pyedflib``; from mef3io 1.3 also ``"mef3io[edf]"``); skipped cleanly without it.
 """
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ def _shift_records(path, from_record, shift_s, discontinuous=True):
         rec = bytes(b[off:off + size])
         stamp = rec.split(b"\x14")[0]
         new = ("+%g" % (float(stamp) + shift_s)).encode() + rec[len(stamp):]
-        b[off:off + size] = new[:size]
+        b[off:off + size] = new.ljust(size, b"\0")[:size]
     Path(path).write_bytes(bytes(b))
 
 
@@ -239,3 +239,12 @@ def test_unfinished_and_truncated_files(tmp_path):
 @pytest.mark.parametrize("tz, hours", [("+1", 1), ("+01:00", 1), ("-05:30", -5.5), ("Z", 0), ("UTC", 0)])
 def test_fixed_offsets(tz, hours):
     assert ex.parse_timezone(tz).utcoffset(None) == dt.timedelta(hours=hours)
+
+
+def test_encrypted_session(tmp_path):
+    src, out = tmp_path / "e.edf", str(tmp_path / "e.mefd")
+    _write_edf(src)
+    res = ex.convert(src, out, "UTC", password1="one", password2="two")
+    ex.verify(out, res, password="two")
+    with pytest.raises(mef3io.PasswordError):
+        mef3io.Reader(out)

@@ -16,7 +16,7 @@ Install: `pip install mef3io` (Python 3.10+, numpy only). MATLAB: the mef3io-mat
 
 ## How-to
 
-- [Convert EDF, EDF+ or BDF to MEF 3.0](https://bnelair.github.io/mef3io/howto/edf_to_mef/): sampling rates, units, time zone, annotations, EDF+D gaps, patient fields, verification (`pip install "mef3io[edf]"`)
+- [Convert EDF, EDF+ or BDF to MEF 3.0](https://bnelair.github.io/mef3io/howto/edf_to_mef/): sampling rates, units, time zone, annotations, EDF+D gaps, patient fields, verification (needs pyedflib: `pip install pyedflib`, from 1.3 `pip install "mef3io[edf]"`)
 - [Read MEF 3.0 in Python](https://bnelair.github.io/mef3io/howto/read_python/): whole channel, time windows, gaps as NaN, passwords, .mefd.tar
 - [Read MEF 3.0 in MATLAB](https://bnelair.github.io/mef3io/howto/read_matlab/): the same in MATLAB
 - [Long recordings with gaps](https://bnelair.github.io/mef3io/howto/long_recordings/): how gaps are stored, finding them without reading samples, appending over days

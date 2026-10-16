@@ -232,8 +232,22 @@ def channel_name(label: str, taken: set) -> str:
     return name
 
 
-def convert(edf_path, mef_path, timezone=None, copy_patient=False, overwrite=False) -> dict:
-    """Write the session; returns what verify() needs."""
+def records_for(annotations, start_uutc):
+    """EDF+ annotations -> records: EDFA when there is a duration, else Note."""
+    return [{"type": "EDFA" if dur else "Note", "text": text,
+             "time": start_uutc + round(onset * 1e6),
+             **({"duration": round(dur * 1e6)} if dur else {})}
+            for onset, dur, text in annotations]
+
+
+def convert(edf_path, mef_path, timezone=None, copy_patient=False, overwrite=False,
+            password1="", password2="") -> dict:
+    """Write the session; returns what verify() needs.
+
+    Passwords: give both to encrypt the session (MEF 3.0 has no level-1-only
+    files), and the level-2 one to verify(). See docs/encryption_model.md.
+    """
+    keys = dict(password1=password1, password2=password2)
     if not timezone:
         raise ValueError(
             "EDF stores local time without a time zone. Pass the zone the "
@@ -241,7 +255,7 @@ def convert(edf_path, mef_path, timezone=None, copy_patient=False, overwrite=Fal
         )
     tz = parse_timezone(timezone)
     if overwrite:
-        mef3io.Writer(mef_path, overwrite=True).close()
+        mef3io.Writer(mef_path, overwrite=True, **keys).close()
     elif Path(mef_path).exists():
         raise FileExistsError(f"{mef_path} exists; pass overwrite=True to replace it")
 
@@ -263,7 +277,7 @@ def convert(edf_path, mef_path, timezone=None, copy_patient=False, overwrite=Fal
             acq = mef3io.Acquisition(channel_description="; ".join(filter(None, described)))
             md = mef3io.Metadata(subject=subject, acquisition=acq)
             # One Writer per channel, because the units label is per Writer.
-            with mef3io.Writer(mef_path, units=sig["units"], metadata=md) as w:
+            with mef3io.Writer(mef_path, units=sig["units"], metadata=md, **keys) as w:
                 for k0, k1 in chunks(edf):
                     physical = sig["read"](k0, k1) * sig["gain"] + sig["offset"]
                     if np.abs(physical).max(initial=0) * 10**p > INT32_MAX:
@@ -273,27 +287,23 @@ def convert(edf_path, mef_path, timezone=None, copy_patient=False, overwrite=Fal
             channels[name] = dict(index=edf["signals"].index(sig), precision=p, lowered=lowered)
 
         annotations = edf["annotations"]
-        with mef3io.Writer(mef_path) as w:  # EDF+ annotations -> session records
-            w.write_annotations([
-                {"type": "EDFA" if dur else "Note", "text": text,
-                 "time": start_uutc + round(onset * 1e6),
-                 **({"duration": round(dur * 1e6)} if dur else {})}
-                for onset, dur, text in annotations
-            ])
+        with mef3io.Writer(mef_path, **keys) as w:  # EDF+ annotations -> session records
+            w.write_annotations(records_for(annotations, start_uutc))
     return dict(edf_path=str(edf_path), start_uutc=start_uutc, channels=channels,
                 n_annotations=len(annotations))
 
 
 # --- 4. verify ----------------------------------------------------------------
-def verify(mef_path, result) -> None:
+def verify(mef_path, result, password="") -> None:
     """Re-read the EDF and the session, chunk by chunk, and compare.
 
     Checks: each stored count is no coarser than the EDF step (unless a warning
     said so), every sample within half a count, the right number of samples
-    (so nothing extra fills a gap), and every annotation present.
+    (so nothing extra fills a gap), and every annotation's time, type, text
+    and duration.
     """
     start_uutc = result["start_uutc"]
-    with open_edf(result["edf_path"]) as edf, mef3io.Reader(mef_path) as r:
+    with open_edf(result["edf_path"]) as edf, mef3io.Reader(mef_path, password) as r:
         for name, ch in result["channels"].items():
             sig, p = edf["signals"][ch["index"]], ch["precision"]
             if not ch["lowered"]:
@@ -308,7 +318,10 @@ def verify(mef_path, result) -> None:
                     f"{name}: max error {err}"
                 stored += len(want)
             assert r.info(name)["number_of_samples"] == stored, f"{name}: sample count"
-        assert len(r.records()) == result["n_annotations"]
+        key = lambda x: (x["time"], x["type"], x["text"], x.get("duration"))  # noqa: E731
+        got = sorted(map(key, r.records()))
+        assert got == sorted(map(key, records_for(edf["annotations"], start_uutc))), \
+            "annotations differ"
 
 
 # --- demo ---------------------------------------------------------------------

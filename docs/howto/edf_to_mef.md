@@ -4,13 +4,15 @@ description: "Convert an EDF, EDF+ or BDF recording to MEF 3.0 with mef3io and p
 
 # Convert EDF, EDF+ or BDF to MEF 3.0
 
+Download
+[`examples/12_edf_to_mef.py`](https://github.com/bnelair/mef3io/blob/main/examples/12_edf_to_mef.py)
+from the mef3io repository (pip does not install the examples), then:
+
 ```bash
 pip install mef3io pyedflib   # pyedflib reads EDF; from mef3io 1.3: pip install "mef3io[edf]"
 python 12_edf_to_mef.py recording.edf recording.mefd --timezone Europe/Prague
 ```
 
-The script is
-[`examples/12_edf_to_mef.py`](https://github.com/bnelair/mef3io/blob/main/examples/12_edf_to_mef.py).
 Run it without arguments to convert a small demo file first. It prints each
 channel and ends with `verified` once it has read the new session back and
 checked it against the values it reads from the EDF file:
@@ -96,7 +98,14 @@ record times are the first annotation of each record.
 
 The script converts one channel at a time, in pieces of ten minutes
 (`CHUNK_SECONDS`), so a recording of days needs no more memory than a short
-one. The check at the end reads the same way.
+one. The check at the end reads the same way. EDF stores all channels
+interleaved, so the file is read once per channel (and again by the check);
+it is fastest when the EDF file fits in the computer's memory cache.
+
+Each piece is written as its own block of data, and MEF 3.0 marks the first
+block of every write with a "possible break" flag. That flag appears every ten
+minutes in `Reader.toc()` even in a continuous recording; the block times show
+there is no gap ([more](long_recordings.md#finding-the-data-without-reading-it)).
 
 ## Patient identity is not copied
 
@@ -104,7 +113,8 @@ An EDF header holds the patient name, code, birth date and sex in plain text.
 The script **does not copy them** unless you pass `--copy-patient`, which
 copies the name and code into the subject fields. In a session without
 passwords those fields are readable by anyone with the files; to protect
-them, add `password1=` and `password2=` to the `Writer` calls
+them, encrypt the session: `convert(..., password1="...", password2="...")`
+and then `verify(..., password="<the level-2 password>")`
 ([what encryption protects](../encryption_model.md#what-encryption-protects)).
 
 Leaving the name out does not make a recording anonymous: the start date,
@@ -117,7 +127,7 @@ annotation text and file names can identify a person too. See
 checks per channel that every sample is within half a count of the EDF value
 at the same time, that each count is no coarser than the EDF step (unless a
 warning said so), that no extra samples fill a gap, and that every annotation
-was written. It uses the script's own EDF reading, so it confirms the
+was written with the same time, type, text and duration. It uses the script's own EDF reading, so it confirms the
 conversion, not the EDF reader. With mef3io 1.3 or later you can also look at
 the session without reading any samples:
 
