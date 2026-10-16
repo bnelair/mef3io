@@ -1,5 +1,5 @@
 site_name: mef3io
-site_description: MEF 3.0 read/write — one C++ core with Python and MATLAB bindings
+site_description: Read and write MEF 3.0 (Multiscale Electrophysiology Format) EEG, iEEG and ECG recordings from Python, MATLAB and C++ - one C++ core, compatible with meflib, pymef and mef_tools
 site_url: https://bnelair.github.io/mef3io/
 repo_url: https://github.com/bnelair/mef3io
 repo_name: bnelair/mef3io
@@ -54,6 +54,7 @@ plugins:
 nav:
   - Home: index.md
   - Getting started:
+      - MEF 3.0 for students: students.md
       - Install: install.md
       - Examples: examples.md
   - Guides:
@@ -73,6 +74,31 @@ nav:
       - Encryption model: encryption_model.md
       - Performance & legacy comparison: legacy_comparison.md
       - Benchmarks: benchmarks.md
+  - Release notes:
+      - All releases: release_notes/index.md
+      - "1.3.0": release_notes/1.3.0.md
+      - "1.2.0": release_notes/1.2.0.md
+      - "1.1.4": release_notes/1.1.4.md
+      - "1.1.3": release_notes/1.1.3.md
+      - "1.1.2": release_notes/1.1.2.md
+      - "1.1.1": release_notes/1.1.1.md
+      - "1.1.0": release_notes/1.1.0.md
+      - "1.0.1": release_notes/1.0.1.md
+      - "1.0.0": release_notes/1.0.0.md
+      - "0.3.0": release_notes/0.3.0.md
+      - "0.2.0": release_notes/0.2.0.md
   - Development:
       - Design & internals: design.md
       - Versioning & releases: releasing.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/bnelair/mef3io
+      name: mef3io on GitHub
+    - icon: material/application-outline
+      link: https://github.com/bnelair/mef3io-studio
+      name: mef3io-studio, a desktop app for MEF 3.0 recordings
+    - icon: material/server-network
+      link: https://github.com/bnelair/mef3io-server
+      name: mef3io-server, streams MEF 3.0 data to viewers

@@ -1,3 +1,7 @@
+---
+description: "MATLAB guide to mef3io: read and write MEF 3.0 (Multiscale Electrophysiology Format) recordings with the +mef3io Reader and Writer classes."
+---
+
 # MATLAB guide
 
 The MATLAB binding wraps the same C++ core as the Python package — identical
@@ -40,7 +44,11 @@ delete(w);                                            % or let it go out of scop
 
 `mef3io.Writer(path, ...)` name-value options: `Overwrite` (default false —
 an existing session is reopened for appending), `Password1`/`Password2`
-(both required for encryption), `Units`, `BlockLength`, `Threads`.
+(both required for encryption), `Units`, `BlockLength`, `Threads`,
+`Metadata` (below) and `Durability` (`'fast'`, the default, or `'full'`; see
+[Long recordings](long_recordings.md)). After an unclean shutdown with
+`'fast'`, `mef3io.recoverSession(path)` reports what is wrong (a dry run) and
+`mef3io.recoverSession(path, Apply=true)` fixes it.
 
 - **`write(channel, data, startUutc, fs, Precision=-1, NewSegment=false)`** —
   float path: NaN runs become gaps; `Precision` sets the conversion factor to
@@ -92,6 +100,11 @@ platform — the same encoding strings are read in with — rather than through
 the locale codepage, so non-ASCII annotations and subject names round-trip on
 Windows too. Bytes that are not valid UTF-8 become U+FFFD, as in Python.
 
+`mef3io.Reader(path, password, nThreads, strict)`: strict (`true`, the
+default) fails on a segment that cannot be read; `false` skips it, reads its
+span as NaN, raises the warning `mef3io:unreadableSegment`, and lists it in
+`r.problems()`.
+
 `info` returns `sampling_frequency`, `units_conversion_factor`,
 `units_description`, `start_time`/`end_time` (int64 uUTC),
 `number_of_samples` (stored samples; gaps not counted), `n_segments`,
@@ -107,6 +120,13 @@ for sharing and safe archiving:
 tarPath = mef3io.archiveSession('session.mefd');   % -> 'session.mefd.tar'
 r = mef3io.Reader(tarPath);                        % no extraction needed
 ```
+
+!!! note "A mef3io addition, not part of MEF 3.0"
+    meflib, pymef and mef_tools cannot open a `.mefd.tar` directly. It is a
+    plain uncompressed tar file, so it can always be unpacked:
+    `mef3io.extractSession`, `tar -xf session.mefd.tar` (built into Windows 10 and
+    later, macOS and Linux) or the free 7-Zip on Windows. The unpacked
+    `.mefd` folder works with the legacy tools.
 
 Windowed reads stay cheap (the archive is uncompressed, so only the needed
 byte ranges are fetched), and any tar tool restores the directory
@@ -126,9 +146,13 @@ Session naming is enforced at every entry point: directories must end
 `.mefd`, archives `.mefd.tar` — anything else is refused, so a stray
 directory or file can never be misread (or overwritten) as a session.
 
-## Not yet in MATLAB: cancelling and progress
+## Not in MATLAB: inspect, cancelling and progress
 
-The Python and C APIs can cancel a read or a long operation from another
+`mef3io.inspect` (a description of a session without reading its samples, see
+[the Python guide](python.md#inspecting-a-session-without-reading-its-samples))
+exists in Python and C++ only; neither MATLAB nor the C ABI has it yet.
+
+The Python, C++ and C APIs can cancel a read or a long operation from another
 thread and report its progress
 ([Cancelling and progress](python.md#cancelling-and-progress)). The MATLAB
 classes do not expose this yet: a MEX call blocks MATLAB's single interpreter

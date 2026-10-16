@@ -1,6 +1,7 @@
 # MATLAB API reference
 
-The MATLAB binding mirrors the [Python API](python.md) one-to-one — a parity
+The MATLAB binding mirrors the [Python API](python.md) for reading and writing (the
+exceptions are listed [at the end](#durability-and-recovery)) — a parity
 test (`matlab/test_api_parity.m`, run in CI) asserts that every public method
 of `mef3io.Reader` / `mef3io.Writer` corresponds to the Python method of the
 same name and carries help text, so the two never drift.
@@ -80,7 +81,10 @@ summary = mef3io.recoverSession(p);                        % dry run
 summary = mef3io.recoverSession(p, Apply=true);
 ```
 
-!!! note "Still Python-only"
+!!! note "Not in MATLAB"
     `Validator` / `validate_session` / `repair_session` have no MATLAB surface
-    yet (see issue #18). Reading, writing, appending, archiving, extracting and
-    recovering are at parity.
+    yet (see issue #18), and neither does `mef3io.inspect` (Python and C++
+    only). Cancelling and progress (`cancel=` / `progress=`, `CancelToken`)
+    are not offered either: a MEX call blocks MATLAB's only interpreter
+    thread, so nothing could cancel it. Reading, writing, appending,
+    archiving, extracting and recovering are at parity.

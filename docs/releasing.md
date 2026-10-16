@@ -29,8 +29,13 @@ release:
 - [ ] `pyproject.toml`: `description`, `keywords`, `classifiers`
 - [ ] `CITATION.cff`
 - [ ] the release notes: draft what changed and what an upgrading user must
-      do. The release workflow publishes GitHub's generated notes; replace
-      them with the reviewed draft (edit the release) as soon as it is out.
+      do in `docs/release_notes/X.Y.Z.md`, and add it to the release-notes
+      index and the `mkdocs.yml` nav (newest first). The release workflow
+      publishes GitHub's generated notes; replace them with the reviewed page
+      as soon as it is out: change its "Draft" line to `*Released
+      YYYY-MM-DD*`, then run
+      `gh release edit vX.Y.Z --notes-file docs/release_notes/X.Y.Z.md`
+      (links in these pages are absolute, so they work on GitHub too).
 
 Nothing in these may state a fact that goes stale on its own (test counts,
 "currently", dates of past work); link to the release notes instead.

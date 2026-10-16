@@ -1,3 +1,7 @@
+---
+description: "Python guide to mef3io: read and write MEF 3.0 EEG/iEEG recordings with Reader and Writer, inspect sessions, cancel long reads, tar archives and the mef_tools drop-in."
+---
+
 # Python guide
 
 ```python
@@ -11,8 +15,15 @@ Two API layers ship in the package:
   `mef_tools.io` code.
 
 Times everywhere are **uUTC**: microseconds since the Unix epoch, as `int`.
-Errors raise `RuntimeError` with the C++ message (e.g. wrong password, append
-conflicts, CRC failures).
+
+Errors from the core raise a subclass of `mef3io.MefError` carrying the C++
+message: `PasswordError` (missing or wrong password), `CrcError` (a checksum
+does not match), `FormatError` (not valid MEF 3.0), `IoError` (file system,
+naming) and `WriteConflictError` (a write that does not fit the session, such
+as an append that overlaps). `MefError` subclasses `RuntimeError`, so older
+`except RuntimeError` code keeps working. `mef3io.Cancelled` (see
+[Cancelling and progress](#cancelling-and-progress)) is deliberately not a
+`MefError`.
 
 ## Writing
 
@@ -22,7 +33,7 @@ with mef3io.Writer("session.mefd", overwrite=True, units="uV") as w:
 ```
 
 `Writer(path, overwrite=False, password1="", password2="", units=None,
-block_length=None, n_threads=0)`
+block_length=None, n_threads=0, metadata=None, durability="fast")`
 
 - `overwrite=True` deletes an existing session first. With
   `overwrite=False`, an existing session is **reopened for appending** —
@@ -67,6 +78,12 @@ block_length=None, n_threads=0)`
   segments. Each answer is kept for the Writer's lifetime, so every later
   one costs nothing. Keep one Writer open across an acquisition, as for
   appends.
+- `metadata=` sets subject and acquisition fields (see
+  [Session metadata](#session-metadata-subject-acquisition)).
+- `durability="fast"` (the default) writes without flushing to disk;
+  `durability="full"` adds the flushes that make an append survive a power
+  cut. After an unclean shutdown in fast mode, run `recover_session`. See
+  [Long recordings](long_recordings.md).
 - `block_length` overrides the RED block size (default: `fs` samples for
   fs ≥ 5000, else `10*fs`). `n_threads=0` uses all cores.
 
@@ -83,7 +100,7 @@ The first write to a channel creates segment 0; later writes **append
 in-segment** (extending the existing files, like the legacy writer);
 `new_segment=True` forces a fresh segment. Appends must match the segment's
 fs and conversion factor and start at/after its end time — violations raise
-`RuntimeError`.
+`WriteConflictError`.
 
 Returns a summary dict: `samples_written`, `blocks`, `gaps_skipped`,
 `segment`.
@@ -119,7 +136,8 @@ with mef3io.Reader("session.mefd") as r:          # password="..." if encrypted
     r.records("ch1")                              # ch1's channel- + segment-level ones
 ```
 
-`Reader(path, password="", backend="cpp", n_threads=0, cache=None)`
+`Reader(path, password="", backend="cpp", n_threads=0, cache=None,
+warn_declarations=True, strict=True)`
 
 - A **level-2 password** unlocks everything; a **level-1 password** reads the
   signal and technical metadata while section-3 subject metadata stays locked
@@ -128,6 +146,18 @@ with mef3io.Reader("session.mefd") as r:          # password="..." if encrypted
   encrypted session; that is mef3io's policy, not protection, because the
   samples themselves are not encrypted
   ([details](encryption_model.md#what-encryption-protects)).
+- `strict=True` (the default) raises when any segment cannot be read.
+  `strict=False` skips it instead: its time span reads back as NaN, it is
+  listed in `Reader.problems`, and an `UnreadableSegmentWarning` is raised.
+  Check `problems` before trusting such a read, because a skipped segment
+  looks exactly like a recording gap.
+- `warn_declarations=True` raises one `SessionDeclarationWarning` when the
+  session leaves buffer-size declarations unset (files from mef3io 1.1.2 and
+  earlier, and from the legacy stack). Reading with mef3io is unaffected; see
+  [Validating and repairing](validation.md).
+- A `BlockCopyWarning` means a block's index entry and its own header
+  disagree on its time or length. The header is used, as meflib and pymef do;
+  the detail is in `read_raw(...)["block_copy_mismatches"]`.
 
 ### `read(channel, t0=None, t1=None, n_threads=None, *, cancel=None, progress=None)`
 
@@ -417,6 +447,13 @@ left untouched, output is deterministic (same session ⇒ identical bytes), and
 any tar tool restores the directory (`tar -xf session.mefd.tar`). Foreign
 archives work too (GNU/bsdtar/`tarfile`, with or without directory entries);
 compressed input (`.tar.gz` etc.) is rejected with a clear error.
+
+!!! note "A mef3io addition, not part of MEF 3.0"
+    meflib, pymef and mef_tools cannot open a `.mefd.tar` directly. It is a
+    plain uncompressed tar file, so it can always be unpacked:
+    `extract_session`, `tar -xf session.mefd.tar` (built into Windows 10 and
+    later, macOS and Linux) or the free 7-Zip on Windows. The unpacked
+    `.mefd` folder works with the legacy tools.
 
 Tar sessions are **read-only**: `Writer` refuses `.tar` paths. To modify one,
 unpack it first — `extract_session` is the exact inverse (archive → extract →

@@ -1,3 +1,7 @@
+---
+description: "Recording for days to months in MEF 3.0 with mef3io: appends that cost only the new data, durability settings, and recovery after a crash."
+---
+
 # Long recordings: days to months
 
 The workload mef3io is built around is not "write a file". It is **a session
