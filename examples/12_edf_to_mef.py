@@ -164,6 +164,8 @@ def open_discontinuous(path: str):
                     for text in filter(None, texts):
                         annotations.append((float(onset), float(dur) if dur else None, text))
             onsets = np.array(times) if onsets is None else onsets
+            if len(onsets) != nrec:
+                raise ValueError(f"{path}: {nrec - len(onsets)} data record(s) have no time stamp")
             continue  # (an EDF+D file always has an annotation signal)
         signals.append(_signal(labels[i], nsamp[i] / record_s, units[i], pmin[i], pmax[i],
                                dmin[i], dmax[i], lambda k0, k1, i=i: read(i, k0, k1),
@@ -259,6 +261,8 @@ def convert(edf_path, mef_path, timezone=None, copy_patient=False, overwrite=Fal
         raise FileExistsError(f"{mef_path} exists; pass overwrite=True to replace it")
 
     with open_edf(str(edf_path)) as edf:  # opened first: a bad path deletes nothing
+        if edf["record_s"] <= 0:
+            raise ValueError(f"{edf_path} holds annotations only, no signal data")
         if overwrite:
             mef3io.Writer(mef_path, overwrite=True, **keys).close()
         start_uutc = local_to_uutc(edf["start"], tz)

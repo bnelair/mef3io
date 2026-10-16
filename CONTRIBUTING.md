@@ -51,7 +51,8 @@ design).
   — `test_mef3io.m`) and keep them green.
 - Match the surrounding style (the C++ is close to the MEF/meflib spec naming;
   keep offset tables faithful to the format).
-- CI must pass: it builds and tests on Linux/macOS across Python 3.10–3.14.
+- CI must pass: it builds and tests on Linux, macOS and Windows across
+  Python 3.10–3.14.
 
 ## Documentation rules
 

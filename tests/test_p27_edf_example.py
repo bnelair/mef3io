@@ -288,3 +288,18 @@ def test_encrypted_session(tmp_path):
     ex.verify(out, res, password="two")
     with pytest.raises(mef3io.PasswordError):
         mef3io.Reader(out)
+
+
+def test_discontinuous_record_without_time_stamp_fails_clearly(tmp_path):
+    src = tmp_path / "b.edf"
+    _write_edf(src)
+    _shift_records(src, 0, 0)
+    b = bytearray(src.read_bytes())
+    ns, hb = int(b[252:256]), int(b[184:192])
+    nsamp = [int(b[256 + ns * 216 + 8 * i:256 + ns * 216 + 8 * i + 8]) for i in range(ns)]
+    off = hb + 2 * sum(nsamp) * 2 + sum(nsamp[:-1]) * 2  # record 2, annotation signal (last)
+    b[off:off + nsamp[-1] * 2] = bytes(nsamp[-1] * 2)
+    src.write_bytes(bytes(b))
+    with pytest.raises(ValueError, match="no time stamp"):
+        with ex.open_edf(str(src)):
+            pass
