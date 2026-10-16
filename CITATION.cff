@@ -7,6 +7,10 @@ authors:
   - family-names: "Mivalt"
     given-names: "Filip"
     affiliation: "Bioelectronics Neurophysiology and Engineering Laboratory (BNEL), Mayo Clinic"
+  - family-names: "Sladky"
+    given-names: "Vladimir"
+  - family-names: "Křemen"
+    given-names: "Václav"
 references:
   - type: article
     title: "Large-scale electrophysiology: acquisition, compression, encryption, and storage of big data"
