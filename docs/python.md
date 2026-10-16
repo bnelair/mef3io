@@ -43,6 +43,13 @@ block_length=None, n_threads=0, metadata=None, durability="fast")`
   fields, technical metadata and annotation text, **not the samples or their
   timing**, which decode without a password; see
   [What encryption protects](encryption_model.md#what-encryption-protects).
+  Passwords are keyed exactly as meflib keys them, so a session opens with
+  the same password in pymef and `mef_tools`. A password longer than 15
+  characters (or 15 UTF-8 bytes), or one with a character above U+00FF,
+  raises a `PasswordInteropWarning`; a session that mef3io 1.2.0 or earlier
+  encrypted with a non-ASCII password still opens, with a
+  `LegacyPasswordWarning` (see
+  [password derivation](encryption_model.md#passwordkey-derivation-for-completeness)).
 - **Appending to an encrypted session needs the level-2 password.** That
   includes sessions at offset 0. Section 3, which holds the recording-time
   offset every new time is stored against, is level-2 encrypted, and without

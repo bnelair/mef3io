@@ -19,6 +19,9 @@ struct TimeSeriesMetadata {
   /// false only from load_time_series_metadata_partial opened with no
   /// password on an encrypted section 2 (section2 then holds defaults).
   bool section2_available = true;
+  /// The password matched only through the byte mapping of mef3io 1.2.0 and earlier
+  /// (crypto::extract_password_bytes_legacy, issue #84).
+  bool legacy_password_mapping = false;
 };
 
 /// Just the recording-time offset of a .tmet record (the first

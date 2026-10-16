@@ -195,9 +195,20 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   key, by password presence. "Level-1 only" is not a valid file. Decrypt a
   section only when its stored level is strictly positive; unencrypted files
   carry -1/-2 (`0xFF`/`0xFE`). See docs/encryption_model.md.
-- **Password scheme**: bytes = terminal byte of each UTF-8 char, 16, zero-pad.
-  L1 field = SHA256(L1)[:16]; L2 field = SHA256(L2)[:16] XOR L1. L2 access
-  derives putative L1 = SHA256(pwd)[:16] XOR L2field, checks its hash.
+- **Password scheme**: bytes = LOW BYTE OF EACH CHARACTER'S UNICODE CODE
+  POINT (meflib `extract_terminal_password_bytes` via `UTF8_nextchar`,
+  meflib.c:2439/8855; "é" -> 0xE9), 16, zero-pad. NOT the last UTF-8 byte —
+  that was mef3io <= 1.2.0's bug (#84): equal on ASCII, wrong on everything
+  else. Chars > U+00FF collide (low byte only) — matched exactly, warned on
+  write (`PasswordInteropWarning`, also > 15 chars / > 15 UTF-8 bytes: pymef
+  strcpy's into a 16-byte buffer). L1 field = SHA256(L1)[:16]; L2 field =
+  SHA256(L2)[:16] XOR L1. L2 access derives putative L1 = SHA256(pwd)[:16]
+  XOR L2field, checks its hash. READ FALLBACK (`validate_password`): meflib
+  rule first; only if it fails AND the legacy bytes differ, the old
+  last-UTF-8-byte rule (`extract_password_bytes_legacy`), which sets
+  `AccessKeys::legacy_password_mapping` -> `LegacyPasswordWarning` /
+  `mef3io:legacyPassword`. Never WRITE with the old rule; an append to an
+  old segment keeps its keys (and warns), new segments use meflib's.
 - **RED data blocks are UNENCRYPTED** even in encrypted sessions (meflib
   default); only metadata s2/s3 and record bodies are encrypted.
 - **Index file_offset is FILE-relative** (includes the 1024 B UH); first block

@@ -113,6 +113,19 @@ int mef3io_reader_problem(mef3io_reader* r, int32_t index, mef3io_segment_proble
  * separate call so mef3io_segment_problem keeps its size and layout.) */
 int mef3io_reader_problem_kind(mef3io_reader* r, int32_t index, int32_t* out);
 
+/* Number of channels the password opened only through the password-to-key
+ * mapping mef3io used up to 1.2.0 (issue #84): the session was encrypted by an
+ * older mef3io with a non-ASCII password, and meflib/pymef cannot open it with
+ * that password. 0 for everything else. Bindings surface it as a warning. */
+int mef3io_reader_n_legacy_password_channels(mef3io_reader* r, int32_t* out);
+/* The same for record (.rdat) files read so far; grows as records are read. */
+int mef3io_reader_n_legacy_password_record_files(mef3io_reader* r, int32_t* out);
+
+/* Why `password` will not behave as expected in other MEF readers (more than
+ * 15 characters, or a character above U+00FF), copied into `buf`; an empty
+ * string when it is fine. Writers surface it as a warning; they never refuse. */
+int mef3io_password_interop_issue(const char* password, char* buf, size_t buf_bytes);
+
 int mef3io_reader_n_channels(mef3io_reader* r, int32_t* out);
 int mef3io_reader_channel_name(mef3io_reader* r, int32_t index, char* buf, size_t buf_bytes);
 
@@ -397,6 +410,14 @@ int mef3io_writer_set_durable(mef3io_writer* w, int durable);
 int mef3io_writer_n_unreadable_metadata(mef3io_writer* w, int32_t* out);
 int mef3io_writer_unreadable_metadata(mef3io_writer* w, int32_t index, char* buf,
                                       size_t buf_bytes);
+
+/* Segments (.tmet paths) this writer appended to whose password matched only
+ * through the password mapping of mef3io 1.2.0 and earlier (issue #84). They keep their
+ * existing keys; new segments use meflib's mapping. Grows over the writer's
+ * life; deduplicated. */
+int mef3io_writer_n_legacy_password_segments(mef3io_writer* w, int32_t* out);
+int mef3io_writer_legacy_password_segment(mef3io_writer* w, int32_t index, char* buf,
+                                          size_t buf_bytes);
 
 typedef struct {
   int64_t samples_written;

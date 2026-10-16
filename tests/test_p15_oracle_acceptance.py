@@ -274,6 +274,59 @@ def test_mef3io_reads_an_encrypted_mef_tools_session(tmp_path):
     np.testing.assert_allclose(np.nan_to_num(ours[:n]), np.nan_to_num(legacy[:n]), atol=1e-6)
 
 
+# Non-ASCII passwords (#84). meflib keys each character by the LOW BYTE OF ITS
+# CODE POINT; mef3io used to take the last UTF-8 byte, so none of these
+# interoperated in either direction. Kept at <= 15 UTF-8 bytes: pymef copies a
+# password into a 16-byte stack buffer (pymef3_file.c), so a longer one is
+# undefined behaviour in the ORACLE, not a test of mef3io. "ÿ" is the Latin-1
+# boundary (U+00FF); "Ł"/"Ż"/"€" are above it, where only the low byte counts.
+NON_ASCII_PASSWORDS = [
+    ("bé", "Ünïcödé"),
+    ("ÿ1", "ü2y"),
+    ("Łódź", "Żółw€"),
+]
+
+
+@pytest.mark.filterwarnings("ignore::mef3io.PasswordInteropWarning")  # chars > U+00FF
+@pytest.mark.parametrize("pw1,pw2", NON_ASCII_PASSWORDS)
+def test_legacy_reads_a_mef3io_session_with_a_non_ascii_password(tmp_path, pw1, pw2):
+    path = tmp_path / "enc_utf8.mefd"
+    x = np.random.default_rng(84).integers(-8000, 8000, 2000, dtype=np.int32)
+    w = mef3io.Writer(str(path), password1=pw1, password2=pw2)
+    w.write_int32("ch1", x, 0.5, START, FS)
+    w.close()
+
+    # Level 2 only: pymef crashes on ANY level-1-only password, ASCII included
+    # (meflib puts that key in level_2_encryption_key, meflib.c:5080). The L2
+    # check covers the L1 mapping too: meflib accepts the L2 password only if
+    # SHA-256 of the L1 BYTES it recovers matches the L1 field mef3io wrote.
+    got = _pymef_samples(path, "ch1", len(x), password=pw2)
+    np.testing.assert_array_equal(got.astype(np.int32), x)
+    assert np.asarray(MefReader(str(path), password2=pw2).get_data("ch1")).size >= len(x)
+
+
+@pytest.mark.parametrize("pw1,pw2", NON_ASCII_PASSWORDS)
+def test_mef3io_reads_a_mef_tools_session_with_a_non_ascii_password(tmp_path, pw1, pw2):
+    path = tmp_path / "legacy_enc_utf8.mefd"
+    x = np.random.default_rng(48).integers(-7000, 7000, 2000, dtype=np.int32)
+    writer = MefWriter(str(path), overwrite=True, password1=pw1, password2=pw2)
+    writer.write_data(x, "ch1", START, FS)
+    del writer
+    legacy = np.asarray(MefReader(str(path), password2=pw2).get_data("ch1")).ravel()
+
+    with warnings.catch_warnings():
+        # Keyed by meflib, so the legacy-mapping fallback must NOT be what opens it.
+        warnings.simplefilter("error", mef3io.LegacyPasswordWarning)
+        with mef3io.Reader(str(path), password=pw2) as r:
+            ours = r.read("ch1")
+            assert r.metadata.subject is not None  # section 3 decrypted
+        with mef3io.Reader(str(path), password=pw1) as r:
+            ours_l1 = r.read("ch1")
+    n = min(len(legacy), len(ours))
+    np.testing.assert_allclose(np.nan_to_num(ours[:n]), np.nan_to_num(legacy[:n]), atol=1e-6)
+    np.testing.assert_array_equal(np.nan_to_num(ours_l1), np.nan_to_num(ours))
+
+
 # --- C. mixed sequences: each stack modifying the other's session ------------
 
 

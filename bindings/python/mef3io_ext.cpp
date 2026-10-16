@@ -703,6 +703,12 @@ NB_MODULE(_mef3io, m) {
     auto b = mef3io::crypto::extract_password_bytes(p);
     return to_bytes(b);
   });
+  m.def("extract_password_bytes_legacy", [](const std::string& p) {
+    auto b = mef3io::crypto::extract_password_bytes_legacy(p);
+    return to_bytes(b);
+  });
+  m.def("password_interop_issue", &mef3io::crypto::password_interop_issue, nb::arg("password"),
+        "Why a password will not behave as expected in other MEF readers, or \"\".");
 
   // validate_password reads 16 bytes from each validation field; a shorter
   // Python bytes object would be an out-of-bounds read, so these test helpers
@@ -932,6 +938,8 @@ NB_MODULE(_mef3io, m) {
       .def("set_units", &mef3io::SessionWriter::set_units)
       .def_prop_ro("unreadable_metadata",
                    [](const mef3io::SessionWriter& w) { return w.unreadable_metadata(); })
+      .def_prop_ro("legacy_password_segments",
+                   [](const mef3io::SessionWriter& w) { return w.legacy_password_segments(); })
       .def("set_threads", &mef3io::SessionWriter::set_threads)
           .def("set_durable", &mef3io::SessionWriter::set_durable, nb::arg("durable"))
       .def(
@@ -1073,6 +1081,21 @@ NB_MODULE(_mef3io, m) {
           },
           "Whether any segment's metadata is encrypted. The warm-start cache "
           "never snapshots such a session.")
+      .def(
+          "legacy_password_channels",
+          [](mef3io::Reader& r) {
+            std::vector<std::string> out;
+            for (const auto& ch : r.channels())
+              if (r.info(ch).legacy_password_mapping) out.push_back(ch);
+            return out;
+          },
+          "Channels whose metadata the password opened only through the byte "
+          "mapping mef3io used up to 1.2.0 (issue #84).")
+      .def(
+          "legacy_password_record_files",
+          [](mef3io::Reader& r) { return r.legacy_password_record_files(); },
+          "Record files read so far that the password opened only through the "
+          "byte mapping mef3io used up to 1.2.0 (issue #84).")
       .def(
           "declaration_issues",
           [](mef3io::Reader& r) {

@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "mef3io/control.hpp"
+#include "mef3io/crypto.hpp"
 #include "mef3io/errors.hpp"
 #include "mef3io/reader.hpp"
 #include "mef3io/records.hpp"
@@ -173,6 +174,27 @@ void mef3io_reader_close(mef3io_reader* r) { delete r; }
 int mef3io_reader_n_problems(mef3io_reader* r, int32_t* out) {
   if (!r || !out) return fail_argument("NULL argument");
   return guarded([&] { *out = static_cast<int32_t>(r->impl.problems().size()); });
+}
+
+int mef3io_reader_n_legacy_password_channels(mef3io_reader* r, int32_t* out) {
+  if (!r || !out) return fail_argument("NULL argument");
+  return guarded([&] {
+    int32_t n = 0;
+    for (const auto& ch : r->impl.channels())
+      if (r->impl.info(ch).legacy_password_mapping) ++n;
+    *out = n;
+  });
+}
+
+int mef3io_reader_n_legacy_password_record_files(mef3io_reader* r, int32_t* out) {
+  if (!r || !out) return fail_argument("NULL argument");
+  return guarded(
+      [&] { *out = static_cast<int32_t>(r->impl.legacy_password_record_files().size()); });
+}
+
+int mef3io_password_interop_issue(const char* password, char* buf, size_t buf_bytes) {
+  if (!password || !buf) return fail_argument("NULL argument");
+  return guarded([&] { copy_str(buf, buf_bytes, mef3io::crypto::password_interop_issue(password)); });
 }
 
 int mef3io_reader_problem(mef3io_reader* r, int32_t index, mef3io_segment_problem* out) {
@@ -520,6 +542,22 @@ int mef3io_writer_unreadable_metadata(mef3io_writer* w, int32_t index, char* buf
     const auto& u = w->impl.unreadable_metadata();
     if (index < 0 || static_cast<size_t>(index) >= u.size())
       throw std::out_of_range("unreadable-metadata index out of range");
+    copy_str(buf, buf_bytes, u[static_cast<size_t>(index)]);
+  });
+}
+
+int mef3io_writer_n_legacy_password_segments(mef3io_writer* w, int32_t* out) {
+  if (!w || !out) return fail_argument("NULL argument");
+  return guarded([&] { *out = static_cast<int32_t>(w->impl.legacy_password_segments().size()); });
+}
+
+int mef3io_writer_legacy_password_segment(mef3io_writer* w, int32_t index, char* buf,
+                                          size_t buf_bytes) {
+  if (!w || !buf) return fail_argument("NULL argument");
+  return guarded([&] {
+    const auto& u = w->impl.legacy_password_segments();
+    if (index < 0 || static_cast<size_t>(index) >= u.size())
+      throw std::out_of_range("legacy-password segment index out of range");
     copy_str(buf, buf_bytes, u[static_cast<size_t>(index)]);
   });
 }

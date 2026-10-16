@@ -117,6 +117,7 @@ void Session::load_channel_basic_info(const std::string& name, Channel& ch) {
     }
     info.number_of_samples += md.section2.number_of_samples;
     if (md.universal_header.is_password_protected()) info.password_protected = true;
+    if (md.legacy_password_mapping) info.legacy_password_mapping = true;
     });
     if (ok) ++readable;
   }
@@ -287,6 +288,14 @@ void Session::read_record_file(std::vector<Record>& out, const std::string& rdat
                                                ? ". records(level=\"channel\") and "
                                                  "records(level=\"segment\") still read"
                                                : "")));
+    // Only a file that was actually read: one that failed above is a problem,
+    // not a successful read through the old password mapping.
+    if (keys.legacy_password_mapping) {
+      const auto where = source_->describe(rdat_path);
+      if (std::find(legacy_password_record_files_.begin(), legacy_password_record_files_.end(),
+                    where) == legacy_password_record_files_.end())
+        legacy_password_record_files_.push_back(where);
+    }
     for (auto& rec : recs) {
       rec.level = level;
       rec.channel = channel;

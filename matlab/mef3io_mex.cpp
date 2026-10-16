@@ -326,6 +326,28 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     }
     return;
   }
+  if (cmd == "reader_legacy_password_channels") {
+    need_args(nrhs, 2, "reader_legacy_password_channels");
+    int32_t n = 0;
+    check(mef3io_reader_n_legacy_password_channels(get_reader(prhs[1]), &n));
+    plhs[0] = mxCreateDoubleScalar(n);
+    return;
+  }
+  if (cmd == "reader_legacy_password_record_files") {
+    need_args(nrhs, 2, "reader_legacy_password_record_files");
+    int32_t n = 0;
+    check(mef3io_reader_n_legacy_password_record_files(get_reader(prhs[1]), &n));
+    plhs[0] = mxCreateDoubleScalar(n);
+    return;
+  }
+  if (cmd == "password_interop_issue") {
+    need_args(nrhs, 2, "password_interop_issue");
+    std::string pw = get_string(prhs[1], "password");
+    char buf[1024] = {0};
+    check(mef3io_password_interop_issue(pw.c_str(), buf, sizeof buf));
+    plhs[0] = make_utf8_string(buf);
+    return;
+  }
   if (cmd == "reader_close") {
     need_args(nrhs, 2, "reader_close");
     mef3io_reader* r = get_reader(prhs[1]);
@@ -765,6 +787,19 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     for (std::int32_t i = 0; i < n; ++i) {
       char buf[4096] = {0};
       check(mef3io_writer_unreadable_metadata(w, i, buf, sizeof buf));
+      mxSetCell(plhs[0], static_cast<mwIndex>(i), make_utf8_string(buf));
+    }
+    return;
+  }
+  if (cmd == "writer_legacy_password_segments") {
+    need_args(nrhs, 2, "writer_legacy_password_segments");
+    mef3io_writer* w = get_writer(prhs[1]);
+    std::int32_t n = 0;
+    check(mef3io_writer_n_legacy_password_segments(w, &n));
+    plhs[0] = mxCreateCellMatrix(static_cast<mwSize>(n), 1);
+    for (std::int32_t i = 0; i < n; ++i) {
+      char buf[4096] = {0};
+      check(mef3io_writer_legacy_password_segment(w, i, buf, sizeof buf));
       mxSetCell(plhs[0], static_cast<mwIndex>(i), make_utf8_string(buf));
     }
     return;

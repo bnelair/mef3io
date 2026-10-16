@@ -114,6 +114,33 @@ gotError = false;
 try mef3io.Reader(encPath, 'wrong'); catch, gotError = true; end
 assert(gotError, 'wrong password must be rejected');
 
+% ---- non-ASCII passwords (#84): meflib's mapping, legacy fallback ---------
+% char(233) = 'é'. A session keyed by mef3io <= 1.2.0 for 'bé' is reproduced
+% exactly by keying with char([98 169]) ('b©'): meflib maps © to 0xA9, the
+% byte the old mapping took for é.
+utfPath = fullfile(sessionDir, 'matlab_utf8.mefd');
+pw1 = ['b' char(233)]; pw2 = ['x' char(252) 'y'];      % 'bé', 'xüy'
+w = mef3io.Writer(utfPath, Overwrite=true, Password1=pw1, Password2=pw2);
+w.write('ch1', x, start, fs, Precision=3);
+delete(w);
+lastwarn('');
+r = mef3io.Reader(utfPath, pw2);
+[~, wid] = lastwarn();
+assert(~strcmp(wid, 'mef3io:legacyPassword'), 'a new session must not need the fallback');
+assert(isequaln(r.read('ch1'), yEnc));
+delete(r);
+oldPath = fullfile(sessionDir, 'matlab_utf8_old.mefd');
+w = mef3io.Writer(oldPath, Overwrite=true, Password1=['b' char(169)], ...
+                  Password2=['x' char(188) 'y']);       % old bytes of 'bé' / 'xüy'
+w.write('ch1', x, start, fs, Precision=3);
+delete(w);
+lastwarn('');
+r = mef3io.Reader(oldPath, pw2);
+[~, wid] = lastwarn();
+assert(strcmp(wid, 'mef3io:legacyPassword'), 'an old-mapping session must warn');
+assert(isequaln(r.read('ch1'), yEnc));
+delete(r);
+
 % ---- input flexibility: types are coerced, edge windows are legal ----------
 flexPath = fullfile(sessionDir, 'matlab_flex.mefd');
 w = mef3io.Writer(flexPath, Overwrite=true);
