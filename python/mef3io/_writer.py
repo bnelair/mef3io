@@ -52,6 +52,46 @@ def warn_unreadable_metadata(entries, stacklevel=3, path=None):
             path=path, details=entries, stacklevel=stacklevel)
 
 
+def password_interop_issue(password: str) -> "str | None":
+    """Why a password will not behave as expected in other MEF readers, or None.
+
+    The same rule :class:`Writer` (and :func:`mef3io.anonymize_session`) use
+    for :class:`PasswordInteropWarning`, so an application can warn before it
+    writes. A password has an issue when it has:
+
+    * more than 15 characters: meflib and pymef refuse it, so only mef3io
+      opens the session;
+    * more than 15 bytes in UTF-8: pymef (and so mef_tools) copies it into a
+      16-byte buffer;
+    * a character above U+00FF: MEF keeps only the low byte of each
+      character's code point, so a different password with the same low bytes
+      also opens the session.
+
+    mef3io itself writes and reads such a password correctly.
+
+    Parameters
+    ----------
+    password : str
+
+    Returns
+    -------
+    str or None
+        The reason in plain words (it never repeats the password), or None
+        when the password interoperates.
+
+    Examples
+    --------
+    >>> mef3io.password_interop_issue("secret")
+    >>> mef3io.password_interop_issue("a" * 20)  # doctest: +ELLIPSIS
+    'it has 20 characters; meflib and pymef refuse passwords longer than 15 characters, ...'
+    """
+    from . import _mef3io
+
+    if not isinstance(password, str):
+        raise TypeError("password must be a str")
+    return _mef3io.password_interop_issue(password) or None
+
+
 def warn_password_interop(password1, password2, stacklevel=3, path=None):
     """Warn about a password other MEF readers will not handle as expected."""
     from . import _mef3io

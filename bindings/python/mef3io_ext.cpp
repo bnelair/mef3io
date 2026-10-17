@@ -2,6 +2,7 @@
 // (crc + version) to prove the toolchain end to end.
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
@@ -29,6 +30,7 @@
 #include "mef3io/writer.hpp"
 
 #include <cmath>
+#include <cstring>
 #include <algorithm>
 #include <filesystem>
 
@@ -408,6 +410,28 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
 }  // namespace
 
 namespace {
+template <class T>
+nb::object opt_or_none(const std::optional<T>& v) {
+  return v ? nb::cast(*v) : nb::none();
+}
+
+nb::object str_or_none(const std::string& v) {
+  if (v.empty()) return nb::none();
+  return nb::str(v.c_str());
+}
+
+/// details of a refusal, as on the raised exception and in CheckReport.
+nb::dict refusal_details(const mef3io::AnonymizeRefusal& r) {
+  nb::dict d;
+  d["channel"] = str_or_none(r.channel);
+  d["field"] = str_or_none(r.field);
+  d["inspect_code"] = str_or_none(r.inspect_code);
+  return d;
+}
+
+// The Python exception type of each RefusalKind (set once in NB_MODULE).
+PyObject* g_refusal_types[6] = {};
+
 nb::dict verify_report_dict(const mef3io::VerifyReport& r) {
   auto issues = [](const std::vector<mef3io::VerifyIssue>& v) {
     nb::list l;
@@ -548,6 +572,41 @@ NB_MODULE(_mef3io, m) {
   // that catches MefError to report a damaged file must not catch it.
   static nb::exception<mef3io::Cancelled> cancelled_error(m, "Cancelled", PyExc_Exception);
 
+  // anonymize refusals (#111): the exception type they always had, plus
+  // `.code` (stable) and `.details` (channel, field, inspect_code). Registered
+  // LAST so it is tried FIRST (nanobind tries translators in reverse order).
+  g_refusal_types[static_cast<int>(mef3io::RefusalKind::InvalidArgument)] = PyExc_ValueError;
+  g_refusal_types[static_cast<int>(mef3io::RefusalKind::Io)] = io_error.ptr();
+  g_refusal_types[static_cast<int>(mef3io::RefusalKind::WriteConflict)] = write_conflict_error.ptr();
+  g_refusal_types[static_cast<int>(mef3io::RefusalKind::Password)] = password_error.ptr();
+  g_refusal_types[static_cast<int>(mef3io::RefusalKind::Format)] = format_error.ptr();
+  g_refusal_types[static_cast<int>(mef3io::RefusalKind::Crc)] = crc_error.ptr();
+  nb::register_exception_translator([](const std::exception_ptr& p, void*) {
+    try {
+      std::rethrow_exception(p);
+    } catch (const mef3io::AnonymizeError& e) {
+      const auto& r = e.refusal();
+      PyObject* type = g_refusal_types[static_cast<int>(r.kind)];
+      const auto* se = dynamic_cast<const std::exception*>(&e);
+      const char* msg = se ? se->what() : r.message.c_str();
+      // "replace": a message holding a non-UTF-8 path must still raise the
+      // refusal (with its code), not a UnicodeDecodeError.
+      PyObject* text = PyUnicode_DecodeUTF8(msg, static_cast<Py_ssize_t>(std::strlen(msg)),
+                                            "replace");
+      if (!text) return;
+      // PyObject_CallFunctionObjArgs, not PyObject_CallOneArg: the latter is
+      // missing from nanobind's macOS symbol list (darwin-ld-cpython.sym), so
+      // the extension failed to link on macOS.
+      PyObject* exc = PyObject_CallFunctionObjArgs(type, text, nullptr);
+      Py_DECREF(text);
+      if (!exc) return;  // the constructor's error is set
+      PyObject_SetAttrString(exc, "code", nb::str(r.code.c_str()).ptr());
+      PyObject_SetAttrString(exc, "details", refusal_details(r).ptr());
+      PyErr_SetObject(type, exc);
+      Py_DECREF(exc);
+    }
+  });
+
   nb::class_<mef3io::CancelToken>(m, "CancelToken")
       .def(nb::init<>())
       .def("cancel", &mef3io::CancelToken::cancel, "Request cancellation (any thread).")
@@ -625,6 +684,64 @@ NB_MODULE(_mef3io, m) {
 
   // --- anonymize (#70): a de-identified copy, every time shifted ---
   m.def(
+      "check_anonymize",
+      [](const std::string& src, const std::string& dst, std::optional<std::int64_t> shift_us,
+         const std::string& pseudonym, const std::string& text, bool has_text_fn, bool rename,
+         const std::string& password, const std::string& output_password_1,
+         const std::string& output_password_2, std::vector<std::string> channels,
+         std::vector<std::string> exclude_channels, const mef3io::CancelToken* cancel) {
+        PyHooks hooks(cancel, nb::none());
+        mef3io::AnonymizeOptions o;
+        o.shift_us = shift_us.value_or(0);
+        o.pseudonym = pseudonym;
+        if (text == "drop") o.text = mef3io::RecordTextPolicy::Drop;
+        else if (text == "keep") o.text = mef3io::RecordTextPolicy::Keep;
+        else if (text == "callback") o.text = mef3io::RecordTextPolicy::Callback;
+        else throw nb::value_error("text must be 'drop', 'keep' or a callable");
+        // The check never calls it; it only needs to know there is one.
+        if (has_text_fn)
+          o.text_fn = [](const std::string& v, const mef3io::RecordTextField&) { return v; };
+        o.rename = rename;
+        o.password = password;
+        o.output_password_1 = output_password_1;
+        o.output_password_2 = output_password_2;
+        o.channels = std::move(channels);
+        o.exclude_channels = std::move(exclude_channels);
+        mef3io::AnonymizeCheck c = hooks.run([&](const mef3io::Control& ctl) {
+          return mef3io::check_anonymize(src, dst, o, ctl, shift_us.has_value());
+        });
+        nb::list refusals;
+        for (const auto& r : c.refusals) {
+          nb::dict d;
+          d["code"] = r.code;
+          // Messages may name source paths, which need not be UTF-8.
+          d["message"] = nb::steal(PyUnicode_DecodeUTF8(
+              r.message.data(), static_cast<Py_ssize_t>(r.message.size()), "replace"));
+          d["error"] = mef3io::refusal_kind_name(r.kind);
+          d["channel"] = str_or_none(r.channel);
+          d["field"] = str_or_none(r.field);
+          d["inspect_code"] = str_or_none(r.inspect_code);
+          refusals.append(d);
+        }
+        nb::dict out;
+        out["ok"] = c.ok;
+        out["refusals"] = refusals;
+        out["notes"] = c.notes;
+        out["session_name"] = c.session_name;
+        out["pseudonym"] = c.pseudonym;
+        out["channels_kept"] = c.channels_kept;
+        out["channels_excluded"] = c.channels_excluded;
+        return out;
+      },
+      nb::arg("src"), nb::arg("dst"), nb::arg("shift_us").none() = nb::none(),
+      nb::arg("pseudonym") = "", nb::arg("text") = "drop", nb::arg("has_text_fn") = false,
+      nb::arg("rename") = true, nb::arg("password") = "", nb::arg("output_password_1") = "",
+      nb::arg("output_password_2") = "", nb::arg("channels") = std::vector<std::string>{},
+      nb::arg("exclude_channels") = std::vector<std::string>{},
+      nb::arg("cancel").none() = nb::none(),
+      "Every check anonymize_session makes before writing; writes nothing "
+      "(see mef3io.anonymize.check).");
+  m.def(
       "anonymize_session",
       [](const std::string& src, const std::string& dst, std::int64_t shift_us,
          const std::string& pseudonym, bool clear_subject, bool clear_location,
@@ -701,6 +818,14 @@ NB_MODULE(_mef3io, m) {
         out["pseudonym"] = r.pseudonym;
         out["shift_us"] = r.shift_us;
         out["source_recording_time_offset"] = r.source_recording_time_offset;
+        // The re-identification key (see AnonymizeReport): to the caller only.
+        out["source_start_us"] = opt_or_none(r.source_start_us);
+        out["source_end_us"] = opt_or_none(r.source_end_us);
+        nb::dict ctimes;
+        for (const auto& t : r.source_channel_times)
+          ctimes[nb::str(t.channel.c_str())] =
+              nb::make_tuple(opt_or_none(t.start_us), opt_or_none(t.end_us));
+        out["source_channel_times"] = ctimes;
         out["channels_kept"] = r.channels_kept;
         out["channels_excluded"] = r.channels_excluded;
         out["segments"] = r.segments;

@@ -2,7 +2,12 @@
 
 :func:`anonymize_session` writes a **copy** of a session with every time
 shifted by one constant and the patient's identity removed; the original is
-never modified. :func:`verify` checks a copy against its source.
+never modified. :func:`check` runs every check it makes before writing,
+without writing. :func:`verify` checks a copy against its source.
+
+Every refusal carries a stable ``code`` (see :data:`REFUSAL_CODES` and
+docs/anonymization.md): as ``.code`` on the raised exception, and in
+:class:`CheckReport`.
 
 Available in Python and C++. There is no MATLAB binding and no C ABI for it.
 """
@@ -13,16 +18,21 @@ import datetime as _dt
 import json
 import os
 import sys
-from dataclasses import asdict, dataclass, field
-from typing import Callable, Iterable, Optional, Sequence, Tuple, Union
+import copy as _copy
+from dataclasses import asdict, dataclass, field, fields, replace
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 from ._cancel import CancelToken, _hooks
 
 __all__ = [
     "AnonymizeReport",
+    "CheckReport",
+    "REFUSAL_CODES",
+    "Refusal",
     "VerifyIssue",
     "VerifyReport",
     "anonymize_session",
+    "check",
     "reference_shift",
     "verify",
 ]
@@ -31,6 +41,87 @@ __all__ = [
 DAY_US = 86_400_000_000
 
 _CLEAR_CHOICES = ("subject", "location", "descriptions")
+
+#: Every refusal code: ``code -> (exception type, where it is decided)``.
+#:
+#: * ``"check"``: decided before anything is written; :func:`check` reports
+#:   it and :func:`anonymize_session` raises it without writing.
+#: * ``"copy"``: only the copy pass can meet it (it needs the data blocks,
+#:   or the finished copy); :func:`anonymize_session` raises it and removes
+#:   the partial copy. :func:`check` cannot report it.
+#: * ``"defensive"``: guards a state an earlier check already rules out, or
+#:   a fault of the environment (a full disk); kept so that every refusal
+#:   has a code.
+#:
+#: docs/anonymization.md explains each one.
+REFUSAL_CODES: Dict[str, Tuple[str, str]] = {
+    # arguments (checked in Python)
+    "argument-type": ("TypeError", "check"),
+    "clear-unknown": ("ValueError", "check"),
+    "text-invalid": ("ValueError", "check"),
+    # options
+    "shift-zero": ("ValueError", "check"),
+    "channel-selection-conflict": ("ValueError", "check"),
+    "text-callback-missing": ("ValueError", "defensive"),
+    "output-password-unpaired": ("ValueError", "check"),
+    "output-passwords-equal": ("ValueError", "check"),
+    # paths
+    "dst-not-mefd": ("IoError", "check"),
+    "dst-exists": ("IoError", "check"),
+    "partial-exists": ("IoError", "check"),
+    "source-missing": ("IoError", "check"),
+    "dst-inside-src": ("IoError", "check"),
+    # opening the source
+    "source-unreadable": ("IoError", "check"),
+    "source-damaged": ("FormatError", "check"),
+    "source-crc": ("CrcError", "check"),
+    "records-ambiguous": ("FormatError", "check"),
+    "password-wrong": ("PasswordError", "check"),
+    "password-required": ("PasswordError", "check"),
+    "password-level1-only": ("PasswordError", "check"),
+    # what inspect marks as blocking (Refusal.inspect_code names the warning)
+    "video-channels": ("WriteConflictError", "check"),
+    "unreadable-segments": ("WriteConflictError", "defensive"),
+    "incomplete-segments": ("WriteConflictError", "check"),
+    "unread-record-files": ("WriteConflictError", "check"),
+    "unreadable-records": ("WriteConflictError", "defensive"),
+    "parts-locked": ("WriteConflictError", "check"),
+    "rto-disputed": ("WriteConflictError", "check"),
+    "rto-unreadable": ("WriteConflictError", "check"),
+    "time-before-rto": ("WriteConflictError", "check"),
+    "inspect-blocker": ("WriteConflictError", "defensive"),
+    # channel selection
+    "channel-unknown": ("ValueError", "check"),
+    "no-channels-left": ("ValueError", "check"),
+    # the shift
+    "shift-below-floor": ("ValueError", "check"),
+    "shift-not-positive": ("ValueError", "check"),
+    # the copy's names
+    "rename-name-mismatch": ("ValueError", "check"),
+    "name-contains-identity": ("ValueError", "check"),
+    "pseudonym-contains-identity": ("ValueError", "check"),
+    "name-too-long": ("ValueError", "check"),
+    # segments and records, read from metadata
+    "segment-folder-unnumbered": ("WriteConflictError", "check"),
+    "segment-number-mismatch": ("WriteConflictError", "check"),
+    "segment-number-duplicate": ("WriteConflictError", "check"),
+    "record-damaged": ("FormatError", "defensive"),
+    "record-crc": ("CrcError", "defensive"),
+    "record-locked": ("PasswordError", "check"),
+    "record-index-mismatch": ("FormatError", "check"),
+    "id-number-time": ("WriteConflictError", "check"),
+    # the copy pass
+    "block-crc": ("CrcError", "copy"),
+    "data-damaged": ("FormatError", "copy"),
+    "verify-failed": ("WriteConflictError", "copy"),
+    "data-locked": ("PasswordError", "defensive"),
+    "time-overflow": ("FormatError", "defensive"),
+    "write-failed": ("IoError", "defensive"),
+    # generic codes for an error of shared code that carries none
+    "io-error": ("IoError", "defensive"),
+    "write-conflict": ("WriteConflictError", "defensive"),
+    "invalid-argument": ("ValueError", "defensive"),
+}
 
 #: ``text(value, info) -> str | None`` for ``text=`` callables. ``info`` is a
 #: dict with ``record_type``, ``field``, ``level``, ``channel``, ``segment``
@@ -139,6 +230,93 @@ class VerifyReport:
 
 
 @dataclass(frozen=True)
+class Refusal:
+    """One reason :func:`anonymize_session` would refuse.
+
+    Attributes
+    ----------
+    code : str
+        Stable identifier (:data:`REFUSAL_CODES`). Match on this, never on
+        ``message``.
+    message : str
+        Plain words, as the raised exception carries them. It may name the
+        source's or the destination's path.
+    error : str
+        The exception type :func:`anonymize_session` raises for it:
+        ``"ValueError"``, ``"TypeError"``, ``"IoError"``,
+        ``"WriteConflictError"``, ``"PasswordError"``, ``"FormatError"`` or
+        ``"CrcError"``.
+    channel : str or None
+        The channel concerned, if any.
+    field : str or None
+        The argument or field concerned (``"dst"``, ``"pseudonym"``,
+        ``"shift_us"``, ``"channels"``, ``"id_number"``, ...), if any.
+    inspect_code : str or None
+        For a condition :func:`mef3io.inspect` marks as blocking, that
+        warning's code (e.g. ``"video-channels"``).
+    """
+
+    code: str
+    message: str
+    error: str
+    channel: Optional[str] = None
+    field: Optional[str] = None
+    inspect_code: Optional[str] = None
+
+    def __str__(self) -> str:
+        return f"{self.code}: {self.message}"
+
+
+@dataclass(frozen=True)
+class CheckReport:
+    """Result of :func:`check`.
+
+    Attributes
+    ----------
+    ok : bool
+        True when :func:`anonymize_session` would start copying. A copy can
+        still be refused by what only the copy pass meets (codes marked
+        ``"copy"`` in :data:`REFUSAL_CODES`).
+    refusals : tuple of Refusal
+        Every refusal found, in the order :func:`anonymize_session` meets
+        them (it raises the first). Checks that depend on one that failed are
+        skipped: nothing about the source is checked when it cannot be
+        opened.
+    notes : tuple of str
+        What would be noted up front: a source that uses meflib's
+        recording-time offset, an output password other MEF readers will not
+        handle as expected.
+    session_name, pseudonym : str
+        The copy's session name and pseudonym ("" when ``dst`` is unusable).
+    channels_kept, channels_excluded : tuple of str
+        The channel selection (empty when the source could not be read).
+    """
+
+    ok: bool
+    refusals: Tuple[Refusal, ...]
+    notes: Tuple[str, ...]
+    session_name: str
+    pseudonym: str
+    channels_kept: Tuple[str, ...]
+    channels_excluded: Tuple[str, ...]
+
+    @property
+    def codes(self) -> Tuple[str, ...]:
+        """The refusals' codes, in order."""
+        return tuple(r.code for r in self.refusals)
+
+    def summary(self) -> str:
+        """A few lines for a terminal."""
+        if self.ok:
+            lines = ["check: nothing stops the copy"]
+        else:
+            lines = [f"check: {len(self.refusals)} refusal(s)"]
+        lines += [f"  - {r}" for r in self.refusals]
+        lines += [f"  note: {n}" for n in self.notes]
+        return "\n".join(lines)
+
+
+@dataclass(frozen=True)
 class AnonymizeReport:
     """Result of :func:`anonymize_session`.
 
@@ -176,6 +354,26 @@ class AnonymizeReport:
     notes : tuple of str
     verification : VerifyReport
         The check the copy passed before it was published.
+    source_start_us, source_end_us : int or None
+        The SOURCE's first and last sample time, uUTC (None without samples).
+    source_channel_times : dict of str to (int or None, int or None)
+        The same for each kept channel (None for a channel with records only).
+
+    Notes
+    -----
+    ``source_start_us``, ``source_end_us`` and ``source_channel_times`` are
+    the **re-identification key**: with ``shift_us`` they give the real dates
+    back. They are returned to the caller, in memory, and nowhere else:
+    mef3io never writes them into the copy (the copy's leak scan refuses it
+    if any appears), never logs them and never puts them in a warning or a
+    message. They are left out of ``repr()``, :meth:`summary`, :meth:`to_dict`
+    (unless ``include_original_times=True``) and **pickling**: a pickled
+    report arrives without them unless it was marked with
+    :meth:`with_original_times_in_pickle` (for example to pass it to a helper
+    process you control; never to a cache). ``copy.copy`` and
+    ``copy.deepcopy`` keep them. ``dataclasses.asdict(report)`` INCLUDES
+    them: prefer :meth:`to_dict`. Store them as you would the original
+    recording.
     """
 
     destination: str
@@ -198,6 +396,12 @@ class AnonymizeReport:
     not_copied: Tuple[str, ...]
     notes: Tuple[str, ...]
     verification: VerifyReport = field(repr=False)
+    # The re-identification key: out of repr() (see Notes).
+    source_start_us: Optional[int] = field(default=None, repr=False)
+    source_end_us: Optional[int] = field(default=None, repr=False)
+    source_channel_times: Dict[str, Tuple[Optional[int], Optional[int]]] = field(
+        default_factory=dict, repr=False, compare=False
+    )
 
     @classmethod
     def _from(cls, d: dict) -> "AnonymizeReport":
@@ -205,11 +409,49 @@ class AnonymizeReport:
         d["verification"] = VerifyReport._from(d["verification"])
         for k in ("channels_kept", "channels_excluded", "not_copied", "notes"):
             d[k] = tuple(d[k])
+        d["source_channel_times"] = {k: tuple(v) for k, v in d["source_channel_times"].items()}
         return cls(**d)
 
-    def to_dict(self) -> dict:
-        """Plain ``dict`` (JSON-serialisable)."""
-        return asdict(self)
+    def with_original_times_in_pickle(self) -> "AnonymizeReport":
+        """A copy of this report whose pickle KEEPS the original times.
+
+        By default a pickled report drops them (the re-identification key).
+        Use this only to hand the report to a process you control, never for
+        a cache or a file.
+        """
+        out = replace(self)
+        object.__setattr__(out, "_pickle_original_times", True)
+        return out
+
+    def __reduce__(self):
+        values = {f.name: getattr(self, f.name) for f in fields(self)}
+        keep = getattr(self, "_pickle_original_times", False)
+        if not keep:
+            values.update(source_start_us=None, source_end_us=None, source_channel_times={})
+        return (_unpickle_report, (values, keep))
+
+    def __copy__(self):
+        out = replace(self)
+        if getattr(self, "_pickle_original_times", False):
+            object.__setattr__(out, "_pickle_original_times", True)
+        return out
+
+    def __deepcopy__(self, memo):
+        values = {f.name: _copy.deepcopy(getattr(self, f.name), memo) for f in fields(self)}
+        return _unpickle_report(values, getattr(self, "_pickle_original_times", False))
+
+    def to_dict(self, *, include_original_times: bool = False) -> dict:
+        """Plain ``dict`` (JSON-serialisable).
+
+        The source's original times (the re-identification key) are left out
+        unless ``include_original_times=True``, so that logging or sharing
+        the dict cannot leak them by accident.
+        """
+        d = asdict(self)
+        if not include_original_times:
+            for k in ("source_start_us", "source_end_us", "source_channel_times"):
+                del d[k]
+        return d
 
     def summary(self) -> str:
         """A few lines for a terminal."""
@@ -239,21 +481,50 @@ class AnonymizeReport:
         return "\n".join(lines)
 
 
+def _unpickle_report(values: dict, keep: bool) -> AnonymizeReport:
+    out = AnonymizeReport(**values)
+    if keep:
+        object.__setattr__(out, "_pickle_original_times", True)
+    return out
+
+
 def _backend():
     from . import _mef3io
 
     return _mef3io
 
 
-def _clear_flags(clear: Iterable[str]) -> dict:
+def _error(error: str, code: str, message: str, **details) -> Exception:
+    """A ValueError/TypeError raised in Python, with ``.code`` and ``.details``
+    like the ones the extension raises."""
+    exc = {"ValueError": ValueError, "TypeError": TypeError}[error](message)
+    exc.code = code
+    exc.details = {"channel": None, "field": None, "inspect_code": None, **details}
+    return exc
+
+
+class _Refusals:
+    """Raise the first refusal (``collect=False``) or gather them all."""
+
+    def __init__(self, collect: bool):
+        self.collect = collect
+        self.found: List[Refusal] = []
+
+    def add(self, error: str, code: str, message: str, **details) -> None:
+        if not self.collect:
+            raise _error(error, code, message, **details)
+        self.found.append(Refusal(code=code, message=message, error=error, **details))
+
+
+def _clear_flags(clear: Iterable[str], refusals: Optional[_Refusals] = None) -> dict:
     if isinstance(clear, str):
         clear = (clear,)
     chosen = set(clear)
     unknown = chosen - set(_CLEAR_CHOICES)
     if unknown:
-        raise ValueError(
-            f"clear= takes any of {_CLEAR_CHOICES}; unknown: {sorted(unknown)}"
-        )
+        (refusals or _Refusals(False)).add(
+            "ValueError", "clear-unknown",
+            f"clear= takes any of {_CLEAR_CHOICES}; unknown: {sorted(unknown)}", field="clear")
     return dict(
         clear_subject="subject" in chosen,
         clear_location="location" in chosen,
@@ -268,21 +539,59 @@ def _names(value, what: str) -> list:
         return [value]
     out = list(value)
     if not all(isinstance(v, str) for v in out):
-        raise TypeError(f"{what} must be channel names (str)")
+        # A programming error, raised even by check(); it still has a code.
+        raise _error("TypeError", "argument-type", f"{what} must be channel names (str)",
+                     field=what)
     return out
 
 
-def _output_passwords(output_password) -> Tuple[str, str]:
+def _output_passwords(output_password, refusals: _Refusals) -> Tuple[str, str]:
     if output_password is None:
         return "", ""
     if isinstance(output_password, str):
-        raise ValueError(
-            "output_password takes a pair (level1, level2): MEF has no level-1-only files"
-        )
+        refusals.add("ValueError", "output-password-unpaired",
+                     "output_password takes a pair (level1, level2): MEF has no level-1-only "
+                     "files", field="output_password")
+        return "", ""
     pw = tuple(output_password)
     if len(pw) != 2 or not all(isinstance(p, str) and p for p in pw):
-        raise ValueError("output_password must be a pair of two non-empty strings (level1, level2)")
+        refusals.add("ValueError", "output-password-unpaired",
+                     "output_password must be a pair of two non-empty strings (level1, level2)",
+                     field="output_password")
+        return "", ""
     return pw  # type: ignore[return-value]
+
+
+def _arguments(refusals: _Refusals, *, channels, exclude_channels, output_password, text,
+               clear) -> dict:
+    """The checks made in Python, in the order anonymize_session makes them,
+    and the extension's keyword arguments."""
+    if channels is not None and exclude_channels is not None:
+        refusals.add("ValueError", "channel-selection-conflict",
+                     "pass channels or exclude_channels, not both", field="channels")
+    names = _names(channels, "channels")
+    excluded = _names(exclude_channels, "exclude_channels")
+    if channels is not None and not names:
+        refusals.add("ValueError", "no-channels-left",
+                     "the selection leaves no channel to copy (channels=[])", field="channels")
+    out1, out2 = _output_passwords(output_password, refusals)
+    if callable(text):
+        text_mode, text_fn = "callback", text
+    elif isinstance(text, str) and text in ("drop", "keep"):
+        text_mode, text_fn = text, None
+    else:
+        refusals.add("ValueError", "text-invalid", "text must be 'drop', 'keep' or a callable",
+                     field="text")
+        text_mode, text_fn = "drop", None
+    return dict(
+        text_mode=text_mode,
+        text_fn=text_fn,
+        output_password_1=out1,
+        output_password_2=out2,
+        channels=names,
+        exclude_channels=excluded,
+        **_clear_flags(clear, refusals),
+    )
 
 
 def anonymize_session(
@@ -415,7 +724,7 @@ def anonymize_session(
         unknown channel, both ``channels`` and ``exclude_channels``, a
         selection that leaves no channel, an unknown ``clear=`` entry, an
         unpaired output password, ``rename=False`` with a differently named
-        ``dst``.
+        ``dst``, a copy name or pseudonym holding the patient's identity.
     WriteConflictError
         The session cannot be copied without risking a misplaced or leaked
         date, or the copy failed verification.
@@ -423,6 +732,19 @@ def anonymize_session(
         The source is encrypted and the password does not grant level 2.
     IoError
         ``dst`` or ``<dst>.partial`` exists, or ``dst`` is inside ``src``.
+    FormatError, CrcError
+        Damaged source data (never re-sealed into the copy).
+
+    Every refusal above carries ``.code``, a stable string from
+    :data:`REFUSAL_CODES` (e.g. ``"dst-exists"``, ``"shift-below-floor"``,
+    ``"name-contains-identity"``), and ``.details``, a dict with
+    ``channel``, ``field`` and ``inspect_code`` (each ``None`` when it does
+    not apply). Match on ``code``, never on the message. :func:`check` returns
+    the same refusals without writing. Errors that are not refusals (a
+    cancel, an exception raised by a callback, an internal error) carry no
+    code. The refusals :func:`check` can report are all raised before
+    anything is written; those marked ``"copy"`` in :data:`REFUSAL_CODES`
+    come from the copy pass, which removes the partial copy.
 
     Examples
     --------
@@ -431,38 +753,148 @@ def anonymize_session(
     >>> rep.verification.ok
     True
     """
-    if channels is not None and exclude_channels is not None:
-        raise ValueError("pass channels or exclude_channels, not both")
-    if channels is not None and not _names(channels, "channels"):
-        raise ValueError("the selection leaves no channel to copy (channels=[])")
-    out1, out2 = _output_passwords(output_password)
-    if out1:
+    a = _arguments(_Refusals(collect=False), channels=channels,
+                   exclude_channels=exclude_channels, output_password=output_password,
+                   text=text, clear=clear)
+    if a["output_password_1"]:
         from ._writer import warn_password_interop
 
-        warn_password_interop(out1, out2)
-    if callable(text):
-        text_mode, text_fn = "callback", text
-    elif text in ("drop", "keep"):
-        text_mode, text_fn = text, None
-    else:
-        raise ValueError("text must be 'drop', 'keep' or a callable")
+        warn_password_interop(a["output_password_1"], a["output_password_2"])
+    text_mode = a.pop("text_mode")
     raw = _backend().anonymize_session(
         os.fspath(src),
         os.fspath(dst),
         int(shift_us),
         pseudonym=pseudonym or "",
         text=text_mode,
-        text_fn=text_fn,
         rename=bool(rename),
         password=password or "",
-        output_password_1=out1,
-        output_password_2=out2,
-        channels=_names(channels, "channels"),
-        exclude_channels=_names(exclude_channels, "exclude_channels"),
-        **_clear_flags(clear),
+        **a,
         **_hooks(cancel, progress),
     )
     return AnonymizeReport._from(raw)
+
+
+def check(
+    src,
+    dst,
+    shift_us: Optional[int] = None,
+    *,
+    pseudonym: Optional[str] = None,
+    clear: Iterable[str] = _CLEAR_CHOICES,
+    text: Union[str, TextCallback] = "drop",
+    rename: bool = True,
+    password: str = "",
+    output_password: Optional[Sequence[str]] = None,
+    channels: Optional[Sequence[str]] = None,
+    exclude_channels: Optional[Sequence[str]] = None,
+    cancel: Optional[CancelToken] = None,
+) -> CheckReport:
+    """Every check :func:`anonymize_session` makes before it writes, without writing.
+
+    Takes the same arguments as :func:`anonymize_session` (no ``progress``)
+    and runs the same checks, through the same code: one pre-flight function
+    in the C++ core serves both, so the two cannot disagree. Instead of
+    raising the first refusal it returns all of them, each with its stable
+    ``code`` (:data:`REFUSAL_CODES`).
+
+    It writes nothing (no ``dst``, no ``<dst>.partial``) and reads only
+    metadata: what :func:`mef3io.inspect` reads, plus each kept segment's
+    1 KB metadata header and the kept channels' record files. It never reads
+    the data (``.tdat``) files. The GIL is released while it runs.
+
+    What it checks, in order: the options (shift zero, both ``channels`` and
+    ``exclude_channels``, output passwords); the destination (exists, a
+    leftover ``<dst>.partial``, not ``.mefd``, inside the source); the source
+    (opens, password grants level 2, nothing :func:`mef3io.inspect` marks as
+    blocking, including the recording-time-offset refusals); the channel
+    selection; the shift (floor, times above 0); the copy's name and
+    pseudonym (identity, length, ``rename=False``); segment numbering; record
+    files (readable, index matches, an ``Epoc``/``Curs`` ``id_number``
+    holding a time inside the recording).
+
+    What it cannot decide (codes marked ``"copy"`` in :data:`REFUSAL_CODES`):
+    a data block failing its CRC or running past its file (``block-crc``,
+    ``data-damaged``), and the final verification of the copy
+    (``verify-failed``), which needs the copy. Every time in the metadata
+    headers and the record files is put through the copy's own shifting
+    rule up front (``time-before-rto``, ``shift-not-positive``,
+    ``time-overflow``); only a time in a block index or data file header, or
+    a block's own time, is met by the copy pass alone, with the same code.
+
+    No refusal message, here or raised, holds one of the source's times.
+
+    Available in Python and C++ (``mef3io::check_anonymize``); not in MATLAB.
+
+    Parameters
+    ----------
+    src, dst
+        As for :func:`anonymize_session`.
+    shift_us : int, optional
+        The shift to check. ``None`` skips the shift checks (for a shift not
+        chosen yet).
+    pseudonym, clear, text, rename, password, output_password, channels, exclude_channels
+        As for :func:`anonymize_session`. A ``text`` callable is never called.
+    cancel : CancelToken, optional
+        Stop the check from another thread; :class:`Cancelled` is raised.
+
+    Returns
+    -------
+    CheckReport
+
+    Raises
+    ------
+    TypeError
+        A channel list that is not made of strings (code ``argument-type``).
+    Cancelled
+        ``cancel`` was set.
+
+    Examples
+    --------
+    >>> rep = mef3io.anonymize.check("patient.mefd", "S001.mefd", shift, pseudonym="S001")
+    >>> rep.ok, rep.codes
+    (False, ('pseudonym-contains-identity',))
+    """
+    refusals = _Refusals(collect=True)
+    a = _arguments(refusals, channels=channels, exclude_channels=exclude_channels,
+                   output_password=output_password, text=text, clear=clear)
+    for k in ("clear_subject", "clear_location", "clear_descriptions"):
+        del a[k]  # nothing up front depends on them
+    text_mode = a.pop("text_mode")
+    text_fn = a.pop("text_fn")
+    raw = _backend().check_anonymize(
+        os.fspath(src),
+        os.fspath(dst),
+        None if shift_us is None else int(shift_us),
+        pseudonym=pseudonym or "",
+        text=text_mode,
+        has_text_fn=text_fn is not None,
+        rename=bool(rename),
+        password=password or "",
+        **a,
+        **_hooks(cancel, None),
+    )
+    found = list(refusals.found)
+    seen = {(r.code, r.field) for r in found}
+    for r in raw["refusals"]:
+        if (r["code"], r["field"]) not in seen:  # also checked in Python
+            found.append(Refusal(**r))
+    notes = list(raw["notes"])
+    from ._writer import password_interop_issue
+
+    for label, pw in (("level-1", a["output_password_1"]), ("level-2", a["output_password_2"])):
+        issue = password_interop_issue(pw) if pw else None
+        if issue:
+            notes.append(f"the {label} output password will not interoperate as expected: {issue}")
+    return CheckReport(
+        ok=not found,
+        refusals=tuple(found),
+        notes=tuple(notes),
+        session_name=raw["session_name"],
+        pseudonym=raw["pseudonym"],
+        channels_kept=tuple(raw["channels_kept"]),
+        channels_excluded=tuple(raw["channels_excluded"]),
+    )
 
 
 def verify(
@@ -681,7 +1113,9 @@ def _main(argv: Sequence[str] | None = None) -> int:
             exclude_channels=args.exclude_channel,
         )
     except (RuntimeError, ValueError, OSError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        code = getattr(exc, "code", None)
+        print(f"error ({code}): {exc}" if isinstance(code, str) else f"error: {exc}",
+              file=sys.stderr)
         return 2
     if args.json:
         print(json.dumps(report.to_dict(), indent=2))

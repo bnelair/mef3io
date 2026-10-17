@@ -13,8 +13,11 @@ The key entry points:
 - **`mef3io::Reader`** — high-level windowed reads, segment map, TOC, records.
 - **`mef3io::SessionWriter`** — high-level writes, in-segment append, records.
 - **`mef3io::Session`** — the lower-level session tree and indexed reads.
-- **`mef3io::anonymize_session`** / **`mef3io::verify_anonymized`**
-  (`anonymize.hpp`) — a de-identified copy with every time shifted, and its
-  check against the source ([De-identification](../anonymization.md)). Not in
-  the C ABI.
+- **`mef3io::anonymize_session`** / **`mef3io::check_anonymize`** /
+  **`mef3io::verify_anonymized`** (`anonymize.hpp`) — a de-identified copy
+  with every time shifted, every check it makes before writing (without
+  writing), and its check against the source
+  ([De-identification](../anonymization.md)). Refusals are thrown with the
+  `mef3io::AnonymizeError` mixin carrying a stable code
+  ([Refusal codes](../anonymization.md#refusal-codes)). Not in the C ABI.
 - **`c_api.h`** — the flat `extern "C"` ABI the MATLAB MEX (and any FFI) builds on.

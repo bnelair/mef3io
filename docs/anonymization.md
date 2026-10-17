@@ -359,6 +359,152 @@ A session that uses meflib's recording-time offset **is** accepted when the
 offset is unambiguous: its times are read as true UTC, moved, and the copy
 has offset 0.
 
+### Checking before copying
+
+`mef3io.anonymize.check` runs every check `anonymize_session` makes before it
+writes, and writes nothing. It takes the same arguments (without
+`progress=`), so an application can tell the user that a name, a channel
+selection or a date will be refused while they are still choosing it:
+
+```python
+rep = mef3io.anonymize.check("patient.mefd", "S001.mefd", shift, pseudonym="P-17")
+if not rep.ok:
+    for r in rep.refusals:
+        print(r.code, r.field, r.message)
+```
+
+- **The same checks, through the same code.** One pre-flight function in the
+  C++ core serves both: `anonymize_session` raises the first refusal it
+  finds, `check` returns all of them, in the same order. They cannot
+  disagree. `anonymize_session` makes all of these checks before it creates
+  any file or reports any progress.
+- **It writes nothing and reads only metadata**: what `inspect` reads, plus
+  each kept segment's 1 KB metadata header and the kept channels' annotation
+  files. It never reads the data (`.tdat`) files, so it takes about as long
+  as `inspect`. It releases the GIL and accepts `cancel=`.
+- **`shift_us=None`** skips the shift checks, for a date not chosen yet.
+- A check that depends on one that failed is skipped: when the source cannot
+  be opened, nothing about it is checked.
+- `rep.notes` holds what the copy would note up front: a source using
+  meflib's recording-time offset, an output password other MEF readers will
+  not handle as expected.
+
+`rep.ok` means the copy will start. A few refusals can only come from the
+copy itself (marked *copy* below): a data block that fails its checksum or
+runs past the end of its file, which needs the data blocks, and a failed
+verification, which needs the finished copy. Every time in the metadata
+and annotation files goes through the copy's own shifting rule up front, so
+a time at or before a non-zero recording-time offset, or one the shift would
+take to 1970 or before, is caught there; only a time in a block index or
+data file's header, or a data block's own time, is met by the copy alone,
+with the same code.
+
+No refusal or verification message holds one of the source's times: they
+name the field and describe the problem in words. Messages may name the
+source's and the copy's paths.
+
+`check` is in Python and C++ (`mef3io::check_anonymize`), not in MATLAB.
+
+### Refusal codes
+
+Every refusal has a stable `code`. On the exception `anonymize_session`
+raises it is `exc.code`, next to `exc.details`, a dict with `channel`,
+`field` and `inspect_code` (each `None` when it does not apply); in a
+`check` report it is `Refusal.code`. The exception types are the ones every
+release has raised, so existing `except` clauses keep working. Match on the
+code, never on the message: messages may be reworded, codes are not. Errors
+that are not refusals (a cancel, an exception raised by your own callback, an
+internal error) have no code. `mef3io.anonymize.REFUSAL_CODES` holds this
+table.
+
+*Where*: **check** = found before anything is written, by `check` and by
+`anonymize_session`; **copy** = only the copy pass can find it, and the
+partial copy is removed; **defensive** = guards a state an earlier check
+already rules out, or a fault of the system (a full disk), so that every
+refusal has a code.
+
+| Code | Raised as | Where | Meaning |
+|---|---|---|---|
+| `argument-type` | `TypeError` | check | A channel list holds something other than names. Raised by `check` too. |
+| `clear-unknown` | `ValueError` | check | `clear=` names something other than subject, location, descriptions. |
+| `text-invalid` | `ValueError` | check | `text=` is not `"drop"`, `"keep"` or a callable. |
+| `shift-zero` | `ValueError` | check | The shift is 0. |
+| `channel-selection-conflict` | `ValueError` | check | Both `channels` and `exclude_channels` given. |
+| `text-callback-missing` | `ValueError` | defensive | C++ only: the callback policy without a callback. |
+| `output-password-unpaired` | `ValueError` | check | One output password, or not a pair of non-empty strings. |
+| `output-passwords-equal` | `ValueError` | check | The two output passwords are the same. |
+| `dst-not-mefd` | `IoError` | check | The destination does not end in `.mefd`. |
+| `dst-exists` | `IoError` | check | The destination exists (also when it appears while copying). |
+| `partial-exists` | `IoError` | check | A `<dst>.partial` from an earlier run is in the way. |
+| `source-missing` | `IoError` | check | The source does not exist. |
+| `dst-inside-src` | `IoError` | check | The destination lies inside the source (or the other way round). |
+| `source-unreadable` | `IoError` | check | The source cannot be opened as a session (not `.mefd` / `.mefd.tar`, a compressed archive, an unreadable file). |
+| `source-damaged` | `FormatError` | check | Source metadata or annotation files are damaged (truncated, malformed). |
+| `source-crc` | `CrcError` | check | Source metadata or an annotation fails its checksum. |
+| `records-ambiguous` | `FormatError` | check | Several session-level annotation files and none named after the session. |
+| `password-wrong` | `PasswordError` | check | The password opens nothing. |
+| `password-required` | `PasswordError` | check | The source is encrypted and no password was given. |
+| `password-level1-only` | `PasswordError` | check | The password is the level-1 one; anonymizing needs level 2. |
+| `video-channels` | `WriteConflictError` | check | The session has video channels. |
+| `unreadable-segments` | `WriteConflictError` | defensive | `inspect` could not read a segment (a strict open fails first with `source-damaged`). |
+| `incomplete-segments` | `WriteConflictError` | check | A segment folder lacks its metadata, index or data file. |
+| `unread-record-files` | `WriteConflictError` | check | Annotation files at the session root that are not the session's own. |
+| `unreadable-records` | `WriteConflictError` | defensive | `inspect` could not read an annotation file (a strict open fails first). |
+| `parts-locked` | `WriteConflictError` | check | Parts the password does not open (comes with a password refusal). |
+| `rto-disputed` | `WriteConflictError` | check | Segments disagree on the recording-time offset. |
+| `rto-unreadable` | `WriteConflictError` | check | The recording-time offset cannot be read, so some times are unknown. |
+| `time-before-rto` | `WriteConflictError` | check | A time stored at or before a non-zero recording-time offset (a block index, data header or block time: only in the copy pass). |
+| `inspect-blocker` | `WriteConflictError` | defensive | A blocking `inspect` warning this table does not know yet (`details["inspect_code"]` names it). |
+| `channel-unknown` | `ValueError` | check | A named channel is not in the session (`details["channel"]`). |
+| `no-channels-left` | `ValueError` | check | The selection leaves no channel. |
+| `shift-below-floor` | `ValueError` | check | The shift is smaller than the recording's span plus one day. |
+| `shift-not-positive` | `ValueError` | check | The shift moves a time to 1970 or before (a block index, data header or block time: only in the copy pass). |
+| `rename-name-mismatch` | `ValueError` | check | `rename=False` and the destination is not named after the source. |
+| `name-contains-identity` | `ValueError` | check | The copy's name holds the patient's name, ID, location or the original session name. |
+| `pseudonym-contains-identity` | `ValueError` | check | The pseudonym holds one of them. |
+| `name-too-long` | `ValueError` | check | The copy's name or pseudonym is longer than 255 bytes. |
+| `segment-folder-unnumbered` | `WriteConflictError` | check | A segment folder's name does not end in a number. |
+| `segment-number-mismatch` | `WriteConflictError` | check | A segment folder's number differs from its metadata's. |
+| `segment-number-duplicate` | `WriteConflictError` | check | Two segment folders of one channel have the same number. |
+| `record-damaged` | `FormatError` | defensive | An annotation file is damaged (`inspect` fails first: `source-damaged`). |
+| `record-crc` | `CrcError` | defensive | An annotation fails its checksum (`inspect` fails first: `source-crc`). |
+| `record-locked` | `PasswordError` | check | An annotation the password does not open (listed by `check` after the password refusal). |
+| `record-index-mismatch` | `FormatError` | check | An annotation index does not match its annotation file. |
+| `id-number-time` | `WriteConflictError` | check | An `Epoc` or `Curs` ID number holds a time inside the recording, which the copy would carry. |
+| `block-crc` | `CrcError` | copy | A data block fails its checksum; damaged data is never re-sealed. |
+| `data-damaged` | `FormatError` | copy | A data block runs past its file, or the index and data disagree. |
+| `verify-failed` | `WriteConflictError` | copy | The copy failed its verification (see below); it was removed. |
+| `data-locked` | `PasswordError` | defensive | An encrypted data block the password does not open. |
+| `time-overflow` | `FormatError` | defensive | A stored time out of range. |
+| `write-failed` | `IoError` | defensive | Writing the copy failed (disk full, permissions). |
+| `io-error` | `IoError` | defensive | Any other input/output error without a code of its own. |
+| `write-conflict` | `WriteConflictError` | defensive | Any other conflict without a code of its own. |
+| `invalid-argument` | `ValueError` | defensive | Any other bad argument without a code of its own. |
+
+Several blocking conditions found by `inspect` are raised as ONE exception
+whose code is the first one's and whose message lists them all; `check`
+returns each as its own refusal, with `inspect_code` naming the `inspect`
+warning.
+
+### The original times in the report
+
+`AnonymizeReport.source_start_us` and `source_end_us` are the source's first
+and last sample times (µs since 1970, UTC), and `source_channel_times` maps
+each kept channel to its own `(start, end)` (`(None, None)` for a channel
+that holds only annotations).
+
+**They are the re-identification key**: with `shift_us` they give the real
+dates back. They are returned to your program in memory and nowhere else.
+mef3io never writes them into the copy (its leak scan would refuse the copy
+if one appeared there), never logs them, and never puts them in a warning or
+an error message. They are left out of `repr(report)`, `report.summary()`
+and `report.to_dict()`; `report.to_dict(include_original_times=True)`
+includes them. A pickled report arrives **without** them unless it was
+marked with `report.with_original_times_in_pickle()` (to hand it to a helper
+process you control, never to a cache); `copy.copy` and `copy.deepcopy` keep
+them, and so does `dataclasses.asdict(report)`, so prefer `to_dict()`. Keep them as you would the original recording, apart from the
+copy.
+
 ### How the copy is checked
 
 `anonymize_session` checks every copy with `mef3io.anonymize.verify` before
