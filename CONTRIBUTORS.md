@@ -2,9 +2,11 @@
 
 ## mef3io
 
-- **Filip Mivalt** ([@xmival00](https://github.com/xmival00)), maintainer, Bioelectronics Neurophysiology and Engineering Laboratory (BNEL) at Mayo Clinic
+- **Filip Mivalt** ([@xmival00](https://github.com/xmival00)), maintainer
 - Vladimir Sladky ([@SweetVlad](https://github.com/SweetVlad))
 - Václav Křemen
+
+Maintained by Filip Mivalt, Bioelectronics Neurophysiology and Engineering Laboratory (BNEL) at Mayo Clinic.
 
 Contributions are welcome; see [CONTRIBUTING.md](https://github.com/bnelair/mef3io/blob/main/CONTRIBUTING.md).
 

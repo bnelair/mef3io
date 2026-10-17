@@ -83,8 +83,11 @@ summary = mef3io.recoverSession(p, Apply=true);
 
 !!! note "Not in MATLAB"
     `Validator` / `validate_session` / `repair_session` have no MATLAB surface
-    yet (see issue #18), and neither do `mef3io.inspect` and
-    `mef3io.anonymize_session` / `mef3io.anonymize.check` (Python and C++ only). Cancelling and progress (`cancel=` / `progress=`, `CancelToken`)
+    (see issue #18), and neither do `mef3io.inspect`,
+    `mef3io.anonymize_session` / `mef3io.anonymize.check` /
+    `mef3io.anonymize.verify` (Python and C++ only) and
+    `mef3io.password_interop_issue` (the MATLAB `Writer` warns
+    `mef3io:passwordInterop` itself). Cancelling and progress (`cancel=` / `progress=`, `CancelToken`)
     are not offered either: a MEX call blocks MATLAB's only interpreter
     thread, so nothing could cancel it. Reading, writing, appending,
     archiving, extracting and recovering are at parity.

@@ -1,5 +1,5 @@
 ---
-description: "Python guide to mef3io: read and write MEF 3.0 EEG/iEEG recordings with Reader and Writer, inspect sessions, cancel long reads, tar archives and the mef_tools drop-in."
+description: "Python guide to mef3io: read and write MEF 3.0 EEG/iEEG recordings with Reader and Writer, inspect sessions, make de-identified copies, cancel long reads, threads, tar archives and the mef_tools drop-in."
 ---
 
 # Python guide
@@ -46,7 +46,9 @@ block_length=None, n_threads=0, metadata=None, durability="fast")`
   Passwords are keyed exactly as meflib keys them, so a session opens with
   the same password in pymef and `mef_tools`. A password longer than 15
   characters (or 15 UTF-8 bytes), or one with a character above U+00FF,
-  raises a `PasswordInteropWarning`; a session that mef3io 1.2.0 or earlier
+  raises a `PasswordInteropWarning`; `mef3io.password_interop_issue(password)`
+  returns the same reason (or `None`) without writing anything, so an
+  application can warn first. A session that mef3io 1.2.0 or earlier
   encrypted with a non-ASCII password still opens, with a
   `LegacyPasswordWarning` (see
   [password derivation](encryption_model.md#passwordkey-derivation-for-completeness)).
@@ -55,9 +57,7 @@ block_length=None, n_threads=0, metadata=None, durability="fast")`
   offset every new time is stored against, is level-2 encrypted, and without
   it the offset is unknown. A Writer opened with only the level-1 password is
   refused (`PasswordError`) for anything that stores times into that
-  session, rather than guessing the offset. Earlier releases took it as 0,
-  which in a session with a recording-time offset placed appended data
-  decades off.
+  session, rather than guessing the offset.
 - `Writer.unreadable_metadata` lists segment metadata the writer could not
   use (`"path: reason"`):
   - `.tmet` files it could not read while choosing the offset. At offset 0
@@ -260,7 +260,7 @@ read is handled the same way. Reading every body type is supported; writing is
 limited to Note, SyLg and EDFA.
 
 Written times are stored as `−t` in a session at offset 0 (every session
-mef3io creates). In a foreign session "anonymized" with meflib's
+mef3io creates). In a foreign session "anonymized" with meflib's deprecated
 recording-time offset they are stored as `rto − t`, the session's own form,
 so mef3io never writes the date there in plain. A segment or channel mef3io
 adds to such a session inherits its offset. The offset does not
@@ -465,9 +465,39 @@ universal headers, record header times and, with `read_index=True`, the block
 index (header and entries). The `.tdat` universal header is never checked,
 because `inspect` never opens a `.tdat`.
 
-!!! note "Python first"
+!!! note "Python and C++ only"
     `inspect` is available in Python and C++ (`mef3io/inspect.hpp`,
-    `inspect_session`). The C ABI and MATLAB bindings come later.
+    `inspect_session`), not in MATLAB or the C ABI.
+
+## De-identified copies
+
+`mef3io.anonymize_session(src, dst, shift_us)` writes a copy of a session
+that can be shared: every time moved by `shift_us`, the subject's identity,
+the session name, descriptions and (by default) annotation text removed,
+and the samples copied byte for byte. The original is never changed.
+`mef3io.anonymize.check` runs the same checks first without writing
+anything, and every copy is verified against its source before it gets its
+final name.
+
+```python
+start = mef3io.inspect("patient.mefd").start_time
+shift = mef3io.anonymize.reference_shift(start, "2000-01-01")   # copy starts on that date
+
+rep = mef3io.anonymize.check("patient.mefd", "S001.mefd", shift, exclude_channels=["ECG"])
+if not rep.ok:
+    print(rep.codes)            # stable refusal codes, e.g. ('name-contains-identity',)
+else:
+    report = mef3io.anonymize_session("patient.mefd", "S001.mefd", shift,
+                                      exclude_channels=["ECG"])
+    print(report.verification.summary())
+```
+
+Everything else (choosing the shift, what changes, encryption of the copy,
+the refusal codes, how the copy is checked, what it does not do) is in
+[De-identification](anonymization.md); a runnable example is
+[`examples/13_anonymize.py`](https://github.com/bnelair/mef3io/blob/main/examples/13_anonymize.py).
+From a terminal: `python -m mef3io anonymize SRC DST --reference-date
+2000-01-01`. Python and C++ only, not MATLAB.
 
 ## Tar archives (single-file sessions)
 
@@ -528,6 +558,9 @@ Reads and the long operations take two optional keyword arguments:
 | `Validator.validate`, `validate_session` | yes | bytes of `.tmet` + `.tidx` + `.tdat` covered |
 | `repair_session` | yes (validation pass only) | as validate |
 | `recover_session` | yes (scan only) | bytes of `.tidx` + `.tdat` covered |
+| `anonymize_session` | yes | bytes, over the copy and its verification |
+| `anonymize.check` | yes | — |
+| `anonymize.verify` | yes | bytes, as for `anonymize_session` |
 
 ```python
 token = mef3io.CancelToken()
@@ -545,10 +578,10 @@ except mef3io.Cancelled:
 token.cancel()
 ```
 
-**One read at a time per `Reader`.** A `Reader` must not be read from two
-threads at once. When a newer request supersedes a read, cancel it and wait
-for the cancelled call to return (it does so promptly) before reading again
-on the same `Reader` — or give each thread its own `Reader`.
+**Several reads at once.** One `Reader` can serve several threads at once
+(see [Parallelism](#parallelism)). When a newer request supersedes a read,
+cancel the old one with its own token; the cancelled call returns promptly
+and the other reads are unaffected.
 
 **Cancelling.** `token.cancel()` is safe from any thread. The operation
 notices between units of work — before each segment is fetched and each block
@@ -573,7 +606,9 @@ stop at the same points). `Cancelled` subclasses `Exception` directly, not
   directory. The short write phase that follows — a `.tmet` replaced by
   rename and 1024-byte header patches — is not interruptible: a cancel that
   arrives then is ignored and the call returns its report, so a session is
-  never left half-repaired.
+  never left half-repaired;
+- `anonymize_session` builds the copy in `<dst>.partial/` and renames it to
+  `dst` only after it has been verified; a cancel removes the partial copy.
 
 **Progress.** `progress(done, total)` is called first with `(0, total)`, then
 at a bounded rate (about every 1 % of `total`, otherwise at most every
@@ -605,7 +640,8 @@ directory, and a replaced tree that could not be deleted is left as
 When neither keyword is given, nothing changes: the hooks cost one pointer
 test per unit of work (see `benchmarks/cancel_overhead_benchmark.py`).
 
-The MATLAB binding does not expose these yet; the C ABI does
+MATLAB does not offer cancelling or progress (a MEX call blocks MATLAB's
+only thread); the C ABI does
 (`mef3io_cancel_token_*` and the `*_ex` functions, see the
 [C++ and C ABI guide](cpp.md#cancelling-and-progress)).
 
@@ -677,6 +713,7 @@ metadata in C++ while other Python threads keep running. So a GUI can open a
 large session on a worker thread without freezing its event loop, and several
 sessions can be opened at once on different threads. One `Reader` can also
 be shared across threads: reads, `toc`, `segments` and `records` may run
-concurrently on it. The Python-level parts
+concurrently on it. `toc`, `segments`, `records` and
+`Writer.write_annotations` release the GIL as well. The Python-level parts
 of an open (the warm-start cache, building the open-time warnings) are short
 and run with the GIL as usual.

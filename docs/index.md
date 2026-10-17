@@ -45,10 +45,22 @@ version number.
   garbage metadata at level 1 — [details](legacy_comparison.md).) Encryption
   hides identity and annotation text, not the samples themselves — see
   [what it protects](encryption_model.md#what-encryption-protects).
+- **De-identified copies for sharing** — `mef3io.anonymize_session` writes
+  a copy with every date moved by the same amount, the subject's identity,
+  the session name, descriptions and annotation text removed, chosen
+  channels left out, and the samples unchanged; the copy can be unencrypted
+  or get new passwords. `mef3io.anonymize.check` reports what would stop a
+  copy before anything is written, and every copy is verified against its
+  source before it is saved. Python and C++ — see
+  [De-identification](anonymization.md).
 - **Deterministic** — output is byte-identical regardless of thread count.
+- **Responsive and thread-safe** — opening, reading and writing release
+  Python's GIL, so a GUI stays responsive while a session opens or decodes
+  on a worker thread, and one `Reader` can be shared between threads.
 - **Made for tools** — `mef3io.inspect()` describes a session without
-  reading its samples, and reads and long operations can report progress and
-  be cancelled from another thread (Python and C++).
+  reading its samples; reads and long operations can report progress and be
+  cancelled from another thread; refusals of a de-identified copy come with
+  stable codes (Python and C++).
 - **Encrypted data blocks** written by some third-party tools are read too;
   see [compatibility](encryption_model.md#compatibility-with-other-mef-30-tools).
 
@@ -112,14 +124,14 @@ The same session opens in MATLAB (`mef3io.Reader('session.mefd')`) and C++
 | | |
 |---|---|
 | [Install](install.md) | pip wheels, MATLAB MEX, building from source |
-| [Python guide](python.md) | `Reader`, `Writer`, legacy compat, caching |
+| [Python guide](python.md) | `Reader`, `Writer`, `inspect`, de-identified copies, cancelling, threads, legacy compat, caching |
 | [MATLAB guide](matlab.md) | `+mef3io` classes and the MEX |
 | [C++ guide](cpp.md) | using the core library and the flat C ABI |
 | [How-to](howto/read_python.md) | short answers: read in [Python](howto/read_python.md) or [MATLAB](howto/read_matlab.md), [convert EDF to MEF 3.0](howto/edf_to_mef.md), [long recordings with gaps](howto/long_recordings.md) |
-| [Examples](examples.md) | twelve runnable scripts |
+| [Examples](examples.md) | thirteen runnable scripts |
 | [Release notes](release_notes/index.md) | what changed in each version, and what an upgrade asks of you |
 | [Format reference](mef3_format.md) | the MEF 3.0 on-disk structure, field by field |
-| [De-identification](anonymization.md) | why meflib's recording-time offset is not anonymization, and what mef3io does instead |
+| [De-identification](anonymization.md) | de-identified copies with `anonymize_session`, and why meflib's recording-time offset (deprecated) is not anonymization |
 | [Performance & legacy comparison](legacy_comparison.md) | measured speed, encryption, and quantization differences |
 
 ## Scope and limitations
@@ -131,12 +143,15 @@ The same session opens in MATLAB (`mef3io.Reader('session.mefd')`) and C++
 - Single-file `.mefd.tar` sessions are a mef3io addition, not part of
   MEF 3.0: legacy tools need them unpacked first (`extract_session`,
   `tar -xf`, or 7-Zip on Windows); see the [Python guide](python.md#tar-archives-single-file-sessions).
-- Data blocks are written unencrypted, as meflib does by default, although
-  the format defines their encryption; aligning with the specification is
-  under discussion
+- Data blocks are written unencrypted. That is not the design of MEF 3.0,
+  which defines their encryption, but a habit of past implementations
+  (meflib's default) that mef3io keeps for compatibility; aligning with the
+  specification is under discussion
   ([compatibility](encryption_model.md#compatibility-with-other-mef-30-tools)).
 - Every record type MEF 3.0 defines is read; `Note`, `SyLg` and `EDFA` can be
   written with their text.
+- De-identification, `inspect`, validation and repair, and cancelling and
+  progress are in Python and C++, not in MATLAB.
 - The pure-Python fallback backend is not implemented.
 - Sessions written by mef3io **≤ 1.1.2** declare some buffer sizes as `0`,
   which can crash meflib-based readers (mef3io and pymef read them fine);

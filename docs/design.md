@@ -5,12 +5,25 @@
 
 !!! note "This is the original plan"
     It records the design as agreed before the code was written, and is kept
-    for its reasoning. Where it differs from what shipped (the pure-Python
-    backend is a stub, `Writer.write` takes float data and
-    `write_int32` the counts, records are written with `write_annotations`,
-    and later features such as `inspect`, cancellation and the validator are
-    not planned here), the [Python](python.md), [C++](cpp.md) and
-    [MATLAB](matlab.md) guides describe the library as it is.
+    for its reasoning. Section 4.6 (threading) describes the code as built;
+    the rest is the plan. Where the plan differs from what shipped, the
+    [Python](python.md), [C++](cpp.md) and [MATLAB](matlab.md) guides
+    describe the library as it is. The main differences:
+
+    - the pure-Python backend is a stub; `Writer.write` takes float data and
+      `write_int32` the counts; records are written with `write_annotations`;
+    - the core is C++20; its AES code is mef3io's own (no vendored library);
+      block indices are read into memory and cached under a size budget with
+      least-recently-used eviction, not memory-mapped;
+    - the MATLAB binding and the C ABI exist (they were "later" here);
+    - one `Reader` can be shared between threads: its mutable state is
+      locked, not immutable after open (see 4.6);
+    - the warm-start cache lives in Python (`mef3io.cache`), and the
+      module names in 4.1 are not the ones the code uses;
+    - features added later are not planned here: `inspect`, cancelling and
+      progress, the validator with repair and recovery, single-file
+      `.mefd.tar` sessions, and de-identified copies (`anonymize_session`,
+      see [De-identification](anonymization.md)).
 
 ## 1. Goal
 
@@ -57,7 +70,8 @@ Key decisions (agreed):
    oracles.
 3. Dropped from meflib: global state, exit-on-error, `FILT_*` filters, `e_*`
    allocator wrappers, lossy RED encode, video.
-4. Added: thread safety (immutable-after-open readers), context-managed
+4. Added: thread safety (planned as immutable-after-open readers; built as
+   locked shared state, see 4.6), context-managed
    resources, exception-based errors, mmap'd binary-searchable indices,
    lazy metadata, metadata cache, internal parallelism.
 

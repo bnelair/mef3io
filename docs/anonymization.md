@@ -4,6 +4,17 @@ description: "How to make a de-identified copy of a MEF 3.0 session with anonymi
 
 # De-identification and the recording-time offset
 
+This page has two parts:
+
+1. **[De-identified copies](#de-identified-copies-with-anonymize_session)**:
+   how to make a copy of a recording that you can share, with every date
+   moved and the patient's identity removed, using `anonymize_session`
+   (Python and C++; not MATLAB). A runnable example is
+   [`examples/13_anonymize.py`](https://github.com/bnelair/mef3io/blob/main/examples/13_anonymize.py).
+2. **[The recording-time offset](#the-recording-time-offset-deprecated)**:
+   why meflib's older way of "anonymizing" a session does not hide the
+   recording date, and how mef3io handles sessions that use it.
+
 !!! warning "meflib's recording-time-offset “anonymization” is deprecated in mef3io"
     A recording-time offset (RTO) does **not** remove the recording date from
     a MEF 3.0 session. The date stays in every metadata file, in plain text
@@ -11,207 +22,6 @@ description: "How to make a de-identified copy of a MEF 3.0 session with anonymi
     still reads existing ones and extends them consistently. To de-identify a
     session, make a de-identified copy with `anonymize_session`; see
     [De-identified copies](#de-identified-copies-with-anonymize_session).
-
-## In plain words
-
-*For clinicians, students and anyone sharing recordings. The technical
-details follow below.*
-
-**What the offset is.** meflib, the C library behind MEF 3.0, can save a
-recording's times as "time since midnight on the day of the recording"
-instead of as calendar times. The midnight it counted from is the *offset*.
-The idea was that someone looking at the times would see "07:47:05" rather
-than "14 May 2031, 07:47:05".
-
-**Why that does not hide the date.** The offset itself, the midnight of the
-recording day, is saved inside the same files, in a place every MEF reader
-looks. Reading software adds it back automatically, so most programs show
-the real date anyway. Someone without the software can still read it with
-a few lines of code, or with a hex editor. It is like covering the date on
-a letter with a sticky note that has the date written on it.
-
-The offset only helps in one situation: the session is encrypted **and**
-the person has only the lower-level (level-1) password. Then the offset takes
-the date out of the times, and the encryption hides the offset. Without the
-encryption, the offset hides nothing. Even with it, other parts of the
-session can still give the date away (see
-[What else the offset leaves in place](#what-else-the-offset-leaves-in-place)).
-
-MEF encryption itself is no substitute for de-identification either: it
-hides the subject fields and annotation text, but the signal and its timing
-stay readable without any password (in an offset session, as times of day).
-See
-[What encryption protects](encryption_model.md#what-encryption-protects).
-
-**What this means for you.**
-
-- Treat a session "anonymized" this way as **identifiable** data: it holds
-  the recording date, and may hold names too.
-- mef3io will never make new sessions like this.
-- mef3io still opens existing ones, shows their true dates and times, and
-  can add data or notes to them without breaking them.
-- For sharing, make a de-identified **copy**: every date moved, names
-  removed. See
-  [De-identified copies](#de-identified-copies-with-anonymize_session).
-
-## What the offset is
-
-meflib computes the offset in `generate_recording_time_offset`
-(meflib.c:4276-4324). It takes the UTC midnight of the recording's UTC date,
-adds one day minus the site's GMT offset, and steps back a day at a time
-until the result is at or before the recording start:
-
-```
-rto = UTC_midnight(start) + 86400 s − GMT_offset;  while rto > start: rto −= 86400 s
-```
-
-The result is the **local midnight** of the recording day. meflib copies it
-into section 3 of every metadata file it writes (`initialize_metadata`,
-meflib.c:4597). Every stored time then holds `rto − t`, a negative number
-(`apply_recording_time_offset`, meflib.c:744). Readers recover the true time
-as `−stored + rto` (`remove_recording_time_offset`, meflib.c:7660). So:
-
-- **The time of day is kept.** It is the stored value, counted from local
-  midnight.
-- **The date is moved into `rto`**, one 8-byte field.
-
-| Where | Field | Offset in the `.tmet` | Encrypted? |
-|---|---|---|---|
-| Section 1 | section-3 encryption level (si1) | 1025 | never; `−2` or `0` means section 3 is plain text, `+2` means encrypted |
-| Section 3 | `recording_time_offset` (si8, µs) | 13312 (section 3, field 0) | **only** if the session has a level-2 password |
-| Section 3 | `GMT_offset` (si4, seconds) | 13336 | same as above |
-
-The offsets are meflib's (`METADATA_SECTION_3_ENCRYPTION_OFFSET`,
-`METADATA_RECORDING_TIME_OFFSET_OFFSET`, `METADATA_GMT_OFFSET_OFFSET`,
-meflib.h:404, 496 and 502) and mef3io's (`fmt::METADATA_SECTION_3_OFFSET` =
-13312 in `types.hpp`; layout in the [format reference](mef3_format.md#metadata-file-tmet-exactly-16-384-b)).
-
-Section 3 is encrypted only when the session has a level-2 password
-(`encrypt_metadata`, meflib.c:2198, encrypts a section only when the writer
-holds that level's key). In an unencrypted session it is plain text. In an
-encrypted session, anyone given the level-2 password can read it.
-
-## Worked example: getting the date back
-
-A small session written by the legacy Python stack (`mef_tools` + `pymef`,
-meflib's own write path), with synthetic data and a **fictional** date:
-14 May 2031, 13:47:05 UTC, at a site six hours behind UTC. The offset is
-computed exactly as meflib does. [Example 11](#backward-compatibility) builds
-it.
-
-| Value | Where it is stored | Stored bytes, as si8 µs | Meaning |
-|---|---|---|---|
-| start time | universal header, offset 16 | `-28025000000` | minus 7 h 47 min 05 s: the **local time of day** |
-| `recording_time_offset` | section 3, `.tmet` offset 13312 | `1936504800000000` | 2031-05-14 06:00:00 UTC = **local midnight** |
-| section-3 level | section 1, `.tmet` offset 1025 | `-2` | **plain text** |
-
-The arithmetic: `−(−28 025 000 000) + 1 936 504 800 000 000 =
-1 936 532 825 000 000` µs, which is **2031-05-14 13:47:05 UTC**, the real start.
-
-No MEF library and no password is needed:
-
-```python
-import datetime as dt
-import struct
-from pathlib import Path
-
-tmet = next(Path("legacy_rto.mefd").glob("*.timd/*.segd/*.tmet")).read_bytes()
-s3_level = struct.unpack_from("<b", tmet, 1025)[0]    # section 3 encryption level
-stored = struct.unpack_from("<q", tmet, 16)[0]        # start time, universal header
-rto = struct.unpack_from("<q", tmet, 13312)[0]        # recording_time_offset, section 3
-
-print("section 3 level:", s3_level)
-print("stored start:   ", stored)
-print("offset (rto):   ", rto)
-print("real start:     ", dt.datetime.fromtimestamp((-stored + rto) / 1e6, dt.timezone.utc))
-```
-
-Output:
-
-```
-section 3 level: -2
-stored start:    -28025000000
-offset (rto):    1936504800000000
-real start:      2031-05-14 13:47:05+00:00
-```
-
-Every `.tmet` in a meflib session carries the same offset (meflib uses one
-per session), so any one of them is normally enough. The other stored
-times (block index, data block headers, records) come back the same way.
-
-## What else the offset leaves in place
-
-Even if section 3 could not be read, the offset only changes **times**, and
-not all of them:
-
-| What | Where | Touched by the offset? |
-|---|---|---|
-| The date itself | `recording_time_offset`, section 3 of every `.tmet` | it *is* the offset: plain text unless encrypted |
-| Time zone | `GMT_offset` (and the DST start/end fields when filled), section 3 | no |
-| Time of day | every stored time | kept on purpose |
-| Seizure, epoch and cursor times | record **bodies**: `Seiz` earliest onset / latest offset / per-channel onset and offset, `Epoc` timestamp / end, `Curs` trace timestamp | **no**: meflib applies the offset to the record **header** time only (meflib.c:1846, 2281), and `mefrec.c` never touches a body. Body times stay as the writing program stored them, normally the real absolute time |
-| Session name | `session_name`, in the universal header of **every** file (offset 308) | no |
-| Channel names, anonymized name | universal header (offsets 52, 564) | no |
-| File and folder names | `<session>.mefd`, `<channel>.timd`, … | no |
-| Subject name, ID, recording location | section 3 | no |
-| Descriptions | section 2 (`session_description`, `channel_description`) | no |
-| Annotation text | record bodies (Note, SyLg, EDFA …) | no |
-| File modification times | the file system, outside the format | no |
-
-Record bodies are plain text in an unencrypted session. In an encrypted one
-they are encrypted only if the writer did so. mef3io encrypts them at level
-2; the legacy Python stack writes them unencrypted (see
-[example 09](examples.md)). So a seizure record can give away the date even
-in a session whose header times all count from midnight.
-
-### The sign convention is not reliable either
-
-`rto − t` is negative, and so marked as "offset applied", only for times
-after the offset. meflib's own offset is at or before the recording start,
-so its times are normally after it. The legacy Python stack lets
-the caller choose any offset (`MefWriter.record_offset`) and does not check
-it. For a time **before** the offset, `rto − t` is positive. Every reader
-then takes it as an absolute time, close to 1 January 1970. We wrote such a
-session with `mef_tools` 1.2.3 / `pymef` 1.4.8 and the offset one hour after
-the start. Its index then held `+3600000000`, which every reader takes as
-1970-01-01 01:00 UTC. The same session's universal headers (`.tmet`, `.tidx`,
-`.tdat`) and data block header held the **real start time, unconverted**.
-
-A correct absolute time is also positive, so the bytes alone cannot tell the
-two apart. That is why mef3io's [validator](validation.md) stands its time
-checks down whenever `rto ≠ 0`. It is also why
-`anonymize_session` refuses a session with an ambiguous legacy time
-convention.
-
-## Deprecated in mef3io
-
-This is a decision about how mef3io **uses** the format, not a change to the
-format. MEF 3.0 still defines the field, and mef3io still reads it exactly
-as meflib does.
-
-- **mef3io never creates an offset session.** A new session gets
-  `recording_time_offset = 0` (`SegmentSpec::recording_time_offset = 0`,
-  `writer.hpp`). No public API sets anything else. A new segment or channel
-  takes an offset only from the existing session it is added to
-  (`SessionWriter::resolve_offset`, `session_writer.cpp`), and an empty
-  session resolves to 0.
-- **mef3io reads offset sessions correctly.** Every time comes back as true
-  UTC, the same values pymef returns.
-- **mef3io extends them consistently.** Appended data, new segments, new
-  channels and annotations are stored in that session's own form, `rto − t`
-  (`to_stored_time`, `time.hpp`). The session stays consistent for every
-  reader, and mef3io never writes the date there in plain. It also does not
-  make the session any less identifiable than it already was.
-- **mef3io refuses when it cannot do that safely**, and writes nothing:
-  - a time at or before the offset (`WriteConflictError`); the only correct
-    bytes for it would be the real date in plain;
-  - segments that disagree on the offset (`WriteConflictError`);
-  - an offset it cannot read: an encrypted session opened with only the
-    level-1 password (`PasswordError`), or damaged metadata where the
-    offset matters (`WriteConflictError`).
-  The full rules are in the [format reference](mef3_format.md#times).
-- **New de-identification goes through `anonymize_session`.** It produces a
-  separate copy with `recording_time_offset = 0`; see the next section.
 
 ## De-identified copies with `anonymize_session`
 
@@ -254,7 +64,7 @@ start = mef3io.inspect("patient.mefd").start_time            # µs since 1970, U
 shift = mef3io.anonymize.reference_shift(start, "2000-01-03", tz="Europe/Prague")
 
 report = mef3io.anonymize_session("patient.mefd", "S001.mefd", shift)
-print(report.summary())
+print(report.summary())     # includes the shift: keep the output with the original
 ```
 
 From a terminal:
@@ -269,7 +79,29 @@ Choose a code that says nothing about the patient: a copy name or
 `pseudonym` that contains the patient's names (or any of their words), ID or
 location, or the original session name, is refused before anything is
 written. Values of 3 or more characters count anywhere ("Roe1", "XRoe"),
-shorter ones as a whole word; case and accents are ignored as above.
+shorter ones as a whole word; case and accents are ignored (see
+[What counts as a name](#how-the-copy-is-checked)).
+
+### Step by step
+
+A typical workflow, which
+[`examples/13_anonymize.py`](https://github.com/bnelair/mef3io/blob/main/examples/13_anonymize.py)
+runs end to end on a small made-up session:
+
+1. **Choose the shift** once per patient (see below) and keep it, with the
+   original recording, away from the copy: together with the copy it gives
+   the real dates back.
+2. **Check first.** `mef3io.anonymize.check(src, dst, shift, ...)` takes the
+   same arguments as the copy and lists everything that would stop it, each
+   with a stable code, without writing anything
+   ([Checking before copying](#checking-before-copying)).
+3. **Make the copy** with `anonymize_session`, leaving out channels you do
+   not want to share (`exclude_channels=`) and choosing whether the copy is
+   encrypted (`output_password=`).
+4. **Read the verification.** `report.verification` says whether the copy
+   passed and lists **notes**: overlaps worth a look, such as a short ID
+   that also appears inside a longer number. Look at them before sharing
+   ([How the copy is checked](#how-the-copy-is-checked)).
 
 ### Choosing the shift
 
@@ -410,8 +242,8 @@ source's and the copy's paths.
 Every refusal has a stable `code`. On the exception `anonymize_session`
 raises it is `exc.code`, next to `exc.details`, a dict with `channel`,
 `field` and `inspect_code` (each `None` when it does not apply); in a
-`check` report it is `Refusal.code`. The exception types are the ones every
-release has raised, so existing `except` clauses keep working. Match on the
+`check` report it is `Refusal.code`. The exception types are mef3io's usual ones (`ValueError`, `TypeError` and
+the `MefError` subclasses in the table), so ordinary `except` clauses work. Match on the
 code, never on the message: messages may be reworded, codes are not. Errors
 that are not refusals (a cancel, an exception raised by your own callback, an
 internal error) have no code. `mef3io.anonymize.REFUSAL_CODES` holds this
@@ -604,7 +436,216 @@ The report never repeats a name it found, so it can be logged.
   sizes.
 - It does not handle **video** (sessions with video channels are refused).
 
-## Backward compatibility
+## The recording-time offset (deprecated)
+
+meflib can store a session's times relative to a *recording-time offset*,
+which was meant to hide the recording date. It does not, and mef3io treats
+it as deprecated: it reads and extends such sessions correctly, but never
+creates one. Use [`anonymize_session`](#de-identified-copies-with-anonymize_session)
+to de-identify a recording.
+
+### In plain words
+
+*For clinicians, students and anyone sharing recordings. The technical
+details follow below.*
+
+**What the offset is.** meflib, the C library behind MEF 3.0, can save a
+recording's times as "time since midnight on the day of the recording"
+instead of as calendar times. The midnight it counted from is the *offset*.
+The idea was that someone looking at the times would see "07:47:05" rather
+than "14 May 2031, 07:47:05".
+
+**Why that does not hide the date.** The offset itself, the midnight of the
+recording day, is saved inside the same files, in a place every MEF reader
+looks. Reading software adds it back automatically, so most programs show
+the real date anyway. Someone without the software can still read it with
+a few lines of code, or with a hex editor. It is like covering the date on
+a letter with a sticky note that has the date written on it.
+
+The offset only helps in one situation: the session is encrypted **and**
+the person has only the lower-level (level-1) password. Then the offset takes
+the date out of the times, and the encryption hides the offset. Without the
+encryption, the offset hides nothing. Even with it, other parts of the
+session can still give the date away (see
+[What else the offset leaves in place](#what-else-the-offset-leaves-in-place)).
+
+MEF encryption itself is no substitute for de-identification either: it
+hides the subject fields and annotation text, but the signal and its timing
+stay readable without any password (in an offset session, as times of day).
+See
+[What encryption protects](encryption_model.md#what-encryption-protects).
+
+**What this means for you.**
+
+- Treat a session "anonymized" this way as **identifiable** data: it holds
+  the recording date, and may hold names too.
+- mef3io will never make new sessions like this.
+- mef3io still opens existing ones, shows their true dates and times, and
+  can add data or notes to them without breaking them.
+- For sharing, make a de-identified **copy**: every date moved, names
+  removed. See
+  [De-identified copies](#de-identified-copies-with-anonymize_session).
+
+### What the offset is
+
+meflib computes the offset in `generate_recording_time_offset`
+(meflib.c:4276-4324). It takes the UTC midnight of the recording's UTC date,
+adds one day minus the site's GMT offset, and steps back a day at a time
+until the result is at or before the recording start:
+
+```
+rto = UTC_midnight(start) + 86400 s − GMT_offset;  while rto > start: rto −= 86400 s
+```
+
+The result is the **local midnight** of the recording day. meflib copies it
+into section 3 of every metadata file it writes (`initialize_metadata`,
+meflib.c:4597). Every stored time then holds `rto − t`, a negative number
+(`apply_recording_time_offset`, meflib.c:744). Readers recover the true time
+as `−stored + rto` (`remove_recording_time_offset`, meflib.c:7660). So:
+
+- **The time of day is kept.** It is the stored value, counted from local
+  midnight.
+- **The date is moved into `rto`**, one 8-byte field.
+
+| Where | Field | Offset in the `.tmet` | Encrypted? |
+|---|---|---|---|
+| Section 1 | section-3 encryption level (si1) | 1025 | never; `−2` or `0` means section 3 is plain text, `+2` means encrypted |
+| Section 3 | `recording_time_offset` (si8, µs) | 13312 (section 3, field 0) | **only** if the session has a level-2 password |
+| Section 3 | `GMT_offset` (si4, seconds) | 13336 | same as above |
+
+The offsets are meflib's (`METADATA_SECTION_3_ENCRYPTION_OFFSET`,
+`METADATA_RECORDING_TIME_OFFSET_OFFSET`, `METADATA_GMT_OFFSET_OFFSET`,
+meflib.h:404, 496 and 502) and mef3io's (`fmt::METADATA_SECTION_3_OFFSET` =
+13312 in `types.hpp`; layout in the [format reference](mef3_format.md#metadata-file-tmet-exactly-16-384-b)).
+
+Section 3 is encrypted only when the session has a level-2 password
+(`encrypt_metadata`, meflib.c:2198, encrypts a section only when the writer
+holds that level's key). In an unencrypted session it is plain text. In an
+encrypted session, anyone given the level-2 password can read it.
+
+### Worked example: getting the date back
+
+A small session written by the legacy Python stack (`mef_tools` + `pymef`,
+meflib's own write path), with synthetic data and a **fictional** date:
+14 May 2031, 13:47:05 UTC, at a site six hours behind UTC. The offset is
+computed exactly as meflib does. [Example 11](#backward-compatibility) builds
+it.
+
+| Value | Where it is stored | Stored bytes, as si8 µs | Meaning |
+|---|---|---|---|
+| start time | universal header, offset 16 | `-28025000000` | minus 7 h 47 min 05 s: the **local time of day** |
+| `recording_time_offset` | section 3, `.tmet` offset 13312 | `1936504800000000` | 2031-05-14 06:00:00 UTC = **local midnight** |
+| section-3 level | section 1, `.tmet` offset 1025 | `-2` | **plain text** |
+
+The arithmetic: `−(−28 025 000 000) + 1 936 504 800 000 000 =
+1 936 532 825 000 000` µs, which is **2031-05-14 13:47:05 UTC**, the real start.
+
+No MEF library and no password is needed:
+
+```python
+import datetime as dt
+import struct
+from pathlib import Path
+
+tmet = next(Path("legacy_rto.mefd").glob("*.timd/*.segd/*.tmet")).read_bytes()
+s3_level = struct.unpack_from("<b", tmet, 1025)[0]    # section 3 encryption level
+stored = struct.unpack_from("<q", tmet, 16)[0]        # start time, universal header
+rto = struct.unpack_from("<q", tmet, 13312)[0]        # recording_time_offset, section 3
+
+print("section 3 level:", s3_level)
+print("stored start:   ", stored)
+print("offset (rto):   ", rto)
+print("real start:     ", dt.datetime.fromtimestamp((-stored + rto) / 1e6, dt.timezone.utc))
+```
+
+Output:
+
+```
+section 3 level: -2
+stored start:    -28025000000
+offset (rto):    1936504800000000
+real start:      2031-05-14 13:47:05+00:00
+```
+
+Every `.tmet` in a meflib session carries the same offset (meflib uses one
+per session), so any one of them is normally enough. The other stored
+times (block index, data block headers, records) come back the same way.
+
+### What else the offset leaves in place
+
+Even if section 3 could not be read, the offset only changes **times**, and
+not all of them:
+
+| What | Where | Touched by the offset? |
+|---|---|---|
+| The date itself | `recording_time_offset`, section 3 of every `.tmet` | it *is* the offset: plain text unless encrypted |
+| Time zone | `GMT_offset` (and the DST start/end fields when filled), section 3 | no |
+| Time of day | every stored time | kept on purpose |
+| Seizure, epoch and cursor times | record **bodies**: `Seiz` earliest onset / latest offset / per-channel onset and offset, `Epoc` timestamp / end, `Curs` trace timestamp | **no**: meflib applies the offset to the record **header** time only (meflib.c:1846, 2281), and `mefrec.c` never touches a body. Body times stay as the writing program stored them, normally the real absolute time |
+| Session name | `session_name`, in the universal header of **every** file (offset 308) | no |
+| Channel names, anonymized name | universal header (offsets 52, 564) | no |
+| File and folder names | `<session>.mefd`, `<channel>.timd`, … | no |
+| Subject name, ID, recording location | section 3 | no |
+| Descriptions | section 2 (`session_description`, `channel_description`) | no |
+| Annotation text | record bodies (Note, SyLg, EDFA …) | no |
+| File modification times | the file system, outside the format | no |
+
+Record bodies are plain text in an unencrypted session. In an encrypted one
+they are encrypted only if the writer did so. mef3io encrypts them at level
+2; the legacy Python stack writes them unencrypted (see
+[example 09](examples.md)). So a seizure record can give away the date even
+in a session whose header times all count from midnight.
+
+#### The sign convention is not reliable either
+
+`rto − t` is negative, and so marked as "offset applied", only for times
+after the offset. meflib's own offset is at or before the recording start,
+so its times are normally after it. The legacy Python stack lets
+the caller choose any offset (`MefWriter.record_offset`) and does not check
+it. For a time **before** the offset, `rto − t` is positive. Every reader
+then takes it as an absolute time, close to 1 January 1970. We wrote such a
+session with `mef_tools` 1.2.3 / `pymef` 1.4.8 and the offset one hour after
+the start. Its index then held `+3600000000`, which every reader takes as
+1970-01-01 01:00 UTC. The same session's universal headers (`.tmet`, `.tidx`,
+`.tdat`) and data block header held the **real start time, unconverted**.
+
+A correct absolute time is also positive, so the bytes alone cannot tell the
+two apart. That is why mef3io's [validator](validation.md) stands its time
+checks down whenever `rto ≠ 0`. It is also why
+`anonymize_session` refuses a session with an ambiguous legacy time
+convention.
+
+### Deprecated in mef3io
+
+This is a decision about how mef3io **uses** the format, not a change to the
+format. MEF 3.0 still defines the field, and mef3io still reads it exactly
+as meflib does.
+
+- **mef3io never creates an offset session.** A new session gets
+  `recording_time_offset = 0` (`SegmentSpec::recording_time_offset = 0`,
+  `writer.hpp`). No public API sets anything else. A new segment or channel
+  takes an offset only from the existing session it is added to
+  (`SessionWriter::resolve_offset`, `session_writer.cpp`), and an empty
+  session resolves to 0.
+- **mef3io reads offset sessions correctly.** Every time comes back as true
+  UTC, the same values pymef returns.
+- **mef3io extends them consistently.** Appended data, new segments, new
+  channels and annotations are stored in that session's own form, `rto − t`
+  (`to_stored_time`, `time.hpp`). The session stays consistent for every
+  reader, and mef3io never writes the date there in plain. It also does not
+  make the session any less identifiable than it already was.
+- **mef3io refuses when it cannot do that safely**, and writes nothing:
+  - a time at or before the offset (`WriteConflictError`); the only correct
+    bytes for it would be the real date in plain;
+  - segments that disagree on the offset (`WriteConflictError`);
+  - an offset it cannot read: an encrypted session opened with only the
+    level-1 password (`PasswordError`), or damaged metadata where the
+    offset matters (`WriteConflictError`).
+  The full rules are in the [format reference](mef3_format.md#times).
+- **New de-identification goes through `anonymize_session`.** It produces a
+  separate copy with `recording_time_offset = 0`; see the next section.
+
+### Backward compatibility
 
 [`examples/11_legacy_rto_sessions.py`](https://github.com/bnelair/mef3io/blob/main/examples/11_legacy_rto_sessions.py)
 demonstrates every claim on this page, and exits non-zero if any check
@@ -676,7 +717,7 @@ all checks passed
 
 The same behaviour is pinned in more detail by `tests/test_p22_records.py`.
 
-## If you have RTO-"anonymized" data today
+### If you have RTO-"anonymized" data today
 
 - **Treat it as identifiable.** It holds the recording date, and the offset
   alone removes no names. Store and share it under the rules for identifiable

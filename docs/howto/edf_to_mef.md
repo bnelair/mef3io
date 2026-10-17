@@ -9,7 +9,7 @@ Download
 from the mef3io repository (pip does not install the examples), then:
 
 ```bash
-pip install mef3io pyedflib   # pyedflib reads EDF; from mef3io 1.3: pip install "mef3io[edf]"
+pip install "mef3io[edf]"     # mef3io plus pyedflib, which reads EDF
 python 12_edf_to_mef.py recording.edf recording.mefd --timezone Europe/Prague
 ```
 
@@ -122,8 +122,9 @@ typed on the command line, where others could see them). From Python, use
 ([what encryption protects](../encryption_model.md#what-encryption-protects)).
 
 Leaving the name out does not make a recording anonymous: the start date,
-annotation text and file names can identify a person too. See
-[De-identification](../anonymization.md).
+annotation text and file names can identify a person too. To share a
+converted recording, make a de-identified copy with
+`mef3io.anonymize_session`; see [De-identification](../anonymization.md).
 
 ## Checking the result
 
@@ -144,7 +145,7 @@ python -m mef3io inspect recording.mefd
 
 The script reads EDF with [pyedflib](https://github.com/holgern/pyedflib), a
 small, maintained wrapper around the EDFlib C library. mef3io never installs
-it by itself: `pip install pyedflib`, or the `[edf]` extra from mef3io 1.3. It reads EDF, EDF+ and
+it by itself: `pip install "mef3io[edf]"` (or `pip install pyedflib`). It reads EDF, EDF+ and
 BDF, keeps each channel at its own sampling rate, and gives the stored whole
 numbers, so the conversion controls the scaling itself.
 [MNE-Python](https://mne.tools) also reads EDF and is the better choice for

@@ -383,7 +383,7 @@ def inspect(
     with the amount of data recorded.
 
     Available in Python and C++ (``mef3io::inspect_session``) only; there is
-    no MATLAB or C ABI equivalent yet.
+    no MATLAB or C ABI equivalent.
 
     Parameters
     ----------

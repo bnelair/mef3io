@@ -50,7 +50,8 @@ quirks matter:
 - **What mef3io writes.** Times are UTC, always; reading returns UTC.
   - **rto = 0** (every session mef3io creates): times are stored as `−t`, the
     form shown above. The bytes are unchanged from earlier releases.
-  - **rto ≠ 0** (only in a foreign session that used meflib's anonymization,
+  - **rto ≠ 0** (only in a foreign session that used meflib's deprecated
+    recording-time-offset "anonymization", which does not de-identify, and
     which mef3io is extending): times are stored as `rto − t`, meflib's own
     offset-applied form. This covers data blocks, index, universal headers and
     records alike. mef3io never writes a date there in plain, and every
@@ -211,6 +212,9 @@ segment. The repair or recovery itself always proceeds.
 7. **Unknown bytes are preserved.** A writer updates only the fields above:
    last operation, last-modified-by, mask and count. Every other byte is
    copied through, and a newer layout-version byte is never downgraded.
+   The one exception is a de-identified copy (`anonymize_session`): it
+   clears another application's region, since it may hold identifying data,
+   before stamping operation 6.
 8. `archive_session` / `extract_session` are byte-exact copies, not
    modifications, and never change the region.
 
@@ -367,7 +371,9 @@ to an 8-byte boundary. A set discontinuity flag means "this block does not
 continue seamlessly from the previous one" — that is how gaps (NaN runs in
 the original signal) are represented; nothing is stored for the gap itself.
 RED blocks are written **unencrypted** even in encrypted sessions (meflib
-default, `RED_ENCRYPTION_LEVEL_DEFAULT`, meflib.h:1082): the passwords
+default, `RED_ENCRYPTION_LEVEL_DEFAULT`, meflib.h:1082). That is a habit of
+past implementations, not the design of MEF 3.0, which defines encrypted
+blocks (see [Encrypted data blocks](encryption_model.md#encrypted-data-blocks)): the passwords
 protect metadata sections 2/3 and record bodies, **not the samples**. A
 block decodes without section 2, and its start time and sample count are in
 plain text both here and in the `.tidx`, so the stored integer samples, their

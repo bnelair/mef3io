@@ -4,7 +4,7 @@ description: "C++ and C ABI guide to mef3io, a MEF 3.0 (Multiscale Electrophysio
 
 # C++ and C ABI guide
 
-The core (`core/`) is a self-contained C++17/20 static library — no external
+The core (`core/`) is a self-contained C++20 static library — no external
 dependencies (SHA-256, AES-128, and CRC-32 are built in). Both the Python
 extension and the MATLAB MEX are thin layers over it, and it can be used
 directly.
@@ -45,6 +45,11 @@ auto recs = r.records("ch1");     // ch1's channel- + segment-level annotations
 // r.records(std::nullopt, std::nullopt, mef3io::Session::RecordLevels::All) = all.
 // mef3io::record_fields(rec) lists a record's body fields in a stable order.
 ```
+
+**Threads.** One `Reader` (and the `Session` under it) can be used from
+several threads at once: reads, `toc`, `segments` and `records` may run
+concurrently. Each call holds its own reference to the block index it
+reads, and the shared mutable state is locked (`core/tests/test_concurrency.cpp`).
 
 `Reader` wraps `mef3io::Session` (`session.hpp`), which exposes the lower
 level: lazy `.mefd/.timd/.segd` traversal, `read_runs` (decoded contiguous
@@ -101,12 +106,48 @@ w.write_records("ch1", {{.type = "Note", .time = t, .text = "marker"}});
 Appends are validated against the on-disk segment (fs, conversion factor,
 start after the segment end) and throw `WriteConflictError` on violation.
 
+## De-identified copies
+
+`mef3io::anonymize_session` (`anonymize.hpp`) writes a de-identified copy of
+a session: every time moved by `shift_us`, identity removed, samples copied
+byte for byte, verified against the source before it is published. What it
+does, and every refusal, is described in
+[De-identification](anonymization.md).
+
+```cpp
+#include "mef3io/anonymize.hpp"
+
+mef3io::AnonymizeOptions opt;
+opt.shift_us = shift;
+opt.exclude_channels = {"ECG"};
+
+mef3io::AnonymizeCheck chk = mef3io::check_anonymize("patient.mefd", "S001.mefd", opt);
+for (const auto& r : chk.refusals) std::cerr << r.code << ": " << r.message << "\n";
+
+if (chk.ok) {
+  try {
+    mef3io::AnonymizeReport rep = mef3io::anonymize_session("patient.mefd", "S001.mefd", opt);
+    // rep.verification.ok, rep.verification.notes
+  } catch (const mef3io::AnonymizeError& e) {
+    std::cerr << e.code() << "\n";          // e.g. "block-crc": only the copy can find it
+  }
+}
+```
+
+`check_anonymize` runs the same pre-flight code as `anonymize_session` and
+returns every refusal instead of throwing the first; it reads only
+metadata. `verify_anonymized` re-checks a copy at any time. Not in the C
+ABI, so not in MATLAB.
+
 ## Errors
 
-Everything throws from the `mef3io::MefError` hierarchy (`errors.hpp`):
-`IoError`, `FormatError`, `CrcError`, `PasswordError`, `WriteConflictError`.
-The one exception is `mef3io::Cancelled` (below), thrown only when a
-`CancelToken` you passed is cancelled.
+The format and I/O errors come from the `mef3io::MefError` hierarchy
+(`errors.hpp`): `IoError`, `FormatError`, `CrcError`, `PasswordError`,
+`WriteConflictError`. A bad argument throws `std::invalid_argument`, an
+unknown channel or segment `std::out_of_range`. Every refusal of
+`anonymize_session` is also a `mef3io::AnonymizeError` carrying a stable
+`code()`, next to its usual type. `mef3io::Cancelled` (below) is thrown only
+when a `CancelToken` you passed is cancelled.
 
 ## Cancelling and progress
 
@@ -129,8 +170,9 @@ try {
 ```
 
 Taking it: `Reader::read` / `read_raw`, `Session::collect_blocks`,
-`archive_session`, `extract_session`, `validate_session`, `repair_session`,
-`recover_session`. The guarantees are the ones in the
+`archive_session`, `extract_session`, `inspect_session`, `validate_session`,
+`repair_session`, `recover_session`, `anonymize_session`,
+`check_anonymize` and `verify_anonymized`. The guarantees are the ones in the
 [Python guide](python.md#cancelling-and-progress) — nothing is left behind,
 repair/recover write only after a cancellable read-only pass, progress is
 `(0, total)` … monotonic … `(total, total)` once when the cancellable work completes, at a bounded
@@ -149,8 +191,8 @@ variants `mef3io_reader_read_ex`, `mef3io_reader_read_raw_ex`,
 `mef3io_archive_session_ex`, `mef3io_extract_session_ex` and
 `mef3io_recover_session_ex` (the existing functions are unchanged). A
 cancelled call returns `MEF3IO_ERR_CANCELLED`. Validation, repair and
-`inspect_session` have no C ABI functions, so MATLAB (built on the C ABI) has
-none of them either.
+`inspect_session` and de-identification have no C ABI functions, so MATLAB
+(built on the C ABI) has none of them either.
 
 
 ## Module map
@@ -172,6 +214,11 @@ none of them either.
 | `writer.hpp` | low-level segment write + in-segment append |
 | `session_writer.hpp` | precision inference, quantization, NaN splitting, segments, records |
 | `records.hpp` | record (.rdat/.ridx) read + write |
+| `validate.hpp` | validator (check registry) and `repair_session` |
+| `recover.hpp` | `recover_session`: rebuild index/data agreement after an interrupted write |
+| `anonymize.hpp` | `anonymize_session`, `check_anonymize`, `verify_anonymized` |
+| `errors.hpp` | the `MefError` hierarchy |
+| `time.hpp` | stored ↔ user time (the recording-time offset and sign conventions) |
 | `parallel.hpp` | deterministic `parallel_for` |
 | `control.hpp` | `CancelToken`, `Cancelled`, progress callback type, `Control` |
 | `version.hpp` | `mef3io::version()` |
@@ -188,6 +235,10 @@ MATLAB MEX is built on it). Conventions:
   `mef3io_last_error()` (thread-local);
 - handles are opaque (`mef3io_reader*`, `mef3io_writer*`); close functions
   accept NULL;
+- `mef3io_reader_open_ex` adds the `strict` flag (lenient reading;
+  `mef3io_reader_n_problems` / `mef3io_reader_problem` list what was
+  skipped); `mef3io_password_interop_issue` says why a password will not
+  work as expected in other MEF readers;
 - `mef3io_reader_open` also accepts a tar session archive;
   `mef3io_archive_session(dir, tar_path_or_NULL, overwrite, out, n)` creates
   one, `mef3io_extract_session` unpacks it back, and `mef3io_writer_open`

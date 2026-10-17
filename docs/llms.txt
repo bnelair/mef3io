@@ -1,22 +1,22 @@
 # mef3io
 
-> mef3io reads and writes MEF 3.0 (Multiscale Electrophysiology Format) recordings from Python, MATLAB and C++, with one C++ core behind all three. MEF 3.0 is a compressed, optionally encrypted format for long electrophysiology recordings (mainly EEG, intracranial EEG and ECG; any regularly sampled signal fits). Files mef3io writes open in meflib, pymef and mef_tools, and theirs open in mef3io.
+> mef3io reads and writes MEF 3.0 (Multiscale Electrophysiology Format) recordings from Python, MATLAB and C++, with one C++ core behind all three. MEF 3.0 is a compressed, optionally encrypted format for long electrophysiology recordings (mainly EEG, intracranial EEG and ECG; any regularly sampled signal fits). Files mef3io writes open in meflib, pymef and mef_tools, and theirs open in mef3io. It also makes de-identified copies of a session for sharing (every date moved, identity removed, samples unchanged).
 
-Install: `pip install mef3io` (Python 3.10+, numpy only). MATLAB: the mef3io-matlab zip on each GitHub release. C++: add `core/` to a CMake project. Times are microseconds since the Unix epoch (uUTC). Gaps read back as NaN. `from mef3io import MefReader, MefWriter` replaces the legacy mef_tools API. Apache-2.0.
+Install: `pip install mef3io` (Python 3.10+, numpy only). MATLAB: the mef3io-matlab zip on each GitHub release. C++: add `core/` to a CMake project. Times are microseconds since the Unix epoch (uUTC). Gaps read back as NaN. `from mef3io import MefReader, MefWriter` replaces the legacy mef_tools API. Reads and opening release the Python GIL, and one Reader can be shared between threads. Apache-2.0.
 
 ## Docs
 
 - [Overview](https://bnelair.github.io/mef3io/): what mef3io is, scope and limitations
 - [MEF 3.0 for students](https://bnelair.github.io/mef3io/students/): the format in plain words, when to use it
 - [Install](https://bnelair.github.io/mef3io/install/): wheels, MATLAB bundle, building from source
-- [Python guide](https://bnelair.github.io/mef3io/python/): Reader, Writer, inspect, cancel/progress, tar archives, caching, mef_tools drop-in
+- [Python guide](https://bnelair.github.io/mef3io/python/): Reader, Writer, inspect, cancel/progress, warnings, threads, tar archives, caching, mef_tools drop-in
 - [MATLAB guide](https://bnelair.github.io/mef3io/matlab/): the +mef3io classes
 - [C++ and C ABI guide](https://bnelair.github.io/mef3io/cpp/): the core library and the flat C API
-- [Examples](https://bnelair.github.io/mef3io/examples/): runnable scripts
+- [Examples](https://bnelair.github.io/mef3io/examples/): runnable scripts, including a de-identification example
 
 ## How-to
 
-- [Convert EDF, EDF+ or BDF to MEF 3.0](https://bnelair.github.io/mef3io/howto/edf_to_mef/): sampling rates, units, time zone, annotations, EDF+D gaps, patient fields, verification (needs pyedflib: `pip install pyedflib`, from 1.3 `pip install "mef3io[edf]"`)
+- [Convert EDF, EDF+ or BDF to MEF 3.0](https://bnelair.github.io/mef3io/howto/edf_to_mef/): sampling rates, units, time zone, annotations, EDF+D gaps, patient fields, verification (needs pyedflib: `pip install "mef3io[edf]"`)
 - [Read MEF 3.0 in Python](https://bnelair.github.io/mef3io/howto/read_python/): whole channel, time windows, gaps as NaN, passwords, .mefd.tar
 - [Read MEF 3.0 in MATLAB](https://bnelair.github.io/mef3io/howto/read_matlab/): the same in MATLAB
 - [Long recordings with gaps](https://bnelair.github.io/mef3io/howto/long_recordings/): how gaps are stored, finding them without reading samples, appending over days
@@ -27,7 +27,7 @@ Install: `pip install mef3io` (Python 3.10+, numpy only). MATLAB: the mef3io-mat
 - [Encryption model](https://bnelair.github.io/mef3io/encryption_model/): the two password levels and what they protect
 - [Validation and repair](https://bnelair.github.io/mef3io/validation/): checking, repairing and recovering sessions
 - [Long recordings](https://bnelair.github.io/mef3io/long_recordings/): months-long appends, durability
-- [De-identification](https://bnelair.github.io/mef3io/anonymization/): why meflib's recording-time offset is not anonymization
+- [De-identification](https://bnelair.github.io/mef3io/anonymization/): de-identified copies with anonymize_session (check before copying, channel exclusion, encryption, verification, refusal codes; Python and C++), and why meflib's recording-time offset is not anonymization (deprecated)
 - [Release notes](https://bnelair.github.io/mef3io/release_notes/): changes and upgrade notes per version
 
 ## Optional

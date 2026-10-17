@@ -36,7 +36,7 @@ What is encrypted in an encrypted session, and what is not:
 | Recording start and end time, session and channel names, anonymized name (if the writer filled it), number of blocks or records, file IDs, mef3io's [provenance stamp](mef3_format.md#provenance-region-mef3io-12-frozen-format) | the 1024-byte header at the start of **every** file | no |
 | Every data block's start time, sample count, position in the file, smallest and largest sample, and gap flag | block index (`.tidx`) | no |
 | Every data block's start time, sample count, scale factor and compression table | data block header (`.tdat`) | no ([with one exception](#encrypted-data-blocks)) |
-| **The samples themselves** (compressed) | data block (`.tdat`) | **no**: meflib writes data blocks unencrypted by default, and so does mef3io |
+| **The samples themselves** (compressed) | data block (`.tdat`) | **no**: meflib writes data blocks unencrypted by default, and so does mef3io. That is a habit of past implementations, not the design of MEF 3.0, which defines encrypted data blocks |
 | File and folder names, file sizes | the file system | no |
 
 So, **without any password**, anyone with the files can recover:
@@ -85,7 +85,9 @@ Also worth knowing:
   and pymef, but take two of those 15 bytes each. Avoid characters beyond
   U+00FF (Ł, €, any non-Latin script): every MEF reader keeps only the low
   byte of each one, so a different password can unlock the same session.
-  mef3io's writer warns (`PasswordInteropWarning`) about either case.
+  mef3io's writer warns (`PasswordInteropWarning`) about either case;
+  `mef3io.password_interop_issue(password)` checks a password before
+  anything is written.
 - **In an unencrypted session nothing is hidden**, including section 3. A
   recording-time offset there hides no date: it is stored right next to the
   times it shifts ([details](anonymization.md)).
@@ -124,7 +126,8 @@ are supplied.
 
 Time-series **data blocks** (`.tdat` RED blocks) are written **unencrypted**
 even in an encrypted session — meflib's `RED_ENCRYPTION_LEVEL_DEFAULT` is
-`NO_ENCRYPTION`. Only metadata sections 2/3 and record bodies are encrypted,
+`NO_ENCRYPTION`. That is not the design of MEF 3.0, which defines encrypted
+data blocks, but a habit of past implementations. Only metadata sections 2/3 and record bodies are encrypted,
 so the samples and their timing decode without a password (see
 [What encryption protects](#what-encryption-protects)).
 A block that another writer DID encrypt has only the first 16 bytes of its
@@ -252,8 +255,11 @@ gate the signal itself: the samples are readable without any password (see
   and, only if that fails and the password has a non-ASCII character (so
   the old rule gives different bytes), with the old rule. A match through
   the old rule opens the session and raises `LegacyPasswordWarning`
-  (MATLAB: `mef3io:legacyPassword`; C: `mef3io_reader_n_legacy_password_
-  channels`, and from `records()` for record files): the data is intact, but
+  (a `MefWarning`; MATLAB: `mef3io:legacyPassword`; C:
+  `mef3io_reader_n_legacy_password_channels`, and from `records()` for
+  record files; `inspect()` reports it as
+  `SessionSummary.legacy_password_mapping` and a `legacy-password` entry in
+  its `warnings`): the data is intact, but
   meflib and pymef cannot open that session with that password. The
   fallback cannot tell who wrote a file, so it also accepts a second
   password, the one whose old-rule bytes equal the real key (a session

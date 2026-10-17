@@ -80,6 +80,10 @@ See the [validation guide](../validation.md) for what each check means.
 
 ::: mef3io.available_checks
 
+::: mef3io.describe_check
+
+::: mef3io.SkippedSegment
+
 ::: mef3io.validate_session
 
 ::: mef3io.repair_session
@@ -89,6 +93,19 @@ See the [validation guide](../validation.md) for what each check means.
 ::: mef3io.RecoveryReport
 
 ::: mef3io.RecoveredSegment
+
+## Errors
+
+mef3io raises `mef3io.MefError` and its subclasses `FormatError` (damaged
+or malformed files), `CrcError` (a checksum does not match),
+`PasswordError` (a missing or wrong password), `IoError` (files, paths,
+session naming) and `WriteConflictError` (a write that would break the
+session). All of them subclass `RuntimeError`. A refusal of
+`anonymize_session` also carries a stable `code` and `details`
+([Refusal codes](../anonymization.md#refusal-codes)); bad arguments raise
+`ValueError` or `TypeError`. `mef3io.Cancelled` is deliberately not a
+`MefError`. `mef3io.have_cpp_backend()` says whether the compiled core
+is available.
 
 ## Warnings
 

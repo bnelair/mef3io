@@ -1,8 +1,9 @@
-"""mef3io — MEF 3.0 read/write.
+"""mef3io — read, write, validate and de-identify MEF 3.0 recordings.
 
-C++ backend (``_mef3io`` extension) with a pure-Python fallback. The public
-API (``Reader``, ``Writer``) is filled in over the implementation phases; P0
-exposes only backend availability so the build can be validated end to end.
+The work is done by the compiled C++ core (the ``_mef3io`` extension); the
+pure-Python backend is a stub. Start with :class:`Reader`, :class:`Writer`,
+:func:`inspect` and :func:`anonymize_session`; the guide is at
+https://bnelair.github.io/mef3io/python/.
 """
 
 try:

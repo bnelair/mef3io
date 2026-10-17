@@ -16,7 +16,7 @@ ARM64; no musllinux/Alpine wheels, which build from the sdist):
 ```bash
 pip install mef3io                 # runtime (numpy only)
 pip install "mef3io[compat]"       # + pandas (DataFrame annotations in compat)
-pip install "mef3io[edf]"          # + pyedflib, for converting EDF/BDF (1.3+; see How-to)
+pip install "mef3io[edf]"          # + pyedflib, for converting EDF/BDF (see How-to)
 pip install "mef3io[test]"         # + oracle test stack (pymef, mef-tools, pandas, pytest)
 pip install "mef3io[bench]"        # + NWB-Zarr benchmark stack
 ```
