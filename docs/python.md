@@ -578,10 +578,10 @@ except mef3io.Cancelled:
 token.cancel()
 ```
 
-**Several reads at once.** One `Reader` can serve several threads at once
-(see [Parallelism](#parallelism)). When a newer request supersedes a read,
-cancel the old one with its own token; the cancelled call returns promptly
-and the other reads are unaffected.
+**Several reads at once.** Reads on one `Reader` can run from several
+threads at once, within the limits in [Parallelism](#parallelism). When a
+newer request supersedes a read, cancel the old one with its own token; the
+cancelled call returns promptly and the other reads are unaffected.
 
 **Cancelling.** `token.cancel()` is safe from any thread. The operation
 notices between units of work — before each segment is fetched and each block
@@ -711,9 +711,15 @@ Opening a session releases the GIL too: `Reader(...)` (and the writer's
 reopen of an existing session) scans the tree and parses every segment's
 metadata in C++ while other Python threads keep running. So a GUI can open a
 large session on a worker thread without freezing its event loop, and several
-sessions can be opened at once on different threads. One `Reader` can also
-be shared across threads: reads, `toc`, `segments` and `records` may run
-concurrently on it. `toc`, `segments`, `records` and
-`Writer.write_annotations` release the GIL as well. The Python-level parts
+sessions can be opened at once on different threads. `toc`, `segments`,
+`records` and `Writer.write_annotations` release the GIL as well.
+
+**Sharing one `Reader`:** reads, `toc`, `segments` and `records` on one `Reader` may run at once. Three
+limits remain until [#110](https://github.com/bnelair/mef3io/issues/110)
+adds the locks: with `cache=`, make one call (a read or `info`) before
+sharing the `Reader`, since the first call builds its backend; do not
+`close()` it while other threads are reading; and an open-time or record
+warning may be shown more than once.
+A `Writer` is not meant to be shared between threads. The Python-level parts
 of an open (the warm-start cache, building the open-time warnings) are short
 and run with the GIL as usual.

@@ -54,9 +54,11 @@ version number.
   source before it is saved. Python and C++ — see
   [De-identification](anonymization.md).
 - **Deterministic** — output is byte-identical regardless of thread count.
-- **Responsive and thread-safe** — opening, reading and writing release
-  Python's GIL, so a GUI stays responsive while a session opens or decodes
-  on a worker thread, and one `Reader` can be shared between threads.
+- **Responsive, with thread-safe reads** — opening, reading and writing
+  release Python's GIL, so a GUI stays responsive while a session opens or
+  decodes on a worker thread, and reads on one `Reader` can run from several
+  threads at once (a `Writer` is not for sharing; limits in
+  [Parallelism](python.md#parallelism)).
 - **Made for tools** — `mef3io.inspect()` describes a session without
   reading its samples; reads and long operations can report progress and be
   cancelled from another thread; refusals of a de-identified copy come with
@@ -143,9 +145,9 @@ The same session opens in MATLAB (`mef3io.Reader('session.mefd')`) and C++
 - Single-file `.mefd.tar` sessions are a mef3io addition, not part of
   MEF 3.0: legacy tools need them unpacked first (`extract_session`,
   `tar -xf`, or 7-Zip on Windows); see the [Python guide](python.md#tar-archives-single-file-sessions).
-- Data blocks are written unencrypted. That is not the design of MEF 3.0,
-  which defines their encryption, but a habit of past implementations
-  (meflib's default) that mef3io keeps for compatibility; aligning with the
+- Data blocks are written unencrypted. That is not the design of MEF 3.0
+  but an artifact of past implementations (meflib's default), which mef3io
+  keeps for compatibility; aligning with the
   specification is under discussion
   ([compatibility](encryption_model.md#compatibility-with-other-mef-30-tools)).
 - Every record type MEF 3.0 defines is read; `Note`, `SyLg` and `EDFA` can be

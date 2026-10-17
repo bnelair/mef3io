@@ -99,8 +99,9 @@ struct SegmentSpec {
   /// it, the appended `.tidx` before its header is patched, and the `.tmet`
   /// temp file before it is renamed over the original. A power cut then
   /// leaves the segment consistent, with the last append either fully
-  /// present or fully absent. (The Python `Writer` defaults to
-  /// `durability="fast"`, i.e. false.)
+  /// present or fully absent. (`SegmentSpec` defaults to true, but
+  /// `SessionWriter` defaults to non-durable — call `set_durable(true)` — and
+  /// the Python `Writer` to `durability="fast"`, i.e. false.)
   ///
   /// false — no flushes. `.tdat` and `.tidx` are extended IN PLACE, so a
   /// crash can leave a torn tail on either, or an index referencing `.tdat`

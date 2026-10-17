@@ -27,17 +27,19 @@ FS = 256.0
 START = 1_717_372_800_000_000 + 9 * 3600 * 1_000_000  # a fictional morning, 09:00 UTC
 
 tmp = Path(tempfile.mkdtemp())
-src = str(tmp / "roe_jane_2024.mefd")
+src = str(tmp / "roe_jane.mefd")
 
 # ---------------------------------------------------------------- the source
 meta = mef3io.Metadata(
-    subject=mef3io.Subject(name_1="Jane", name_2="Roe", id="MRN-0042",
+    subject=mef3io.Subject(name_1="Jane", name_2="Roe", id="42",
                            recording_location="Example Hospital"),
     acquisition=mef3io.Acquisition(session_description="Jane Roe, overnight EEG"),
 )
 rng = np.random.default_rng(0)
 with mef3io.Writer(src, overwrite=True, units="uV", metadata=meta) as w:
-    for ch in ("Fp1", "Fp2", "ECG"):
+    # "LAH42" is a real electrode label; the 42 inside it overlaps the subject
+    # ID's digits, so the verification lists a note (and keeps the name).
+    for ch in ("Fp1", "LAH42", "ECG"):
         w.write(ch, rng.standard_normal(int(60 * FS)), START, fs=FS)
     w.write_annotations([{"time": START + 5_000_000, "text": "Jane Roe asked for a break"}],
                         channel="Fp1")
@@ -75,12 +77,11 @@ print("   record text fields changed:", report.record_text_fields_changed)
 
 # ----------------------------------------------- 3. verification and the notes
 v = report.verification  # anonymize_session ran verify() before publishing
+# summary() lists the notes: overlaps worth a look before sharing, such as
+# a short ID inside a kept channel name. They never repeat the value itself.
 print("\n3.", v.summary())
-# Notes are overlaps worth a look before sharing (never the value itself).
 print("   notes:", len(v.notes))
-for n in v.notes:
-    print("   note:", n)
-assert v.ok
+assert v.ok and v.notes
 
 # The same check can be run again at any time, on any copy:
 assert mef3io.anonymize.verify(src, dst, shift).ok
@@ -95,6 +96,6 @@ with mef3io.Reader(dst) as r:
 
 # The source is unchanged.
 with mef3io.Reader(src) as r:
-    assert sorted(r.channels) == ["ECG", "Fp1", "Fp2"]
+    assert sorted(r.channels) == ["ECG", "Fp1", "LAH42"]
     assert r.metadata.subject.name_2 == "Roe"
 print("\nthe source is unchanged; done")

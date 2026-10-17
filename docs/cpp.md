@@ -46,10 +46,13 @@ auto recs = r.records("ch1");     // ch1's channel- + segment-level annotations
 // mef3io::record_fields(rec) lists a record's body fields in a stable order.
 ```
 
-**Threads.** One `Reader` (and the `Session` under it) can be used from
-several threads at once: reads, `toc`, `segments` and `records` may run
-concurrently. Each call holds its own reference to the block index it
-reads, and the shared mutable state is locked (`core/tests/test_concurrency.cpp`).
+**Threads.** Reads, `toc`, `segments` and `records` on one `Reader` (and
+the `Session` under it) may run from several threads at once. Each call
+holds its own reference to the block index it reads, and the shared mutable
+state is locked (`core/tests/test_concurrency.cpp`). Configure
+`set_threads` (and `set_index_cache_bytes`) before sharing: the setters are
+not synchronised yet ([#110](https://github.com/bnelair/mef3io/issues/110)).
+A `SessionWriter` is not for sharing.
 
 `Reader` wraps `mef3io::Session` (`session.hpp`), which exposes the lower
 level: lazy `.mefd/.timd/.segd` traversal, `read_runs` (decoded contiguous
@@ -102,6 +105,10 @@ w.write_int32("ch2", counts, /*ufact=*/0.01, start_uutc, 256.0, valid_mask);
 // Records (annotations); std::nullopt -> session level.
 w.write_records("ch1", {{.type = "Note", .time = t, .text = "marker"}});
 ```
+
+A `SessionWriter` is non-durable by default (no flushes, like the Python
+`durability="fast"`); call `w.set_durable(true)` for the flush barriers
+described in [Long recordings](long_recordings.md#the-durability-knob).
 
 Appends are validated against the on-disk segment (fs, conversion factor,
 start after the segment end) and throw `WriteConflictError` on violation.

@@ -178,8 +178,8 @@ the legacy stack instead.
 | encrypted | 2.08 s (22.2 M samples/s) | 1.40 s (33.0 M samples/s) | 80.2 MB |
 
 Encryption costs nothing, because mef3io encrypts only metadata; it leaves
-data blocks unencrypted, as past implementations did (not the format's
-design). MATLAB could not
+data blocks unencrypted, which is not the design of MEF 3.0 but an artifact
+of past implementations. MATLAB could not
 be benchmarked on this machine; the
 [MATLAB vs Python table](legacy_comparison.md#matlab-vs-python-binding-same-c-core)
 comes from the earlier one.

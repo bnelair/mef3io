@@ -371,9 +371,9 @@ to an 8-byte boundary. A set discontinuity flag means "this block does not
 continue seamlessly from the previous one" — that is how gaps (NaN runs in
 the original signal) are represented; nothing is stored for the gap itself.
 RED blocks are written **unencrypted** even in encrypted sessions (meflib
-default, `RED_ENCRYPTION_LEVEL_DEFAULT`, meflib.h:1082). That is a habit of
-past implementations, not the design of MEF 3.0, which defines encrypted
-blocks (see [Encrypted data blocks](encryption_model.md#encrypted-data-blocks)): the passwords
+default, `RED_ENCRYPTION_LEVEL_DEFAULT`, meflib.h:1082). That is not the design
+of MEF 3.0 but an artifact of past implementations; the format defines
+encrypted blocks (see [Encrypted data blocks](encryption_model.md#encrypted-data-blocks)): the passwords
 protect metadata sections 2/3 and record bodies, **not the samples**. A
 block decodes without section 2, and its start time and sample count are in
 plain text both here and in the `.tidx`, so the stored integer samples, their

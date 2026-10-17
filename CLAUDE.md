@@ -14,8 +14,9 @@ validator + targeted repair + recovery implemented (+ an open-time warning).
 `inspect` (metadata-only description, #67), cancel/progress on long
 operations, and de-identified copies (`anonymize_session` +
 `anonymize.check`/`verify`, #70/#111) implemented — all Python + C++ only, not
-MATLAB. One Reader/Session is safe to share across threads (#79; GIL released
-on open and every long call). Python (pytest) + standalone C++ Catch2 suites.
+MATLAB. Reads/toc/segments/records on one Reader/Session may overlap across
+threads (#79; GIL released on open and every long call); Python-side limits
+until #110 are in for_agents/INVARIANTS.md §12. Python (pytest) + standalone C++ Catch2 suites.
 Wheel builds via `python -m build`. Parallel decode/encode, byte-deterministic
 across threads.
 
@@ -856,7 +857,8 @@ Benchmarks: `benchmarks/mef_benchmark.py` (write/open/seq/parallel vs mef_tools
 Public text: `tests/test_p25_public_text.py` (and the docs workflow's check of
 the built site) fails if README, docs, examples, the package, bindings, MATLAB
 or core sources name the private third-party reader; CLAUDE.md, tests and
-scripts are exempt. Keep it out of for_agents/ too (public, not scanned). The
-only institution mention allowed is the README/docs affiliation line
-("Maintained by Filip Mivalt, Bioelectronics Neurophysiology and Engineering
-Laboratory (BNEL) at Mayo Clinic.").
+scripts are exempt. Keep it out of for_agents/ too (public, not scanned).
+Institution mentions allowed: the affiliation line ("Maintained by Filip
+Mivalt, Bioelectronics Neurophysiology and Engineering Laboratory (BNEL) at
+Mayo Clinic.") in README, docs/index.md and CONTRIBUTORS.md, and the
+CITATION.cff author `affiliation` field (maintainer-approved). Nothing else.

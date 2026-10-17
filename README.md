@@ -138,8 +138,10 @@ pages such as
   [De-identification](https://bnelair.github.io/mef3io/anonymization/).
 - **Programs that stay responsive.** Opening, reading and writing release
   Python's GIL, so a GUI or server keeps running while a session opens or
-  decodes on a worker thread, and one `Reader` can be shared between
-  threads.
+  decodes on a worker thread. Reads on one `Reader` can run from several
+  threads at once (a `Writer` is not for sharing); see
+  [Parallelism](https://bnelair.github.io/mef3io/python/#parallelism) for the
+  limits.
 - **One file instead of a folder.** A session can be packed into a single
   `.mefd.tar` and read in place, without unpacking.
 
@@ -163,8 +165,8 @@ Changes in every version, and what an upgrade asks of you, are listed in the
   keep confidential recordings on protected storage. See
   [what encryption protects](https://bnelair.github.io/mef3io/encryption_model/#what-encryption-protects).
 - **Data-block encryption.** The MEF 3.0 specification defines encrypted
-  data blocks. Leaving them unencrypted is a habit of past implementations,
-  not the format's design: meflib does not encrypt them unless asked, and
+  data blocks. Leaving them unencrypted is not the design of MEF 3.0 but an
+  artifact of past implementations: meflib does not encrypt them unless asked, and
   the legacy readers mishandle encrypted blocks (pymef crashes on them, and
   meflib requires the level-2 password even for level-1 blocks). mef3io
   reads such blocks (some third-party tools write them): a block encrypted at

@@ -207,7 +207,14 @@ answered. Rules:
 ## 12. Calls on one Reader can overlap
 
 The bindings release the GIL on open and on every long call, so several
-threads may call one `Reader`/`Session` at once. A new long call must release
+threads may call one `Reader`/`Session` at once: reads, toc, segments and
+records. NOT yet safe in Python (#110): `Reader._ensure_impl` with `cache=` is
+an unlocked check-then-set (5 warm Readers x 8 threads built 39 backends);
+`close()` racing a first read can reopen the session; `records()` warning
+dedup diffs the cumulative problems list, so concurrent calls can double-warn;
+the C++ setters (`set_threads`, `set_index_cache_bytes`) are unsynchronised.
+The docs say exactly this — do not widen the claim before #110 lands. A
+Writer is not shared-safe. A new long call must release
 the GIL too (and get a `tests/test_p31_gil_release.py` case); any state it
 mutates must be locked; core globals must be `constexpr` or immutable (the AES
 inverse S-box used to be filled lazily, a data race).

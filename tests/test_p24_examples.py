@@ -10,6 +10,7 @@ nothing beyond mef3io and is run the same way.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -50,7 +51,11 @@ def test_anonymize_example_runs_clean():
     assert "verification: passed" in out
     assert "copy starts: 2000-01-01T09:00:00+00:00" in out
     assert "the source is unchanged; done" in out
+    # The planted overlap (the ID "42" inside the kept channel LAH42) is a note.
+    assert "note: LAH42.timd" in out and "notes: 2" in out
     # The example promises not to print the original recording date
-    # (2024-06-03, fictional) nor the shift that would give it back.
-    assert "2024-06-03" not in out and "1717" not in out
+    # (2024-06-03, fictional), its year, nor the shift that would give it back.
+    assert "2024" not in out and "1717" not in out
     assert "shifted by" not in out
+    # No uUTC time or shift of any kind (12+ digits) reaches the output.
+    assert not re.search(r"\d{12,}", out), out

@@ -54,8 +54,9 @@ with real barriers:
 - the `.tdat` body is flushed **before** the `.tidx` that points at those bytes
   is written — otherwise a power cut can leave an index running past the real
   end of the data file, which no in-process rollback can repair;
-- the `.tidx` and `.tmet` are written to a temp file, flushed, then renamed, so
-  a crash leaves either the old file or the new one, never a torn one.
+- the appended `.tidx` is flushed before its header is patched, and the `.tmet`
+  is written to a temp file, flushed, then renamed, so a crash leaves either
+  the old `.tmet` or the new one, never a torn one.
 
 Two things are deliberately **not** flushed: a fresh write (there is nothing
 underneath to lose — a crash leaves an incomplete session either way), and the

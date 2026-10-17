@@ -36,7 +36,7 @@ What is encrypted in an encrypted session, and what is not:
 | Recording start and end time, session and channel names, anonymized name (if the writer filled it), number of blocks or records, file IDs, mef3io's [provenance stamp](mef3_format.md#provenance-region-mef3io-12-frozen-format) | the 1024-byte header at the start of **every** file | no |
 | Every data block's start time, sample count, position in the file, smallest and largest sample, and gap flag | block index (`.tidx`) | no |
 | Every data block's start time, sample count, scale factor and compression table | data block header (`.tdat`) | no ([with one exception](#encrypted-data-blocks)) |
-| **The samples themselves** (compressed) | data block (`.tdat`) | **no**: meflib writes data blocks unencrypted by default, and so does mef3io. That is a habit of past implementations, not the design of MEF 3.0, which defines encrypted data blocks |
+| **The samples themselves** (compressed) | data block (`.tdat`) | **no**: meflib writes data blocks unencrypted by default, and so does mef3io. That is not the design of MEF 3.0 but an artifact of past implementations: the format defines encrypted data blocks |
 | File and folder names, file sizes | the file system | no |
 
 So, **without any password**, anyone with the files can recover:
@@ -126,8 +126,8 @@ are supplied.
 
 Time-series **data blocks** (`.tdat` RED blocks) are written **unencrypted**
 even in an encrypted session — meflib's `RED_ENCRYPTION_LEVEL_DEFAULT` is
-`NO_ENCRYPTION`. That is not the design of MEF 3.0, which defines encrypted
-data blocks, but a habit of past implementations. Only metadata sections 2/3 and record bodies are encrypted,
+`NO_ENCRYPTION`. That is not the design of MEF 3.0 (which defines encrypted
+data blocks) but an artifact of past implementations. Only metadata sections 2/3 and record bodies are encrypted,
 so the samples and their timing decode without a password (see
 [What encryption protects](#what-encryption-protects)).
 A block that another writer DID encrypt has only the first 16 bytes of its
@@ -220,7 +220,8 @@ gate the signal itself: the samples are readable without any password (see
   Recordings mef3io writes leave data blocks unencrypted and stay fully
   compatible. mef3io 1.2 and earlier decoded such blocks wrongly (they
   deciphered the whole 256-byte table instead of its first 16 bytes).
-- **Unencrypted data blocks are a habit, not the design.** The format
+- **Unencrypted data blocks are not the design of MEF 3.0 but an artifact
+  of past implementations.** The format
   defines data-block encryption; blocks are left unencrypted because of past
   implementations' defaults (meflib's `RED_ENCRYPTION_LEVEL_DEFAULT` is no
   encryption) and because the legacy readers mishandle encrypted blocks.

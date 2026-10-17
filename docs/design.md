@@ -5,8 +5,8 @@
 
 !!! note "This is the original plan"
     It records the design as agreed before the code was written, and is kept
-    for its reasoning. Section 4.6 (threading) describes the code as built;
-    the rest is the plan. Where the plan differs from what shipped, the
+    for its reasoning. Section 4.6 (threading) has been updated to the code
+    as built; the rest is the plan. Where the plan differs from what shipped, the
     [Python](python.md), [C++](cpp.md) and [MATLAB](matlab.md) guides
     describe the library as it is. The main differences:
 
@@ -208,11 +208,12 @@ ABI shim (later) converts to codes. Bindings map to Python exceptions.
 
 ### 4.6 Threading
 
-- Internal `ThreadPool`, size set at `open()` (`n_threads`, default `auto` =
-  hardware concurrency), per-call override on read/write calls.
-- Parallel units: (1) RED block decode/encode — independent blocks, disjoint
-  output slices ⇒ deterministic, race-free; (2) per-channel/per-segment file
-  IO; (3) metadata open (parallel stat+read of `.tmet`s).
+- No persistent thread pool: each parallel step calls `parallel_for`
+  (`parallel.hpp`) with `n_threads` (0 = hardware concurrency, 1 = serial;
+  set on the Reader/Writer, per-call override on reads).
+- Parallel units: RED block decode and encode — independent blocks, disjoint
+  output slices ⇒ deterministic, race-free. Opening a session (the tree scan
+  and every `.tmet`) is serial.
 - Concurrent calls on one Reader from user threads are safe. The Reader is
   NOT immutable after open: it caches block indices (with LRU eviction) and,
   in lenient mode, records problems as it meets them. That state is locked,
@@ -224,14 +225,14 @@ ABI shim (later) converts to codes. Bindings map to Python exceptions.
   (the `Reader`, `Session` and `SessionWriter` constructors, #79), reads,
   writes, `toc`, `segments`, `records`, `write_records`, and the
   session-level functions. Cheap accessors keep it.
-- Writer is single-writer per session (documented; guarded by a lock file or
-  advisory check — TBD in implementation), but **internally parallel**:
-  block boundaries are computed up front (from `mef_block_len` and the NaN/
-  discontinuity split), then blocks are RED-encoded + encrypted + CRC'd by the
-  pool in parallel, and a single sequencer thread appends the finished blocks
-  to `.tdat` and emits `.tidx` entries **in order**. Output is byte-identical
-  regardless of `n_threads`. A bounded queue caps memory so writing a long
-  signal never holds the whole encoded stream in RAM.
+- A session has one writer at a time. That is documented, not enforced:
+  there is no lock file. Within one write call the writer is **internally
+  parallel**: block boundaries are computed up front (from `mef_block_len`
+  and the NaN/discontinuity split), all blocks of the call are RED-encoded in
+  parallel into their own buffers, and the `.tdat` body and `.tidx` entries
+  are then assembled and written **in order** on the calling thread. Output
+  is byte-identical regardless of `n_threads`. Memory scales with one call's
+  encoded data, so very long signals are written in chunks.
 
 ## 5. Python package
 
