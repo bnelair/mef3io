@@ -576,7 +576,9 @@ class Reader:
             If it raises, the read stops and the exception propagates.
             Reads on one Reader may run from several threads at once, and
             cancelling one does not affect the others. Until #110: with
-            ``cache=``, make one call before sharing the Reader, and do not
+            ``cache=``, make one read (or ``toc``/``segments``/``records``)
+            before sharing the Reader (``info``, ``channels`` and ``metadata``
+            come from the snapshot and do not open it), and do not
             ``close()`` it while other threads read (see the Python guide,
             "Parallelism").
 

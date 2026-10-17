@@ -716,8 +716,10 @@ sessions can be opened at once on different threads. `toc`, `segments`,
 
 **Sharing one `Reader`:** reads, `toc`, `segments` and `records` on one `Reader` may run at once. Three
 limits remain until [#110](https://github.com/bnelair/mef3io/issues/110)
-adds the locks: with `cache=`, make one call (a read or `info`) before
-sharing the `Reader`, since the first call builds its backend; do not
+adds the locks: with `cache=`, make one read (or `toc`, `segments` or
+`records`) before sharing the `Reader`, since that first call builds its
+backend (`info`, `channels` and `metadata` come from the snapshot and do
+not open it); do not
 `close()` it while other threads are reading; and an open-time or record
 warning may be shown more than once.
 A `Writer` is not meant to be shared between threads. The Python-level parts
