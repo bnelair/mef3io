@@ -125,6 +125,23 @@ pages such as
   gaps, annotations, encryption, what identifying fields it holds — without
   reading any samples, and long reads and operations can report progress and
   be cancelled from another thread (Python and C++).
+- **Sharing recordings without identifying the patient.**
+  `mef3io.anonymize_session` writes a de-identified copy of a session: every
+  date and time moved by the same amount (so events still line up with the
+  signal), names, ID, location, descriptions and annotation text removed,
+  and the samples copied unchanged. Channels can be left out, and the copy
+  can be unencrypted or protected with new passwords.
+  `mef3io.anonymize.check` reports everything that would stop a copy before
+  anything is written, and every copy is verified against its source (no
+  original date or name left anywhere) before it is saved. The original is
+  never changed. Python and C++; see
+  [De-identification](https://bnelair.github.io/mef3io/anonymization/).
+- **Programs that stay responsive.** Opening, reading and writing release
+  Python's GIL, so a GUI or server keeps running while a session opens or
+  decodes on a worker thread. Reads on one `Reader` can run from several
+  threads at once (a `Writer` is not for sharing); see
+  [Parallelism](https://bnelair.github.io/mef3io/python/#parallelism) for the
+  limits.
 - **One file instead of a folder.** A session can be packed into a single
   `.mefd.tar` and read in place, without unpacking.
 
@@ -148,8 +165,8 @@ Changes in every version, and what an upgrade asks of you, are listed in the
   keep confidential recordings on protected storage. See
   [what encryption protects](https://bnelair.github.io/mef3io/encryption_model/#what-encryption-protects).
 - **Data-block encryption.** The MEF 3.0 specification defines encrypted
-  data blocks. Leaving them unencrypted is a habit of past implementations,
-  not the format's design: meflib does not encrypt them unless asked, and
+  data blocks. Leaving them unencrypted is not the design of MEF 3.0 but an
+  artifact of past implementations: meflib does not encrypt them unless asked, and
   the legacy readers mishandle encrypted blocks (pymef crashes on them, and
   meflib requires the level-2 password even for level-1 blocks). mef3io
   reads such blocks (some third-party tools write them): a block encrypted at
@@ -168,13 +185,19 @@ Changes in every version, and what an upgrade asks of you, are listed in the
   works with the legacy tools.
 - **Records** (annotations): every record type MEF 3.0 defines is read;
   `Note`, `SyLg` and `EDFA` can be written with their text.
-- **De-identification**: meflib's recording-time offset does not hide the
-  recording date (it stays in every metadata file, in plain text unless the
-  session is encrypted), so mef3io never creates such sessions; it reads and
+- **De-identification**: meflib's recording-time offset, once used to
+  "anonymize" sessions, is deprecated in mef3io: it does not hide the
+  recording date (the date stays in every metadata file, in plain text unless
+  the session is encrypted). mef3io never creates such sessions; it reads and
   extends existing ones. To share a recording, make a de-identified copy with
-  `mef3io.anonymize_session` (every date moved, identity removed, samples
-  unchanged; Python and C++) — see
+  `mef3io.anonymize_session` (Python and C++, not MATLAB). It keeps channel
+  names and does not change the signal itself, and with annotation text kept
+  it removes only the names it knows — see
   [De-identification](https://bnelair.github.io/mef3io/anonymization/).
+- **MATLAB** reads and writes sessions, annotations and metadata, packs and
+  unpacks `.mefd.tar` archives and recovers interrupted writes. Inspecting,
+  validating and repairing, cancelling and progress, and de-identification
+  are in Python and C++ only.
 - **Pure-Python backend** is not implemented (`backend="pure"` raises); the
   wheels carry the compiled core.
 

@@ -4,6 +4,9 @@
 > mef_tools repo; the extraction it describes was completed in July 2026
 > (paths like `requirements/` and `scripts/export_mef3io.sh` no longer
 > exist). Kept for context; current assistant context lives in `CLAUDE.md`.
+> The "Knowledge base" section below is frozen at July 2026 and is WRONG in
+> places (test count, append, MATLAB, records writing, file paths): do not
+> copy from it; `CLAUDE.md` and `INVARIANTS.md` supersede it.
 
 This document is the single orientation point for moving `mef3io` into its own
 repository and for re-seeding an assistant's (or a new contributor's) context

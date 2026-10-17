@@ -95,18 +95,21 @@ struct SegmentSpec {
   ui4 known_difference_bytes = 0;
   /// Flush to stable storage at the points that keep a segment self-consistent.
   ///
-  /// true (default) — the `.tdat` body is flushed BEFORE the `.tidx` that
-  /// references it, and the `.tidx`/`.tmet` replacements are flushed before the
-  /// rename. A power cut then leaves the segment consistent, with the last
-  /// append either fully present or fully absent.
+  /// true — the `.tdat` body is flushed BEFORE the `.tidx` that references
+  /// it, the appended `.tidx` before its header is patched, and the `.tmet`
+  /// temp file before it is renamed over the original. A power cut then
+  /// leaves the segment consistent, with the last append either fully
+  /// present or fully absent. (`SegmentSpec` defaults to true, but
+  /// `SessionWriter` defaults to non-durable — call `set_durable(true)` — and
+  /// the Python `Writer` to `durability="fast"`, i.e. false.)
   ///
-  /// false — no flushes. Writes are still ATOMIC (temp file + rename), so no
-  /// file is ever torn and the session is never half-written; what is lost is
-  /// the ORDERING guarantee between files, so a crash can leave the index
-  /// referencing `.tdat` bytes that never landed. That is detectable
-  /// (`index.block-offsets`, `index.data-coverage`) and repairable
-  /// (`recover_session`), which is what makes the trade a reasonable one to
-  /// offer. It is the durability meflib gives — which is none.
+  /// false — no flushes. `.tdat` and `.tidx` are extended IN PLACE, so a
+  /// crash can leave a torn tail on either, or an index referencing `.tdat`
+  /// bytes that never landed; only `.tmet` is published by rename. Every such
+  /// state is detectable (`index.block-offsets`, `index.data-coverage`, the
+  /// body CRCs) and repairable (`recover_session`), which is what makes the
+  /// trade a reasonable one to offer. It is the durability meflib gives —
+  /// which is none.
   bool durable = true;
 };
 

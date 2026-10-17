@@ -11,8 +11,15 @@ writing, the error hierarchy, and the C ABI — see the [C++ guide](../cpp.md).
 The key entry points:
 
 - **`mef3io::Reader`** — high-level windowed reads, segment map, TOC, records.
+  Reads on one `Reader` may run from several threads at once (see the
+  [C++ guide](../cpp.md#reading) for the limits).
 - **`mef3io::SessionWriter`** — high-level writes, in-segment append, records.
 - **`mef3io::Session`** — the lower-level session tree and indexed reads.
+- **`mef3io::inspect_session`** (`inspect.hpp`) — everything about a session
+  without reading its samples. Not in the C ABI.
+- **`mef3io::validate_session`** / **`mef3io::repair_session`**
+  (`validate.hpp`) and **`mef3io::recover_session`** (`recover.hpp`) —
+  checking, repairing and recovering sessions ([Validation](../validation.md)).
 - **`mef3io::anonymize_session`** / **`mef3io::check_anonymize`** /
   **`mef3io::verify_anonymized`** (`anonymize.hpp`) — a de-identified copy
   with every time shifted, every check it makes before writing (without

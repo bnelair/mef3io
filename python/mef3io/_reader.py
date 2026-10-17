@@ -574,9 +574,13 @@ class Reader:
             decoded. Called at a bounded rate, possibly from a decode worker
             thread (with the GIL held for the call only), never concurrently.
             If it raises, the read stops and the exception propagates.
-            A Reader must not be read from two threads at once: after
-            cancelling, wait for the cancelled call to return before the next
-            read on the same Reader (or use one Reader per thread).
+            Reads on one Reader may run from several threads at once, and
+            cancelling one does not affect the others. Until #110: with
+            ``cache=``, make one read (or ``toc``/``segments``/``records``)
+            before sharing the Reader (``info``, ``channels`` and ``metadata``
+            come from the snapshot and do not open it), and do not
+            ``close()`` it while other threads read (see the Python guide,
+            "Parallelism").
 
         Returns
         -------

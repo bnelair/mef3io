@@ -1,6 +1,6 @@
 """Convert an EDF, EDF+ or BDF file to a MEF 3.0 session.
 
-    pip install mef3io pyedflib         # or, from mef3io 1.3: pip install "mef3io[edf]"
+    pip install "mef3io[edf]"           # or: pip install mef3io pyedflib
     python 12_edf_to_mef.py recording.edf recording.mefd --timezone Europe/Prague
     python 12_edf_to_mef.py            # no arguments: converts a small demo file
 

@@ -146,24 +146,35 @@ Session naming is enforced at every entry point: directories must end
 `.mefd`, archives `.mefd.tar` — anything else is refused, so a stray
 directory or file can never be misread (or overwritten) as a session.
 
-## Not in MATLAB: inspect, de-identified copies, cancelling and progress
+## Not in MATLAB: inspect, validation, de-identified copies, cancelling and progress
 
 `mef3io.inspect` (a description of a session without reading its samples, see
 [the Python guide](python.md#inspecting-a-session-without-reading-its-samples))
-exists in Python and C++ only; neither MATLAB nor the C ABI has it yet.
+exists in Python and C++ only; neither MATLAB nor the C ABI has it.
+Validating and repairing a session
+([Validation & repair](validation.md)) are Python and C++ only as well;
+recovering after an interrupted write is available (`mef3io.recoverSession`).
 
-`mef3io.anonymize_session` (a de-identified copy, see
+`mef3io.anonymize_session`, `mef3io.anonymize.check` and
+`mef3io.anonymize.verify` (de-identified copies, see
 [De-identification](anonymization.md#de-identified-copies-with-anonymize_session))
-is Python and C++ only too. From MATLAB, run it in a terminal:
-`python -m mef3io anonymize SRC DST --shift-us N`.
+are Python and C++ only too. From MATLAB, run them in a terminal:
+`python -m mef3io anonymize SRC DST --reference-date YYYY-MM-DD` (or
+`--shift-us N`).
 
 The Python, C++ and C APIs can cancel a read or a long operation from another
 thread and report its progress
 ([Cancelling and progress](python.md#cancelling-and-progress)). The MATLAB
-classes do not expose this yet: a MEX call blocks MATLAB's single interpreter
-thread, so there is no second MATLAB thread to cancel from. The C ABI has the
-hooks (`mef3io_cancel_token_*`, the `*_ex` functions) for when this is wired
-up.
+classes do not offer it: a MEX call blocks MATLAB's single interpreter
+thread, so there is no second MATLAB thread to cancel from. (The C ABI has
+the hooks, `mef3io_cancel_token_*` and the `*_ex` functions, for other
+callers.)
+
+Python's warnings carry the session path as data and keep it out of the
+message text (`MefWarning`). In MATLAB, `mef3io:unreadableSegment` and
+`mef3io:legacyPassword` still start with the session path, and
+`mef3io:unreadableSegment` / `mef3io:unreadableRecords` name the first file
+they skipped.
 
 ## How it is put together
 

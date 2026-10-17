@@ -30,7 +30,12 @@ release:
 - [ ] `CITATION.cff`
 - [ ] the release notes: draft what changed and what an upgrading user must
       do in `docs/release_notes/X.Y.Z.md`, and add it to the release-notes
-      index and the `mkdocs.yml` nav (newest first). The release workflow
+      index and the `mkdocs.yml` nav (newest first). Between releases, pull
+      requests collect their notes in `docs/release_notes/unreleased.md`
+      (listed in the index and the nav as "Unreleased"); the revision renames
+      it to `X.Y.Z.md`, rewrites it for the reader (highlights, fixes,
+      upgrading) and removes the "Unreleased" entries. The next pull request
+      that needs a note creates the file again. The release workflow
       publishes GitHub's generated notes; replace them with the reviewed page
       as soon as it is out: change its "Draft" line to `*Released
       YYYY-MM-DD*`, then run

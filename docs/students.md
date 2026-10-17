@@ -37,6 +37,11 @@ them. The [format reference](mef3_format.md) has every byte.
 - **Separating identity from data.** Two passwords can protect the subject's
   identity and the technical metadata. They do not hide the samples
   themselves; see [what encryption protects](encryption_model.md#what-encryption-protects).
+- **Sharing without identifying the patient.** To give a recording to
+  someone outside your study, make a de-identified copy with
+  `mef3io.anonymize_session`: every date is moved, names and other
+  identifying text are removed, and the signal stays the same. See
+  [De-identification](anonymization.md).
 
 It is a poor fit for signals without a fixed sampling rate (event streams,
 irregular measurements), and for video, which mef3io does not handle.

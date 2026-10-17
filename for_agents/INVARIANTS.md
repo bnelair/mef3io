@@ -37,8 +37,9 @@ flake the way RSS does. Pinned by `tests/test_p17_large_files.py`.
 
 Done properly once (2026-09-21) across the whole library. Clean: offsets are
 `si8`/`size_t` everywhere with no narrowing; `tar` archive and extract stream in
-1 MB chunks; the warm-start cache hashes only bounded prefixes (16 KB of
-`.tmet`, 1 KB of `.tidx`) and never touches `.tdat`; validation keeps only the
+1 MB chunks; the warm-start cache (format 6) reads only the first and last
+segment's 1024-byte `.tmet` header and a few file sizes per channel, and never
+touches `.tdat`; validation keeps only the
 1024-byte universal header plus the file size; the repair path backs up the
 `.tdat` header rather than the file.
 
@@ -47,10 +48,14 @@ Two things were **not** clean and are now fixed: `read_runs` read the whole
 forever. The index is **~2 % of the data**, so a session of a few hundred
 gigabytes held several GB of it resident. It is now capped
 (`Session::set_index_cache_bytes`, default 256 MB) with least-recently-used
-eviction — done only at the END of an operation, because a caller holds a span
-into those bytes while reading and evicting one mid-read is a use-after-free.
-`tests/test_p17_large_files.py` checks both the bound and that reads stay
-correct across eviction.
+eviction, done at the END of a public call. `segment_index` hands out a
+`shared_ptr` pin, so evicting an index that another call (or another THREAD's
+call on the same Session) is still reading never frees bytes in use; a raw
+span here crashed four threads sharing one Session. The cache is guarded by
+`index_mu_`, other mutable state by `state_mu_`; neither is held across I/O,
+and they are never held together. Pinned by `tests/test_p17_large_files.py`
+(the bound, and correct reads across eviction), `core/tests/test_concurrency.cpp`
+and `tests/test_p31_gil_release.py`.
 
 ## 2. An append must be O(new data), never O(total blocks)
 
@@ -85,17 +90,21 @@ from measured.
 ## 4. Durability is scoped deliberately, and meflib has none
 
 meflib does **no** durability work: its single `fflush` is "to update stat
-structure after write", not a barrier. mef3io's default is stronger.
+structure after write", not a barrier. mef3io's `durability="full"` is
+stronger.
 
-Load-bearing on append, do not remove for speed:
+Load-bearing on append with `durability="full"`, do not remove for speed:
 - the `.tdat` is flushed **before** the `.tidx` that references those bytes;
-- `.tidx`/`.tmet` replacements are flushed before the rename.
+- the appended `.tidx` is flushed before its header is patched, and the
+  `.tmet` temp file before it is renamed over the original.
 
 Deliberately skipped: a fresh write (nothing underneath to lose) and the
 directory entry after a rename (losing the rename keeps the previous complete
-file). `durability="fast"` drops the barriers for speed; writes stay atomic, so
-the failure mode is a recoverable inconsistency, not a torn file — which is why
-`recover_session` exists.
+file). The DEFAULT is `durability="fast"`, which drops the barriers. That is
+NOT atomic: `.tdat` and `.tidx` are extended in place, so a crash can leave a
+torn tail, or an index ahead of or behind the data; only `.tmet` is published
+by rename. Every such state is detectable and fixed by `recover_session`,
+which is what makes the default defensible.
 
 ## 5. Repair rewrites declarations; recovery may touch the index
 
@@ -183,3 +192,35 @@ answered. Rules:
 - Every new field the copy carries needs a planted-leak test in
   `tests/test_p29_anonymize.py` that shows `verify` catching it in the copy
   AND the rewrite removing it from a source.
+- ONE pre-flight (`preflight()` in `core/src/anonymize.cpp`) decides every
+  refusal for both `anonymize_session` (throws the first, before any file or
+  progress) and `check` (collects all). Never add an up-front check anywhere
+  else; `tests/test_p32_anonymize_check.py` runs every refusal through both.
+- Refusal codes are stable API, kept equal in three places by test_p32:
+  `REFUSAL_CODES` (`python/mef3io/anonymize.py`), the table in
+  `docs/anonymization.md`, and the test cases.
+- No message, warning or `VerifyIssue` carries a source time or the
+  recording-time offset. `AnonymizeReport.source_*` times are the
+  re-identification key: in memory only, left out of `repr`, `summary()`,
+  `to_dict()` (unless asked) and pickles.
+
+## 12. Calls on one Reader can overlap
+
+The bindings release the GIL on open and on every long call, so several
+threads may call one `Reader`/`Session` at once: reads, toc, segments and
+records. NOT yet safe in Python (#110): `Reader._ensure_impl` with `cache=` is
+an unlocked check-then-set (5 warm Readers x 8 threads built 39 backends);
+`close()` racing a first read can reopen the session; `records()` warning
+dedup diffs the cumulative problems list, so concurrent calls can double-warn;
+the C++ setters (`set_threads`, `set_index_cache_bytes`) are unsynchronised.
+The docs say exactly this — do not widen the claim before #110 lands. A
+Writer is not shared-safe. A new long call must release
+the GIL too (and get a `tests/test_p31_gil_release.py` case); any state it
+mutates must be locked; core globals must be `constexpr` or immutable (the AES
+inverse S-box used to be filled lazily, a data race).
+
+## 13. No private product name in public text
+
+`tests/test_p25_public_text.py` (and the docs workflow's site check) fail if
+public text names a private third-party product. CLAUDE.md, tests and scripts
+are exempt; this folder is public, so keep such names out of it.

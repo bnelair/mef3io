@@ -46,8 +46,9 @@ as above; MATLAB R2026a / Python 3.13):
 
 Takeaways: MATLAB and Python are within measurement noise of each other
 (reads identical at ~135 M samples/s; the one slower MATLAB write is
-first-run warmup), **encryption costs nothing** on either binding (it only
-wraps metadata — the signal codec path is unchanged), and both are the same
+first-run warmup), **encryption costs nothing** on either binding (mef3io
+encrypts only metadata, leaving the data blocks unencrypted as past
+implementations did — the signal codec path is unchanged), and both are the same
 ~7–8× ahead of the legacy pymef stack shown in the table above. Sessions
 written by either binding read back bit-identically in the other.
 
@@ -55,8 +56,9 @@ written by either binding read back bit-identically in the other.
 
 MEF 3.0 encrypts **section 2** (technical metadata: fs, sample counts,
 conversion factor) with the level-1 key and **section 3** (subject identity,
-recording-time offset) with the level-2 key; signal blocks themselves are not
-encrypted. The intended contract: an L1 holder reads the signal and technical
+recording-time offset) with the level-2 key. The format also defines
+encrypted signal blocks, but past implementations, and mef3io, leave them
+unencrypted. The intended contract: an L1 holder reads the signal and technical
 metadata but cannot see who the subject is; L2 unlocks everything
 (see [encryption_model.md](encryption_model.md)).
 
@@ -81,7 +83,8 @@ sections that level allows, and reports the rest as unavailable
 (`Reader.info()` → `section3_available`, subject fields `None` under L1).
 Two-level access therefore works as designed: the L1 password can be given to
 signal-processing staff without exposing subject identity. Note that neither
-password protects the samples themselves, which are not encrypted (see
+password protects the samples themselves, which mef3io and past
+implementations leave unencrypted (see
 [What encryption protects](encryption_model.md#what-encryption-protects)).
 
 ## Annotation encryption — a legacy writer gap
@@ -154,13 +157,12 @@ The whole point of the section-2 work is a defect neither mef3io nor pymef can
 see — both size their buffers from each block's own header rather than from the
 declarations — so it can only be confirmed by the C library.
 
-On 2026-09-21 the nine-session set from `scripts/make_reader_compat_check.py`
-was opened in a meflib-based third-party reader and the traces drawn. **Only the deliberate negative control
+The nine-session set from `scripts/make_reader_compat_check.py` was opened in a meflib-based third-party reader and the traces drawn. **Only the deliberate negative control
 crashed.**
 
 | session | result |
 |---|---|
-| fresh write by this version | decoded |
+| fresh write by mef3io | decoded |
 | written then extended via the append path | decoded |
 | legacy `mef_tools` session, untouched | decoded |
 | the same legacy session after `repair_session` | decoded |
@@ -170,7 +172,7 @@ crashed.**
 | `.tmet` with foreign padding, then appended | decoded |
 | rebuilt by `recover_session` after an interrupted write | decoded |
 
-The last two rows of that pair are the argument: identical samples, identical
+The two rows in bold are the argument: identical samples, identical
 blocks, only the declarations differ. That isolates the cause to metadata
 section 2 about as tightly as it can be isolated, and it confirms that the
 fix, the repair path and the recovery path all produce output that reader

@@ -50,7 +50,7 @@ pass to `Writer.write` are not stored and come back as a gap.
   so compare the times to tell a real gap.
 
 In MATLAB, `r.segments(ch)` and `r.toc(ch)` work the same way;
-`mef3io.inspect` is Python only.
+`mef3io.inspect` is in Python and C++ only, not MATLAB.
 
 ## Adding data for days or months
 

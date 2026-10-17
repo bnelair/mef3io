@@ -122,7 +122,8 @@ int mef3io_reader_n_legacy_password_channels(mef3io_reader* r, int32_t* out);
 int mef3io_reader_n_legacy_password_record_files(mef3io_reader* r, int32_t* out);
 
 /* Why `password` will not behave as expected in other MEF readers (more than
- * 15 characters, or a character above U+00FF), copied into `buf`; an empty
+ * 15 characters, more than 15 UTF-8 bytes, or a character above U+00FF),
+ * copied into `buf`; an empty
  * string when it is fine. Writers surface it as a warning; they never refuse. */
 int mef3io_password_interop_issue(const char* password, char* buf, size_t buf_bytes);
 

@@ -3,8 +3,9 @@
 MEF 3.0 uses two passwords: level 1 (technical metadata) and level 2 (full
 access incl. subject metadata and records). Sessions are either unencrypted
 or encrypted with BOTH levels — the level-2 password also unlocks level 1.
-Signal (RED) data blocks themselves are not encrypted (meflib default); the
-passwords gate metadata and record bodies.
+mef3io leaves the signal (RED) data blocks unencrypted, as past
+implementations did; that is not the design of MEF 3.0 but an artifact of
+past implementations. The passwords gate metadata and record bodies.
 """
 import tempfile
 from pathlib import Path

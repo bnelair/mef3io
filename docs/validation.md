@@ -378,7 +378,7 @@ for s in report.segments:
 
 ### When you should need it
 
-With the default `durability="full"` an append cannot leave either shape: the
+With `durability="full"` an append cannot leave either shape: the
 `.tdat` is flushed before the `.tidx` that references it. Recovery exists for
 `durability="fast"` (see
 [Long recordings](long_recordings.md#the-durability-knob)), for storage that
