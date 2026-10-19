@@ -663,3 +663,30 @@ def test_a_short_cut_reads_only_around_its_window(tmp_path):
     # window is one minute). Before #124's review a cut read every block of
     # the segment.
     assert read < tdat_bytes / 4, (read, tdat_bytes)
+
+
+def test_a_long_block_overlapped_by_later_short_ones_is_not_missed(tmp_path):
+    """A 10-s block 0 with blocks 1-5 moved to start inside it (both copies of
+    their times): a window starting in block 0's tail must still get those
+    samples. The range searched reaches back by the longest declared block."""
+    import test_p6_threads as p6
+
+    src = tmp_path / "p.mefd"
+    fs = p6.FS
+    with mef3io.Writer(str(src), overwrite=True, block_length=int(10 * fs)) as w:
+        w.write("ch1", np.arange(int(fs * 120)) * 1.0, START, fs, precision=0)
+    n = len(list((src / "ch1.timd").glob("*/*.tidx"))[0].read_bytes()[UH:]) // 56
+    # Block i (10 s each) starts at i*10 s; move blocks 1..5 back to start at
+    # 1..5 s, inside block 0.
+    shifts = [0] + [-(i * 10 - i) * fs for i in range(1, 6)] + [0] * (n - 6)
+    p6._shift_block_times(str(src), shifts)
+    t0, t1 = START + 9 * SECOND, START + 16 * SECOND
+    rep = _transform(src, tmp_path / "cut.mefd", time_range=(t0, t1))
+    assert rep.verification.ok, rep.summary()
+    # In [9 s, 16 s): block 0 [0,10) gives 1 s, blocks 1-5 [i, i+10) give
+    # 2..6 s: 21 s of samples (missing blocks 0-3 would leave 11 s).
+    with mef3io.Reader(str(tmp_path / "cut.mefd")) as c:
+        assert c.info("ch1")["number_of_samples"] == int(21 * fs)
+    rep = mef3io.transform.check(src, tmp_path / "x.mefd", time_range=(START + 7 * SECOND,
+                                                                       START + 8 * SECOND))
+    assert rep.ok and rep.channels_without_samples == ()

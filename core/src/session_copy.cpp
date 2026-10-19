@@ -989,16 +989,27 @@ bool record_in_window(const RawRecord& r, si8 rto, si8 t0, si8 t1) {
   return false;
 }
 
+/// How far before t0 a block of this segment can start and still reach it:
+/// its longest declared block plus a second; an hour when the declaration
+/// is unset (a foreign writer's), so nothing is missed, only more is read.
+si8 longest_block_us(const fmt::TimeSeriesMetadataSection2& m) {
+  const ui4 n = m.maximum_block_samples;
+  if (n == 0 || n == 0xFFFFFFFFu || !(m.sampling_frequency > 0)) return 3'600'000'000LL;
+  return static_cast<si8>(std::llround(n * 1e6 / m.sampling_frequency)) + 1'000'000;
+}
+
 /// The index entries [first, last) of a segment a cut [t0, t1) must look at,
 /// found by binary search on the index's start times (O(log n) small reads:
-/// never the whole index, never the data): from two blocks before the last
-/// one starting at or before t0 to one after the first starting at or after
-/// t1. The margin covers an index time that disagrees a little with its
-/// block header (the header decides, #11/#13); the verification checks the
-/// blocks just outside the range hold nothing of the window.
+/// never the whole index, never the data): from two blocks before the first
+/// one starting after t0 - `reach_us` (the longest a block can be:
+/// longest_block_us, so a long block overlapped by later short ones is not
+/// missed) to one after the first starting at or after t1. The two-block
+/// margin covers an index time that disagrees a little with its block header
+/// (the header decides, #11/#13); the verification checks the block just
+/// before the range holds nothing of the window.
 std::pair<std::size_t, std::size_t> window_entries(const SessionSource& src,
                                                    const std::string& tidx_rel, si8 rto, si8 t0,
-                                                   si8 t1) {
+                                                   si8 t1, si8 reach_us) {
   const std::uint64_t size = src.file_size(tidx_rel);
   if (size < fmt::UNIVERSAL_HEADER_BYTES) return {0, 0};
   const std::size_t n =
@@ -1018,7 +1029,7 @@ std::pair<std::size_t, std::size_t> window_entries(const SessionSource& src,
     }
     return lo;
   };
-  const std::size_t a = first_after(t0, false);  // a - 1 = the last block starting at or before t0
+  const std::size_t a = first_after(saturating_add(t0, -reach_us), false);
   const std::size_t b = first_after(t1, true);
   return {a >= 2 ? a - 2 : 0, std::min(n, b + 1)};
 }
@@ -1293,8 +1304,12 @@ class Copier {
     TmetImage t = open_tmet(src_, seg.tmet, rules_.copy->password);
     seg_keys_ = t.keys;
     seg_rto_ = t.rto;
-    seg_fs_ = fmt::TimeSeriesMetadataSection2::parse(
-                  std::span<const ui1>(t.bytes).subspan(S2, S2_BYTES)).sampling_frequency;
+    {
+      const auto m = fmt::TimeSeriesMetadataSection2::parse(
+          std::span<const ui1>(t.bytes).subspan(S2, S2_BYTES));
+      seg_fs_ = m.sampling_frequency;
+      seg_reach_us_ = longest_block_us(m);
+    }
     if (window_) {
       // A segment outside the window is not read at all.
       const si8 a = read<si8>(t.bytes, UH_START), b = read<si8>(t.bytes, UH_END);
@@ -1343,7 +1358,8 @@ class Copier {
     detail::SegmentCopySpec spec;
     spec.start_sample = start_sample;
     if (window_)  // only the blocks around the window are read
-      spec.entries = window_entries(src_, seg.tidx, seg_rto_, window_->first, window_->second);
+      spec.entries =
+          window_entries(src_, seg.tidx, seg_rto_, window_->first, window_->second, seg_reach_us_);
     std::optional<si8> first_t, end_t;  // a cut: the kept samples' span (user uUTC)
     native_max_ = std::numeric_limits<si4>::min();
     native_min_ = std::numeric_limits<si4>::max();
@@ -1680,6 +1696,7 @@ class Copier {
   std::optional<std::pair<si8, si8>> window_;     // [t0, t1), user uUTC
   si8 seg_rto_ = 0;                               // the segment being copied
   sf8 seg_fs_ = 0;
+  si8 seg_reach_us_ = 0;                          // longest_block_us
   std::optional<std::pair<si8, si8>> seg_span_;   // its kept samples' span
   std::optional<si4> seg_number_;                 // its number in the copy
   si4 native_max_ = 0, native_min_ = 0;           // its kept samples' extrema
@@ -2146,7 +2163,11 @@ class Verifier {
     collect_source_uuids(std::span<const ui1>(s.bytes).first(UH));
     std::span<const ui1> sb(s.bytes), db(d.bytes);
     seg_rto_ = s.rto;
-    seg_fs_ = fmt::TimeSeriesMetadataSection2::parse(sb.subspan(S2, S2_BYTES)).sampling_frequency;
+    {
+      const auto m = fmt::TimeSeriesMetadataSection2::parse(sb.subspan(S2, S2_BYTES));
+      seg_fs_ = m.sampling_frequency;
+      seg_reach_us_ = longest_block_us(m);
+    }
     check_uh(sb.first(UH), db.first(UH), drel, /*counts_from_source=*/true);
     if (transform()) {
       check_sections_transform(sb, db, drel, d);
@@ -2358,7 +2379,7 @@ class Verifier {
     const auto de = dst_.read_range(d.tidx, UH, nd * ENTRY);  // the copy: O(window)
     const ui4 dcrc_x = crc::calculate(de, fmt::CRC_START_VALUE);
     const std::size_t ns = static_cast<std::size_t>((src_.file_size(s.tidx) - UH) / ENTRY);
-    const auto [f, l] = window_entries(src_, s.tidx, seg_rto_, t0, t1);
+    const auto [f, l] = window_entries(src_, s.tidx, seg_rto_, t0, t1, seg_reach_us_);
 
     // A source block's header (time, samples), read at the entry's offset.
     auto header_of = [&](std::span<const ui1> block) {
@@ -2781,6 +2802,7 @@ class Verifier {
   bool cut_segment_ = false;
   si8 seg_rto_ = 0;  // the source segment's
   sf8 seg_fs_ = 0;
+  si8 seg_reach_us_ = 0;
   const Control& ctl_;
   std::function<void(std::uint64_t)> progress_;
   VerifyReport& rep_;
@@ -2904,11 +2926,17 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
     vo.password = o.output_password;
     const Report dr = validate_session(dst_path, vo, inner);
     // Compared as a multiset: each source finding excuses one copy finding.
+    // A cut renumbers segments and rewrites their spans, so a finding the
+    // source had is recognised by its check and channel alone there.
+    const bool cut = o.time_range.has_value();
+    auto key_of = [&](const Finding& f) {
+      return cut ? f.check_id + " | " + f.channel : finding_key(f);
+    };
     std::map<std::string, int> known;
-    for (const auto& f : sr.findings) ++known[finding_key(f)];
+    for (const auto& f : sr.findings) ++known[key_of(f)];
     for (const auto& f : dr.findings) {
       if (f.severity == Severity::Info) continue;
-      const std::string key = finding_key(f);
+      const std::string key = key_of(f);
       auto it = known.find(key);
       if (it != known.end() && it->second > 0) {
         --it->second;
@@ -3259,11 +3287,11 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
                   to_user_time(b, plan.rto) > saturating_add(t0, -DAY_US)))
               continue;
             const TmetImage t = open_tmet(src, seg.tmet, o.password);
-            const sf8 fs = fmt::TimeSeriesMetadataSection2::parse(
-                               std::span<const ui1>(t.bytes).subspan(S2, S2_BYTES))
-                               .sampling_frequency;
+            const auto m = fmt::TimeSeriesMetadataSection2::parse(
+                std::span<const ui1>(t.bytes).subspan(S2, S2_BYTES));
+            const sf8 fs = m.sampling_frequency;
             if (!(fs > 0)) continue;
-            const auto [f, l] = window_entries(src, seg.tidx, t.rto, t0, t1);
+            const auto [f, l] = window_entries(src, seg.tidx, t.rto, t0, t1, longest_block_us(m));
             if (f >= l) continue;
             const auto es = src.read_range(seg.tidx, UH + f * ENTRY, (l - f) * ENTRY);
             for (std::size_t i = 0; i < l - f && !has; ++i) {

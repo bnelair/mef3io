@@ -90,8 +90,11 @@ kept; segments outside the window are not read, ones that keep no block are
 removed, the rest renumbered from 0 with channel-wide start_sample. Records:
 `record_in_window` (time in window; Seiz/Epoc also by span; no time = kept).
 ONLY THE BLOCKS AROUND THE WINDOW ARE READ: `window_entries` binary-searches
-the .tidx start times (O(log n) 8-byte reads) for [last block <= t0 - 2,
-first block >= t1 + 1] and `SegmentCopySpec::entries` restricts the engine
+the .tidx start times (O(log n) 8-byte reads) for [first block starting after
+t0 - longest_block_us (the segment's declared longest block + 1 s; an hour
+when unset), minus 2; first block >= t1, plus 1] — reaching back by the
+longest block is what keeps a long block overlapped by later short ones in
+range (a 2-block margin alone silently lost its tail) and `SegmentCopySpec::entries` restricts the engine
 to it (rchar-pinned in test_p33: a 1-min cut of 4 h reads ~1 MB of 11.6 MB,
 the rest is the validator reading indexes). The pre-flight uses the same
 index range to find kept channels with NO sample in the window; they are
