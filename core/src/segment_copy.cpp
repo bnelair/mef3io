@@ -77,7 +77,9 @@ CopyStats copy_segment(const SegmentCopySpec& spec) {
   if ((tidx_size - UH) % ENTRY != 0)
     throw FormatError("block index ends in a partial entry (an interrupted write?); run "
                       "recover_session first: " + src.describe(spec.tidx_rel));
-  const std::size_t n_entries = static_cast<std::size_t>((tidx_size - UH) / ENTRY);
+  const std::size_t all_entries = static_cast<std::size_t>((tidx_size - UH) / ENTRY);
+  const std::size_t from = spec.entries ? std::min(spec.entries->first, all_entries) : 0;
+  const std::size_t n_entries = spec.entries ? std::min(spec.entries->second, all_entries) : all_entries;
 
   std::vector<ui1> tidx_uh = src.read_range(spec.tidx_rel, 0, UH);
   std::vector<ui1> tdat_uh = src.read_range(spec.tdat_rel, 0, UH);
@@ -94,7 +96,7 @@ CopyStats copy_segment(const SegmentCopySpec& spec) {
   si8 next_sample = spec.start_sample.value_or(0);
   std::uint64_t prev_end = UH;  // source: blocks must be in file order, non-overlapping
 
-  for (std::size_t first = 0; first < n_entries; first += ENTRIES_PER_CHUNK) {
+  for (std::size_t first = from; first < n_entries; first += ENTRIES_PER_CHUNK) {
     if (spec.control) spec.control->check();
     const std::size_t k = std::min(ENTRIES_PER_CHUNK, n_entries - first);
     std::vector<ui1> entries = src.read_range(spec.tidx_rel, UH + first * ENTRY, k * ENTRY);
@@ -155,7 +157,7 @@ CopyStats copy_segment(const SegmentCopySpec& spec) {
           throw CrcError("block " + std::to_string(global) + " of " + where +
                          " fails its CRC: the data is damaged, and copying it would hide that");
 
-        CopyBlock cb{global, entry_at(b), block};
+        CopyBlock cb{global, entry_at(b), block, {}};
         if (spec.on_block && !spec.on_block(cb)) {
           // PRECONDITION (#103): dropping a segment's LEADING blocks needs
           // spec.start_sample -- the channel-wide sample index the copy

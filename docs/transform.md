@@ -87,9 +87,14 @@ rep = mef3io.transform_session("patient.mefd", "seizure_2h.mefd",
                                time_range=(onset - 3600_000_000, onset + 3600_000_000))
 ```
 
-- **Segments outside the window** are not read at all.
-- **Blocks outside it** are left out, and blocks inside it are copied byte
-  for byte.
+- **Segments outside the window** are not read at all, and in the ones
+  that overlap it only the blocks around the window are read: a one-minute
+  cut of a month-long recording reads about a minute of data.
+- **Blocks outside it** are left out. Blocks inside it are copied with their
+  samples byte for byte; the first block kept after a dropped one is marked
+  as following a gap.
+- **Channels with no sample in the window** are left out, and the report
+  names them (`channels_without_samples`).
 - **Edges:** at each edge of the window, the one block that straddles it is
   decoded, trimmed and re-encoded, so the copy holds exactly the window. The
   cost does not depend on how long the window is. `exact=False` keeps those
@@ -104,6 +109,14 @@ rep = mef3io.transform_session("patient.mefd", "seizure_2h.mefd",
   channels, passwords, a new name and metadata edits in one pass.
 - **With `anonymize_session`**, the same `time_range` (in the original
   times) cuts before every time is shifted.
+
+**Which samples a cut keeps:** exactly those whose time is at or after
+`start` and before `end`. The copy's first sample is the first one at or after
+`start`. `Reader.read(start, end)` works differently, on a regular grid: it
+can put a sample up to half a sample period before `start` into its first
+slot. So reading the source and the copy with the same `read(start, end)` can
+differ by that one edge sample. To compare them, read the copy whole and the
+source from the copy's start time.
 
 The cut is checked like everything else:
 - blocks kept whole must be byte-identical to the source's;

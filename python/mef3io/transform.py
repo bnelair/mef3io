@@ -93,6 +93,9 @@ class TransformReport:
     session_name : str
         The copy's session name (its folder's stem).
     channels_kept, channels_excluded : tuple of str
+    channels_without_samples : tuple of str
+        A cut: channels left out because they have no sample in the window
+        (also in ``channels_excluded``).
     segments, blocks, records : int
         What was copied.
     blocks_reencrypted, blocks_decrypted : int
@@ -120,6 +123,7 @@ class TransformReport:
     session_name: str
     channels_kept: Tuple[str, ...]
     channels_excluded: Tuple[str, ...]
+    channels_without_samples: Tuple[str, ...]
     segments: int
     blocks: int
     blocks_reencrypted: int
@@ -139,7 +143,8 @@ class TransformReport:
     def _from(cls, d: dict) -> "TransformReport":
         d = dict(d)
         d["verification"] = VerifyReport._from(d["verification"])
-        for k in ("channels_kept", "channels_excluded", "not_copied", "notes"):
+        for k in ("channels_kept", "channels_excluded", "channels_without_samples", "not_copied",
+                  "notes"):
             d[k] = tuple(d[k])
         return cls(**d)
 

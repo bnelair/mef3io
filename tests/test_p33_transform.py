@@ -541,3 +541,125 @@ def test_the_cli_cuts(tmp_path, capsys):
     assert main(["transform", str(src), str(tmp_path / "c.mefd"), "--start", str(t0), "--end",
                  str(t1), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["blocks_trimmed"] > 0
+
+
+# --------------------------------------------------------------------------- cut review round 1
+
+
+def _session_at(path, fs, seconds=40, channels=("ch1", "ch2"), starts=None):
+    with mef3io.Writer(str(path), overwrite=True) as w:
+        for i, ch in enumerate(channels):
+            start = START if starts is None else starts[i]
+            w.write(ch, np.cumsum(np.random.default_rng(i).normal(size=int(fs * seconds))).round(3),
+                    start, fs, precision=3)
+    return Path(path)
+
+
+def _cut_matches_source(src, dst):
+    """The cut's samples are the source's at the same times: read each cut
+    channel whole and the source from the cut's first sample time (a real
+    sample time, so both reads sit on the same grid)."""
+    with mef3io.Reader(str(src)) as r, mef3io.Reader(str(dst)) as c:
+        for ch in c.channels:
+            info = c.info(ch)
+            y = c.read(ch)
+            x = r.read(ch, info["start_time"], info["end_time"])
+            np.testing.assert_array_equal(x, y)
+
+
+@pytest.mark.parametrize("fs", [256.0, 250.5, 1000.3])
+@pytest.mark.parametrize("exact", [True, False])
+def test_random_windows_at_awkward_rates(tmp_path, fs, exact):
+    src = _session_at(tmp_path / "p.mefd", fs)
+    rng = np.random.default_rng(int(fs * 10) + exact)
+    for k in range(6):
+        t0 = START + int(rng.integers(0, 30 * SECOND))
+        t1 = t0 + int(rng.integers(SECOND // 10, 9 * SECOND))
+        dst = tmp_path / f"c{k}.mefd"
+        rep = _transform(src, dst, time_range=(t0, t1), exact=exact)
+        assert rep.verification.ok, rep.summary()
+        assert mef3io.validate_session(str(dst)).ok
+        _cut_matches_source(src, dst)
+        if exact:  # the first sample at or after t0, the last before t1 (end = last + 1/fs)
+            with mef3io.Reader(str(dst)) as c:
+                for ch in c.channels:
+                    assert c.info(ch)["start_time"] >= t0
+                    assert c.info(ch)["end_time"] - 1e6 / fs < t1
+
+
+def test_a_channel_without_samples_in_the_window_is_left_out(tmp_path):
+    src = _session_at(tmp_path / "p.mefd", 256.0, seconds=20,
+                      starts=(START, START + 60 * SECOND))
+    t0, t1 = START + 2 * SECOND, START + 10 * SECOND  # ch2 starts a minute later
+    rep = _transform(src, tmp_path / "c.mefd", time_range=(t0, t1))
+    assert rep.verification.ok, rep.summary()
+    assert rep.channels_kept == ("ch1",) and rep.channels_without_samples == ("ch2",)
+    assert not (tmp_path / "c.mefd" / "ch2.timd").exists()
+    chk = mef3io.transform.check(src, tmp_path / "x.mefd", time_range=(t0, t1))
+    assert chk.ok and chk.channels_without_samples == ("ch2",)
+
+
+def test_a_window_in_a_gap_between_segments(tmp_path):
+    src = _two_segment_session(tmp_path / "p.mefd")  # ch1: 0-60 s and 120-150 s
+    t0, t1 = START + 70 * SECOND, START + 100 * SECOND
+    rep = mef3io.transform.check(src, tmp_path / "x.mefd", time_range=(t0, t1))
+    assert rep.codes == ("time-range-empty",)  # ch2 ends at 60 s too
+
+
+def test_a_duplicated_block_fails_verification(tmp_path):
+    # The same samples in every 10-s block (2560 at 256 Hz): blocks of one size.
+    src = tmp_path / "p.mefd"
+    with mef3io.Writer(str(src), overwrite=True) as w:
+        w.write("ch1", np.tile((np.arange(2560) % 50) * 1.0, 20), START, 256.0, precision=0)
+    t0, t1 = START + 15 * SECOND, START + 150 * SECOND
+    copy = tmp_path / "cut.mefd"
+    assert _transform(src, copy, time_range=(t0, t1)).verification.ok
+    seg = copy / "ch1.timd" / "ch1-000000.segd"
+    tdat, tidx = seg / "ch1-000000.tdat", seg / "ch1-000000.tidx"
+    raw, idx = bytearray(tdat.read_bytes()), bytearray(tidx.read_bytes())
+    e4, e5 = UH + 4 * 56, UH + 5 * 56
+    o4, n4 = struct.unpack_from("<q", idx, e4)[0], struct.unpack_from("<I", idx, e4 + 28)[0]
+    o5, n5 = struct.unpack_from("<q", idx, e5)[0], struct.unpack_from("<I", idx, e5 + 28)[0]
+    assert n4 == n5
+    raw[o5:o5 + n5] = raw[o4:o4 + n4]  # block 5 := block 4
+    idx[e5 + 8:e5 + 16] = idx[e4 + 8:e4 + 16]
+    _reseal(raw)
+    _reseal(idx)
+    tdat.write_bytes(bytes(raw))
+    tidx.write_bytes(bytes(idx))
+    assert not mef3io.transform.verify(src, copy, time_range=(t0, t1)).ok
+
+
+def test_an_index_time_that_disagrees_with_its_block_header(tmp_path):
+    src = _session_at(tmp_path / "p.mefd", 256.0, seconds=200, channels=("ch1",))
+    tidx = src / "ch1.timd" / "ch1-000000.segd" / "ch1-000000.tidx"
+    idx = bytearray(tidx.read_bytes())
+    e = UH + 6 * 56
+    struct.pack_into("<q", idx, e + 8, struct.unpack_from("<q", idx, e + 8)[0] - 3)  # 3 us off
+    _reseal(idx)
+    tidx.write_bytes(bytes(idx))
+    t0, t1 = START + 15 * SECOND, START + 150 * SECOND
+    rep = _transform(src, tmp_path / "cut.mefd", time_range=(t0, t1))
+    assert rep.verification.ok, rep.summary()
+
+
+@pytest.mark.skipif(not Path("/proc/self/io").exists(), reason="needs /proc/self/io")
+def test_a_short_cut_reads_only_around_its_window(tmp_path):
+    src = _session_at(tmp_path / "p.mefd", 256.0, seconds=4 * 3600, channels=("ch1",))
+    tdat_bytes = sum(p.stat().st_size for p in src.rglob("*.tdat"))
+
+    def rchar():
+        for line in Path("/proc/self/io").read_text().splitlines():
+            if line.startswith("rchar:"):
+                return int(line.split()[1])
+
+    before = rchar()
+    rep = _transform(src, tmp_path / "cut.mefd",
+                     time_range=(START + 1800 * SECOND, START + 1860 * SECOND))
+    read = rchar() - before
+    assert rep.verification.ok
+    # The copy and its verification together (the validator in it reads the
+    # indexes, ~2% of the data): nowhere near the data file (four hours; the
+    # window is one minute). Before #124's review a cut read every block of
+    # the segment.
+    assert read < tdat_bytes / 4, (read, tdat_bytes)

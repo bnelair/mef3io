@@ -89,12 +89,29 @@ BEFORE its .tmet (`copy_segment`), so section 2's derived fields
 kept; segments outside the window are not read, ones that keep no block are
 removed, the rest renumbered from 0 with channel-wide start_sample. Records:
 `record_in_window` (time in window; Seiz/Epoc also by span; no time = kept).
-Verify: copy segments matched to source segments by TIME (each source
-segment's own rto); `check_segment_data_cut`: a kept-whole block must be
-byte-identical (check_block, discontinuity bit free), a trimmed one decodes
-to exactly the source's samples from i0; plus INDEPENDENT checks: every
-sample inside the window, total samples == what the source index has in it.
-Cut UH times / derived s2 fields are left to the validator (verify runs it).
+ONLY THE BLOCKS AROUND THE WINDOW ARE READ: `window_entries` binary-searches
+the .tidx start times (O(log n) 8-byte reads) for [last block <= t0 - 2,
+first block >= t1 + 1] and `SegmentCopySpec::entries` restricts the engine
+to it (rchar-pinned in test_p33: a 1-min cut of 4 h reads ~1 MB of 11.6 MB,
+the rest is the validator reading indexes). The pre-flight uses the same
+index range to find kept channels with NO sample in the window; they are
+left out (`channels_without_samples`, also excluded: Seiz entries dropped,
+names redacted when anonymizing) — an empty channel folder failed verify.
+Section 2 block_interval is recomputed with maximum_block_samples (the
+validator's times.block-interval refused cuts otherwise).
+Verify (`check_segment_data_cut`) walks the source blocks of the same range
+in LOCKSTEP with the copy's, placing each by its HEADER (authority): every
+source block with samples in the window must be matched by the copy's NEXT
+block — kept whole: its entry as the source's (time via time_field, count)
+and byte-identical (check_block, discontinuity bit free); trimmed: decodes
+to exactly its window samples (check_trimmed_block) with the time
+stored_like + shift; leftover/missing/duplicated/reordered copy blocks fail;
+the source blocks just outside the range must hold nothing of the window.
+Copy segments are matched to source segments by TIME (each one's own rto).
+Cut UH times / other derived s2 fields are left to the validator (verify
+runs it). Reader.read(t0, t1) can put a sample up to half a period before t0
+in slot 0, so tests compare the cut read whole against the source read from
+the cut's start time.
 Transform rules, test-pinned (`tests/test_p33_transform.py`,
 `core/tests/test_transform.cpp`): every stored time VERBATIM (Copier::time
 returns it unchanged; no Shifter, so no rto refusals: rto, DST, GMT kept);

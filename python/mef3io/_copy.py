@@ -240,6 +240,9 @@ class CheckReport:
         Anonymize only: the copy's pseudonym ("" for a transform).
     channels_kept, channels_excluded : tuple of str
         The channel selection (empty when the source could not be read).
+    channels_without_samples : tuple of str
+        A cut: kept channels with no sample in the window, which the copy
+        leaves out (also in ``channels_excluded``).
     """
 
     ok: bool
@@ -249,6 +252,7 @@ class CheckReport:
     pseudonym: str
     channels_kept: Tuple[str, ...]
     channels_excluded: Tuple[str, ...]
+    channels_without_samples: Tuple[str, ...] = ()
 
     @property
     def codes(self) -> Tuple[str, ...]:
@@ -385,6 +389,7 @@ def _check_report(raw: dict, refusals: _Refusals, a: dict) -> CheckReport:
         pseudonym=raw.get("pseudonym", ""),
         channels_kept=tuple(raw["channels_kept"]),
         channels_excluded=tuple(raw["channels_excluded"]),
+        channels_without_samples=tuple(raw.get("channels_without_samples", ())),
     )
 
 

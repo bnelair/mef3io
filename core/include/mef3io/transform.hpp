@@ -173,6 +173,9 @@ struct CopyCheck {
   std::vector<std::string> notes;  ///< what the copy would note up front
   std::string session_name;        ///< the copy's (empty when dst is unusable)
   std::vector<std::string> channels_kept, channels_excluded;
+  /// A cut: channels left out because they have no sample in the window
+  /// (also in channels_excluded).
+  std::vector<std::string> channels_without_samples;
 };
 
 /// What every copy operation reports.
@@ -181,6 +184,9 @@ struct CopyReport {
   std::string session_name;  ///< the copy's
   std::vector<std::string> channels_kept;
   std::vector<std::string> channels_excluded;
+  /// A cut: channels left out because they have no sample in the window
+  /// (also in channels_excluded).
+  std::vector<std::string> channels_without_samples;
   si8 segments = 0;
   si8 blocks = 0;
   si8 blocks_reencrypted = 0;  ///< source-encrypted blocks written encrypted

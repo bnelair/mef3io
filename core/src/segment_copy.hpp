@@ -89,6 +89,10 @@ struct SegmentCopySpec {
   /// invalid_argument otherwise): only the caller knows the channel-wide
   /// count the segment continues from.
   std::optional<si8> start_sample;
+  /// Only the index entries [first, last) are looked at (a cut, #103: the
+  /// blocks around its window, found in the index without reading it whole);
+  /// unset = every entry. Only their blocks are read.
+  std::optional<std::pair<std::size_t, std::size_t>> entries;
   const Control* control = nullptr;
   /// Called with the number of source bytes consumed since the last call.
   std::function<void(std::uint64_t)> on_progress;

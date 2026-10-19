@@ -989,6 +989,40 @@ bool record_in_window(const RawRecord& r, si8 rto, si8 t0, si8 t1) {
   return false;
 }
 
+/// The index entries [first, last) of a segment a cut [t0, t1) must look at,
+/// found by binary search on the index's start times (O(log n) small reads:
+/// never the whole index, never the data): from two blocks before the last
+/// one starting at or before t0 to one after the first starting at or after
+/// t1. The margin covers an index time that disagrees a little with its
+/// block header (the header decides, #11/#13); the verification checks the
+/// blocks just outside the range hold nothing of the window.
+std::pair<std::size_t, std::size_t> window_entries(const SessionSource& src,
+                                                   const std::string& tidx_rel, si8 rto, si8 t0,
+                                                   si8 t1) {
+  const std::uint64_t size = src.file_size(tidx_rel);
+  if (size < fmt::UNIVERSAL_HEADER_BYTES) return {0, 0};
+  const std::size_t n =
+      static_cast<std::size_t>((size - fmt::UNIVERSAL_HEADER_BYTES) / fmt::TIME_SERIES_INDEX_BYTES);
+  auto time_at = [&](std::size_t i) {
+    const auto b = src.read_range(
+        tidx_rel, fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES + 8, 8);
+    return to_user_time(read<si8>(b, 0), rto);
+  };
+  auto first_after = [&](si8 t, bool or_at) {  // first i with time > t (or >= t)
+    std::size_t lo = 0, hi = n;
+    while (lo < hi) {
+      const std::size_t mid = lo + (hi - lo) / 2;
+      const si8 v = time_at(mid);
+      if (or_at ? v >= t : v > t) hi = mid;
+      else lo = mid + 1;
+    }
+    return lo;
+  };
+  const std::size_t a = first_after(t0, false);  // a - 1 = the last block starting at or before t0
+  const std::size_t b = first_after(t1, true);
+  return {a >= 2 ? a - 2 : 0, std::min(n, b + 1)};
+}
+
 /// A cut's user time stored the way `like` was stored (meflib's negated
 /// form, or absolute); an unset `like` gets the negated form.
 si8 stored_like(si8 like, si8 user, si8 rto) {
@@ -1222,6 +1256,7 @@ class Copier {
       m.recording_duration = seg_span_->second - seg_span_->first;
       m.maximum_block_bytes = st->max_block_bytes;
       m.maximum_block_samples = st->max_block_samples;
+      m.block_interval = static_cast<si8>(std::llround(st->max_block_samples * 1e6 / seg_fs_));
       m.maximum_difference_bytes = st->max_difference_bytes;
       m.number_of_discontinuities = st->discontinuities;
       m.maximum_contiguous_blocks = st->max_contiguous_blocks;
@@ -1307,6 +1342,8 @@ class Copier {
                                       std::optional<si8> start_sample) {
     detail::SegmentCopySpec spec;
     spec.start_sample = start_sample;
+    if (window_)  // only the blocks around the window are read
+      spec.entries = window_entries(src_, seg.tidx, seg_rto_, window_->first, window_->second);
     std::optional<si8> first_t, end_t;  // a cut: the kept samples' span (user uUTC)
     native_max_ = std::numeric_limits<si4>::min();
     native_min_ = std::numeric_limits<si4>::max();
@@ -2292,18 +2329,21 @@ class Verifier {
     if (read<ui4>(duh_d, 4) != dcrc_d) problem(d.tdat, "body CRC", "does not verify");
   }
 
-  /// A segment of a cut copy against its source segment. Every block of the
-  /// copy lies inside the source block holding its first sample: one kept
-  /// whole is byte-identical to it (check_block); a re-encoded edge block
-  /// holds exactly the source's samples from that point (decoded and
-  /// compared). Then, independently of the copy pass: every sample lies in
-  /// the window (exact cut), and the copy holds as many samples as the
-  /// source has in it.
+  /// A segment of a cut copy against its source segment, in LOCKSTEP: the
+  /// source's blocks around the window are walked in order (placed by their
+  /// own headers, the authority), and each one holding samples of the window
+  /// must be matched by the copy's NEXT block: byte-identical when kept
+  /// whole (check_block), or holding exactly its samples in the window when
+  /// trimmed (decoded and compared). A copy block left over, missing,
+  /// repeated or out of order fails. The source blocks just outside the
+  /// range searched must hold nothing of the window (an index out of order
+  /// there would hide blocks). Both files are read in bounded batches, only
+  /// around the window.
   void check_segment_data_cut(const detail::LayoutSegment& s, const detail::LayoutSegment& d) {
     const auto [t0, t1] = *o_.time_range;
     const bool exact = o_.exact;
-    const auto stidx = src_.file_size(s.tidx), dtidx = dst_.file_size(d.tidx);
-    const auto dtdat = dst_.file_size(d.tdat);
+    const auto dtidx = dst_.file_size(d.tidx), dtdat = dst_.file_size(d.tdat);
+    const auto stdat = src_.file_size(s.tdat);
     const auto suh_x = src_.read_range(s.tidx, 0, UH), duh_x = dst_.read_range(d.tidx, 0, UH);
     const auto suh_d = src_.read_range(s.tdat, 0, UH), duh_d = dst_.read_range(d.tdat, 0, UH);
     collect_source_uuids(suh_x);
@@ -2314,98 +2354,146 @@ class Verifier {
       problem(d.tidx, "block index", "ends in a partial entry");
       return;
     }
-    const std::size_t ns = static_cast<std::size_t>((stidx - UH) / ENTRY);
     const std::size_t nd = static_cast<std::size_t>((dtidx - UH) / ENTRY);
-    // The indexes (about 2% of the data): read whole.
-    const auto se = src_.read_range(s.tidx, UH, ns * ENTRY);
-    const auto de = dst_.read_range(d.tidx, UH, nd * ENTRY);
-    auto s_time = [&](std::size_t i) { return to_user_time(read<si8>(se, i * ENTRY + 8), seg_rto_); };
-    auto s_n = [&](std::size_t i) { return static_cast<std::size_t>(read<ui4>(se, i * ENTRY + 24)); };
-    // A copied time back in the source's terms: an anonymized copy stores
-    // shifted times against offset 0.
-    auto source_time = [&](si8 stored) {
-      return transform() ? to_user_time(stored, seg_rto_) : to_user_time(stored, 0) - sh_.shift;
+    const auto de = dst_.read_range(d.tidx, UH, nd * ENTRY);  // the copy: O(window)
+    const ui4 dcrc_x = crc::calculate(de, fmt::CRC_START_VALUE);
+    const std::size_t ns = static_cast<std::size_t>((src_.file_size(s.tidx) - UH) / ENTRY);
+    const auto [f, l] = window_entries(src_, s.tidx, seg_rto_, t0, t1);
+
+    // A source block's header (time, samples), read at the entry's offset.
+    auto header_of = [&](std::span<const ui1> block) {
+      return std::make_pair(to_user_time(read<si8>(block, 40), seg_rto_),
+                            static_cast<std::size_t>(read<ui4>(block, 32)));
     };
-    si8 want = 0;  // the samples the window holds, from the source's index
-    for (std::size_t i = 0; i < ns; ++i) {
-      const auto [a, b] = window_slice(s_time(i), s_n(i), seg_fs_, t0, t1);
-      if (a < b) want += static_cast<si8>(exact ? b - a : s_n(i));
-    }
-    ui4 dcrc_x = crc::calculate(de, fmt::CRC_START_VALUE), dcrc_d = fmt::CRC_START_VALUE;
-    std::uint64_t dexpect = UH;
-    ui4 dmax = 0;
-    si8 have = 0;
-    std::size_t sp = 0;  // the source block holding the copy's next block
+    for (const std::size_t i : {f > 0 ? f - 1 : ns, l})
+      if (i < ns) {
+        const auto e = src_.read_range(s.tidx, UH + i * ENTRY, ENTRY);
+        const auto off = static_cast<std::uint64_t>(read<si8>(e, 0));
+        if (off + fmt::RED_BLOCK_HEADER_BYTES > stdat) continue;  // the validator's
+        const auto [t, n] = header_of(src_.read_range(s.tdat, off, fmt::RED_BLOCK_HEADER_BYTES));
+        const auto [a, b] = window_slice(t, n, seg_fs_, t0, t1);
+        if (a < b)
+          problem(s.tidx, "block index",
+                  "is out of time order around the time range, so the cut cannot be checked");
+      }
+
+    // The copy's blocks, read forward in bounded batches.
     constexpr std::uint64_t BATCH = 8u << 20;
-    std::size_t j = 0;
-    while (j < nd) {
+    std::vector<ui1> dbuf;
+    std::uint64_t dlo = 0, dexpect = UH;
+    std::size_t dloaded = 0;  // copy blocks [0, dloaded) have been read
+    ui4 dcrc_d = fmt::CRC_START_VALUE;
+    bool broken = false;
+    auto load_until = [&](std::size_t j) {  // make copy block j available
+      while (!broken && dloaded <= j && dloaded < nd) {
+        std::size_t k = dloaded;
+        std::uint64_t lo = dexpect, hi = dexpect;
+        while (k < nd) {
+          const auto off = static_cast<std::uint64_t>(read<si8>(de, k * ENTRY));
+          const auto nb = read<ui4>(de, k * ENTRY + 28);
+          if (off != hi || off + nb > dtdat || nb < fmt::RED_BLOCK_HEADER_BYTES) {
+            problem(d.tidx, "entry " + std::to_string(k),
+                    "does not describe the next block of the data file (offset/size)");
+            broken = true;
+            return;
+          }
+          if (k > dloaded && off + nb - lo > BATCH) break;
+          hi = off + nb;
+          ++k;
+        }
+        dbuf = dst_.read_range(d.tdat, lo, hi - lo);
+        dcrc_d = crc::calculate(dbuf, dcrc_d);
+        if (progress_) progress_(dbuf.size());
+        dlo = lo;
+        dexpect = hi;
+        dloaded = k;
+      }
+    };
+    auto dst_block = [&](std::size_t j) {
+      const auto off = static_cast<std::uint64_t>(read<si8>(de, j * ENTRY));
+      return std::span<const ui1>(dbuf.data() + (off - dlo), read<ui4>(de, j * ENTRY + 28));
+    };
+
+    // The source's blocks around the window, in order, in bounded batches.
+    const auto se = src_.read_range(s.tidx, UH + f * ENTRY, (l - f) * ENTRY);
+    std::size_t j = 0;  // the copy's next block
+    ui4 dmax = 0;
+    std::size_t i = 0;
+    while (i < l - f && !broken) {
       ctl_.check();
-      // A batch of the copy's blocks, bounded in bytes.
-      std::size_t k = j;
-      std::uint64_t dlo = 0, dhi = 0;
-      while (k < nd) {
-        const auto off = static_cast<std::uint64_t>(read<si8>(de, k * ENTRY));
-        const auto nb = read<ui4>(de, k * ENTRY + 28);
-        if (off != dexpect || off + nb > dtdat || nb < fmt::RED_BLOCK_HEADER_BYTES) {
-          problem(d.tidx, "entry " + std::to_string(k),
-                  "does not describe the next block of the data file (offset/size)");
+      std::size_t k = i;
+      std::uint64_t lo = 0, hi = 0;
+      while (k < l - f) {
+        const auto off = static_cast<std::uint64_t>(read<si8>(se, k * ENTRY));
+        const auto nb = read<ui4>(se, k * ENTRY + 28);
+        if (off + nb > stdat || nb < fmt::RED_BLOCK_HEADER_BYTES) {
+          problem(s.tidx, "entry " + std::to_string(f + k), "lies outside the data file");
           return;
         }
-        if (k > j && off + nb - dlo > BATCH) break;
-        if (k == j) dlo = off;
-        dhi = off + nb;
-        dexpect = dhi;
+        if (k > i && (off < hi || off + nb - lo > BATCH)) break;
+        if (k == i) lo = off;
+        hi = std::max(hi, off + nb);
         ++k;
       }
-      const auto dbuf = dst_.read_range(d.tdat, dlo, dhi - dlo);
-      dcrc_d = crc::calculate(dbuf, dcrc_d);
-      for (std::size_t b = j; b < k; ++b) {
-        const std::string loc = d.tdat + " block " + std::to_string(b);
-        const auto dent = std::span<const ui1>(de).subspan(b * ENTRY, ENTRY);
-        const auto nb = read<ui4>(dent, 28);
-        std::span<const ui1> dblk(dbuf.data() + (read<si8>(dent, 0) - dlo), nb);
-        const si8 dstored = read<si8>(dblk, 40);
-        const si8 td = source_time(dstored);
-        const std::size_t n = read<ui4>(dblk, 32);
-        if (read<si8>(dent, 8) != dstored || read<ui4>(dent, 24) != n)
-          problem(loc, "index entry", "time or sample count differs from its block's");
-        while (sp + 1 < ns && s_time(sp + 1) <= td) ++sp;
-        const si8 ts = s_time(sp);
-        const si8 i0 = std::llround(static_cast<long double>(td - ts) * seg_fs_ / 1e6L);
-        if (ns == 0 || i0 < 0 || sample_time(ts, static_cast<std::size_t>(i0), seg_fs_) != td ||
-            static_cast<std::size_t>(i0) + n > s_n(sp)) {
-          problem(loc, "block", "does not lie inside a block of the source");
-          continue;
+      const auto sbuf = src_.read_range(s.tdat, lo, hi - lo);
+      for (std::size_t b = i; b < k && !broken; ++b) {
+        std::span<const ui1> sblk(sbuf.data() + (read<si8>(se, b * ENTRY) - lo),
+                                  read<ui4>(se, b * ENTRY + 28));
+        const auto [ts, ns_b] = header_of(sblk);
+        const auto [a, e] = window_slice(ts, ns_b, seg_fs_, t0, t1);
+        if (a >= e) continue;  // nothing of this block is in the window
+        const bool whole = !exact || (a == 0 && e == ns_b);
+        load_until(j);
+        if (broken) break;
+        const std::string loc = d.tdat + " block " + std::to_string(j);
+        if (j >= nd) {
+          problem(d.tdat, "blocks", "the copy lacks samples the source has in the time range");
+          broken = true;
+          break;
         }
-        if (exact && (td < t0 || sample_time(td, n - 1, seg_fs_) >= t1))
-          problem(loc, "block", "holds samples outside the time range");
-        const si8 soff = read<si8>(se, sp * ENTRY);
-        const ui4 snb = read<ui4>(se, sp * ENTRY + 28);
-        const auto sblk = src_.read_range(s.tdat, static_cast<std::uint64_t>(soff), snb);
-        if (i0 == 0 && n == s_n(sp)) {
-          check_block(sblk, dblk, loc);  // kept whole: byte-identical
+        const auto dblk = dst_block(j);
+        const auto dent = std::span<const ui1>(de).subspan(j * ENTRY, ENTRY);
+        const auto sent = std::span<const ui1>(se).subspan(b * ENTRY, ENTRY);
+        if (whole) {
+          // Its entry as the source's (verbatim, or shifted): even an index
+          // time that disagrees with the header stays what it was.
+          time_field(read<si8>(sent, 8), read<si8>(dent, 8), loc, "index entry start_time");
+          if (read<ui4>(dent, 24) != read<ui4>(sent, 24))
+            problem(loc, "index entry", "sample count differs from the source's");
+        } else if (read<si8>(dent, 8) != read<si8>(dblk, 40) ||
+                   read<ui4>(dent, 24) != read<ui4>(dblk, 32)) {
+          problem(loc, "index entry", "time or sample count differs from its re-encoded block's");
+        }
+        if (whole) {
+          if (dblk.size() != sblk.size())
+            problem(loc, "block", "is not the source's block kept whole");
+          else
+            check_block(sblk, dblk, loc);  // byte-identical
         } else {
-          if (!exact) problem(loc, "block", "is trimmed, but the cut keeps whole blocks");
-          check_trimmed_block(sblk, dblk, static_cast<std::size_t>(i0), loc);
-          time_field(stored_like(read<si8>(sblk, 40), td, seg_rto_), dstored, loc,
-                     "block header start_time");
+          if (read<ui4>(dblk, 32) != e - a)
+            problem(loc, "block", "does not hold the source block's samples in the time range");
+          else
+            check_trimmed_block(sblk, dblk, a, loc);
+          time_field(stored_like(read<si8>(sblk, 40), sample_time(ts, a, seg_fs_), seg_rto_),
+                     read<si8>(dblk, 40), loc, "block header start_time");
         }
-        dmax = std::max(dmax, nb);
-        have += static_cast<si8>(n);
+        dmax = std::max(dmax, static_cast<ui4>(dblk.size()));
         ++rep_.blocks;
+        ++j;
       }
-      if (progress_) progress_(dbuf.size());
-      j = k;
+      i = k;
     }
+    if (!broken) {
+      if (j < nd)
+        problem(d.tdat, "blocks", "the copy holds blocks the source does not have in the time range");
+      load_until(nd);  // the rest, for the CRC
+    }
+    if (broken) return;
     if (dexpect != dtdat) problem(d.tdat, "data file", "holds bytes no index entry describes");
     if (read<ui4>(duh_x, 4) != dcrc_x) problem(d.tidx, "body CRC", "does not verify");
     if (read<ui4>(duh_d, 4) != dcrc_d) problem(d.tdat, "body CRC", "does not verify");
     check_counts(duh_x, static_cast<si8>(nd), static_cast<si8>(ENTRY), d.tidx);
     check_counts(duh_d, static_cast<si8>(nd), static_cast<si8>(dmax), d.tdat);
-    if (have != want)
-      problem(d.tdat, "samples",
-              "the copy holds " + std::to_string(have) + " sample(s) of this segment; the source "
-              "has " + std::to_string(want) + " in the time range");
   }
 
   /// A re-encoded edge block: a valid block whose samples are exactly the
@@ -2952,6 +3040,9 @@ struct Preflight {
   std::string new_name, pseudonym;
   std::map<std::string, int> segment_numbers;  // by source .tmet path
   std::string session_records;                 // source-relative, or ""
+  /// A cut: kept channels with no sample in the window. They are left out
+  /// of the copy (and counted with the excluded ones from then on).
+  std::vector<std::string> without_samples;
 };
 
 /// One piece of source text an anonymized copy keeps (after redaction).
@@ -3141,6 +3232,10 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
   }
 
   // ---- a cut (#103) --------------------------------------------------------
+  // Which kept channels have samples in the window, from each overlapping
+  // segment's index around it (window_entries: a few small reads, never the
+  // data). A channel without any is left out, so the copy never holds an
+  // empty channel folder.
   if (o.time_range) {
     const auto [t0, t1] = *o.time_range;
     if (t0 >= t1) {
@@ -3148,10 +3243,48 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
           "time_range must start before it ends", {}, "time_range");
     } else {
       bool any = false;
-      for (const auto& c : plan.summary.channels)
-        if (pf.kept.count(c.name) && c.start_time && c.end_time && *c.start_time < t1 &&
-            *c.end_time > t0)
-          any = true;
+      for (const auto& c : plan.layout.channels) {
+        if (!pf.kept.count(c.name)) continue;
+        bool has = false;
+        for (const auto& seg : c.segments) {
+          if (has) break;
+          ctl.check();
+          try {
+            const auto uh = src.read_range(seg.tmet, 0, UH);
+            const si8 a = read<si8>(uh, UH_START), b = read<si8>(uh, UH_END);
+            // A first look with the session's offset (a day's margin), the
+            // segment's own for the ones that may overlap.
+            if (!is_sentinel(a, false) && !is_sentinel(b, false) &&
+                !(to_user_time(a, plan.rto) < saturating_add(t1, DAY_US) &&
+                  to_user_time(b, plan.rto) > saturating_add(t0, -DAY_US)))
+              continue;
+            const TmetImage t = open_tmet(src, seg.tmet, o.password);
+            const sf8 fs = fmt::TimeSeriesMetadataSection2::parse(
+                               std::span<const ui1>(t.bytes).subspan(S2, S2_BYTES))
+                               .sampling_frequency;
+            if (!(fs > 0)) continue;
+            const auto [f, l] = window_entries(src, seg.tidx, t.rto, t0, t1);
+            if (f >= l) continue;
+            const auto es = src.read_range(seg.tidx, UH + f * ENTRY, (l - f) * ENTRY);
+            for (std::size_t i = 0; i < l - f && !has; ++i) {
+              const auto [i0, i1] =
+                  window_slice(to_user_time(read<si8>(es, i * ENTRY + 8), t.rto),
+                               read<ui4>(es, i * ENTRY + 24), fs, t0, t1);
+              has = i0 < i1;
+            }
+          } catch (...) {
+            add_exception(std::current_exception(), "source-damaged", "source-crc",
+                          "source-unreadable", c.name);
+          }
+        }
+        if (has) any = true;
+        else pf.without_samples.push_back(c.name);
+      }
+      for (const auto& c : pf.without_samples) {
+        pf.kept.erase(c);
+        pf.excluded.insert(c);
+        pf.notes.push_back("channel " + c + " has no samples in time_range; it is left out");
+      }
       if (!any)
         add(RefusalKind::InvalidArgument, "time-range-empty",
             "no channel of the copy has samples inside time_range", {}, "time_range");
@@ -3531,6 +3664,7 @@ CopyCheck check_of(Preflight& pf) {
   if (pf.plan) {
     c.channels_kept.assign(pf.kept.begin(), pf.kept.end());
     c.channels_excluded.assign(pf.excluded.begin(), pf.excluded.end());
+    c.channels_without_samples = pf.without_samples;
   }
   return c;
 }
@@ -3625,6 +3759,7 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
   rep.session_name = new_name;
   rep.channels_kept.assign(kept.begin(), kept.end());
   rep.channels_excluded.assign(excluded.begin(), excluded.end());
+  rep.channels_without_samples = pf.without_samples;
   rep.output_encrypted = out.encrypt;
   rep.notes = pf.notes;
   if (arep) {

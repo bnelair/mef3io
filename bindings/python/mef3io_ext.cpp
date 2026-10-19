@@ -501,6 +501,7 @@ nb::dict check_dict(const mef3io::CopyCheck& c) {
   out["session_name"] = c.session_name;
   out["channels_kept"] = c.channels_kept;
   out["channels_excluded"] = c.channels_excluded;
+  out["channels_without_samples"] = c.channels_without_samples;
   return out;
 }
 
@@ -511,6 +512,7 @@ nb::dict copy_report_dict(const mef3io::CopyReport& r) {
   out["session_name"] = r.session_name;
   out["channels_kept"] = r.channels_kept;
   out["channels_excluded"] = r.channels_excluded;
+  out["channels_without_samples"] = r.channels_without_samples;
   out["segments"] = r.segments;
   out["blocks"] = r.blocks;
   out["blocks_reencrypted"] = r.blocks_reencrypted;
