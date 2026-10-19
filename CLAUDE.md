@@ -935,6 +935,17 @@ files). `ChannelSummary.channel_description` is an identity value: only with
 messages and `problems` still contain paths (they are data, documented as
 identifiable). Tests: tests/test_p30_warning_paths.py, p26, p27.
 
+NAMING (#72 first part, `core/src/naming.cpp`, `mef3io.naming`):
+`time_range` reads ONLY the first and last segment's .tmet of each channel
+(load_time_series_metadata_partial, so no password works and reports
+offset_known=false; a wrong one throws), rchar-pinned in test_p35;
+offset_known=false also for rto != 0 with non-negated stored times.
+`name_drift` reads every file's 1 KB UH (session_name) + root *.rdat names;
+read-only. `rename_archive` uses `detail::rename_no_replace`
+(core/src/no_replace.hpp: renameat2 RENAME_NOREPLACE / renamex_np RENAME_EXCL
+/ MoveFileExW without replace) and REFUSES where unsupported, never falling
+back; name <= 246 bytes. rename_session (journal, marker, undo) is #72 part 2
+and must reuse no_replace.hpp.
 VERIFY BEFORE PUBLISHING: `scripts/verify_local.sh` (`--full-bench`,
 `--no-bench`) is the single entry point — builds, asserts the IN-TREE extension
 is the one under test (not an installed wheel), runs the C++ + Python suites,

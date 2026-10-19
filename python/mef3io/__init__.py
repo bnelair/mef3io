@@ -35,6 +35,8 @@ from . import anonymize  # noqa: E402  (mef3io.anonymize.verify, ...)
 from .anonymize import AnonymizeReport, VerifyReport, anonymize_session  # noqa: E402
 from . import transform  # noqa: E402  (mef3io.transform.check, .verify, ...)
 from .transform import TransformReport, transform_session  # noqa: E402
+from . import naming  # noqa: E402
+from .naming import TimeRange, name_drift, rename_archive, time_range  # noqa: E402
 from ._inspect import (  # noqa: E402
     ChannelSummary,
     IdentityField,
@@ -91,6 +93,7 @@ __all__ = [
     "password_interop_issue",
     "anonymize_session", "AnonymizeReport", "VerifyReport",
     "transform_session", "TransformReport",
+    "time_range", "TimeRange", "name_drift", "rename_archive",
     # Not "inspect": `from mef3io import *` would shadow the standard library's.
     "SessionSummary", "ChannelSummary", "SegmentSummary",
     "RecordSummary", "IdentityField", "SummaryWarning",
