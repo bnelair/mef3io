@@ -166,6 +166,17 @@ def _late_legacy(templates, tmp_path):
     return src, tmp_path / "S001.mefd", {}
 
 
+def _glued(templates, tmp_path):
+    """A left-out channel's name glued into kept note text (#115): the
+    removal takes whole words only, the copy's check would refuse it."""
+    src = tmp_path / "src" / "glued.mefd"
+    with mef3io.Writer(str(src), overwrite=True) as w:
+        for ch in ("a3", "LH1"):
+            w.write(ch, _signal(2560, 1), START, FS, precision=3)
+        w.write_annotations([{"type": "Note", "time": START + SECOND, "text": "a3a3 artefact"}])
+    return src, tmp_path / "S001.mefd", {"exclude_channels": ["a3"], "text": "keep"}
+
+
 def _inside(templates, tmp_path):
     src = _fresh(templates, tmp_path)
     return src, src / "inner.mefd", {}
@@ -262,6 +273,7 @@ CASES = {
         _src_rdat(s), b"Epoc", lambda r, b, n: struct.pack_into("<q", r, b, T_POS)))),
     "segment folder names another number": (
         "segment-number-mismatch", _mutated(lambda s: _rename_segment(s, "ch3-000007", "ch3"))),
+    "kept text glued to a left-out channel": ("text-unremovable", _glued),
     "segment folder without a number": (
         "segment-folder-unnumbered", _mutated(lambda s: _rename_segment(s, "ch3-Jane", "ch3"))),
     # --- one per further code that can be decided up front ---------------

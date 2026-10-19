@@ -169,6 +169,20 @@ AnonymizeCheck check_anonymize(const std::string& src, const std::string& dst,
                                const AnonymizeOptions& options, const Control& ctl = {},
                                bool check_shift = true);
 
+/// The text anonymize_session would keep for each of `texts` (record text
+/// with RecordTextPolicy::Keep, or a description it keeps): the exact
+/// redaction the copy applies, with the same source, destination name and
+/// options, so applications never need to copy its rules (#114). Reads only
+/// metadata (the pre-flight's), writes nothing, never logs its inputs. Not
+/// a check that the result is safe to keep: check_anonymize refuses text
+/// the removal cannot take out ("text-unremovable").
+/// @throws the first pre-flight refusal that leaves the redaction unknown
+///         (the source cannot be read, `dst` is not a `.mefd` name).
+std::vector<std::string> redact_text(const std::string& src, const std::string& dst,
+                                     const AnonymizeOptions& options,
+                                     const std::vector<std::string>& texts,
+                                     const Control& ctl = {});
+
 /// Check a copy against its source. Reads both; writes nothing.
 VerifyReport verify_anonymized(const std::string& src, const std::string& dst, si8 shift_us,
                                const VerifyOptions& options = {}, const Control& ctl = {});

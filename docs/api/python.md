@@ -46,6 +46,8 @@ for the workflow. Python and C++ only (no MATLAB, no C ABI).
 
 ::: mef3io.anonymize.reference_shift
 
+::: mef3io.anonymize.redact_text
+
 ::: mef3io.AnonymizeReport
 
 ::: mef3io.anonymize.CheckReport

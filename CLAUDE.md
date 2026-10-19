@@ -125,8 +125,18 @@ whole plus each 3+-digit run as a whole number ("EEG-0042" -> "0042"; its
 letters are a prefix). Engine: dropping a segment's FIRST block requires
 `SegmentCopySpec::start_sample` (invalid_argument otherwise; #103 must pass the
 channel-wide count). Case fold covers ASCII + Latin-1 +
-Latin Ext-A and is LENGTH-PRESERVING (the redactor replaces at folded
-offsets); the scanner additionally strips those diacritics (fail closed). Identity checks run before excusing the copy's own name ("S0012"
+Latin Ext-A; `scan_folded` additionally strips those diacritics. BOTH the
+scanner and the Redactor match in that one space (#115: the removal must
+cover what the check looks for — "Muller" for "Müller"); `scan_folded`'s
+start/end maps take a match back to whole original characters, which the
+Redactor replaces. The MATCHING rules stay separate (independence). Text
+the removal still cannot take out (a left-out channel "a3" in "a3a3") is
+refused in the PRE-FLIGHT (`text-unremovable`): with text="keep" or kept
+descriptions it runs copy_redactor + build_scanner on every kept field
+(`record_text_fields`, inspect's description values), so check() reports it
+and nothing is written; a text callback cannot be predicted (verify still
+checks). `redact_text()` (C++ + Python, #114) = that same copy_redactor on
+caller texts: no rule mirror in applications. Identity checks run before excusing the copy's own name ("S0012"
 vs copy "S001"). Epoc/Curs id_number: absolute window only (the rto window
 reaches small ints). Redactor: <4 chars = whole tokens, numeric = whole
 numbers, never inside kept channel names. Segment number = `.tmet` UH @48,

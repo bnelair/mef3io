@@ -1379,3 +1379,61 @@ def test_cli(tmp_path, rich, capsys):
               "--channel", "ch1", "--exclude-channel", "ch2"])
     assert exc.value.code == 2
     assert not (tmp_path / "C.mefd").exists() and not (tmp_path / "D.mefd").exists()
+
+
+# --------------------------------------------------------------------------- #115 / #114
+
+
+def _kept_text_session(path, subject, channels=("LH1", "LH2"), note="Muller called at night"):
+    with mef3io.Writer(str(path), overwrite=True,
+                       metadata=mef3io.Metadata(subject=subject)) as w:
+        for i, ch in enumerate(channels):
+            w.write(ch, _signal(2560, i), START, FS, precision=3)
+        w.write_annotations([{"type": "Note", "time": START + SECOND, "text": note}])
+    return Path(path)
+
+
+def test_an_unaccented_spelling_of_a_name_is_removed(tmp_path):
+    src = _kept_text_session(tmp_path / "p.mefd", mef3io.Subject(name_1="Jane", name_2="Müller"))
+    rep = _anon(src, tmp_path / "S001.mefd", text="keep")
+    assert rep.verification.ok, rep.verification.summary()
+    [note] = [r for r in _all_records(tmp_path / "S001.mefd") if r["type"] == "Note"]
+    assert "muller" not in note["text"].lower() and "called at night" in note["text"]
+
+
+def test_redact_text_is_exactly_what_the_copy_keeps(tmp_path):
+    texts = ["Muller called at night", "JANE MÜLLER", "Mary_Ann saw MRN12345",
+             "ward LH1, Jane's aura"]
+    src = _kept_text_session(tmp_path / "p.mefd", mef3io.Subject(
+        name_1="Jane", name_2="Müller", id="MRN12345"), note=texts[0])
+    dst = tmp_path / "S001.mefd"
+    got = mef3io.anonymize.redact_text(src, dst, texts)
+    assert not dst.exists()  # nothing written
+    assert got[1].strip() == "" and "12345" not in got[2] and "LH1" in got[3]
+    _anon(src, dst, text="keep")
+    [note] = [r for r in _all_records(dst) if r["type"] == "Note"]
+    assert note["text"] == got[0]
+
+
+def test_redact_text_refuses_what_leaves_it_unknown(tmp_path):
+    with pytest.raises(mef3io.IoError) as exc:
+        mef3io.anonymize.redact_text(tmp_path / "nowhere.mefd", tmp_path / "S.mefd", ["x"])
+    assert exc.value.code == "source-missing"
+    with pytest.raises(TypeError):
+        mef3io.anonymize.redact_text(tmp_path / "nowhere.mefd", tmp_path / "S.mefd", "x")
+
+
+def test_text_the_removal_cannot_take_out_is_refused_up_front(tmp_path):
+    src = _kept_text_session(tmp_path / "p.mefd", mef3io.Subject(), channels=("a3", "LH1"),
+                             note="a3a3 artefact")
+    dst = tmp_path / "S001.mefd"
+    rep = mef3io.anonymize.check(src, dst, SHIFT, exclude_channels=["a3"], text="keep")
+    assert rep.codes == ("text-unremovable",), rep.summary()
+    r = rep.refusals[0]
+    assert r.field == "record text" and "a3a3" not in r.message
+    with pytest.raises(mef3io.WriteConflictError) as exc:
+        _anon(src, dst, exclude_channels=["a3"], text="keep")
+    assert exc.value.code == "text-unremovable"
+    assert not dst.exists() and not Path(str(dst) + ".partial").exists()
+    # Dropping the text makes the same copy possible.
+    assert _anon(src, dst, exclude_channels=["a3"]).verification.ok

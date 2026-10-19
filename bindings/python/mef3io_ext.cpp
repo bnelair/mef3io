@@ -890,6 +890,42 @@ NB_MODULE(_mef3io, m) {
       nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none(),
       "Write a de-identified copy of a session (see mef3io.anonymize_session).");
   m.def(
+      "redact_text",
+      [](const std::string& src, const std::string& dst, nb::list raw_texts,
+         const std::string& pseudonym, bool clear_subject, bool clear_location,
+         bool clear_descriptions, bool rename, const std::string& password,
+         std::vector<std::string> channels, std::vector<std::string> exclude_channels,
+         const mef3io::CancelToken* cancel) {
+        std::vector<std::string> texts;
+        for (nb::handle h : raw_texts) {
+          const nb::bytes b = nb::cast<nb::bytes>(h);
+          texts.emplace_back(b.c_str(), b.size());
+        }
+        PyHooks hooks(cancel, nb::none());
+        mef3io::AnonymizeOptions o;
+        o.pseudonym = pseudonym;
+        o.clear_subject = clear_subject;
+        o.clear_location = clear_location;
+        o.clear_descriptions = clear_descriptions;
+        o.text = mef3io::RecordTextPolicy::Keep;
+        set_copy_options(o, rename, password, "", "", std::move(channels),
+                         std::move(exclude_channels));
+        // Bytes in, bytes out (text from a file need not be UTF-8).
+        const std::vector<std::string> out = hooks.run([&](const mef3io::Control& ctl) {
+          return mef3io::redact_text(src, dst, o, texts, ctl);
+        });
+        nb::list l;
+        for (const auto& t : out) l.append(nb::bytes(t.data(), t.size()));
+        return l;
+      },
+      nb::arg("src"), nb::arg("dst"), nb::arg("texts"), nb::arg("pseudonym") = "",
+      nb::arg("clear_subject") = true, nb::arg("clear_location") = true,
+      nb::arg("clear_descriptions") = true, nb::arg("rename") = true, nb::arg("password") = "",
+      nb::arg("channels") = std::vector<std::string>{},
+      nb::arg("exclude_channels") = std::vector<std::string>{},
+      nb::arg("cancel").none() = nb::none(),
+      "The text anonymize_session would keep (see mef3io.anonymize.redact_text).");
+  m.def(
       "verify_anonymized",
       [](const std::string& src, const std::string& dst, std::int64_t shift_us,
          const std::string& password, const std::string& output_password, bool clear_subject,

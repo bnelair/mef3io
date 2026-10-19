@@ -32,6 +32,7 @@
 #include <cctype>
 #include <exception>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -306,11 +307,15 @@ std::string folded(std::string s) {
   return s;
 }
 
-/// The SCANNER's fold (fail-closed side): case-folded as above, then the
-/// diacritics of those Latin letters removed, so "Muller" and "Jiri" are
-/// found for "Müller" and "Jiří". Not length-preserving; only the scanner,
-/// which works entirely in this folded space, uses it.
-std::string scan_folded(const std::string& in) {
+/// The match fold: case-folded as above, then the diacritics of those Latin
+/// letters removed, so "Muller" and "Jiri" are found for "Müller" and
+/// "Jiří". The scanner (the check) and the Redactor (the removal) both match
+/// in this space, so the removal covers what the check looks for (#115).
+/// Not length-preserving: `start` / `end`, when given, receive for each
+/// output byte the input byte range of the character it came from, so a
+/// match can be replaced in the original text.
+std::string scan_folded(const std::string& in, std::vector<std::size_t>* start = nullptr,
+                        std::vector<std::size_t>* end = nullptr) {
   // Base letters of U+0100..U+017F, in order (ligatures handled below).
   static const char* const EXT_A =
       "aaaaaaccccccccddddeeeeeeeeeegggggggghhhhiiiiiiiiiiiijjkkklllllll"
@@ -320,31 +325,46 @@ std::string scan_folded(const std::string& in) {
                 0x80 + 1);
   static const char* const LATIN1 =  // U+00E0..U+00FF (after folding)
       "aaaaaa\x01" "ceeeeiiiidnooooo\x02ouuuuy\x03y";
-  const std::string f = folded(in);
+  const std::string f = folded(in);  // length-preserving: f's offsets are in's
   std::string out;
   out.reserve(f.size());
+  if (start) start->clear();
+  if (end) end->clear();
+  auto emit = [&](const char* text, std::size_t from, std::size_t to) {
+    for (; *text; ++text) {
+      out += *text;
+      if (start) start->push_back(from);
+      if (end) end->push_back(to);
+    }
+  };
   for (std::size_t i = 0; i < f.size(); ++i) {
     const auto b = static_cast<unsigned char>(f[i]);
     if (b >= 0xC2 && b <= 0xC5 && i + 1 < f.size() &&
         (static_cast<unsigned char>(f[i + 1]) & 0xC0) == 0x80) {
       const unsigned cp = ((b & 0x1Fu) << 6) | (static_cast<unsigned char>(f[i + 1]) & 0x3Fu);
-      if (cp == 0xDF) { out += "ss"; ++i; continue; }
-      if (cp == 0xE6) { out += "ae"; ++i; continue; }
-      if (cp == 0xFE) { out += "th"; ++i; continue; }
-      if (cp == 0x132 || cp == 0x133) { out += "ij"; ++i; continue; }
-      if (cp == 0x152 || cp == 0x153) { out += "oe"; ++i; continue; }
-      if (cp >= 0xE0 && cp <= 0xFF && cp != 0xF7) {
-        out += LATIN1[cp - 0xE0];
-        ++i;
-        continue;
-      }
-      if (cp >= 0x100 && cp <= 0x17F) {
-        out += EXT_A[cp - 0x100];
+      const char* base = nullptr;
+      char one[2] = {0, 0};
+      if (cp == 0xDF) base = "ss";
+      else if (cp == 0xE6) base = "ae";
+      else if (cp == 0xFE) base = "th";
+      else if (cp == 0x132 || cp == 0x133) base = "ij";
+      else if (cp == 0x152 || cp == 0x153) base = "oe";
+      else if (cp >= 0xE0 && cp <= 0xFF && cp != 0xF7) base = (one[0] = LATIN1[cp - 0xE0], one);
+      else if (cp >= 0x100 && cp <= 0x17F) base = (one[0] = EXT_A[cp - 0x100], one);
+      if (base) {
+        emit(base, i, i + 2);
         ++i;
         continue;
       }
     }
-    out += f[i];
+    const char c[2] = {f[i], 0};
+    if (f[i] == 0) {  // emit() stops at NUL: keep it as its own byte
+      out += '\0';
+      if (start) start->push_back(i);
+      if (end) end->push_back(i + 1);
+      continue;
+    }
+    emit(c, i, i + 1);
   }
   return out;
 }
@@ -504,18 +524,18 @@ Span token_run(const std::string& h, std::size_t a, std::size_t b) {
 struct Redactor {
   enum class Mode { Substring, Token, Number };
   struct Rule {
-    std::string needle;  // case-folded
+    std::string needle;  // scan_folded: case and Latin diacritics folded
     std::string replacement;
     Mode mode = Mode::Substring;
   };
   std::vector<Rule> rules;
-  std::vector<std::string> protect;  // kept channel names, folded, longest first
+  std::vector<std::string> protect;  // kept channel names, scan_folded, longest first
 
   /// `name_like`: an excluded channel name, matched as a whole token.
   void add(const std::string& value, const std::string& replacement, bool name_like) {
     if (value.size() < 2) return;  // one byte would match nearly any text
-    const std::string n = folded(value);
-    if (n == folded(replacement)) return;
+    const std::string n = scan_folded(value);
+    if (n.size() < 2 || n == scan_folded(replacement)) return;
     for (const auto& r : rules)
       if (r.needle == n) return;
     Mode mode = Mode::Substring;
@@ -526,14 +546,19 @@ struct Redactor {
                      [](const Rule& a, const Rule& b) { return a.needle.size() > b.needle.size(); });
   }
 
+  /// Every rule applied, matched in the scanner's folded space (so "Muller"
+  /// goes for "Müller") and replaced in the original text.
   std::string apply(std::string text) const {
     for (const auto& r : rules) {
-      std::size_t from = 0;
+      std::size_t resume = 0;  // byte offset in `text` to search from
       while (true) {
-        const std::string h = folded(text);
+        std::vector<std::size_t> start, end;
+        const std::string h = scan_folded(text, &start, &end);
         std::vector<Span> keep;
         for (const auto& k : protect)
           for (const auto& s : occurrences(h, k)) keep.push_back(s);
+        std::size_t from = 0;
+        while (from < h.size() && start[from] < resume) ++from;
         std::size_t p = h.find(r.needle, from);
         while (p != std::string::npos) {
           const Span s{p, p + r.needle.size()};
@@ -547,8 +572,10 @@ struct Redactor {
           p = h.find(r.needle, p + 1);
         }
         if (p == std::string::npos) break;
-        text.replace(p, r.needle.size(), r.replacement);
-        from = p + r.replacement.size();
+        // Whole characters: a match ending inside "ß" ("ss") takes all of it.
+        const std::size_t a = start[p], b = end[p + r.needle.size() - 1];
+        text.replace(a, b - a, r.replacement);
+        resume = a + r.replacement.size();
       }
     }
     return text;
@@ -849,6 +876,28 @@ std::size_t seiz_entry_count(const std::vector<ui1>& b) {
 
 std::string seiz_entry_name(const std::vector<ui1>& b, std::size_t c) {
   return read_string(b, SEIZ_FIXED + c * SEIZ_CHANNEL, SEIZ_CHANNEL_NAME);
+}
+
+/// Every free-text field of a record that anonymize's text policy applies
+/// to, as the copy rewrites them (rewrite_body): the variable text of
+/// Note/SyLg/EDFA, the fixed text slots, and the names in a Seiz record's
+/// channel list (`seiz_name`). Bodies with no known layout are not kept, so
+/// they have none.
+void record_text_fields(
+    const RawRecord& r,
+    const std::function<void(const char* field, const std::string& value, bool seiz_name)>& fn) {
+  const BodyLayout* lay = layout_of(r);
+  if (!lay || lay->keep_whole) return;
+  if (lay->variable_text_from != SIZE_MAX) {
+    const std::size_t from = lay->variable_text_from;
+    fn("text", read_string(r.body, from, r.body.size() - from), false);
+    return;
+  }
+  for (const auto& slot : lay->text)
+    fn(slot.name, read_string(r.body, slot.offset, slot.bytes), false);
+  if (r.type == "Seiz")
+    for (std::size_t c = 0; c < seiz_entry_count(r.body); ++c)
+      fn("channel name", seiz_entry_name(r.body, c), true);
 }
 
 /// One metadata text field a transform sets in a segment's sections.
@@ -1502,7 +1551,7 @@ Redactor build_redactor(const SourcePlan& p, const std::string& new_name, bool c
                         bool clear_location, const std::set<std::string>& excluded,
                         const std::set<std::string>& kept, const std::string& pseudonym) {
   Redactor r;
-  for (const auto& k : kept) r.protect.push_back(folded(k));
+  for (const auto& k : kept) r.protect.push_back(scan_folded(k));
   std::sort(r.protect.begin(), r.protect.end(),
             [](const std::string& a, const std::string& b) { return a.size() > b.size(); });
   // Every value normalized; subject and location values also word by word.
@@ -2476,6 +2525,20 @@ struct Preflight {
   std::string session_records;                 // source-relative, or ""
 };
 
+/// One piece of source text an anonymized copy keeps (after redaction).
+struct KeptText {
+  std::string value, where, field, channel;
+};
+
+/// The Redactor a copy applies, from the pre-flight's results. `rename`
+/// false: the source's session name is kept on purpose, so it is not removed.
+Redactor copy_redactor(const SourcePlan& plan, const AnonymizeOptions& an, const Preflight& pf) {
+  SourcePlan p = plan;
+  if (!an.rename) p.session_names.clear();
+  return build_redactor(p, pf.new_name, an.clear_subject, an.clear_location, pf.excluded,
+                        pf.kept, pf.pseudonym);
+}
+
 /// `collect`: false = throw the first refusal (anonymize_session /
 /// transform_session), true = record every refusal and go on with the checks
 /// that do not depend on a failed one (check_anonymize / check_transform).
@@ -2789,6 +2852,7 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
   // whose suffix is not a number, or names another segment, is refused:
   // which one is right is unknown. (1024 bytes per segment.)
   std::vector<std::pair<std::string, std::string>> record_files;  // (rel, channel)
+  std::vector<KeptText> kept_texts;  // anonymize, text kept: checked at the end
   for (const auto& c : plan.layout.channels) {
     if (!pf.kept.count(c.name)) continue;
     std::set<int> numbers;
@@ -2868,6 +2932,14 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
       const RawRecord& r = f.records[i];
       const std::string what = "record " + std::to_string(i) + " (" + r.type + ") of " + where;
       shift_time(r.time, what + " time", false, channel);
+      if (an && an->text == RecordTextPolicy::Keep)
+        record_text_fields(r, [&](const char* field, const std::string& v, bool seiz_name) {
+          // A Seiz entry of a left-out channel goes; a kept channel's exact
+          // name stays as it is (rewrite_body's rules).
+          if (v.empty() || (seiz_name && (excluded_keys.count(channel_key(v)) || pf.kept.count(v))))
+            return;
+          kept_texts.push_back({v, what, std::string("record ") + field, channel});
+        });
       if (const BodyLayout* lay = layout_of(r); lay && !lay->keep_whole &&
                                                  lay->variable_text_from == SIZE_MAX) {
         for (std::size_t off : lay->times)
@@ -2898,6 +2970,37 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
                 "may store a time there); it is copied unchanged, so the copy would carry the "
                 "date",
             channel, "id_number");
+    }
+  }
+
+  // ---- kept text: the removal, then the check, as the copy will run them --
+  // (#115) Text the copy keeps is redacted, and the copy's verification then
+  // scans it. Whatever the scan would still refuse is refused HERE, before
+  // anything is written: a value the removal leaves inside a longer word
+  // ("a3a3" for a left-out channel "a3"). The message names the field, never
+  // the text. A text callback's output cannot be known in advance; verify
+  // still checks it.
+  if (an && (an->text == RecordTextPolicy::Keep || !an->clear_descriptions) && dst_named) {
+    if (!an->clear_descriptions)
+      for (const auto& f : plan.summary.identity)
+        if (f.name == "session_description" || f.name == "channel_description" ||
+            f.name == "reference_description")
+          for (const auto& v : f.values)
+            kept_texts.push_back({v, "metadata section 2", f.name, ""});
+    if (!kept_texts.empty()) {
+      const Redactor red = copy_redactor(plan, *an, pf);
+      const Scanner scan = build_scanner(plan, pf.new_name, an->clear_subject,
+                                         an->clear_location, pf.excluded, pf.kept, pf.pseudonym);
+      std::set<std::pair<std::string, std::string>> reported;  // (where, field)
+      for (const auto& t : kept_texts) {
+        const Scanner::Result r = scan.text(red.apply(t.value));
+        if (r.refuse.empty() || !reported.insert({t.where, t.field}).second) continue;
+        add(RefusalKind::WriteConflict, "text-unremovable",
+            t.where + ": its " + t.field + " holds " + r.refuse +
+                " in a form the removal does not take out (inside a longer word or number); "
+                "drop the text, or clear the descriptions, for this copy",
+            t.channel, t.field);
+      }
     }
   }
   return pf;
@@ -2973,6 +3076,25 @@ AnonymizeCheck check_anonymize(const std::string& src, const std::string& dst,
   return c;
 }
 
+std::vector<std::string> redact_text(const std::string& src, const std::string& dst,
+                                     const AnonymizeOptions& options,
+                                     const std::vector<std::string>& texts, const Control& ctl) {
+  Preflight pf = preflight(src, dst, Rules{&options, &options, nullptr}, ctl, /*collect=*/true,
+                           /*check_shift=*/false);
+  if (!pf.plan || pf.new_name.empty()) {
+    // Without the source or the copy's name the redaction is unknown.
+    for (auto& r : pf.refusals)
+      if (r.code != "dst-exists" && r.code != "partial-exists") raise(std::move(r));
+    refuse(RefusalKind::InvalidArgument, "invalid-argument",
+           "the redaction needs a readable source and a destination ending in .mefd");
+  }
+  const Redactor red = copy_redactor(*pf.plan, options, pf);
+  std::vector<std::string> out;
+  out.reserve(texts.size());
+  for (const auto& t : texts) out.push_back(red.apply(t));
+  return out;
+}
+
 CopyCheck check_transform(const std::string& src, const std::string& dst,
                           const TransformOptions& options, const Control& ctl) {
   Preflight pf = preflight(src, dst, Rules{&options, nullptr, &options.metadata}, ctl,
@@ -3017,9 +3139,8 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
   Shifter sh{plan.rto, an ? an->shift_us : 0};
   std::optional<Redactor> red;
   if (an) {
-    if (!o.rename) plan.session_names.clear();  // the name is kept on purpose
-    red = build_redactor(plan, new_name, an->clear_subject, an->clear_location, excluded, kept,
-                         pseudonym);
+    red = copy_redactor(plan, *an, pf);
+    if (!o.rename) plan.session_names.clear();  // the name is kept on purpose (verify, too)
   }
   const OutputKeys out = output_keys(o);
 
