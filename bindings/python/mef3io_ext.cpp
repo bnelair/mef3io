@@ -765,7 +765,8 @@ NB_MODULE(_mef3io, m) {
   m.def(
       "check_anonymize",
       [](const std::string& src, const std::string& dst, std::optional<std::int64_t> shift_us,
-         const std::string& pseudonym, const std::string& text, bool has_text_fn, bool rename,
+         const std::string& pseudonym, bool clear_subject, bool clear_location,
+         bool clear_descriptions, const std::string& text, bool has_text_fn, bool rename,
          const std::string& password, const std::string& output_password_1,
          const std::string& output_password_2, std::vector<std::string> channels,
          std::vector<std::string> exclude_channels, const mef3io::CancelToken* cancel) {
@@ -773,6 +774,9 @@ NB_MODULE(_mef3io, m) {
         mef3io::AnonymizeOptions o;
         o.shift_us = shift_us.value_or(0);
         o.pseudonym = pseudonym;
+        o.clear_subject = clear_subject;
+        o.clear_location = clear_location;
+        o.clear_descriptions = clear_descriptions;
         if (text == "drop") o.text = mef3io::RecordTextPolicy::Drop;
         else if (text == "keep") o.text = mef3io::RecordTextPolicy::Keep;
         else if (text == "callback") o.text = mef3io::RecordTextPolicy::Callback;
@@ -790,7 +794,9 @@ NB_MODULE(_mef3io, m) {
         return out;
       },
       nb::arg("src"), nb::arg("dst"), nb::arg("shift_us").none() = nb::none(),
-      nb::arg("pseudonym") = "", nb::arg("text") = "drop", nb::arg("has_text_fn") = false,
+      nb::arg("pseudonym") = "", nb::arg("clear_subject") = true,
+      nb::arg("clear_location") = true, nb::arg("clear_descriptions") = true,
+      nb::arg("text") = "drop", nb::arg("has_text_fn") = false,
       nb::arg("rename") = true, nb::arg("password") = "", nb::arg("output_password_1") = "",
       nb::arg("output_password_2") = "", nb::arg("channels") = std::vector<std::string>{},
       nb::arg("exclude_channels") = std::vector<std::string>{},

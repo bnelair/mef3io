@@ -562,8 +562,8 @@ def check(
     refusals = _Refusals(collect=True)
     a = _arguments(refusals, channels=channels, exclude_channels=exclude_channels,
                    output_password=output_password, text=text, clear=clear)
-    for k in ("clear_subject", "clear_location", "clear_descriptions"):
-        del a[k]  # nothing up front depends on them
+    # The clear flags decide what text the copy keeps, which check() tries
+    # (text-unremovable), so they go through as for the copy.
     text_mode = a.pop("text_mode")
     text_fn = a.pop("text_fn")
     raw = _backend().check_anonymize(
@@ -692,9 +692,14 @@ def redact_text(
 
     Raises
     ------
-    The first refusal that leaves the redaction unknown: the source cannot be
-    read (``source-missing``, ``password-required``, ...) or ``dst`` is not a
-    ``.mefd`` name (``dst-not-mefd``).
+    What the copy itself would refuse, raised as :func:`anonymize_session`
+    raises it (its ``.code``): a source that cannot be read or is locked
+    (``source-missing``, ``password-required``, ``password-level1-only``),
+    an unknown channel, a destination or pseudonym holding the patient's
+    identity, and so on. Only refusals that do not decide the redaction are
+    ignored: the destination already existing (``dst-exists``,
+    ``partial-exists``) and text the removal cannot take out
+    (``text-unremovable``, which is what :func:`check` reports).
     """
     if isinstance(texts, str):
         raise _error("TypeError", "argument-type", "texts must be a sequence of str",

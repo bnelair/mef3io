@@ -176,8 +176,10 @@ AnonymizeCheck check_anonymize(const std::string& src, const std::string& dst,
 /// metadata (the pre-flight's), writes nothing, never logs its inputs. Not
 /// a check that the result is safe to keep: check_anonymize refuses text
 /// the removal cannot take out ("text-unremovable").
-/// @throws the first pre-flight refusal that leaves the redaction unknown
-///         (the source cannot be read, `dst` is not a `.mefd` name).
+/// @throws the first refusal anonymize_session would throw (a locked or
+///         unreadable source, an unknown channel, an identity-bearing name,
+///         ...), except those that do not decide the redaction: the
+///         destination in use and "text-unremovable".
 std::vector<std::string> redact_text(const std::string& src, const std::string& dst,
                                      const AnonymizeOptions& options,
                                      const std::vector<std::string>& texts,
