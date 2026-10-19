@@ -34,8 +34,9 @@ constexpr std::size_t UH_START = 16, UH_END = 24, UH_SESSION_NAME = 308, UH_NAME
 /// std::invalid_argument naming the problem. rename_session (#72, second
 /// part) uses the same rule.
 void check_portable_name(const std::string& name) {
-  if (name.empty() || name == "." || name == "..")
-    throw std::invalid_argument("the new name is empty");
+  if (name.empty()) throw std::invalid_argument("the new name is empty");
+  if (name == "." || name == "..")
+    throw std::invalid_argument("the new name cannot be '" + name + "'");
   for (const unsigned char c : name) {
     if (c < 0x20 || c == 0x7f)
       throw std::invalid_argument("the new name contains a control character");
