@@ -319,6 +319,18 @@ bool outside_rename_fields(std::size_t i, bool tmet) {
 /// would erase that write, so only the name and the description are put back
 /// and the CRCs recomputed: a logical inverse.
 void restore(const fs::path& file, const std::vector<ui1>& saved, bool tmet) {
+  if (saved.size() < (tmet ? static_cast<std::size_t>(fmt::METADATA_FILE_BYTES) : UH))
+    throw IoError("the backup of " + str(file) + " is too short");
+  // A .tmet replaced without a flush can come back short or empty after a
+  // power cut. Nothing else can have written it meaningfully then: the
+  // backup goes back whole.
+  std::error_code ec;
+  const auto size = fs::file_size(file, ec);
+  if (ec || size < (tmet ? static_cast<std::uintmax_t>(fmt::METADATA_FILE_BYTES) : UH)) {
+    if (tmet) detail::write_all_atomic(str(file), saved, false);
+    else overwrite_prefix(file, saved);
+    return;
+  }
   std::vector<ui1> cur = tmet ? read_whole(file) : read_prefix(file, UH);
   if (cur == saved) return;
   bool only_ours = cur.size() == saved.size();
@@ -350,16 +362,21 @@ void roll_back(const Journal& j, bool own_dir) {
     throw IoError("cannot find the session of the interrupted operation " + j.id + " in " +
                   str(j.parent));
   fs::path dir = j.parent / u8(*at);
+  // Everything needed is checked before the first change.
+  const auto blob = read_whole(j.backups());
+  std::size_t needed = 0;
+  for (const auto n : j.sizes) needed += n;
+  if (blob.size() < needed || j.sizes.size() != j.files.size())
+    throw IoError("the backups of the interrupted operation " + j.id + " are incomplete (" +
+                  str(j.backups()) + "); nothing was rolled back. If name_drift shows the "
+                  "name consistent, clear_operation_marker() removes the marker.");
   for (const auto& r : j.records) {
     if (has_entry(dir, r.temp)) rename_entry(dir, r.temp, r.from, r.temp);
     else if (!has_entry(dir, r.from) && has_entry(dir, r.to)) rename_entry(dir, r.to, r.from, r.temp);
   }
-  const auto blob = read_whole(j.backups());
   std::vector<fs::path> written;
   std::size_t off = 0;
   for (std::size_t i = 0; i < j.files.size(); ++i) {
-    if (off + j.sizes[i] > blob.size())
-      throw IoError("the backups of operation " + j.id + " are incomplete: " + str(j.backups()));
     const std::vector<ui1> saved(blob.begin() + off, blob.begin() + off + j.sizes[i]);
     off += j.sizes[i];
     written.push_back(dir / u8(j.files[i]));
@@ -408,8 +425,10 @@ fs::path session_dir(const std::string& path) {
   // drift that is not there, write the wrong name into every header, and
   // never find the folder again by its exact entry name after a crash.
   std::error_code ec;
-  for (fs::directory_iterator it(dir.parent_path(), ec), end; !ec && it != end; it.increment(ec))
-    if (fs::equivalent(it->path(), dir, ec)) return dir.parent_path() / it->path().filename();
+  for (fs::directory_iterator it(dir.parent_path(), ec), end; !ec && it != end; it.increment(ec)) {
+    std::error_code eq;  // an unreadable sibling must not end the scan
+    if (fs::equivalent(it->path(), dir, eq)) return dir.parent_path() / it->path().filename();
+  }
   return dir;
 }
 
@@ -600,7 +619,7 @@ RenameReport run(Plan p, const fs::path& dir, const RenameOptions& o, RenameRepo
   j.files = p.files;
   const bool default_dir = o.backup_dir.empty();
   j.backup_dir = default_dir ? u8(str(dir) + ".repair-backup") : u8(o.backup_dir);
-  fs::create_directories(j.backup_dir);
+  if (fs::create_directories(j.backup_dir)) detail::fsync_directory(j.backup_dir.parent_path());
   {
     std::ofstream out(j.backups(), std::ios::binary | std::ios::trunc);
     if (!out) throw IoError("cannot write the backups: " + str(j.backups()));
@@ -758,7 +777,7 @@ RenameReport fix_name_drift(const std::string& path, const std::string& target,
 
 std::optional<OperationMarker> operation_marker(const std::string& path) {
   if (path_has_suffix(path, ".tar")) return std::nullopt;
-  return detail::read_operation_marker(fs::path(path));
+  return detail::read_operation_marker(u8(path));
 }
 
 void clear_operation_marker(const std::string& path) {

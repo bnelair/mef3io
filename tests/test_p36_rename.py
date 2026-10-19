@@ -353,6 +353,33 @@ def test_a_rollback_keeps_an_append_made_meanwhile(tmp_path):
         assert np.count_nonzero(~np.isnan(r.read("A"))) == 2 * 2560
 
 
+@pytest.mark.parametrize("keep", [0, 100])
+def test_a_metadata_file_lost_in_a_power_cut_is_restored(tmp_path, keep):
+    """Patched .tmet files are published unflushed (one batch flush later):
+    after a power cut one can come back empty or short."""
+    src = _session(tmp_path / "a.mefd", segments=1, channels=("A",))
+    before = _files(src)
+    with pytest.raises(mef3io.IoError):
+        mef3io.rename_session(src, "b", _crash_at=6)  # every header patched
+    tmet = next(src.rglob("*.tmet"))
+    assert tmet.read_bytes() != before[tmet.relative_to(src).as_posix()]
+    tmet.write_bytes(tmet.read_bytes()[:keep])
+    assert mef3io.fix_name_drift(src).rolled_back
+    assert _files(src) == before
+
+
+def test_incomplete_backups_change_nothing(tmp_path):
+    src = _session(tmp_path / "a.mefd", segments=1, channels=("A",))
+    with pytest.raises(mef3io.IoError):
+        mef3io.rename_session(src, "b", _crash_at=4)
+    (blob,) = (tmp_path / "a.mefd.repair-backup").glob("*.backup")
+    blob.write_bytes(blob.read_bytes()[:-100])
+    mid = _files(src)
+    with pytest.raises(mef3io.IoError, match="nothing was rolled back"):
+        mef3io.fix_name_drift(src)
+    assert _files(src) == mid
+
+
 def test_rollback_restores_the_old_bytes(tmp_path):
     src = _session(tmp_path / "a.mefd", description="a")
     before = _files(src)
