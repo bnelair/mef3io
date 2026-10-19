@@ -112,7 +112,13 @@ stored_like + shift; leftover/missing/duplicated/reordered copy blocks fail;
 the source blocks just outside the range must hold nothing of the window.
 Copy segments are matched to source segments by TIME (each one's own rto).
 Cut UH times / other derived s2 fields are left to the validator (verify
-runs it). Reader.read(t0, t1) can put a sample up to half a period before t0
+runs it), so a cut NEVER excuses validator findings more loosely than the
+exact key (check|channel|segment|field|message): a source already failing
+e.g. times.recording-duration gets its cut refused (repair first). A
+check+channel key was tried and rejected in review: on legacy mef_tools
+sessions, which carry sizing.contiguous / times.discontinuities /
+block-interval / recording-duration on every channel, it would have excused
+the cut's own block_interval bug. Reader.read(t0, t1) can put a sample up to half a period before t0
 in slot 0, so tests compare the cut read whole against the source read from
 the cut's start time.
 Transform rules, test-pinned (`tests/test_p33_transform.py`,

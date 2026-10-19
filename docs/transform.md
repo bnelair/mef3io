@@ -124,6 +124,12 @@ The cut is checked like everything else:
 - every kept sample must lie in the window;
 - the copy must hold as many samples as the source has in the window.
 
+A cut writes new declarations (counts, durations, start and end times) for
+each segment it keeps. If the source already fails the validator for one of
+those, the cut is refused rather than risk passing a mistake of its own. Run
+`python -m mef3io validate` on the source, and `repair` it first (see
+[Validation & repair](validation.md)).
+
 From the command line, add `--start` and `--end` (and `--whole-blocks`) to
 `python -m mef3io transform` or `anonymize`.
 

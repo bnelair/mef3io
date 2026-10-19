@@ -2926,17 +2926,16 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
     vo.password = o.output_password;
     const Report dr = validate_session(dst_path, vo, inner);
     // Compared as a multiset: each source finding excuses one copy finding.
-    // A cut renumbers segments and rewrites their spans, so a finding the
-    // source had is recognised by its check and channel alone there.
-    const bool cut = o.time_range.has_value();
-    auto key_of = [&](const Finding& f) {
-      return cut ? f.check_id + " | " + f.channel : finding_key(f);
-    };
+    // A finding is excused only when the source had exactly the same one
+    // (check, channel, segment, field, message). A cut recomputes the very
+    // declarations several checks look at, so it never matches more loosely:
+    // a cut of a session that already fails such a check is refused (repair
+    // the source first) rather than risk excusing the cut's own mistake.
     std::map<std::string, int> known;
-    for (const auto& f : sr.findings) ++known[key_of(f)];
+    for (const auto& f : sr.findings) ++known[finding_key(f)];
     for (const auto& f : dr.findings) {
       if (f.severity == Severity::Info) continue;
-      const std::string key = key_of(f);
+      const std::string key = finding_key(f);
       auto it = known.find(key);
       if (it != known.end() && it->second > 0) {
         --it->second;
