@@ -142,6 +142,12 @@ pages such as
   threads at once (a `Writer` is not for sharing); see
   [Parallelism](https://bnelair.github.io/mef3io/python/#parallelism) for the
   limits.
+- **Copies with only what you need.** `mef3io.transform_session` writes a
+  copy with chosen channels, new passwords (or none), a new name and edited
+  subject details or descriptions. Every time and sample is copied as
+  stored, and the copy is checked against its source before it is saved.
+  Python and C++; see
+  [Modified copies](https://bnelair.github.io/mef3io/transform/).
 - **One file instead of a folder.** A session can be packed into a single
   `.mefd.tar` and read in place, without unpacking.
 

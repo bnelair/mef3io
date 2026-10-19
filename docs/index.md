@@ -53,6 +53,11 @@ version number.
   copy before anything is written, and every copy is verified against its
   source before it is saved. Python and C++ — see
   [De-identification](anonymization.md).
+- **Modified copies** — `mef3io.transform_session` writes a copy with only
+  the changes you ask for: chosen channels, new passwords or none, a new
+  name, edited subject details and descriptions. Every time and sample is
+  copied as stored, and the copy is verified against its source. Python and
+  C++ — see [Modified copies](transform.md).
 - **Deterministic** — output is byte-identical regardless of thread count.
 - **Responsive, with thread-safe reads** — opening, reading and writing
   release Python's GIL, so a GUI stays responsive while a session opens or
@@ -126,7 +131,7 @@ The same session opens in MATLAB (`mef3io.Reader('session.mefd')`) and C++
 | | |
 |---|---|
 | [Install](install.md) | pip wheels, MATLAB MEX, building from source |
-| [Python guide](python.md) | `Reader`, `Writer`, `inspect`, de-identified copies, cancelling, threads, legacy compat, caching |
+| [Python guide](python.md) | `Reader`, `Writer`, `inspect`, de-identified and modified copies, cancelling, threads, legacy compat, caching |
 | [MATLAB guide](matlab.md) | `+mef3io` classes and the MEX |
 | [C++ guide](cpp.md) | using the core library and the flat C ABI |
 | [How-to](howto/read_python.md) | short answers: read in [Python](howto/read_python.md) or [MATLAB](howto/read_matlab.md), [convert EDF to MEF 3.0](howto/edf_to_mef.md), [long recordings with gaps](howto/long_recordings.md) |
@@ -134,6 +139,7 @@ The same session opens in MATLAB (`mef3io.Reader('session.mefd')`) and C++
 | [Release notes](release_notes/index.md) | what changed in each version, and what an upgrade asks of you |
 | [Format reference](mef3_format.md) | the MEF 3.0 on-disk structure, field by field |
 | [De-identification](anonymization.md) | de-identified copies with `anonymize_session`, and why meflib's recording-time offset (deprecated) is not anonymization |
+| [Modified copies](transform.md) | copies with chosen channels, passwords, name and details, with `transform_session` |
 | [Performance & legacy comparison](legacy_comparison.md) | measured speed, encryption, and quantization differences |
 
 ## Scope and limitations

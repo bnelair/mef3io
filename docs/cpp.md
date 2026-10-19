@@ -146,14 +146,40 @@ returns every refusal instead of throwing the first; it reads only
 metadata. `verify_anonymized` re-checks a copy at any time. Not in the C
 ABI, so not in MATLAB.
 
+## Modified copies
+
+`mef3io::transform_session` (`transform.hpp`) is the same copy engine with
+other rules:
+- you choose the channels, new passwords (or none), the session name and
+  edits to the descriptive metadata;
+- every time and every sample is copied as stored;
+- the copy is verified before it is published.
+
+See [Modified copies](transform.md).
+
+```cpp
+#include "mef3io/transform.hpp"
+
+mef3io::TransformOptions opt;
+opt.exclude_channels = {"ECG"};
+opt.metadata.subject_id = "S-017";
+opt.metadata.channel_descriptions["Fp1"] = "frontal pole, left";
+mef3io::TransformReport rep = mef3io::transform_session("patient.mefd", "eeg.mefd", opt);
+```
+
+`check_transform` and `verify_transform` mirror their anonymize
+counterparts. The options, refusals and reports are shared:
+- `AnonymizeOptions` and `TransformOptions` both extend `CopyOptions`;
+- `AnonymizeError` is an alias of `CopyError`.
+
 ## Errors
 
 The format and I/O errors come from the `mef3io::MefError` hierarchy
 (`errors.hpp`): `IoError`, `FormatError`, `CrcError`, `PasswordError`,
 `WriteConflictError`. A bad argument throws `std::invalid_argument`, an
 unknown channel or segment `std::out_of_range`. Every refusal of
-`anonymize_session` is also a `mef3io::AnonymizeError` carrying a stable
-`code()`, next to its usual type. `mef3io::Cancelled` (below) is thrown only
+`anonymize_session` and `transform_session` is also a `mef3io::CopyError`
+(alias `AnonymizeError`) carrying a stable `code()`, next to its usual type. `mef3io::Cancelled` (below) is thrown only
 when a `CancelToken` you passed is cancelled.
 
 ## Cancelling and progress

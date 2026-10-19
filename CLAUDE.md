@@ -12,8 +12,9 @@ records). In-segment append + per-segment map implemented. Tar session
 archives (single-file `.mefd.tar`, read in place) implemented. Session
 validator + targeted repair + recovery implemented (+ an open-time warning).
 `inspect` (metadata-only description, #67), cancel/progress on long
-operations, and de-identified copies (`anonymize_session` +
-`anonymize.check`/`verify`, #70/#111) implemented — all Python + C++ only, not
+operations, de-identified copies (`anonymize_session` +
+`anonymize.check`/`verify`, #70/#111) and modified copies (`transform_session`
++ `transform.check`/`verify`, #73) implemented — all Python + C++ only, not
 MATLAB. Reads/toc/segments/records on one Reader/Session may overlap across
 threads (#79; GIL released on open and every long call); Python-side limits
 until #110 are in for_agents/INVARIANTS.md §12. Python (pytest) + standalone C++ Catch2 suites.
@@ -50,17 +51,54 @@ abstraction: DirectorySource/TarSource), `tar` (uncompressed .mefd.tar session
 archives: TarIndex/TarSource/`archive_session`), `reader` (gridding, NaN fill,
 scaling, parallel decode), `records` (read+write), `writer` (segment writer),
 `session_writer` (precision inference, quantization, NaN splitting, segments),
-`parallel.hpp`, `anonymize` (`anonymize_session` + `verify_anonymized`, #70;
-see below), `segment_copy.hpp` (internal streaming block-copy engine:
+`parallel.hpp`, `anonymize.hpp` (`anonymize_session` + `verify_anonymized`,
+#70; see below) and `transform.hpp` (`transform_session` + `check_transform`
++ `verify_transform`, #73, and the types EVERY copy shares: `CopyOptions`,
+`CopyRefusal`/`CopyError` = `AnonymizeRefusal`/`AnonymizeError` aliases,
+`CopyCheck`, `CopyReport`, `VerifyReport`), both implemented by ONE engine in
+`core/src/session_copy.cpp` (was anonymize.cpp; see "Copy engine" below),
+`segment_copy.hpp` (internal streaming block-copy engine:
 per-block edit/drop hook, re-seals block CRCs, repacks + rewrites `.tidx`
 offsets, renumbers start_sample and flags the block after a drop as a
 discontinuity, returns section-2 stats; built so the planned cut/merge #103 —
 not implemented — can reuse it), `inspect` (describe a session from
 .tmet/.rdat [+ .tidx], never .tdat), `control.hpp` (CancelToken + progress in
 one `Control`; `Cancelled` is deliberately NOT a std::exception), `recover`,
-`errors` (MefError hierarchy; anonymize refusals add the `AnonymizeError`
+`errors` (MefError hierarchy; copy refusals add the `CopyError`
 code mixin), `time` (stored <-> user time), `c_api.h` (flat C ABI under the
 MEX); internal `durability.hpp`, `last_segment.hpp`.
+
+Copy engine (#73, `core/src/session_copy.cpp`): anonymize_session and
+transform_session are ONE driver (`run_copy`: preflight -> Copier pass into
+`<dst>.partial` -> fsync -> `verify_impl` -> rename), ONE `preflight()`, ONE
+`Copier` and ONE `Verifier`, steered by `Rules` (`anon` set = anonymize;
+unset = transform with `edits`). NEVER fork a second copy path for a new
+operation (cut/merge #103, re-encode #121): add rules or options to this one.
+Transform rules, test-pinned (`tests/test_p33_transform.py`,
+`core/tests/test_transform.cpp`): every stored time VERBATIM (Copier::time
+returns it unchanged; no Shifter, so no rto refusals: rto, DST, GMT kept);
+RED blocks untouched except re-keyed encrypted statistics; meflib
+protected/discretionary regions KEPT (UH, s1-s3, entries, block headers);
+record bodies byte for byte (unknown types too) except the Seiz entries of
+left-out channels (`kept_body`); the session name written only when it
+differs (no zero-fill of untouched fields); new file UUID, level UUIDs
+remapped, provenance_UUID = the source's (or the source's file UUID when
+unset); provenance op 8 `Transform` via stamp_modified (declines a foreign
+region, which is then left as is). Metadata edits (`MetadataEdits`: subject
+names/ID, location, session description, per-channel channel/reference
+descriptions) go into the STORED section images (never re-serialized); a
+value that does not fit is REFUSED (`metadata-too-long`), never cut. Its
+verification compares every other byte to the source: UH except CRCs,
+session name, 32..48 (counts/max sizes the engine derives; the validator
+checks them), UUIDs, password fields, provenance; s1 beyond the levels; s2/s3
+= source + the edits exactly; entries/blocks beyond offset, CRC and
+encryption bits; bodies padded with 0x7e only. Python: shared report and
+refusal plumbing in `python/mef3io/_copy.py` (COPY_REFUSAL_CODES +
+VerifyReport/CheckReport/Refusal + argument checks + CLI helpers);
+anonymize.REFUSAL_CODES = shared + anonymize-only, transform.REFUSAL_CODES =
+shared + metadata-*. The shared codes are documented ONCE, in
+docs/anonymization.md's table; docs/transform.md documents only the
+transform's own (test_p33 checks both).
 
 Anonymize (#70) invariants, all test-pinned (`tests/test_p29_anonymize.py`):
 (1) `verify` is FIELD-WISE and INDEPENDENT of the rewrite (own matcher, so
@@ -103,7 +141,7 @@ header 5/8. Segment folders renamed canonically. Unknown record bodies are
 dropped. (8) Inner inspect/validate calls get a cancel-only `Control`
 (passing progress restarts the caller's sequence). (9) pymef SEGFAULTS on
 unknown or `UnRc` record types: oracle tests must not include them.
-(10) #111 ONE PRE-FLIGHT: `preflight()` in anonymize.cpp makes EVERY check
+(10) #111 ONE PRE-FLIGHT: `preflight()` in session_copy.cpp makes EVERY check
 decidable before writing (options, paths, source open, records ambiguity,
 inspect plan, password access, inspect blockers, channel selection, shift,
 names, segment numbering from each .tmet UH @48, record files incl. the
@@ -115,7 +153,7 @@ parametrizes every refusal case through BOTH and requires the same first
 code/type/message. Reads metadata only (rchar-pinned < 2% of .tdat, <= 3x
 inspect). Blockers thrown as ONE exception (message lists all, code = first)
 — collect mode lists each with `inspect_code`. (11) Every refusal throws
-`CodedError<Base>` = the old exception type + the `AnonymizeError` mixin
+`CodedError<Base>` = the old exception type + the `CopyError` mixin
 (code, kind, channel, field, inspect_code); `refusal_of()` gives uncoded
 shared-code errors a generic code at preflight stages and at the
 anonymize_session boundary. Python: a translator registered LAST sets
@@ -265,11 +303,13 @@ population; `ChannelInfo` carries the fields on read. C ABI
 (mef_tools.io drop-in; `MefReader`/`MefWriter` are also re-exported at the top
 level — `from mef3io import MefReader, MefWriter` — via lazy `__getattr__`),
 `cache` (opt-in warm start), `anonymize` (de-identified copy, `check`,
-`verify`, `reference_shift`, `REFUSAL_CODES`, CLI), `_inspect`
+`verify`, `reference_shift`, `REFUSAL_CODES`, CLI), `transform` (modified
+copy, `check`, `verify`, `REFUSAL_CODES`, `METADATA_FIELDS`, CLI), `_copy`
+(what both copies share), `_inspect`
 (`mef3io.inspect`; kept out of `__all__` so `import *` does not shadow the
 stdlib module), `_cancel` (CancelToken/Cancelled), `_warnings` (MefWarning +
 `emit`), `validate`, `metadata`, `_archive`, `__main__` (CLI: inspect,
-validate, repair, recover, anonymize), `pure` (stub). `password_interop_issue`
+validate, repair, recover, anonymize, transform), `pure` (stub). `password_interop_issue`
 lives in `_writer.py`. `bindings/python/mef3io_ext.cpp` =
 nanobind. `matlab/` = MEX + `+mef3io` classes. `examples/` = runnable scripts
 01-13 (listed in examples/README.md; 13 = anonymize, smoke-tested in
@@ -595,8 +635,9 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   recovery `Recovery`. RULE (core/src/last_segment.hpp): when repair or
   recovery modifies a NON-last segment, it ALSO stamps the channel's LAST
   segment's .tmet with `SegmentRepaired` (code 9; 6 = `Anonymize`, stamped
-  on every file of an anonymized copy; 7/8 stay reserved for rename #72 /
-  transform #73 and deliberately unassigned).
+  on every file of an anonymized copy; 8 = `Transform`, on every file of a
+  transform_session copy whose region is mef3io's or empty; 7 stays reserved
+  for rename #72 and deliberately unassigned).
   Header-only (region + header CRC), backed up. Always reported, naming the
   file: repair = an Info finding `provenance.last-segment`, recovery =
   `RecoveryReport.notes`. `provenance.last-segment` is NOT a registered check,

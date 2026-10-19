@@ -28,6 +28,7 @@ Install: `pip install mef3io` (Python 3.10+, numpy only). MATLAB: the mef3io-mat
 - [Validation and repair](https://bnelair.github.io/mef3io/validation/): checking, repairing and recovering sessions
 - [Long recordings](https://bnelair.github.io/mef3io/long_recordings/): months-long appends, durability
 - [De-identification](https://bnelair.github.io/mef3io/anonymization/): de-identified copies with anonymize_session (check before copying, channel exclusion, encryption, verification, refusal codes; Python and C++), and why meflib's recording-time offset is not anonymization (deprecated)
+- [Modified copies](https://bnelair.github.io/mef3io/transform/): transform_session, a copy with chosen channels, new passwords or none, a new name and edited descriptive metadata; every time and sample copied as stored, verified against the source (Python and C++)
 - [Release notes](https://bnelair.github.io/mef3io/release_notes/): changes and upgrade notes per version
 
 ## Optional

@@ -119,8 +119,11 @@ enum class Operation : ui1 {
   MetadataUpdate = 5,  ///< reserved: descriptive metadata rewritten in place
   Anonymize = 6,       ///< anonymize_session (#70): a de-identified copy, every
                        ///< time shifted; stamped on every file of the copy
-  // 7, 8: reserved for rename (#72) and transform (#73). Not assigned here, so
-  // those issues can define them without a collision.
+  // 7: reserved for rename (#72). Not assigned here, so that issue can define
+  // it without a collision.
+  Transform = 8,       ///< transform_session (#73): a copy with a choice of
+                       ///< channels, passwords, name or descriptive metadata;
+                       ///< times and samples verbatim; stamped on every file
   SegmentRepaired = 9, ///< stamped on a channel's LAST segment when repair or
                        ///< recovery modified ANOTHER segment of that channel
 };
