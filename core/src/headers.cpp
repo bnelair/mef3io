@@ -350,7 +350,8 @@ const char* operation_name(ui1 code) {
     case 4: return "recovery";
     case 5: return "metadata-update";
     case 6: return "anonymize";
-    // 7-8 reserved (rename #72, transform #73): unknown here.
+    // 7 reserved (rename #72): unknown here.
+    case 8: return "transform";
     case 9: return "segment-repaired";
     default: return nullptr;
   }

@@ -176,7 +176,7 @@ Offsets are relative to the region; add 960 for the position in the file.
 | 5 | `metadata-update` | reserved: descriptive metadata rewritten in place |
 | 6 | `anonymize` | the file belongs to a de-identified copy made by `anonymize_session` (#70); stamped on every file of the copy |
 | 7 | — | reserved for rename (#72), not yet assigned |
-| 8 | — | reserved for transform (#73), not yet assigned |
+| 8 | `transform` | the file belongs to a copy made by `transform_session` (#73): a choice of channels, new passwords, a new name or edited descriptive metadata, with every time and sample copied verbatim; stamped on every file of the copy (a region another program owns is left as it is) |
 | 9 | `segment-repaired` | stamped on a channel's **last** segment's `.tmet` when `repair_session` or `recover_session` modified **another** segment of that channel. The last segment itself was not repaired: that file only records that something earlier in its channel was. |
 
 `segment-repaired` exists so that one file per channel, the last segment's

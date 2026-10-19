@@ -22,7 +22,9 @@
 // anonymize_session throws it as an AnonymizeError mixed into the exception
 // type it always threw (std::invalid_argument, IoError, ...).
 //
-// Available in C++ and Python. There is no C ABI or MATLAB binding.
+// Available in C++ and Python. There is no C ABI or MATLAB binding. The copy
+// engine, its options, refusals and reports are shared with transform_session
+// (transform.hpp, #73).
 #pragma once
 
 #include <exception>
@@ -34,6 +36,7 @@
 
 #include "mef3io/control.hpp"
 #include "mef3io/records.hpp"
+#include "mef3io/transform.hpp"
 #include "mef3io/types.hpp"
 
 namespace mef3io {
@@ -58,7 +61,10 @@ enum class RecordTextPolicy {
   Callback,  ///< `text_fn` decides; the redaction below still applies after it
 };
 
-struct AnonymizeOptions {
+/// The copy options (CopyOptions: password, output passwords, channels,
+/// rename) plus what anonymization adds. A left-out channel's name is also
+/// redacted from kept text; with `rename`, session_description too.
+struct AnonymizeOptions : CopyOptions {
   /// Added to every time, in microseconds. Must be non-zero, keep every time
   /// above 0, and be at least the session's time span plus one day in
   /// magnitude (so no shifted time can land inside the original range).
@@ -76,53 +82,6 @@ struct AnonymizeOptions {
   bool clear_descriptions = true;
   RecordTextPolicy text = RecordTextPolicy::Drop;
   RecordTextFn text_fn;  ///< required with RecordTextPolicy::Callback
-  /// true: the copy takes the stem of `dst` as its session name everywhere
-  /// (folder, session-level record files, every universal header,
-  /// session_description). false: the source's name is kept, and the stem of
-  /// `dst` must equal it.
-  bool rename = true;
-  std::string password;  ///< opens the source; encrypted sources need level 2
-  /// Output encryption: both empty = none; otherwise BOTH set (MEF has no
-  /// level-1-only files). Metadata sections 2/3 and record bodies are
-  /// encrypted as on every mef3io write. RED blocks the SOURCE encrypted are
-  /// re-encrypted with these passwords at the same level, or decrypted when
-  /// none are given; plain blocks stay plain.
-  std::string output_password_1, output_password_2;
-  /// Channels to copy: empty = all. Mutually exclusive with exclude_channels.
-  std::vector<std::string> channels;
-  /// Channels to leave out. An excluded channel leaves nothing in the copy:
-  /// no folder, no records, no per-channel entry in a Seiz record, and its
-  /// name is redacted from kept text.
-  std::vector<std::string> exclude_channels;
-};
-
-/// One time or text field the leak scan or the comparison flagged.
-struct VerifyIssue {
-  std::string location;  ///< file (source-relative) and, where useful, entry
-  std::string field;     ///< e.g. "universal header start_time", "record text"
-  std::string message;   ///< plain words; never echoes an identifying string
-};
-
-struct VerifyReport {
-  bool ok = false;
-  std::vector<VerifyIssue> problems;   ///< anything wrong, including leaks
-  std::vector<VerifyIssue> leaks;      ///< the subset found by the leak scan
-  /// Overlaps reported but NOT refused: an identity value inside a kept
-  /// channel's name as part of a longer token (or shorter than 3
-  /// characters), inside the copy's own name, or a number of fewer than 4
-  /// digits inside a longer number. Worth showing the user; never echoes an
-  /// identifying value.
-  std::vector<VerifyIssue> notes;
-  /// Validator findings the source already had (check id, channel, segment):
-  /// carried over unchanged by a copy, not introduced by it.
-  std::vector<std::string> inherited_findings;
-  std::vector<std::string> channels;           ///< channels in the copy
-  std::vector<std::string> excluded_channels;  ///< in the source, not the copy
-  si8 segments = 0;
-  si8 blocks = 0;
-  si8 records = 0;
-  si8 times_checked = 0;
-  si8 text_fields_checked = 0;
 };
 
 struct VerifyOptions {
@@ -134,56 +93,13 @@ struct VerifyOptions {
   bool clear_descriptions = true;
 };
 
-/// Which exception type a refusal is thrown as.
-enum class RefusalKind {
-  InvalidArgument,  ///< std::invalid_argument (Python ValueError)
-  Io,               ///< IoError
-  WriteConflict,    ///< WriteConflictError
-  Password,         ///< PasswordError
-  Format,           ///< FormatError
-  Crc,              ///< CrcError
-};
-
-/// The Python name of the exception type: "ValueError", "IoError",
-/// "WriteConflictError", "PasswordError", "FormatError" or "CrcError".
-const char* refusal_kind_name(RefusalKind kind) noexcept;
-
-/// One reason a session cannot be anonymized as asked.
-struct AnonymizeRefusal {
-  std::string code;     ///< stable, e.g. "dst-exists" (docs/anonymization.md)
-  std::string message;  ///< plain words
-  RefusalKind kind = RefusalKind::InvalidArgument;
-  std::string channel;  ///< the channel concerned, or ""
-  std::string field;    ///< the option or field concerned (e.g. "pseudonym"), or ""
-  /// For a refusal taken from inspect_session's warnings: that warning's code.
-  std::string inspect_code;
-};
-
-/// Mixed into every exception anonymize_session throws for a refusal, next to
-/// its usual type: `catch (const AnonymizeError& e)` reads the code, and
-/// `catch (const IoError&)` still works as before.
-class AnonymizeError {
- public:
-  explicit AnonymizeError(AnonymizeRefusal r) : refusal_(std::move(r)) {}
-  virtual ~AnonymizeError() = default;
-  const AnonymizeRefusal& refusal() const noexcept { return refusal_; }
-  const std::string& code() const noexcept { return refusal_.code; }
-
- private:
-  AnonymizeRefusal refusal_;
-};
+/// The names anonymize used before the copy types were shared (#73).
+using AnonymizeRefusal = CopyRefusal;
+using AnonymizeError = CopyError;
 
 /// Result of check_anonymize().
-struct AnonymizeCheck {
-  bool ok = false;  ///< no refusal
-  /// Every refusal found, in the order anonymize_session meets them (it
-  /// throws the first). Checks that depend on an earlier one that failed
-  /// (e.g. everything about the source when it cannot be opened) are skipped.
-  std::vector<AnonymizeRefusal> refusals;
-  std::vector<std::string> notes;  ///< what anonymize_session would note up front
-  std::string session_name;        ///< the copy's (empty when dst is unusable)
+struct AnonymizeCheck : CopyCheck {
   std::string pseudonym;
-  std::vector<std::string> channels_kept, channels_excluded;
 };
 
 /// When one channel's recording began and ended in the SOURCE.
@@ -192,9 +108,7 @@ struct SourceChannelTimes {
   std::optional<si8> start_us, end_us;  ///< uUTC; empty for a record-only channel
 };
 
-struct AnonymizeReport {
-  std::string destination;
-  std::string session_name;        ///< the copy's
+struct AnonymizeReport : CopyReport {
   std::string pseudonym;
   si8 shift_us = 0;
   si8 source_recording_time_offset = 0;  ///< read from the source; the copy has 0
@@ -205,23 +119,8 @@ struct AnonymizeReport {
   std::optional<si8> source_start_us, source_end_us;
   /// The same per kept channel (same caution).
   std::vector<SourceChannelTimes> source_channel_times;
-  std::vector<std::string> channels_kept;
-  std::vector<std::string> channels_excluded;
-  si8 segments = 0;
-  si8 blocks = 0;
-  si8 blocks_reencrypted = 0;   ///< source-encrypted blocks written encrypted
-  si8 blocks_decrypted = 0;     ///< source-encrypted blocks written plain
-  si8 records = 0;
   si8 record_text_fields_changed = 0;
-  si8 record_bodies_cleared = 0;   ///< bodies of a type/version with no known layout
-  si8 seizure_channel_entries_dropped = 0;
-  std::uint64_t bytes_written = 0;
-  bool output_encrypted = false;
-  /// Files in the source that are not part of the MEF layout and were not
-  /// copied (source-relative paths).
-  std::vector<std::string> not_copied;
-  std::vector<std::string> notes;
-  VerifyReport verification;
+  si8 record_bodies_cleared = 0;  ///< bodies of a type/version with no known layout
 };
 
 /// Write a de-identified copy of `src` (a `.mefd` directory or `.mefd.tar`)

@@ -1,4 +1,11 @@
-// mef3io — anonymize_session and verify_anonymized (#70). See anonymize.hpp.
+// mef3io — the streaming session copy, with two sets of rules:
+// anonymize_session / verify_anonymized (#70, anonymize.hpp) and
+// transform_session / verify_transform (#73, transform.hpp). ONE engine: the
+// pre-flight, the copy pass, the verification and the publish are shared; the
+// rules decide what changes. `Rules::anonymize()` = shift every time, remove
+// identity, clear the regions other writers fill, unlink the copy; otherwise
+// (a transform) every time, region and record body is copied verbatim and
+// only the channels, passwords, name and edited metadata differ.
 //
 // Format facts this file relies on (settled against meflib and mef3io):
 //   * every time is stored meflib-style: negative = offset applied,
@@ -18,6 +25,7 @@
 //   * session-level records are `<session>.mefd/<session>.rdat`
 //     (meflib.c:6335), so a renamed copy renames them too.
 #include "mef3io/anonymize.hpp"
+#include "mef3io/transform.hpp"
 
 #include <algorithm>
 #include <array>
@@ -216,6 +224,15 @@ struct Shifter {
     const si8 n = a + shift;
     return s < 0 ? -n : n;
   }
+};
+
+/// Which copy this is. `anon` set: anonymize_session's rules. Unset: a
+/// transform (times, regions and record bodies verbatim; `edits` applied).
+struct Rules {
+  const CopyOptions* copy = nullptr;
+  const AnonymizeOptions* anon = nullptr;
+  const MetadataEdits* edits = nullptr;  ///< transform only (may be empty)
+  bool anonymize() const { return anon != nullptr; }
 };
 
 // ---------------------------------------------------------------------------
@@ -821,6 +838,56 @@ const BodyLayout* layout_of(const RawRecord& r) {
   return &it->second;
 }
 
+/// How many channel entries a Seiz body holds: its declared count, bounded
+/// by what the body has room for (mefrec.h:110-131). The one place every
+/// reader of Seiz entries (copy, pre-flight, verification) takes it from.
+std::size_t seiz_entry_count(const std::vector<ui1>& b) {
+  const si4 declared = read<si4>(b, SEIZ_NCH);
+  const std::size_t room = (b.size() - SEIZ_FIXED) / SEIZ_CHANNEL;
+  return std::min(room, static_cast<std::size_t>(std::max<si4>(declared, 0)));
+}
+
+std::string seiz_entry_name(const std::vector<ui1>& b, std::size_t c) {
+  return read_string(b, SEIZ_FIXED + c * SEIZ_CHANNEL, SEIZ_CHANNEL_NAME);
+}
+
+/// One metadata text field a transform sets in a segment's sections.
+struct EditedField {
+  std::size_t section;  // S2 or S3 (offset of the section in the .tmet)
+  std::size_t offset, bytes;
+  std::string value;
+};
+
+/// The MetadataEdits that apply to `channel`'s segments. The copy writes
+/// them and the verification expects them from this one table.
+std::vector<EditedField> edited_fields(const MetadataEdits& m, const std::string& channel) {
+  std::vector<EditedField> v;
+  auto add = [&](std::size_t sec, std::size_t off, std::size_t n,
+                 const std::optional<std::string>& x) {
+    if (x) v.push_back({sec, off, n, *x});
+  };
+  add(S3, S3_NAME1, S3_SUBJECT_BYTES, m.subject_name_1);
+  add(S3, S3_NAME2, S3_SUBJECT_BYTES, m.subject_name_2);
+  add(S3, S3_ID, S3_SUBJECT_BYTES, m.subject_id);
+  add(S3, S3_LOCATION, S3_LOCATION_BYTES, m.recording_location);
+  add(S2, S2_SESSION_DESC, S2_DESC_BYTES, m.session_description);
+  if (const auto it = m.channel_descriptions.find(channel); it != m.channel_descriptions.end())
+    v.push_back({S2, S2_CHANNEL_DESC, S2_DESC_BYTES, it->second});
+  if (const auto it = m.reference_descriptions.find(channel);
+      it != m.reference_descriptions.end())
+    v.push_back({S2, S2_REFERENCE_DESC, S2_DESC_BYTES, it->second});
+  return v;
+}
+
+/// A record's encryption byte in the copy: level 2 with output passwords
+/// (records may hold identifying text); otherwise 0, except that a transform
+/// keeps a source's own "not encrypted" value (it changes no byte it has no
+/// reason to).
+si1 record_encryption(si1 source, bool encrypt, bool anonymize) {
+  if (encrypt) return fmt::LEVEL_2_ENCRYPTION;
+  return (!anonymize && source <= 0) ? source : si1{0};
+}
+
 // ---------------------------------------------------------------------------
 // Metadata images.
 // ---------------------------------------------------------------------------
@@ -874,32 +941,48 @@ struct OutputKeys {
   crypto::AccessKeys keys;
 };
 
-class Anonymizer {
+/// What one copy writes, under its Rules. Every file of the copy is written
+/// by one of copy_tmet / copy_segment_data / copy_records.
+class Copier {
  public:
-  Anonymizer(const SessionSource& src, const AnonymizeOptions& o, const Shifter& sh,
-             const Redactor& red, std::string new_name, std::string pseudonym,
-             std::set<std::string> excluded, std::set<std::string> kept, OutputKeys out,
-             const Control& ctl,
-             std::function<void(std::uint64_t)> progress, AnonymizeReport& report)
-      : src_(src), o_(o), sh_(sh), red_(red), name_(std::move(new_name)),
+  Copier(const SessionSource& src, Rules rules, const Shifter& sh, const Redactor* red,
+         std::string new_name, std::string pseudonym, std::set<std::string> excluded,
+         std::set<std::string> kept, OutputKeys out, const Control& ctl,
+         std::function<void(std::uint64_t)> progress, CopyReport& report,
+         AnonymizeReport* anon_report, TransformReport* transform_report)
+      : src_(src), rules_(rules), sh_(sh), red_(red), name_(std::move(new_name)),
         pseudonym_(std::move(pseudonym)), kept_(std::move(kept)), out_(std::move(out)),
-        ctl_(ctl), progress_(std::move(progress)), rep_(report) {
+        ctl_(ctl), progress_(std::move(progress)), rep_(report), arep_(anon_report),
+        trep_(transform_report) {
     for (const auto& c : excluded) excluded_.insert(channel_key(c));
   }
 
   std::vector<std::string> written;  // every output file, for the flush
 
+  /// A stored time as the copy writes it: shifted (anonymize) or verbatim.
+  si8 time(si8 s, const std::string& what, bool body = false) const {
+    return rules_.anonymize() ? sh_(s, what, body) : s;
+  }
+
   /// Patch a universal header in place (any file type). Counts, maximum
   /// sizes and the CRCs are the caller's.
   void patch_uh(std::span<ui1> uh, const std::string& what, const std::string& channel) {
-    write<si8>(uh, UH_START, sh_(read<si8>(uh, UH_START), what + " start time"));
-    write<si8>(uh, UH_END, sh_(read<si8>(uh, UH_END), what + " end time"));
-    // Every text field is rewritten whole: write_string zero-fills the field,
-    // so nothing hidden after a terminator survives.
-    write_string(uh, UH_CHANNEL_NAME, UH_NAME_BYTES, channel);
-    write_string(uh, UH_SESSION_NAME, UH_NAME_BYTES, name_);
-    write_string(uh, UH_ANON_NAME, UH_NAME_BYTES, pseudonym_);
+    const bool anon = rules_.anonymize();
+    write<si8>(uh, UH_START, time(read<si8>(uh, UH_START), what + " start time"));
+    write<si8>(uh, UH_END, time(read<si8>(uh, UH_END), what + " end time"));
+    if (anon) {
+      // Every text field is rewritten whole: write_string zero-fills the
+      // field, so nothing hidden after a terminator survives.
+      write_string(uh, UH_CHANNEL_NAME, UH_NAME_BYTES, channel);
+      write_string(uh, UH_SESSION_NAME, UH_NAME_BYTES, name_);
+      write_string(uh, UH_ANON_NAME, UH_NAME_BYTES, pseudonym_);
+    } else if (read_string(uh, UH_SESSION_NAME, UH_NAME_BYTES) != name_) {
+      // A transform keeps every byte it has no reason to change: the name is
+      // written only when the copy is renamed.
+      write_string(uh, UH_SESSION_NAME, UH_NAME_BYTES, name_);
+    }
     const Uuid old_level = uuid_at(uh, UH_LEVEL_UUID);
+    const Uuid old_file = uuid_at(uh, UH_FILE_UUID);
     Uuid level{};
     if (!all_zero(old_level)) {
       auto it = level_map_.find(old_level);
@@ -909,17 +992,25 @@ class Anonymizer {
     const Uuid file = random_uuid();
     std::copy(level.begin(), level.end(), uh.begin() + UH_LEVEL_UUID);
     std::copy(file.begin(), file.end(), uh.begin() + UH_FILE_UUID);
-    std::copy(file.begin(), file.end(), uh.begin() + UH_PROV_UUID);  // the copy is its own origin
+    if (anon) {
+      std::copy(file.begin(), file.end(), uh.begin() + UH_PROV_UUID);  // its own origin
+    } else if (all_zero(uuid_at(uh, UH_PROV_UUID))) {
+      // The copy's origin is the source file (meflib: provenance_UUID names
+      // the file a file was derived from); a set one is kept.
+      std::copy(old_file.begin(), old_file.end(), uh.begin() + UH_PROV_UUID);
+    }
     std::copy(out_.vf.level1.begin(), out_.vf.level1.end(), uh.begin() + UH_L1_FIELD);
     std::copy(out_.vf.level2.begin(), out_.vf.level2.end(), uh.begin() + UH_L2_FIELD);
-    std::fill_n(uh.begin() + UH_PROTECTED, UH_PROTECTED_BYTES, ui1{0});
-    // Provenance: keep a mef3io region's history, clear anyone else's, and
-    // record the anonymization (operation 6).
+    if (anon) std::fill_n(uh.begin() + UH_PROTECTED, UH_PROTECTED_BYTES, ui1{0});
+    // Provenance: anonymize keeps a mef3io region's history and clears anyone
+    // else's; a transform stamps a mef3io (or empty) region and never writes
+    // another program's (stamp_modified declines it).
     fmt::UniversalHeader h;
     std::copy_n(uh.begin() + fmt::provenance::REGION_OFFSET, fmt::provenance::REGION_BYTES,
                 h.discretionary_region.begin());
-    if (!fmt::provenance::read(h).present) h.discretionary_region.fill(0);
-    fmt::provenance::stamp_modified(h, fmt::provenance::Operation::Anonymize);
+    if (anon && !fmt::provenance::read(h).present) h.discretionary_region.fill(0);
+    fmt::provenance::stamp_modified(
+        h, anon ? fmt::provenance::Operation::Anonymize : fmt::provenance::Operation::Transform);
     std::copy(h.discretionary_region.begin(), h.discretionary_region.end(),
               uh.begin() + fmt::provenance::REGION_OFFSET);
   }
@@ -927,12 +1018,12 @@ class Anonymizer {
   std::string text_field(const std::string& value, const RecordTextField& where) {
     if (value.empty()) return value;
     std::string out;
-    switch (o_.text) {
+    switch (rules_.anon->text) {
       case RecordTextPolicy::Drop: out = ""; break;
-      case RecordTextPolicy::Keep: out = red_.apply(value); break;
-      case RecordTextPolicy::Callback: out = red_.apply(o_.text_fn(value, where)); break;
+      case RecordTextPolicy::Keep: out = red_->apply(value); break;
+      case RecordTextPolicy::Callback: out = red_->apply(rules_.anon->text_fn(value, where)); break;
     }
-    if (out != value) ++rep_.record_text_fields_changed;
+    if (out != value) ++arep_->record_text_fields_changed;
     return out;
   }
 
@@ -952,41 +1043,53 @@ class Anonymizer {
   void copy_tmet(const std::string& rel, const fs::path& out, const std::string& channel) {
     // (out is named canonically by the caller)
     ctl_.check();
-    TmetImage t = open_tmet(src_, rel, o_.password);
-    if (t.rto != sh_.rto)
-      refuse(RefusalKind::WriteConflict, "rto-disputed",
-             "segments disagree on the recording-time offset (" + src_.describe(rel) +
-                 " differs from the rest of the session), so there is no single right way to read their times",
-             channel);
+    TmetImage t = open_tmet(src_, rel, rules_.copy->password);
     std::span<ui1> b(t.bytes);
     auto s2 = b.subspan(S2, S2_BYTES);
     auto s3 = b.subspan(S3, S3_BYTES);
-    // Section 2: descriptions, and the regions meflib leaves to writers.
-    // Every text field is REWRITTEN, never left as is: write_string
-    // zero-fills the whole field, so bytes hidden after a terminator go.
-    for (std::size_t off : {S2_CHANNEL_DESC, S2_SESSION_DESC, S2_REFERENCE_DESC}) {
-      const std::string old = read_string(s2, off, S2_DESC_BYTES);
-      write_string(s2, off, S2_DESC_BYTES,
-                   o_.clear_descriptions ? std::string() : red_.apply(old));
-    }
-    write_string(s2, S2_UNITS, S2_UNITS_BYTES,
-                 red_.apply(read_string(s2, S2_UNITS, S2_UNITS_BYTES)));
-    std::fill(s2.begin() + S2_REGIONS, s2.end(), ui1{0});
-    // Section 3: time-zone fields SET, identity cleared.
-    write<si8>(s3, S3_RTO, 0);
-    write<si8>(s3, S3_DST_START, fmt::UUTC_NO_ENTRY);
-    write<si8>(s3, S3_DST_END, fmt::UUTC_NO_ENTRY);
-    write<si4>(s3, S3_GMT, 0);
-    for (std::size_t off : {S3_NAME1, S3_NAME2, S3_ID})
-      write_string(s3, off, S3_SUBJECT_BYTES,
-                   o_.clear_subject ? std::string() : read_string(s3, off, S3_SUBJECT_BYTES));
-    write_string(s3, S3_LOCATION, S3_LOCATION_BYTES,
-                 o_.clear_location ? std::string()
-                                   : read_string(s3, S3_LOCATION, S3_LOCATION_BYTES));
-    std::fill(s3.begin() + S3_REGIONS, s3.end(), ui1{0});
-    // Section 1: encryption levels of the COPY; regions cleared.
     auto s1 = b.subspan(S1, S1_BYTES);
-    std::fill(s1.begin(), s1.end(), ui1{0});
+    if (rules_.anonymize()) {
+      if (t.rto != sh_.rto)
+        refuse(RefusalKind::WriteConflict, "rto-disputed",
+               "segments disagree on the recording-time offset (" + src_.describe(rel) +
+                   " differs from the rest of the session), so there is no single right way to read their times",
+               channel);
+      const AnonymizeOptions& o = *rules_.anon;
+      // Section 2: descriptions, and the regions meflib leaves to writers.
+      // Every text field is REWRITTEN, never left as is: write_string
+      // zero-fills the whole field, so bytes hidden after a terminator go.
+      for (std::size_t off : {S2_CHANNEL_DESC, S2_SESSION_DESC, S2_REFERENCE_DESC}) {
+        const std::string old = read_string(s2, off, S2_DESC_BYTES);
+        write_string(s2, off, S2_DESC_BYTES,
+                     o.clear_descriptions ? std::string() : red_->apply(old));
+      }
+      write_string(s2, S2_UNITS, S2_UNITS_BYTES,
+                   red_->apply(read_string(s2, S2_UNITS, S2_UNITS_BYTES)));
+      std::fill(s2.begin() + S2_REGIONS, s2.end(), ui1{0});
+      // Section 3: time-zone fields SET, identity cleared.
+      write<si8>(s3, S3_RTO, 0);
+      write<si8>(s3, S3_DST_START, fmt::UUTC_NO_ENTRY);
+      write<si8>(s3, S3_DST_END, fmt::UUTC_NO_ENTRY);
+      write<si4>(s3, S3_GMT, 0);
+      for (std::size_t off : {S3_NAME1, S3_NAME2, S3_ID})
+        write_string(s3, off, S3_SUBJECT_BYTES,
+                     o.clear_subject ? std::string() : read_string(s3, off, S3_SUBJECT_BYTES));
+      write_string(s3, S3_LOCATION, S3_LOCATION_BYTES,
+                   o.clear_location ? std::string()
+                                    : read_string(s3, S3_LOCATION, S3_LOCATION_BYTES));
+      std::fill(s3.begin() + S3_REGIONS, s3.end(), ui1{0});
+      // Section 1: the copy's encryption levels; regions cleared.
+      std::fill(s1.begin(), s1.end(), ui1{0});
+    } else {
+      // A transform: the sections as stored, except the edited fields.
+      for (const auto& f : edited_fields(*rules_.edits, channel)) {
+        auto sec = f.section == S2 ? s2 : s3;
+        if (read_string(sec, f.offset, f.bytes) != f.value || !terminated_clean(sec, f)) {
+          write_string(sec, f.offset, f.bytes, f.value);
+          ++trep_->metadata_fields_changed;
+        }
+      }
+    }
     write<si1>(s1, 0, out_.encrypt ? fmt::LEVEL_1_ENCRYPTION : -fmt::LEVEL_1_ENCRYPTION);
     write<si1>(s1, 1, out_.encrypt ? fmt::LEVEL_2_ENCRYPTION : -fmt::LEVEL_2_ENCRYPTION);
     if (out_.encrypt) {
@@ -1017,15 +1120,17 @@ class Anonymizer {
     const std::string where = src_.describe(seg.tdat);
     spec.on_block = [&](detail::CopyBlock& cb) {
       const std::string what = "block " + std::to_string(cb.index) + " of " + where;
-      write<si8>(cb.block, 40, sh_(read<si8>(cb.block, 40), what + " start time"));
-      write<si8>(cb.entry, 8, sh_(read<si8>(cb.entry, 8), "index entry " + what));
-      // Regions meflib leaves to writers, zero in everything it writes:
-      // index entry protected (40, 4 B), RED-protected (45, 3 B) and
-      // discretionary (48, 8 B); block header protected (5, 3 B) and
-      // discretionary (8, 8 B). Inside the block CRC, which is re-sealed.
-      std::fill_n(cb.entry.begin() + 40, 4, ui1{0});
-      std::fill_n(cb.entry.begin() + 45, 11, ui1{0});
-      std::fill_n(cb.block.begin() + 5, 11, ui1{0});
+      if (rules_.anonymize()) {
+        write<si8>(cb.block, 40, sh_(read<si8>(cb.block, 40), what + " start time"));
+        write<si8>(cb.entry, 8, sh_(read<si8>(cb.entry, 8), "index entry " + what));
+        // Regions meflib leaves to writers, zero in everything it writes:
+        // index entry protected (40, 4 B), RED-protected (45, 3 B) and
+        // discretionary (48, 8 B); block header protected (5, 3 B) and
+        // discretionary (8, 8 B). Inside the block CRC, which is re-sealed.
+        std::fill_n(cb.entry.begin() + 40, 4, ui1{0});
+        std::fill_n(cb.entry.begin() + 45, 11, ui1{0});
+        std::fill_n(cb.block.begin() + 5, 11, ui1{0});
+      }
       const ui1 flags = read<ui1>(cb.block, 4);
       const ui1 level_mask = flags & ENC_MASK;
       if (level_mask) {
@@ -1062,7 +1167,7 @@ class Anonymizer {
     detail::CopyStats st;
     try {
       st = detail::copy_segment(spec);
-    } catch (const AnonymizeError&) {
+    } catch (const CopyError&) {
       throw;
     } catch (const CrcError& e) {  // a block's CRC: never re-sealed
       refuse(RefusalKind::Crc, "block-crc", e.what(), channel);
@@ -1081,7 +1186,7 @@ class Anonymizer {
   void copy_records(const std::string& rdat_rel, const fs::path& out_rdat, RecordLevel level,
                     const std::string& channel, int segment) {
     ctl_.check();
-    RawRecordFile f = read_record_file(src_, rdat_rel, o_.password);
+    RawRecordFile f = read_record_file(src_, rdat_rel, rules_.copy->password);
     const std::string where = src_.describe(rdat_rel);
     std::vector<ui1> rdat(f.uh);
     std::vector<ui1> ridx(f.has_ridx ? f.ridx_uh : f.uh);
@@ -1090,13 +1195,17 @@ class Anonymizer {
     for (std::size_t i = 0; i < f.records.size(); ++i) {
       RawRecord& r = f.records[i];
       const std::string what = "record " + std::to_string(i) + " (" + r.type + ") of " + where;
-      const si8 time = sh_(r.time, what + " time");
-      RecordTextField tf{r.type, "", level, channel, segment, to_user_time(time, 0)};
-      std::vector<ui1> body = rewrite_body(r, tf, what);
+      const si8 t = time(r.time, what + " time");
+      std::vector<ui1> body;
+      if (rules_.anonymize()) {
+        RecordTextField tf{r.type, "", level, channel, segment, to_user_time(t, 0)};
+        body = rewrite_body(r, tf, what);
+      } else {
+        body = kept_body(r);
+      }
       if (body.size() % 16) body.resize((body.size() + 15) & ~std::size_t{15}, PAD_BYTE);
-      si1 enc = 0;
+      const si1 enc = record_encryption(r.enc, out_.encrypt, rules_.anonymize());
       if (out_.encrypt) {
-        enc = fmt::LEVEL_2_ENCRYPTION;  // records may hold identifying text
         auto e = crypto::aes128_ecb_encrypt(body, *out_.keys.level2_key);
         std::copy(e.begin(), e.end(), body.begin());
       }
@@ -1106,7 +1215,7 @@ class Anonymizer {
       write<ui1>(rec, 10, r.vmin);
       write<si1>(rec, 11, enc);
       write<ui4>(rec, 12, static_cast<ui4>(body.size()));
-      write<si8>(rec, 16, time);
+      write<si8>(rec, 16, t);
       rec.insert(rec.end(), body.begin(), body.end());
       write<ui4>(rec, 0, crc::calculate(std::span<const ui1>(rec).subspan(4)));
       const si8 offset = static_cast<si8>(rdat.size());
@@ -1133,7 +1242,7 @@ class Anonymizer {
                  channel);
         idx_time = read<si8>(*it, 16);
       }
-      write<si8>(e, 16, sh_(idx_time, "record index entry " + std::to_string(i) + " of " + where));
+      write<si8>(e, 16, time(idx_time, "record index entry " + std::to_string(i) + " of " + where));
       ridx.insert(ridx.end(), e.begin(), e.end());
       ++rep_.records;
     }
@@ -1154,13 +1263,41 @@ class Anonymizer {
   }
 
  private:
+  /// The field holds nothing after its terminator (an edit to the same value
+  /// leaves such a field alone; anything hidden there is rewritten away).
+  static bool terminated_clean(std::span<const ui1> sec, const EditedField& f) {
+    const std::size_t n = read_string(sec, f.offset, f.bytes).size();
+    return all_zero(sec.subspan(f.offset + n, f.bytes - n));
+  }
+
+  /// A transform keeps a record body as stored, except the Seiz entries of
+  /// left-out channels.
+  std::vector<ui1> kept_body(const RawRecord& r) {
+    if (r.type != "Seiz" || excluded_.empty() || !layout_of(r)) return r.body;
+    const std::size_t n = seiz_entry_count(r.body);
+    std::vector<ui1> out(r.body.begin(), r.body.begin() + SEIZ_FIXED);
+    si4 kept = 0;
+    for (std::size_t c = 0; c < n; ++c) {
+      const auto first = r.body.begin() + static_cast<std::ptrdiff_t>(SEIZ_FIXED + c * SEIZ_CHANNEL);
+      if (excluded_.count(channel_key(seiz_entry_name(r.body, c)))) {
+        ++rep_.seizure_channel_entries_dropped;
+        continue;
+      }
+      out.insert(out.end(), first, first + SEIZ_CHANNEL);
+      ++kept;
+    }
+    if (kept == static_cast<si4>(n)) return r.body;  // nothing left out: as stored
+    write<si4>(out, SEIZ_NCH, kept);
+    return out;
+  }
+
   std::vector<ui1> rewrite_body(const RawRecord& r, RecordTextField tf, const std::string& what) {
     const BodyLayout* lay = layout_of(r);
     if (!lay) {
       // No known layout (UnRc, an unknown type or version, a body shorter
       // than its type): it may hold text or dates nothing here can find, so
       // it is not carried over. The record itself (type, time) is kept.
-      if (!r.body.empty()) ++rep_.record_bodies_cleared;
+      if (!r.body.empty()) ++arep_->record_bodies_cleared;
       return {};
     }
     if (lay->keep_whole) {  // LNTP: the template, re-padded (nothing after it is data)
@@ -1190,9 +1327,7 @@ class Anonymizer {
       return b;
     }
     // Seiz channel entries: excluded channels leave, the rest are shifted.
-    const si4 declared = read<si4>(b, SEIZ_NCH);
-    const std::size_t room = (b.size() - SEIZ_FIXED) / SEIZ_CHANNEL;
-    const std::size_t n = std::min(room, static_cast<std::size_t>(std::max<si4>(declared, 0)));
+    const std::size_t n = seiz_entry_count(b);
     std::vector<ui1> out(b.begin(), b.begin() + SEIZ_FIXED);
     si4 kept = 0;
     for (std::size_t c = 0; c < n; ++c) {
@@ -1207,8 +1342,8 @@ class Anonymizer {
       // text="drop" it is cleared, otherwise redacted. Rewritten whole.
       std::string now = name;
       if (!kept_.count(name))
-        now = o_.text == RecordTextPolicy::Drop ? std::string() : red_.apply(name);
-      if (now != name) ++rep_.record_text_fields_changed;
+        now = rules_.anon->text == RecordTextPolicy::Drop ? std::string() : red_->apply(name);
+      if (now != name) ++arep_->record_text_fields_changed;
       write_string(e, 0, SEIZ_CHANNEL_NAME, now);
       for (std::size_t off : {SEIZ_CH_ONSET, SEIZ_CH_OFFSET})
         write<si8>(e, off, sh_(read<si8>(e, off), what + " channel " + std::to_string(c) + " time",
@@ -1221,16 +1356,18 @@ class Anonymizer {
   }
 
   const SessionSource& src_;
-  const AnonymizeOptions& o_;
+  Rules rules_;
   const Shifter& sh_;
-  const Redactor& red_;
+  const Redactor* red_;  // anonymize only
   std::string name_, pseudonym_;
   std::set<std::string> excluded_;  // channel_key()s
   std::set<std::string> kept_;
   OutputKeys out_;
   const Control& ctl_;
   std::function<void(std::uint64_t)> progress_;
-  AnonymizeReport& rep_;
+  CopyReport& rep_;
+  AnonymizeReport* arep_;    // anonymize only
+  TransformReport* trep_;    // transform only
   std::map<Uuid, Uuid> level_map_;
   crypto::AccessKeys seg_keys_;
 };
@@ -1432,11 +1569,13 @@ Scanner build_scanner(const SourcePlan& p, const std::string& new_name, bool cle
 
 class Verifier {
  public:
+  /// `edits` set = a transform's verification (times, regions and bodies
+  /// must equal the source's; only the edits may differ); unset = anonymize.
   Verifier(const SessionSource& src, const SessionSource& dst, const SourcePlan& plan, si8 shift,
-           const VerifyOptions& o, const Control& ctl, std::function<void(std::uint64_t)> progress,
-           VerifyReport& rep)
-      : src_(src), dst_(dst), plan_(plan), o_(o), ctl_(ctl), progress_(std::move(progress)),
-        rep_(rep) {
+           const VerifyOptions& o, const MetadataEdits* edits, const Control& ctl,
+           std::function<void(std::uint64_t)> progress, VerifyReport& rep)
+      : src_(src), dst_(dst), plan_(plan), o_(o), edits_(edits), ctl_(ctl),
+        progress_(std::move(progress)), rep_(rep) {
     sh_.rto = plan.rto;
     sh_.shift = shift;
     // The leak window: the original range, widened by just under a day on
@@ -1476,6 +1615,10 @@ class Verifier {
   void time_field(si8 src_v, si8 dst_v, const std::string& loc, const std::string& field,
                   bool body = false) {
     ++rep_.times_checked;
+    if (transform()) {  // copied verbatim
+      if (dst_v != src_v) problem(loc, field, "differs from the source's (a transform copies every time as stored)");
+      return;
+    }
     if (!(body && is_sentinel(dst_v, true)) && in_window(dst_v))
       leak(loc, field, "holds a time inside the source's recording range (plain or negated)");
     si8 expected;
@@ -1551,9 +1694,21 @@ class Verifier {
 
   void set_kept(std::set<std::string> k) { kept_ = std::move(k); }
 
+  bool transform() const { return edits_ != nullptr; }
+
   void set_scanner(Scanner s) { scan_ = std::move(s); }
 
-  void check_uh(std::span<const ui1> s, std::span<const ui1> d, const std::string& loc) {
+  /// `counts_from_source`: the entry count and maximum entry size (32..48)
+  /// are the source's (a .tmet, which the copy does not resize); otherwise
+  /// they are checked against what the copy holds (check_counts).
+  /// `rebuilt_index`: a record index the copy built because the source had
+  /// none, from the record file's header (file type "ridx").
+  void check_uh(std::span<const ui1> s, std::span<const ui1> d, const std::string& loc,
+                bool counts_from_source = false, bool rebuilt_index = false) {
+    if (transform()) {
+      check_uh_transform(s, d, loc, counts_from_source, rebuilt_index);
+      return;
+    }
     time_field(read<si8>(s, UH_START), read<si8>(d, UH_START), loc, "universal header start_time");
     time_field(read<si8>(s, UH_END), read<si8>(d, UH_END), loc, "universal header end_time");
     const std::string sn = text(d, UH_SESSION_NAME, UH_NAME_BYTES, loc, "universal header session_name");
@@ -1584,6 +1739,70 @@ class Verifier {
       problem(loc, "universal header CRC", "does not verify");
   }
 
+  /// A transform's universal header: the source's, byte for byte, except
+  /// the CRCs, the session name (when renamed), the UUIDs (new file UUID,
+  /// level UUIDs remapped one to one, provenance_UUID naming the source), the
+  /// password fields, the provenance region (exactly the source's stamped as
+  /// a transform, or untouched when another program owns it) and, unless
+  /// `counts_from_source`, the entry count and maximum entry size, which the
+  /// copy derives from what it wrote and check_counts verifies against it.
+  void check_uh_transform(std::span<const ui1> s, std::span<const ui1> d, const std::string& loc,
+                          bool counts_from_source, bool rebuilt_index) {
+    if (crc::calculate(d.subspan(4, UH - 4)) != read<ui4>(d, 0))
+      problem(loc, "universal header CRC", "does not verify");
+    if (read_string(d, UH_SESSION_NAME, UH_NAME_BYTES) != dst_.session_name())
+      problem(loc, "universal header session_name", "does not match the copy's folder name");
+    time_field(read<si8>(s, UH_START), read<si8>(d, UH_START), loc, "universal header start_time");
+    time_field(read<si8>(s, UH_END), read<si8>(d, UH_END), loc, "universal header end_time");
+    struct Span { std::size_t from, to; const char* what; };
+    std::vector<Span> same = {
+        {rebuilt_index ? std::size_t{13} : std::size_t{8}, 16, "file type and version"},
+        {48, 52, "segment number"},
+        {UH_CHANNEL_NAME, UH_SESSION_NAME, "channel_name"},
+        {UH_ANON_NAME, UH_LEVEL_UUID, "anonymized_name"},
+        {UH_PROTECTED, fmt::provenance::REGION_OFFSET, "protected region"},
+    };
+    if (counts_from_source) same.push_back({32, 48, "entry count and maximum entry size"});
+    for (const auto& x : same)
+      if (!std::equal(s.begin() + x.from, s.begin() + x.to, d.begin() + x.from))
+        problem(loc, std::string("universal header ") + x.what, "differs from the source's");
+    if (rebuilt_index && read_string(d, 8, 5) != fmt::FILE_TYPE_RECORD_INDICES)
+      problem(loc, "universal header file type", "is not a record index");
+    if (uuid_at(d, UH_FILE_UUID) == uuid_at(s, UH_FILE_UUID))
+      problem(loc, "universal header file_UUID", "is the source's; a copy is a new file");
+    const Uuid sp = uuid_at(s, UH_PROV_UUID);
+    if (uuid_at(d, UH_PROV_UUID) != (all_zero(sp) ? uuid_at(s, UH_FILE_UUID) : sp))
+      problem(loc, "universal header provenance_UUID", "does not name the source file");
+    // Level UUIDs: a new one per source level, the same for every file of it.
+    const Uuid sl = uuid_at(s, UH_LEVEL_UUID), dl = uuid_at(d, UH_LEVEL_UUID);
+    bool level_ok = all_zero(sl) == all_zero(dl);
+    if (!all_zero(sl)) {
+      const auto it = level_map_.emplace(sl, dl).first;  // the first file of that level sets it
+      level_ok = level_ok && sl != dl && it->second == dl;
+    }
+    if (!level_ok) problem(loc, "universal header level_UUID", "is not the source level's new UUID");
+    // Provenance: the source's region as stamp_modified leaves it (which
+    // declines another program's region, so that one must be unchanged).
+    fmt::UniversalHeader want = fmt::UniversalHeader::parse(s);
+    fmt::provenance::stamp_modified(want, fmt::provenance::Operation::Transform);
+    if (!std::equal(want.discretionary_region.begin(), want.discretionary_region.end(),
+                    d.begin() + fmt::provenance::REGION_OFFSET))
+      problem(loc, "provenance region",
+              "is not the source's stamped as a transform (operation 8), or another program's "
+              "region was changed");
+  }
+
+  /// The entry count and maximum entry size of a file the copy wrote, against
+  /// what it holds (any copy: the engine derives them, and the validator
+  /// reports a wrong maximum only as Info and never reads record files).
+  void check_counts(std::span<const ui1> d, si8 entries, si8 max_entry, const std::string& loc) {
+    if (read<si8>(d, 32) != entries)
+      problem(loc, "universal header number_of_entries",
+              "is not the number of entries the file holds");
+    if (read<si8>(d, 40) != max_entry)
+      problem(loc, "universal header maximum_entry_size", "is not the largest entry's size");
+  }
+
   void collect_source_uuids(std::span<const ui1> uh) {
     for (std::size_t off : {UH_LEVEL_UUID, UH_FILE_UUID, UH_PROV_UUID}) {
       const Uuid u = uuid_at(uh, off);
@@ -1603,7 +1822,15 @@ class Verifier {
     }
     collect_source_uuids(std::span<const ui1>(s.bytes).first(UH));
     std::span<const ui1> sb(s.bytes), db(d.bytes);
-    check_uh(sb.first(UH), db.first(UH), drel);
+    check_uh(sb.first(UH), db.first(UH), drel, /*counts_from_source=*/true);
+    if (transform()) {
+      check_sections_transform(sb, db, drel, d);
+      dst_encrypted_ = d.s2_level > 0;
+      src_keys_ = s.keys;
+      dst_keys_ = d.keys;
+      if (progress_) progress_(2 * TMET);
+      return;
+    }
     const auto ds2 = db.subspan(S2, S2_BYTES), ss2 = sb.subspan(S2, S2_BYTES);
     const auto ds3 = db.subspan(S3, S3_BYTES);
     // Time-zone fields: SET values, not shifted.
@@ -1660,6 +1887,30 @@ class Verifier {
     if (progress_) progress_(2 * TMET);
   }
 
+  /// A transform's sections 1-3 (decrypted): the source's, byte for byte,
+  /// except the encryption levels and the edited fields, which must hold
+  /// exactly the edit.
+  void check_sections_transform(std::span<const ui1> sb, std::span<const ui1> db,
+                                const std::string& drel, const TmetImage& d) {
+    if (!std::equal(sb.begin() + S1 + 2, sb.begin() + S1 + S1_BYTES, db.begin() + S1 + 2))
+      problem(drel, "section 1", "differs from the source's beyond the encryption levels");
+    const bool want_enc = !o_.output_password.empty();
+    if ((d.s2_level > 0) != want_enc || (d.s3_level > 0) != want_enc)
+      problem(drel, "section 1 encryption levels", "do not match the output passwords");
+    // The channel this segment belongs to: "<ch>.timd/<ch>-NNNNNN.segd/..".
+    const std::string channel = drel.substr(0, drel.find(".timd/"));
+    std::vector<ui1> expect(sb.begin(), sb.end());
+    std::span<ui1> e(expect);
+    for (const auto& f : edited_fields(*edits_, channel))
+      write_string(e.subspan(f.section), f.offset, f.bytes, f.value);
+    rep_.text_fields_checked += 7;
+    rep_.times_checked += 4;  // rto, DST start/end, GMT: inside section 3
+    if (!std::equal(e.begin() + S2, e.begin() + S2 + S2_BYTES, db.begin() + S2))
+      problem(drel, "section 2", "differs from the source's beyond the requested edits");
+    if (!std::equal(e.begin() + S3, e.begin() + S3 + S3_BYTES, db.begin() + S3))
+      problem(drel, "section 3", "differs from the source's beyond the requested edits");
+  }
+
   void check_segment_data(const detail::LayoutSegment& s, const detail::LayoutSegment& d) {
     const auto stidx = src_.file_size(s.tidx), dtidx = dst_.file_size(d.tidx);
     const auto stdat = src_.file_size(s.tdat), dtdat = dst_.file_size(d.tdat);
@@ -1676,6 +1927,7 @@ class Verifier {
     }
     ui4 dcrc_x = fmt::CRC_START_VALUE, dcrc_d = fmt::CRC_START_VALUE;
     std::uint64_t dexpect = UH;
+    ui4 dmax = 0;  // the largest block the copy holds
     constexpr std::size_t CHUNK = 8192, BATCH = 8u << 20;
     for (std::size_t first = 0; first < n; first += CHUNK) {
       ctl_.check();
@@ -1701,6 +1953,7 @@ class Verifier {
           }
           if (j > i && (so + sn - slo > BATCH || dof + dn - dlo > BATCH || so < shi)) break;
           if (j == i) { slo = so; dlo = dof; }
+          dmax = std::max(dmax, dn);
           shi = std::max(shi, so + sn);
           dhi = dof + dn;
           dexpect = dhi;
@@ -1719,8 +1972,13 @@ class Verifier {
             problem(loc, "index entry", "differs from the source's beyond its time");
           // meflib's per-entry protected (40, 4 B), RED-protected (45, 3 B)
           // and discretionary (48, 8 B) regions: another writer's bytes.
-          if (!all_zero(dent.subspan(40, 4)) || !all_zero(dent.subspan(45, 11)))
+          if (transform()) {
+            if (!std::equal(sent.begin() + 40, sent.begin() + 44, dent.begin() + 40) ||
+                !std::equal(sent.begin() + 45, sent.end(), dent.begin() + 45))
+              problem(loc, "index entry regions", "differ from the source's");
+          } else if (!all_zero(dent.subspan(40, 4)) || !all_zero(dent.subspan(45, 11))) {
             leak(loc, "index entry regions", "are not cleared");
+          }
           const auto nb = read<ui4>(sent, 28);
           std::span<const ui1> sblk(sbuf.data() + (read<si8>(sent, 0) - slo), nb);
           std::span<const ui1> dblk(dbuf.data() + (read<si8>(dent, 0) - dlo), nb);
@@ -1732,6 +1990,8 @@ class Verifier {
       }
     }
     if (dexpect != dtdat) problem(d.tdat, "data file", "holds bytes no index entry describes");
+    check_counts(duh_x, static_cast<si8>(n), static_cast<si8>(ENTRY), d.tidx);
+    check_counts(duh_d, static_cast<si8>(n), static_cast<si8>(dmax), d.tdat);
     if (read<ui4>(duh_x, 4) != dcrc_x) problem(d.tidx, "body CRC", "does not verify");
     if (read<ui4>(duh_d, 4) != dcrc_d) problem(d.tdat, "body CRC", "does not verify");
   }
@@ -1744,7 +2004,12 @@ class Verifier {
         !std::equal(s.begin() + 16, s.begin() + 40, d.begin() + 16))
       problem(loc, "block header", "differs from the source's beyond its time and encryption");
     // Protected (5, 3 B) and discretionary (8, 8 B) regions of the header.
-    if (!all_zero(d.subspan(5, 11))) leak(loc, "block header regions", "are not cleared");
+    if (transform()) {
+      if (!std::equal(s.begin() + 5, s.begin() + 16, d.begin() + 5))
+        problem(loc, "block header regions", "differ from the source's");
+    } else if (!all_zero(d.subspan(5, 11))) {
+      leak(loc, "block header regions", "are not cleared");
+    }
     time_field(read<si8>(s, 40), read<si8>(d, 40), loc, "block header start_time");
     // The statistics table, compared in the clear.
     std::array<ui1, red::STATISTICS_BYTES> ss{}, ds{};
@@ -1792,8 +2057,17 @@ class Verifier {
     collect_source_uuids(s.uh);
     if (s.has_ridx) collect_source_uuids(s.ridx_uh);
     check_uh(s.uh, d.uh, drel);
-    if (d.has_ridx) check_uh(s.has_ridx ? s.ridx_uh : s.uh, d.ridx_uh, ridx_of(drel));
+    if (d.has_ridx)
+      check_uh(s.has_ridx ? s.ridx_uh : s.uh, d.ridx_uh, ridx_of(drel), false, !s.has_ridx);
     else problem(drel, "record index", "is missing");
+    {
+      si8 largest = 0;
+      for (const auto& r : d.records)
+        largest = std::max(largest, static_cast<si8>(RHDR + r.body.size()));
+      const si8 n = static_cast<si8>(d.records.size());
+      check_counts(d.uh, n, largest, drel);
+      if (d.has_ridx) check_counts(d.ridx_uh, n, static_cast<si8>(RIDX), ridx_of(drel));
+    }
     if (s.records.size() != d.records.size()) {
       problem(drel, "records", "the copy holds " + std::to_string(d.records.size()) +
                                    " record(s), the source " + std::to_string(s.records.size()));
@@ -1809,6 +2083,8 @@ class Verifier {
         continue;
       }
       time_field(a.time, b.time, loc, "record header time");
+      if (b.enc != record_encryption(a.enc, !o_.output_password.empty(), !transform()))
+        problem(loc, "record header encryption", "does not match the output passwords");
       if (d.has_ridx) {
         // Index entries are matched to records by file offset, not position.
         const auto* de = index_entry(d, i);
@@ -1818,10 +2094,59 @@ class Verifier {
         } else {
           time_field(se ? read<si8>(*se, 16) : a.time, read<si8>(*de, 16), loc,
                      "record index time");
+          // Type, version and encryption as the record's own header says.
+          if (!std::equal(b.type_bytes.begin(), b.type_bytes.end(), de->begin()) ||
+              (*de)[5] != b.vmaj || (*de)[6] != b.vmin || static_cast<si1>((*de)[7]) != b.enc)
+            problem(loc, "record index entry", "type, version or encryption differs from the record's");
         }
       }
       check_body(a, b, loc, excluded);
     }
+  }
+
+  /// A transform keeps a body as stored (padded to 16 bytes), except the
+  /// Seiz entries of left-out channels. Checked entry by entry rather than by
+  /// rebuilding the body the way the copy does: the fixed part equal but for
+  /// the count, and the copy's entries, in order, exactly the source's
+  /// entries that name a kept channel.
+  void check_body_transform(const RawRecord& a, const RawRecord& b, const std::string& loc,
+                            const std::set<std::string>& excluded) {
+    auto padding_only = [](const std::vector<ui1>& v, std::size_t from) {
+      return v.size() >= from && v.size() - from < 16 &&
+             std::all_of(v.begin() + static_cast<std::ptrdiff_t>(from), v.end(),
+                         [](ui1 c) { return c == PAD_BYTE; });
+    };
+    if (a.type != "Seiz" || !layout_of(a)) {
+      if (!(b.body.size() >= a.body.size() &&
+            std::equal(a.body.begin(), a.body.end(), b.body.begin()) &&
+            padding_only(b.body, a.body.size())))
+        problem(loc, "record body", "differs from the source's");
+      return;
+    }
+    if (b.body.size() < SEIZ_FIXED ||
+        !std::equal(a.body.begin(), a.body.begin() + SEIZ_NCH, b.body.begin()) ||
+        !std::equal(a.body.begin() + SEIZ_NCH + 4, a.body.begin() + SEIZ_FIXED,
+                    b.body.begin() + SEIZ_NCH + 4)) {
+      problem(loc, "record body", "differs from the source's");
+      return;
+    }
+    std::size_t k = 0;  // the copy's next entry
+    const std::size_t have = seiz_entry_count(b.body);
+    for (std::size_t c = 0; c < seiz_entry_count(a.body); ++c) {
+      if (excluded.count(channel_key(seiz_entry_name(a.body, c)))) continue;
+      const auto src = a.body.begin() + static_cast<std::ptrdiff_t>(SEIZ_FIXED + c * SEIZ_CHANNEL);
+      if (k >= have || !std::equal(src, src + SEIZ_CHANNEL,
+                                   b.body.begin() + static_cast<std::ptrdiff_t>(
+                                                        SEIZ_FIXED + k * SEIZ_CHANNEL))) {
+        problem(loc, "Seiz channels", "are not the source's entries for the kept channels");
+        return;
+      }
+      ++k;
+    }
+    const bool whole = k == seiz_entry_count(a.body);  // nothing left out: stored as is
+    if (k != have || read<si4>(b.body, SEIZ_NCH) != static_cast<si4>(k) ||
+        !padding_only(b.body, whole ? a.body.size() : SEIZ_FIXED + k * SEIZ_CHANNEL))
+      problem(loc, "Seiz channels", "the copy lists other entries than the source's kept ones");
   }
 
   static const std::array<ui1, RIDX>* index_entry(const RawRecordFile& f, std::size_t i) {
@@ -1832,6 +2157,10 @@ class Verifier {
 
   void check_body(const RawRecord& a, const RawRecord& b, const std::string& loc,
                   const std::set<std::string>& excluded) {
+    if (transform()) {
+      check_body_transform(a, b, loc, excluded);
+      return;
+    }
     const BodyLayout* la = layout_of(a);
     if (!la) {
       if (!b.body.empty() && !all_zero(b.body) &&
@@ -1877,11 +2206,7 @@ class Verifier {
     if (a.type != "Seiz") return;
     // Channel entries: the source's minus the excluded, in order, shifted.
     std::vector<std::size_t> want;
-    const auto entries = [](const RawRecord& r) {
-      const si4 declared = read<si4>(r.body, SEIZ_NCH);
-      const std::size_t room = (r.body.size() - SEIZ_FIXED) / SEIZ_CHANNEL;
-      return std::min(room, static_cast<std::size_t>(std::max<si4>(declared, 0)));
-    };
+    const auto entries = [](const RawRecord& r) { return seiz_entry_count(r.body); };
     for (std::size_t c = 0; c < entries(a); ++c)
       if (!excluded.count(
               channel_key(read_string(a.body, SEIZ_FIXED + c * SEIZ_CHANNEL, SEIZ_CHANNEL_NAME))))
@@ -1918,6 +2243,8 @@ class Verifier {
   const SessionSource& dst_;
   const SourcePlan& plan_;
   const VerifyOptions& o_;
+  const MetadataEdits* edits_;  // set = a transform
+  std::map<Uuid, Uuid> level_map_;  // transform: source level UUID -> the copy's
   const Control& ctl_;
   std::function<void(std::uint64_t)> progress_;
   VerifyReport& rep_;
@@ -1935,9 +2262,11 @@ std::string finding_key(const Finding& f) {
          " | " + f.field + " | " + f.message;
 }
 
+/// `edits` set = verify a transform (MetadataEdits it was made with); unset =
+/// verify an anonymized copy (shift, VerifyOptions' clear flags).
 VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
                          const SourcePlan& plan, const std::string& dst_path, si8 shift,
-                         const VerifyOptions& o, const Control& ctl,
+                         const VerifyOptions& o, const MetadataEdits* edits, const Control& ctl,
                          std::function<void(std::uint64_t)> progress) {
   VerifyReport rep;
   const auto dsrc = open_session_source(dst_path);
@@ -1957,7 +2286,7 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
   rep.channels.assign(dch.begin(), dch.end());
   rep.excluded_channels.assign(excluded.begin(), excluded.end());
 
-  Verifier v(src, dst, plan, shift, o, ctl, std::move(progress), rep);
+  Verifier v(src, dst, plan, shift, o, edits, ctl, std::move(progress), rep);
   for (const auto& c : dch)
     if (!std::binary_search(plan.all_channels.begin(), plan.all_channels.end(), c))
       v.problem(c, "channel", "is not a channel of the source");
@@ -1990,7 +2319,7 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
 
   // The shift floor, re-checked: below it the leak window cannot tell a
   // leak from a legitimately shifted time.
-  if (plan.has_times) {
+  if (!edits && plan.has_times) {
     const si8 span = saturating_add(plan.last, -plan.first);
     const si8 mag = shift == INT64_MIN ? INT64_MAX : (shift < 0 ? -shift : shift);
     if (mag < saturating_add(span, DAY_US))
@@ -1998,7 +2327,9 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
   }
 
   const std::string dname = dst.session_name();
-  {
+  if (edits) {
+    v.set_kept(dch);
+  } else {
     // The anonymized_name the copy carries is its pseudonym, not a leak.
     std::string pseudonym;
     if (!dlayout.channels.empty() && !dlayout.channels.front().segments.empty()) {
@@ -2009,7 +2340,8 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
                                 pseudonym));
     v.set_kept(dch);
   }
-  // Every name the copy carries outside its files: each path component.
+  // Every name the copy carries outside its files: each path component
+  // (anonymize: none may carry what was removed).
   {
     std::function<void(const std::string&)> walk = [&](const std::string& rel) {
       for (const auto& e : dst.list_dir(rel)) {
@@ -2018,7 +2350,7 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
         if (e.is_dir) walk(p);
       }
     };
-    walk("");
+    if (!edits) walk("");
     for (const auto& dc : dlayout.channels)
       for (const auto& ds : dc.segments)
         if (leaf(ds.dir()) != canonical_segment_stem(dc.name, ds.number) + ".segd")
@@ -2133,7 +2465,7 @@ std::string blocker_code(const std::string& inspect_code) {
 }
 
 struct Preflight {
-  std::vector<AnonymizeRefusal> refusals;
+  std::vector<CopyRefusal> refusals;
   std::vector<std::string> notes;
   fs::path dst, partial;
   std::shared_ptr<const SessionSource> source;
@@ -2144,17 +2476,22 @@ struct Preflight {
   std::string session_records;                 // source-relative, or ""
 };
 
-/// `collect`: false = throw the first refusal (anonymize_session), true =
-/// record every refusal and go on with the checks that do not depend on a
-/// failed one (check_anonymize). Reads metadata only, never a `.tdat`.
-Preflight preflight(const std::string& src_path, const std::string& dst_path,
-                    const AnonymizeOptions& o, const Control& ctl, bool collect,
-                    bool check_shift) {
+/// `collect`: false = throw the first refusal (anonymize_session /
+/// transform_session), true = record every refusal and go on with the checks
+/// that do not depend on a failed one (check_anonymize / check_transform).
+/// Reads metadata only, never a `.tdat`. The anonymization checks (shift,
+/// identity in the new names, the offset convention, times hidden in record
+/// ids) run only under anonymize's rules; a transform copies every time as
+/// stored, so none of them applies to it.
+Preflight preflight(const std::string& src_path, const std::string& dst_path, const Rules& rules,
+                    const Control& ctl, bool collect, bool check_shift) {
+  const CopyOptions& o = *rules.copy;
+  const AnonymizeOptions* an = rules.anon;
   Preflight pf;
   auto add = [&](RefusalKind kind, std::string code, std::string message,
                  std::string channel = {}, std::string field = {}) {
-    AnonymizeRefusal r{std::move(code), std::move(message), kind, std::move(channel),
-                       std::move(field), {}};
+    CopyRefusal r{std::move(code), std::move(message), kind, std::move(channel),
+                  std::move(field), {}};
     if (pf.plan) r.message = scrub_times(*pf.plan, r.message);  // never a source time
     if (!collect) raise(std::move(r));
     pf.refusals.push_back(std::move(r));
@@ -2173,13 +2510,13 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path,
   ctl.check();
 
   // ---- options -----------------------------------------------------------
-  if (check_shift && o.shift_us == 0)
+  if (an && check_shift && an->shift_us == 0)
     add(RefusalKind::InvalidArgument, "shift-zero", "shift_us must not be 0", {}, "shift_us");
   const bool selection_conflict = !o.channels.empty() && !o.exclude_channels.empty();
   if (selection_conflict)
     add(RefusalKind::InvalidArgument, "channel-selection-conflict",
         "pass channels or exclude_channels, not both", {}, "channels");
-  if (o.text == RecordTextPolicy::Callback && !o.text_fn)
+  if (an && an->text == RecordTextPolicy::Callback && !an->text_fn)
     add(RefusalKind::InvalidArgument, "text-callback-missing",
         "the callback text policy needs a text function", {}, "text");
   if (o.output_password_1.empty() != o.output_password_2.empty())
@@ -2253,26 +2590,33 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path,
   if (plan.summary.encryption.access != "full")
     add(RefusalKind::Password,
         plan.summary.encryption.access == "level-1" ? "password-level1-only" : "password-required",
-        "the session is encrypted and the password does not open all of it: metadata section 3 "
-        "holds the recording-time offset and the subject fields, so anonymizing needs the "
-        "level-2 password",
+        std::string("the session is encrypted and the password does not open all of it: metadata "
+                    "section 3 holds the recording-time offset and the subject fields, so ") +
+            (an ? "anonymizing" : "copying") + " needs the level-2 password",
         {}, "password");
   {
-    std::vector<AnonymizeRefusal> blockers;
+    // A transform copies every time as stored, so how the offset convention
+    // reads them does not concern it; everything else (parts it could not
+    // copy whole) does.
+    static const std::set<std::string> time_only = {
+        "time-offset-disputed", "ambiguous-time-convention", "offset-assumed-zero",
+        "times-unresolved"};
+    std::vector<CopyRefusal> blockers;
     for (const auto& w : plan.summary.warnings)
-      if (w.blocks_anonymize)
-        blockers.push_back(AnonymizeRefusal{blocker_code(w.code), scrub_times(plan, w.message),
-                                            RefusalKind::WriteConflict, {}, {}, w.code});
+      if (w.blocks_anonymize && (an || !time_only.count(w.code)))
+        blockers.push_back(CopyRefusal{blocker_code(w.code), scrub_times(plan, w.message),
+                                       RefusalKind::WriteConflict, {}, {}, w.code});
     if (!blockers.empty() && !collect) {
       // One exception for all of them, as every release so far has thrown.
-      AnonymizeRefusal r = blockers.front();
-      r.message = "this session cannot be anonymized safely:";
+      CopyRefusal r = blockers.front();
+      r.message = an ? "this session cannot be anonymized safely:"
+                     : "this session cannot be copied whole:";
       for (const auto& b : blockers) r.message += "\n  - " + b.inspect_code + ": " + b.message;
       raise(std::move(r));
     }
     for (auto& b : blockers) pf.refusals.push_back(std::move(b));
   }
-  if (plan.rto != 0)
+  if (an && plan.rto != 0)
     pf.notes.push_back("the source used meflib's recording-time offset; its times were read as "
                        "true UTC and the copy has recording_time_offset = 0");
 
@@ -2304,12 +2648,45 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path,
           o.channels.empty() ? "exclude_channels" : "channels");
   }
 
+  // ---- metadata edits (a transform) -------------------------------------
+  if (rules.edits && !rules.edits->empty()) {
+    const MetadataEdits& m = *rules.edits;
+    auto fits = [&](const std::string& v, std::size_t field_bytes, const char* name,
+                    const std::string& channel = {}) {
+      if (v.size() > field_bytes - 1)
+        add(RefusalKind::InvalidArgument, "metadata-too-long",
+            std::string(name) + " is " + std::to_string(v.size()) + " bytes; the field holds " +
+                std::to_string(field_bytes - 1),
+            channel, name);
+      else if (v.find('\0') != std::string::npos)
+        add(RefusalKind::InvalidArgument, "metadata-invalid",
+            std::string(name) + " contains a NUL character", channel, name);
+    };
+    if (m.subject_name_1) fits(*m.subject_name_1, S3_SUBJECT_BYTES, "subject_name_1");
+    if (m.subject_name_2) fits(*m.subject_name_2, S3_SUBJECT_BYTES, "subject_name_2");
+    if (m.subject_id) fits(*m.subject_id, S3_SUBJECT_BYTES, "subject_id");
+    if (m.recording_location) fits(*m.recording_location, S3_LOCATION_BYTES, "recording_location");
+    if (m.session_description) fits(*m.session_description, S2_DESC_BYTES, "session_description");
+    for (const auto* per : {&m.channel_descriptions, &m.reference_descriptions}) {
+      const char* name =
+          per == &m.channel_descriptions ? "channel_description" : "reference_description";
+      for (const auto& [ch, v] : *per) {
+        fits(v, S2_DESC_BYTES, name, ch);
+        if (!pf.kept.count(ch))
+          add(RefusalKind::InvalidArgument, "metadata-channel-unknown",
+              std::string(name) + " is given for " + ch + ", which is not a channel of the copy",
+              ch, name);
+      }
+    }
+  }
+
   // ---- the shift ---------------------------------------------------------
   bool first_time_refused = false;
-  if (check_shift && o.shift_us != 0 && plan.has_times) {
+  if (an && check_shift && an->shift_us != 0 && plan.has_times) {
+    const si8 shift_us = an->shift_us;
     const si8 span = saturating_add(plan.last, -plan.first);
     const si8 mag =
-        o.shift_us == INT64_MIN ? INT64_MAX : (o.shift_us < 0 ? -o.shift_us : o.shift_us);
+        shift_us == INT64_MIN ? INT64_MAX : (shift_us < 0 ? -shift_us : shift_us);
     const si8 floor = saturating_add(span, DAY_US);
     if (mag < floor)
       add(RefusalKind::InvalidArgument, "shift-below-floor",
@@ -2317,7 +2694,7 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path,
           "plus one day (" + std::to_string(floor) + " us), so that no shifted time can fall "
           "inside the original range",
           {}, "shift_us");
-    if (o.shift_us < 0 && plan.first + o.shift_us <= 0) {
+    if (shift_us < 0 && plan.first + shift_us <= 0) {
       first_time_refused = true;
       add(RefusalKind::InvalidArgument, "shift-not-positive",
           "the shift moves the session's first time to 0 or below; shifted times must stay "
@@ -2334,7 +2711,7 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path,
           "rename=False keeps the source's session name, so the destination folder must be "
           "named after it",
           {}, "rename");
-    pf.pseudonym = o.pseudonym.empty() ? pf.new_name : o.pseudonym;
+    pf.pseudonym = !an ? std::string() : an->pseudonym.empty() ? pf.new_name : an->pseudonym;
     // The copy's own names are written everywhere, so they must not carry
     // what the copy removes: a value of 3+ characters anywhere in them
     // ("Roe1", "XRoe"), a shorter one as a whole word. Subject and location
@@ -2377,10 +2754,12 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path,
         }
       }
     };
-    check(pf.new_name, "the new session name (the destination folder's name)",
-          "name-contains-identity", "dst");
-    if (pf.pseudonym != pf.new_name)
-      check(pf.pseudonym, "the pseudonym", "pseudonym-contains-identity", "pseudonym");
+    if (an) {
+      check(pf.new_name, "the new session name (the destination folder's name)",
+            "name-contains-identity", "dst");
+      if (pf.pseudonym != pf.new_name)
+        check(pf.pseudonym, "the pseudonym", "pseudonym-contains-identity", "pseudonym");
+    }
     if (pf.pseudonym.size() > UH_NAME_BYTES - 1 || pf.new_name.size() > UH_NAME_BYTES - 1)
       add(RefusalKind::InvalidArgument, "name-too-long",
           "the session name and pseudonym must fit 255 bytes", {},
@@ -2393,10 +2772,11 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path,
   // offset, moved to 0 or below, out of range) is refused here first. Only
   // the .tidx/.tdat headers and block times are left to the copy pass. After
   // the first such refusal the rest are skipped (one per cause is enough).
-  const Shifter sh{plan.rto, check_shift ? o.shift_us : 0};
+  // A transform writes times as stored: nothing to check.
+  const Shifter sh{plan.rto, an && check_shift ? an->shift_us : 0};
   bool time_refused = first_time_refused;  // that refusal covers the rest
   auto shift_time = [&](si8 v, const std::string& what, bool body, const std::string& channel) {
-    if (time_refused) return;
+    if (!an || time_refused) return;
     try {
       (void)sh(v, what, body);
     } catch (...) {
@@ -2493,10 +2873,7 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path,
         for (std::size_t off : lay->times)
           shift_time(read<si8>(r.body, off), what + " body time", true, channel);
         if (r.type == "Seiz") {  // the entries the copy keeps, as rewrite_body does
-          const si4 declared = read<si4>(r.body, SEIZ_NCH);
-          const std::size_t room = (r.body.size() - SEIZ_FIXED) / SEIZ_CHANNEL;
-          const std::size_t n =
-              std::min(room, static_cast<std::size_t>(std::max<si4>(declared, 0)));
+          const std::size_t n = seiz_entry_count(r.body);
           for (std::size_t c = 0; c < n; ++c) {
             const std::size_t e = SEIZ_FIXED + c * SEIZ_CHANNEL;
             if (excluded_keys.count(channel_key(read_string(r.body, e, SEIZ_CHANNEL_NAME))))
@@ -2513,7 +2890,7 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path,
             "record index of " + where + " has no entry for record " + std::to_string(i) +
                 "; which time is right is unknown",
             channel);
-      if ((r.type == "Epoc" || r.type == "Curs") && layout_of(r) &&
+      if (an && (r.type == "Epoc" || r.type == "Curs") && layout_of(r) &&
           in_absolute_window(plan, read<si8>(r.body, 0)))
         add(RefusalKind::WriteConflict, "id-number-time",
             "record " + std::to_string(i) + " (" + r.type + ") of " + where +
@@ -2526,12 +2903,11 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path,
   return pf;
 }
 
-}  // namespace
-
-// ---------------------------------------------------------------------------
-
-VerifyReport verify_anonymized(const std::string& src, const std::string& dst, si8 shift_us,
-                               const VerifyOptions& options, const Control& ctl) {
+/// verify_anonymized / verify_transform: plan the source, then verify_impl
+/// with its own progress over both sessions.
+VerifyReport verify_standalone(const std::string& src, const std::string& dst, si8 shift_us,
+                               const VerifyOptions& options, const MetadataEdits* edits,
+                               const Control& ctl) {
   const auto source = open_session_source(src);
   Control inner;
   inner.cancel = ctl.cancel;
@@ -2539,13 +2915,22 @@ VerifyReport verify_anonymized(const std::string& src, const std::string& dst, s
   std::uint64_t total = std::max<std::uint64_t>(1, 2 * plan.summary.total_bytes);
   detail::ProgressReporter progress(ctl, total);
   progress.start();
-  auto rep = verify_impl(src, *source, plan, dst, shift_us, options, ctl,
+  auto rep = verify_impl(src, *source, plan, dst, shift_us, options, edits, ctl,
                          progress.active() ? std::function<void(std::uint64_t)>(
                                                  [&](std::uint64_t n) { progress.add(n); })
                                            : std::function<void(std::uint64_t)>());
   ctl.check();
   progress.finish();
   return rep;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+
+VerifyReport verify_anonymized(const std::string& src, const std::string& dst, si8 shift_us,
+                               const VerifyOptions& options, const Control& ctl) {
+  return verify_standalone(src, dst, shift_us, options, nullptr, ctl);
 }
 
 const char* refusal_kind_name(RefusalKind kind) noexcept {
@@ -2560,16 +2945,14 @@ const char* refusal_kind_name(RefusalKind kind) noexcept {
   return "MefError";
 }
 
-AnonymizeCheck check_anonymize(const std::string& src, const std::string& dst,
-                               const AnonymizeOptions& options, const Control& ctl,
-                               bool check_shift) {
-  Preflight pf = preflight(src, dst, options, ctl, /*collect=*/true, check_shift);
-  AnonymizeCheck c;
+namespace {
+
+CopyCheck check_of(Preflight& pf) {
+  CopyCheck c;
   c.ok = pf.refusals.empty();
   c.refusals = std::move(pf.refusals);
   c.notes = std::move(pf.notes);
   c.session_name = pf.new_name;
-  c.pseudonym = pf.pseudonym;
   if (pf.plan) {
     c.channels_kept.assign(pf.kept.begin(), pf.kept.end());
     c.channels_excluded.assign(pf.excluded.begin(), pf.excluded.end());
@@ -2577,12 +2960,51 @@ AnonymizeCheck check_anonymize(const std::string& src, const std::string& dst,
   return c;
 }
 
+}  // namespace
+
+AnonymizeCheck check_anonymize(const std::string& src, const std::string& dst,
+                               const AnonymizeOptions& options, const Control& ctl,
+                               bool check_shift) {
+  Preflight pf = preflight(src, dst, Rules{&options, &options, nullptr}, ctl, /*collect=*/true,
+                           check_shift);
+  AnonymizeCheck c;
+  c.pseudonym = pf.pseudonym;
+  static_cast<CopyCheck&>(c) = check_of(pf);
+  return c;
+}
+
+CopyCheck check_transform(const std::string& src, const std::string& dst,
+                          const TransformOptions& options, const Control& ctl) {
+  Preflight pf = preflight(src, dst, Rules{&options, nullptr, &options.metadata}, ctl,
+                           /*collect=*/true, /*check_shift=*/false);
+  return check_of(pf);
+}
+
 namespace {
 
-AnonymizeReport anonymize_impl(const std::string& src_path, const std::string& dst_path,
-                               const AnonymizeOptions& o, const Control& ctl) {
+OutputKeys output_keys(const CopyOptions& o) {
+  OutputKeys out;
+  if (!o.output_password_1.empty()) {
+    out.encrypt = true;
+    out.vf = crypto::make_validation_fields(o.output_password_1, o.output_password_2);
+    out.keys = crypto::validate_password(o.output_password_2, out.vf.level1, out.vf.level2);
+    if (!out.keys.level1_key || !out.keys.level2_key)
+      throw std::logic_error("output keys could not be derived");
+  }
+  return out;
+}
+
+/// The copy: pre-flight (throws the first refusal), the copy pass into
+/// `<dst>.partial/<name>`, the flush, the verification, the publish. ONE
+/// driver for anonymize_session and transform_session; `rules` decides what
+/// changes, `arep` / `trep` receive what only that operation reports.
+void run_copy(const std::string& src_path, const std::string& dst_path, const Rules& rules,
+              const Control& ctl, CopyReport& rep, AnonymizeReport* arep,
+              TransformReport* trep) {
+  const CopyOptions& o = *rules.copy;
+  const AnonymizeOptions* an = rules.anon;
   // Every refusal that can be decided before writing, thrown at the first.
-  Preflight pf = preflight(src_path, dst_path, o, ctl, /*collect=*/false, /*check_shift=*/true);
+  Preflight pf = preflight(src_path, dst_path, rules, ctl, /*collect=*/false, /*check_shift=*/true);
   const fs::path& dst = pf.dst;
   const fs::path& partial = pf.partial;
   const SessionSource& src = *pf.source;
@@ -2592,43 +3014,40 @@ AnonymizeReport anonymize_impl(const std::string& src_path, const std::string& d
   const std::string& new_name = pf.new_name;
   const std::string& pseudonym = pf.pseudonym;
 
-  Shifter sh{plan.rto, o.shift_us};
-  if (!o.rename) plan.session_names.clear();  // the name is kept on purpose
-  const Redactor red =
-      build_redactor(plan, new_name, o.clear_subject, o.clear_location, excluded, kept, pseudonym);
-
-  OutputKeys out;
-  if (!o.output_password_1.empty()) {
-    out.encrypt = true;
-    out.vf = crypto::make_validation_fields(o.output_password_1, o.output_password_2);
-    out.keys = crypto::validate_password(o.output_password_2, out.vf.level1, out.vf.level2);
-    if (!out.keys.level1_key || !out.keys.level2_key)
-      throw std::logic_error("output keys could not be derived");
+  Shifter sh{plan.rto, an ? an->shift_us : 0};
+  std::optional<Redactor> red;
+  if (an) {
+    if (!o.rename) plan.session_names.clear();  // the name is kept on purpose
+    red = build_redactor(plan, new_name, an->clear_subject, an->clear_location, excluded, kept,
+                         pseudonym);
   }
+  const OutputKeys out = output_keys(o);
 
-  AnonymizeReport rep;
   rep.destination = dst.string();
   rep.session_name = new_name;
-  rep.pseudonym = pseudonym;
-  rep.shift_us = o.shift_us;
-  rep.source_recording_time_offset = plan.rto;
   rep.channels_kept.assign(kept.begin(), kept.end());
   rep.channels_excluded.assign(excluded.begin(), excluded.end());
   rep.output_encrypted = out.encrypt;
   rep.notes = pf.notes;
-  // The re-identification key: returned to the caller, never written.
-  rep.source_start_us = plan.summary.start_time;
-  rep.source_end_us = plan.summary.end_time;
-  for (const auto& ic : plan.summary.channels)
-    if (kept.count(ic.name)) rep.source_channel_times.push_back({ic.name, ic.start_time, ic.end_time});
-  for (const auto& ch : kept)  // record-only channels: no samples, no times
-    if (std::none_of(rep.source_channel_times.begin(), rep.source_channel_times.end(),
-                     [&](const SourceChannelTimes& t) { return t.channel == ch; }))
-      rep.source_channel_times.push_back({ch, std::nullopt, std::nullopt});
-  std::sort(rep.source_channel_times.begin(), rep.source_channel_times.end(),
-            [](const SourceChannelTimes& a, const SourceChannelTimes& b) {
-              return a.channel < b.channel;
-            });
+  if (arep) {
+    arep->pseudonym = pseudonym;
+    arep->shift_us = an->shift_us;
+    arep->source_recording_time_offset = plan.rto;
+    // The re-identification key: returned to the caller, never written.
+    arep->source_start_us = plan.summary.start_time;
+    arep->source_end_us = plan.summary.end_time;
+    for (const auto& ic : plan.summary.channels)
+      if (kept.count(ic.name))
+        arep->source_channel_times.push_back({ic.name, ic.start_time, ic.end_time});
+    for (const auto& ch : kept)  // record-only channels: no samples, no times
+      if (std::none_of(arep->source_channel_times.begin(), arep->source_channel_times.end(),
+                       [&](const SourceChannelTimes& t) { return t.channel == ch; }))
+        arep->source_channel_times.push_back({ch, std::nullopt, std::nullopt});
+    std::sort(arep->source_channel_times.begin(), arep->source_channel_times.end(),
+              [](const SourceChannelTimes& x, const SourceChannelTimes& y) {
+                return x.channel < y.channel;
+              });
+  }
 
   const std::uint64_t total = std::max<std::uint64_t>(1, 3 * plan.summary.total_bytes);
   detail::ProgressReporter progress(ctl, total);
@@ -2639,8 +3058,8 @@ AnonymizeReport anonymize_impl(const std::string& src_path, const std::string& d
   try {
     progress.start();
     fs::create_directories(root);
-    Anonymizer an(src, o, sh, red, new_name, pseudonym, excluded, kept, out, ctl, on_bytes,
-                  rep);
+    Copier cp(src, rules, sh, red ? &*red : nullptr, new_name, pseudonym, excluded, kept, out,
+              ctl, on_bytes, rep, arep, trep);
 
     std::set<std::string> handled;  // source-relative paths copied
     std::map<std::string, const detail::LayoutChannel*> data;
@@ -2650,26 +3069,25 @@ AnonymizeReport anonymize_impl(const std::string& src_path, const std::string& d
       fs::create_directory(cdir);
       const std::string crec = ch + ".timd/" + ch + ".rdat";
       if (src.exists(crec)) {
-        an.copy_records(crec, cdir / (ch + ".rdat"), RecordLevel::Channel, ch, -1);
+        cp.copy_records(crec, cdir / (ch + ".rdat"), RecordLevel::Channel, ch, -1);
         handled.insert(crec);
         handled.insert(ridx_of(crec));
       }
       const auto it = data.find(ch);
       if (it == data.end()) continue;  // record-only channel
-      std::set<int> numbers;
       for (const auto& seg : it->second->segments) {
         // Numbered by the pre-flight (folder name and .tmet header agree).
         const int folder_number = pf.segment_numbers.at(seg.tmet);
         const std::string stem = canonical_segment_stem(ch, folder_number);
         const fs::path sdir = cdir / (stem + ".segd");
         fs::create_directory(sdir);
-        an.copy_tmet(seg.tmet, sdir / (stem + ".tmet"), ch);
-        an.copy_segment_data(seg, sdir, ch, stem);
+        cp.copy_tmet(seg.tmet, sdir / (stem + ".tmet"), ch);
+        cp.copy_segment_data(seg, sdir, ch, stem);
         handled.insert(seg.tmet);
         handled.insert(seg.tidx);
         handled.insert(seg.tdat);
         if (src.exists(seg.rdat())) {
-          an.copy_records(seg.rdat(), sdir / (stem + ".rdat"), RecordLevel::Segment, ch,
+          cp.copy_records(seg.rdat(), sdir / (stem + ".rdat"), RecordLevel::Segment, ch,
                           folder_number);
           handled.insert(seg.rdat());
           handled.insert(ridx_of(seg.rdat()));
@@ -2680,7 +3098,7 @@ AnonymizeReport anonymize_impl(const std::string& src_path, const std::string& d
     {
       const std::string& srec = pf.session_records;
       if (!srec.empty()) {
-        an.copy_records(srec, root / (new_name + ".rdat"), RecordLevel::Session, "", -1);
+        cp.copy_records(srec, root / (new_name + ".rdat"), RecordLevel::Session, "", -1);
         handled.insert(srec);
         handled.insert(ridx_of(srec));
       }
@@ -2703,16 +3121,18 @@ AnonymizeReport anonymize_impl(const std::string& src_path, const std::string& d
     walk("");
 
     // Durable before it is published: the rename below makes it a session.
-    for (const auto& f : an.written) detail::fsync_file_or_throw(f);
+    for (const auto& f : cp.written) detail::fsync_file_or_throw(f);
 
     VerifyOptions vo;
     vo.password = o.password;
     vo.output_password = o.output_password_2;
-    vo.clear_subject = o.clear_subject;
-    vo.clear_location = o.clear_location;
-    vo.clear_descriptions = o.clear_descriptions;
-    rep.verification =
-        verify_impl(src_path, src, plan, root.string(), o.shift_us, vo, ctl, on_bytes);
+    if (an) {
+      vo.clear_subject = an->clear_subject;
+      vo.clear_location = an->clear_location;
+      vo.clear_descriptions = an->clear_descriptions;
+    }
+    rep.verification = verify_impl(src_path, src, plan, root.string(), an ? an->shift_us : 0, vo,
+                                   an ? nullptr : rules.edits, ctl, on_bytes);
     // verify alone cannot tell a dropped channel from an excluded one; here
     // the selection is known.
     if (rep.verification.channels != rep.channels_kept) {
@@ -2745,24 +3165,49 @@ AnonymizeReport anonymize_impl(const std::string& src_path, const std::string& d
   std::error_code ec;
   fs::remove_all(partial, ec);
   rep.destination = dst.string();
-  return rep;
+}
+
+/// Whatever shared code threw without a code gets the generic one of its
+/// type; Cancelled and internal errors pass through unchanged.
+template <class F>
+auto coded(F&& f) -> decltype(f()) {
+  try {
+    return f();
+  } catch (const CopyError&) {
+    throw;
+  } catch (...) {
+    auto r = refusal_of(std::current_exception(), "source-damaged", "source-crc", "io-error");
+    if (!r) throw;
+    raise(std::move(*r));
+  }
 }
 
 }  // namespace
 
 AnonymizeReport anonymize_session(const std::string& src_path, const std::string& dst_path,
                                   const AnonymizeOptions& o, const Control& ctl) {
-  try {
-    return anonymize_impl(src_path, dst_path, o, ctl);
-  } catch (const AnonymizeError&) {
-    throw;
-  } catch (...) {
-    // Whatever shared code threw without a code gets the generic one of its
-    // type; Cancelled and internal errors pass through unchanged.
-    auto r = refusal_of(std::current_exception(), "source-damaged", "source-crc", "io-error");
-    if (!r) throw;
-    raise(std::move(*r));
-  }
+  return coded([&] {
+    AnonymizeReport rep;
+    run_copy(src_path, dst_path, Rules{&o, &o, nullptr}, ctl, rep, &rep, nullptr);
+    return rep;
+  });
+}
+
+TransformReport transform_session(const std::string& src_path, const std::string& dst_path,
+                                  const TransformOptions& o, const Control& ctl) {
+  return coded([&] {
+    TransformReport rep;
+    run_copy(src_path, dst_path, Rules{&o, nullptr, &o.metadata}, ctl, rep, nullptr, &rep);
+    return rep;
+  });
+}
+
+VerifyReport verify_transform(const std::string& src, const std::string& dst,
+                              const TransformOptions& options, const Control& ctl) {
+  VerifyOptions vo;
+  vo.password = options.password;
+  vo.output_password = options.output_password_2;
+  return verify_standalone(src, dst, 0, vo, &options.metadata, ctl);
 }
 
 }  // namespace mef3io

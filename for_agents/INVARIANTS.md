@@ -192,7 +192,7 @@ answered. Rules:
 - Every new field the copy carries needs a planted-leak test in
   `tests/test_p29_anonymize.py` that shows `verify` catching it in the copy
   AND the rewrite removing it from a source.
-- ONE pre-flight (`preflight()` in `core/src/anonymize.cpp`) decides every
+- ONE pre-flight (`preflight()` in `core/src/session_copy.cpp`) decides every
   refusal for both `anonymize_session` (throws the first, before any file or
   progress) and `check` (collects all). Never add an up-front check anywhere
   else; `tests/test_p32_anonymize_check.py` runs every refusal through both.
@@ -224,3 +224,25 @@ inverse S-box used to be filled lazily, a data race).
 `tests/test_p25_public_text.py` (and the docs workflow's site check) fail if
 public text names a private third-party product. CLAUDE.md, tests and scripts
 are exempt; this folder is public, so keep such names out of it.
+
+## 12. One copy engine: a transform changes only what it was asked to
+
+`transform_session` (#73) is the same engine as `anonymize_session`
+(`core/src/session_copy.cpp`: one `preflight`, one `Copier`, one `Verifier`,
+one `run_copy`), steered by `Rules`. Rules:
+
+- Never add a second copy path. Cut/merge (#103) and re-encoding (#121) are
+  options of this engine, so every copy keeps the partial-directory publish,
+  the pre-flight/check pair, the verification and the refusal codes.
+- A transform copies every stored time, every sample, every region another
+  writer fills and every record body VERBATIM. The only changes are the
+  channels, passwords, name and the requested metadata edits, and its
+  verification compares everything else byte for byte. A transform must
+  never "normalise" a session (no rto folding, no region clearing):
+  that is anonymize's job, and doing it silently would change a recording
+  the user asked to copy.
+- Metadata edits are written into the stored section images, never by
+  re-serializing them, and a value that does not fit is refused, never cut.
+- Shared refusal codes are documented once (docs/anonymization.md), and
+  docs/transform.md documents only the transform's own;
+  `tests/test_p33_transform.py` keeps both equal to the code tables.

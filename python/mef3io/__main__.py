@@ -18,6 +18,11 @@ given.
 
     python -m mef3io anonymize SRC.mefd DST.mefd --shift-us N
     python -m mef3io anonymize SRC.mefd DST.mefd --reference-date 2000-01-03 --tz Europe/Prague
+
+``transform`` never touches the source either; it writes a copy with a choice of channels,
+passwords, name and details, every time and sample as stored::
+
+    python -m mef3io transform SRC.mefd DST.mefd --exclude-channel ECG --set subject_id=S01
 """
 from __future__ import annotations
 
@@ -30,6 +35,7 @@ COMMANDS = {
     "repair": "rewrite only the declarations for the checks you name",
     "recover": "after an interrupted write, make the index and data agree again",
     "anonymize": "write a de-identified copy: every time shifted, identity removed",
+    "transform": "write a copy with chosen channels, passwords, name and details",
 }
 
 
@@ -71,6 +77,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .anonymize import _main as _anonymize_main
 
         return _anonymize_main(rest)
+    if command == "transform":
+        from .transform import _main as _transform_main
+
+        return _transform_main(rest)
     raise AssertionError(f"unhandled command {command}")  # pragma: no cover
 
 

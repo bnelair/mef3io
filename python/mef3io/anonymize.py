@@ -16,13 +16,29 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
-import os
-import sys
 import copy as _copy
 from dataclasses import asdict, dataclass, field, fields, replace
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, Iterable, Optional, Sequence, Tuple, Union
 
 from ._cancel import CancelToken, _hooks
+from ._copy import (  # shared with mef3io.transform (#73); re-exported here
+    COPY_REFUSAL_CODES,
+    CheckReport,
+    Refusal,
+    VerifyIssue,
+    VerifyReport,
+    _add_copy_cli_arguments,
+    _backend,
+    _check_report,
+    _cli_copy_kwargs,
+    _cli_error,
+    _cli_password,
+    _copy_arguments,
+    _copy_output_password,
+    _fspaths,
+    _Refusals,
+    _warn_output_passwords,
+)
 
 __all__ = [
     "AnonymizeReport",
@@ -55,265 +71,27 @@ _CLEAR_CHOICES = ("subject", "location", "descriptions")
 #:
 #: docs/anonymization.md explains each one.
 REFUSAL_CODES: Dict[str, Tuple[str, str]] = {
-    # arguments (checked in Python)
-    "argument-type": ("TypeError", "check"),
+    **COPY_REFUSAL_CODES,  # every copy's (mef3io._copy)
+    # what only anonymization checks or does
     "clear-unknown": ("ValueError", "check"),
     "text-invalid": ("ValueError", "check"),
-    # options
     "shift-zero": ("ValueError", "check"),
-    "channel-selection-conflict": ("ValueError", "check"),
     "text-callback-missing": ("ValueError", "defensive"),
-    "output-password-unpaired": ("ValueError", "check"),
-    "output-passwords-equal": ("ValueError", "check"),
-    # paths
-    "dst-not-mefd": ("IoError", "check"),
-    "dst-exists": ("IoError", "check"),
-    "partial-exists": ("IoError", "check"),
-    "source-missing": ("IoError", "check"),
-    "dst-inside-src": ("IoError", "check"),
-    # opening the source
-    "source-unreadable": ("IoError", "check"),
-    "source-damaged": ("FormatError", "check"),
-    "source-crc": ("CrcError", "check"),
-    "records-ambiguous": ("FormatError", "check"),
-    "password-wrong": ("PasswordError", "check"),
-    "password-required": ("PasswordError", "check"),
-    "password-level1-only": ("PasswordError", "check"),
-    # what inspect marks as blocking (Refusal.inspect_code names the warning)
-    "video-channels": ("WriteConflictError", "check"),
-    "unreadable-segments": ("WriteConflictError", "defensive"),
-    "incomplete-segments": ("WriteConflictError", "check"),
-    "unread-record-files": ("WriteConflictError", "check"),
-    "unreadable-records": ("WriteConflictError", "defensive"),
-    "parts-locked": ("WriteConflictError", "check"),
     "rto-disputed": ("WriteConflictError", "check"),
     "rto-unreadable": ("WriteConflictError", "check"),
     "time-before-rto": ("WriteConflictError", "check"),
-    "inspect-blocker": ("WriteConflictError", "defensive"),
-    # channel selection
-    "channel-unknown": ("ValueError", "check"),
-    "no-channels-left": ("ValueError", "check"),
-    # the shift
     "shift-below-floor": ("ValueError", "check"),
     "shift-not-positive": ("ValueError", "check"),
-    # the copy's names
-    "rename-name-mismatch": ("ValueError", "check"),
     "name-contains-identity": ("ValueError", "check"),
     "pseudonym-contains-identity": ("ValueError", "check"),
-    "name-too-long": ("ValueError", "check"),
-    # segments and records, read from metadata
-    "segment-folder-unnumbered": ("WriteConflictError", "check"),
-    "segment-number-mismatch": ("WriteConflictError", "check"),
-    "segment-number-duplicate": ("WriteConflictError", "check"),
-    "record-damaged": ("FormatError", "defensive"),
-    "record-crc": ("CrcError", "defensive"),
-    "record-locked": ("PasswordError", "check"),
-    "record-index-mismatch": ("FormatError", "check"),
     "id-number-time": ("WriteConflictError", "check"),
-    # the copy pass
-    "block-crc": ("CrcError", "copy"),
-    "data-damaged": ("FormatError", "copy"),
-    "verify-failed": ("WriteConflictError", "copy"),
-    "data-locked": ("PasswordError", "defensive"),
     "time-overflow": ("FormatError", "defensive"),
-    "write-failed": ("IoError", "defensive"),
-    # generic codes for an error of shared code that carries none
-    "io-error": ("IoError", "defensive"),
-    "write-conflict": ("WriteConflictError", "defensive"),
-    "invalid-argument": ("ValueError", "defensive"),
 }
 
 #: ``text(value, info) -> str | None`` for ``text=`` callables. ``info`` is a
 #: dict with ``record_type``, ``field``, ``level``, ``channel``, ``segment``
 #: and ``time`` (the record's time in the copy, uUTC).
 TextCallback = Callable[[str, dict], Optional[str]]
-
-
-@dataclass(frozen=True)
-class VerifyIssue:
-    """One problem :func:`verify` found.
-
-    ``message`` names what is wrong in plain words. It never repeats an
-    identifying string (a name it found is described, not quoted), so a
-    report can be logged or shared.
-    """
-
-    location: str
-    field: str
-    message: str
-
-    def __str__(self) -> str:
-        return f"{self.location}: {self.field} {self.message}"
-
-
-@dataclass(frozen=True)
-class VerifyReport:
-    """Result of :func:`verify`.
-
-    Attributes
-    ----------
-    ok : bool
-        True when nothing is wrong: no problem and no leak.
-    problems : tuple of VerifyIssue
-        Everything wrong with the copy, leaks included.
-    leaks : tuple of VerifyIssue
-        The problems found by the leak scan: a time field holding a value in
-        the source's recording range (plain or negated), a name that should
-        be gone, a source UUID, an uncleared field.
-    notes : tuple of VerifyIssue
-        Overlaps reported but not refused, worth showing the user: an
-        identity value inside a kept channel's name as part of a longer token
-        (or one shorter than 3 characters), inside the copy's own name, or a
-        number of fewer than 4 digits inside a longer number in kept text.
-    inherited_findings : tuple of str
-        Validator findings the source already had; a copy carries them over
-        unchanged and they do not count against ``ok``.
-    channels, excluded_channels : tuple of str
-        Channels in the copy, and the source's channels it leaves out.
-    segments, blocks, records, times_checked, text_fields_checked : int
-        How much was compared.
-    """
-
-    ok: bool
-    problems: Tuple[VerifyIssue, ...]
-    leaks: Tuple[VerifyIssue, ...]
-    notes: Tuple[VerifyIssue, ...]
-    inherited_findings: Tuple[str, ...]
-    channels: Tuple[str, ...]
-    excluded_channels: Tuple[str, ...]
-    segments: int
-    blocks: int
-    records: int
-    times_checked: int
-    text_fields_checked: int
-
-    @classmethod
-    def _from(cls, d: dict) -> "VerifyReport":
-        return cls(
-            ok=bool(d["ok"]),
-            problems=tuple(VerifyIssue(**p) for p in d["problems"]),
-            leaks=tuple(VerifyIssue(**p) for p in d["leaks"]),
-            notes=tuple(VerifyIssue(**p) for p in d.get("notes", ())),
-            inherited_findings=tuple(d["inherited_findings"]),
-            channels=tuple(d["channels"]),
-            excluded_channels=tuple(d["excluded_channels"]),
-            segments=d["segments"],
-            blocks=d["blocks"],
-            records=d["records"],
-            times_checked=d["times_checked"],
-            text_fields_checked=d["text_fields_checked"],
-        )
-
-    def summary(self) -> str:
-        """A few lines for a terminal."""
-        lines = [
-            f"verification: {'passed' if self.ok else 'FAILED'} — {self.segments} segment(s), "
-            f"{self.blocks} block(s), {self.records} record(s), {self.times_checked} time(s) "
-            f"and {self.text_fields_checked} text field(s) checked"
-        ]
-        if self.excluded_channels:
-            lines.append(f"  channels left out: {', '.join(self.excluded_channels)}")
-        for p in self.problems[:20]:
-            lines.append(f"  - {p}")
-        if len(self.problems) > 20:
-            lines.append(f"  ... and {len(self.problems) - 20} more")
-        for n in self.notes[:20]:
-            lines.append(f"  note: {n}")
-        if len(self.notes) > 20:
-            lines.append(f"  ... and {len(self.notes) - 20} more notes")
-        if self.inherited_findings:
-            lines.append(
-                f"  {len(self.inherited_findings)} validator finding(s) carried over from the "
-                "source unchanged"
-            )
-        return "\n".join(lines)
-
-
-@dataclass(frozen=True)
-class Refusal:
-    """One reason :func:`anonymize_session` would refuse.
-
-    Attributes
-    ----------
-    code : str
-        Stable identifier (:data:`REFUSAL_CODES`). Match on this, never on
-        ``message``.
-    message : str
-        Plain words, as the raised exception carries them. It may name the
-        source's or the destination's path.
-    error : str
-        The exception type :func:`anonymize_session` raises for it:
-        ``"ValueError"``, ``"TypeError"``, ``"IoError"``,
-        ``"WriteConflictError"``, ``"PasswordError"``, ``"FormatError"`` or
-        ``"CrcError"``.
-    channel : str or None
-        The channel concerned, if any.
-    field : str or None
-        The argument or field concerned (``"dst"``, ``"pseudonym"``,
-        ``"shift_us"``, ``"channels"``, ``"id_number"``, ...), if any.
-    inspect_code : str or None
-        For a condition :func:`mef3io.inspect` marks as blocking, that
-        warning's code (e.g. ``"video-channels"``).
-    """
-
-    code: str
-    message: str
-    error: str
-    channel: Optional[str] = None
-    field: Optional[str] = None
-    inspect_code: Optional[str] = None
-
-    def __str__(self) -> str:
-        return f"{self.code}: {self.message}"
-
-
-@dataclass(frozen=True)
-class CheckReport:
-    """Result of :func:`check`.
-
-    Attributes
-    ----------
-    ok : bool
-        True when :func:`anonymize_session` would start copying. A copy can
-        still be refused by what only the copy pass meets (codes marked
-        ``"copy"`` in :data:`REFUSAL_CODES`).
-    refusals : tuple of Refusal
-        Every refusal found, in the order :func:`anonymize_session` meets
-        them (it raises the first). Checks that depend on one that failed are
-        skipped: nothing about the source is checked when it cannot be
-        opened.
-    notes : tuple of str
-        What would be noted up front: a source that uses meflib's
-        recording-time offset, an output password other MEF readers will not
-        handle as expected.
-    session_name, pseudonym : str
-        The copy's session name and pseudonym ("" when ``dst`` is unusable).
-    channels_kept, channels_excluded : tuple of str
-        The channel selection (empty when the source could not be read).
-    """
-
-    ok: bool
-    refusals: Tuple[Refusal, ...]
-    notes: Tuple[str, ...]
-    session_name: str
-    pseudonym: str
-    channels_kept: Tuple[str, ...]
-    channels_excluded: Tuple[str, ...]
-
-    @property
-    def codes(self) -> Tuple[str, ...]:
-        """The refusals' codes, in order."""
-        return tuple(r.code for r in self.refusals)
-
-    def summary(self) -> str:
-        """A few lines for a terminal."""
-        if self.ok:
-            lines = ["check: nothing stops the copy"]
-        else:
-            lines = [f"check: {len(self.refusals)} refusal(s)"]
-        lines += [f"  - {r}" for r in self.refusals]
-        lines += [f"  note: {n}" for n in self.notes]
-        return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -488,34 +266,6 @@ def _unpickle_report(values: dict, keep: bool) -> AnonymizeReport:
     return out
 
 
-def _backend():
-    from . import _mef3io
-
-    return _mef3io
-
-
-def _error(error: str, code: str, message: str, **details) -> Exception:
-    """A ValueError/TypeError raised in Python, with ``.code`` and ``.details``
-    like the ones the extension raises."""
-    exc = {"ValueError": ValueError, "TypeError": TypeError}[error](message)
-    exc.code = code
-    exc.details = {"channel": None, "field": None, "inspect_code": None, **details}
-    return exc
-
-
-class _Refusals:
-    """Raise the first refusal (``collect=False``) or gather them all."""
-
-    def __init__(self, collect: bool):
-        self.collect = collect
-        self.found: List[Refusal] = []
-
-    def add(self, error: str, code: str, message: str, **details) -> None:
-        if not self.collect:
-            raise _error(error, code, message, **details)
-        self.found.append(Refusal(code=code, message=message, error=error, **details))
-
-
 def _clear_flags(clear: Iterable[str], refusals: Optional[_Refusals] = None) -> dict:
     if isinstance(clear, str):
         clear = (clear,)
@@ -532,49 +282,12 @@ def _clear_flags(clear: Iterable[str], refusals: Optional[_Refusals] = None) -> 
     )
 
 
-def _names(value, what: str) -> list:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value]
-    out = list(value)
-    if not all(isinstance(v, str) for v in out):
-        # A programming error, raised even by check(); it still has a code.
-        raise _error("TypeError", "argument-type", f"{what} must be channel names (str)",
-                     field=what)
-    return out
-
-
-def _output_passwords(output_password, refusals: _Refusals) -> Tuple[str, str]:
-    if output_password is None:
-        return "", ""
-    if isinstance(output_password, str):
-        refusals.add("ValueError", "output-password-unpaired",
-                     "output_password takes a pair (level1, level2): MEF has no level-1-only "
-                     "files", field="output_password")
-        return "", ""
-    pw = tuple(output_password)
-    if len(pw) != 2 or not all(isinstance(p, str) and p for p in pw):
-        refusals.add("ValueError", "output-password-unpaired",
-                     "output_password must be a pair of two non-empty strings (level1, level2)",
-                     field="output_password")
-        return "", ""
-    return pw  # type: ignore[return-value]
-
-
 def _arguments(refusals: _Refusals, *, channels, exclude_channels, output_password, text,
                clear) -> dict:
     """The checks made in Python, in the order anonymize_session makes them,
     and the extension's keyword arguments."""
-    if channels is not None and exclude_channels is not None:
-        refusals.add("ValueError", "channel-selection-conflict",
-                     "pass channels or exclude_channels, not both", field="channels")
-    names = _names(channels, "channels")
-    excluded = _names(exclude_channels, "exclude_channels")
-    if channels is not None and not names:
-        refusals.add("ValueError", "no-channels-left",
-                     "the selection leaves no channel to copy (channels=[])", field="channels")
-    out1, out2 = _output_passwords(output_password, refusals)
+    copy = _copy_arguments(refusals, channels=channels, exclude_channels=exclude_channels,
+                           output_password=output_password)
     if callable(text):
         text_mode, text_fn = "callback", text
     elif isinstance(text, str) and text in ("drop", "keep"):
@@ -583,15 +296,7 @@ def _arguments(refusals: _Refusals, *, channels, exclude_channels, output_passwo
         refusals.add("ValueError", "text-invalid", "text must be 'drop', 'keep' or a callable",
                      field="text")
         text_mode, text_fn = "drop", None
-    return dict(
-        text_mode=text_mode,
-        text_fn=text_fn,
-        output_password_1=out1,
-        output_password_2=out2,
-        channels=names,
-        exclude_channels=excluded,
-        **_clear_flags(clear, refusals),
-    )
+    return dict(text_mode=text_mode, text_fn=text_fn, **copy, **_clear_flags(clear, refusals))
 
 
 def anonymize_session(
@@ -756,14 +461,10 @@ def anonymize_session(
     a = _arguments(_Refusals(collect=False), channels=channels,
                    exclude_channels=exclude_channels, output_password=output_password,
                    text=text, clear=clear)
-    if a["output_password_1"]:
-        from ._writer import warn_password_interop
-
-        warn_password_interop(a["output_password_1"], a["output_password_2"])
+    _warn_output_passwords(a)
     text_mode = a.pop("text_mode")
     raw = _backend().anonymize_session(
-        os.fspath(src),
-        os.fspath(dst),
+        *_fspaths(src, dst),
         int(shift_us),
         pseudonym=pseudonym or "",
         text=text_mode,
@@ -863,8 +564,7 @@ def check(
     text_mode = a.pop("text_mode")
     text_fn = a.pop("text_fn")
     raw = _backend().check_anonymize(
-        os.fspath(src),
-        os.fspath(dst),
+        *_fspaths(src, dst),
         None if shift_us is None else int(shift_us),
         pseudonym=pseudonym or "",
         text=text_mode,
@@ -874,27 +574,7 @@ def check(
         **a,
         **_hooks(cancel, None),
     )
-    found = list(refusals.found)
-    seen = {(r.code, r.field) for r in found}
-    for r in raw["refusals"]:
-        if (r["code"], r["field"]) not in seen:  # also checked in Python
-            found.append(Refusal(**r))
-    notes = list(raw["notes"])
-    from ._writer import password_interop_issue
-
-    for label, pw in (("level-1", a["output_password_1"]), ("level-2", a["output_password_2"])):
-        issue = password_interop_issue(pw) if pw else None
-        if issue:
-            notes.append(f"the {label} output password will not interoperate as expected: {issue}")
-    return CheckReport(
-        ok=not found,
-        refusals=tuple(found),
-        notes=tuple(notes),
-        session_name=raw["session_name"],
-        pseudonym=raw["pseudonym"],
-        channels_kept=tuple(raw["channels_kept"]),
-        channels_excluded=tuple(raw["channels_excluded"]),
-    )
+    return _check_report(raw, refusals, a)
 
 
 def verify(
@@ -954,18 +634,11 @@ def verify(
     -------
     VerifyReport
     """
-    if output_password is None:
-        out = ""
-    elif isinstance(output_password, str):
-        out = output_password
-    else:
-        out = tuple(output_password)[-1]
     raw = _backend().verify_anonymized(
-        os.fspath(src),
-        os.fspath(dst),
+        *_fspaths(src, dst),
         int(shift_us),
         password=password or "",
-        output_password=out,
+        output_password=_copy_output_password(output_password),
         **_clear_flags(clear),
         **_hooks(cancel, progress),
     )
@@ -1058,31 +731,14 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="do NOT clear this (repeatable): subject, location, descriptions")
     p.add_argument("--text", choices=("drop", "keep"), default="drop",
                    help="record free text: drop (default) or keep with names redacted")
-    p.add_argument("--no-rename", action="store_true",
-                   help="keep the source's session name (DST must be named after it)")
-    p.add_argument("--password", default="", help="level-2 password of an encrypted source")
-    p.add_argument("--password-env", help="read the source password from this variable")
-    p.add_argument("--output-password", nargs=2, metavar=("LEVEL1", "LEVEL2"),
-                   help="encrypt the copy with these two passwords")
-    sel = p.add_mutually_exclusive_group()
-    sel.add_argument("--channel", action="append", default=None,
-                     help="copy only this channel (repeatable)")
-    sel.add_argument("--exclude-channel", action="append", default=None,
-                     help="leave this channel out (repeatable)")
-    p.add_argument("--json", action="store_true", help="print the report as JSON")
+    _add_copy_cli_arguments(p)
     return p
 
 
 def _main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    password = args.password
-    if args.password_env:
-        if args.password:
-            parser.error("pass --password or --password-env, not both")
-        password = os.environ.get(args.password_env)
-        if not password:
-            parser.error(f"environment variable {args.password_env} is not set or empty")
+    password = _cli_password(parser, args)
     if args.tz and args.reference_date is None:
         parser.error("--tz only applies with --reference-date")
     if args.keep_weekday and args.reference_date is None:
@@ -1106,17 +762,10 @@ def _main(argv: Sequence[str] | None = None) -> int:
             pseudonym=args.pseudonym,
             clear=[c for c in _CLEAR_CHOICES if c not in args.keep],
             text=args.text,
-            rename=not args.no_rename,
-            password=password,
-            output_password=tuple(args.output_password) if args.output_password else None,
-            channels=args.channel,
-            exclude_channels=args.exclude_channel,
+            **_cli_copy_kwargs(args, password),
         )
     except (RuntimeError, ValueError, OSError) as exc:
-        code = getattr(exc, "code", None)
-        print(f"error ({code}): {exc}" if isinstance(code, str) else f"error: {exc}",
-              file=sys.stderr)
-        return 2
+        return _cli_error(exc)
     if args.json:
         print(json.dumps(report.to_dict(), indent=2))
     else:

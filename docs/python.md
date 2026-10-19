@@ -499,6 +499,34 @@ the refusal codes, how the copy is checked, what it does not do) is in
 From a terminal: `python -m mef3io anonymize SRC DST --reference-date
 2000-01-01`. Python and C++ only, not MATLAB.
 
+## Modified copies
+
+`mef3io.transform_session(src, dst, ...)` writes a copy with only the
+changes you ask for:
+- a choice of channels;
+- new passwords, or none;
+- the session name;
+- edited details: subject names and ID, recording location, the session,
+  channel and reference descriptions.
+
+Every time and every sample is copied as stored, and the original is never
+changed. It is the same copy engine as `anonymize_session`, with the same
+`check` / `verify` pair and refusal codes.
+
+```python
+rep = mef3io.transform_session(
+    "patient.mefd", "patient_eeg.mefd",
+    exclude_channels=["ECG"],
+    output_password=("level-1 pw", "level-2 pw"),     # or None: no passwords
+    metadata={"subject_id": "S-017", "channel_descriptions": {"Fp1": "frontal pole"}},
+)
+print(rep.summary())
+```
+
+The details are in [Modified copies](transform.md). From a terminal:
+`python -m mef3io transform SRC DST --exclude-channel ECG --set subject_id=S-017`.
+Python and C++ only, not MATLAB.
+
 ## Tar archives (single-file sessions)
 
 A session directory can be packed into a single **uncompressed tar** file —
@@ -561,6 +589,9 @@ Reads and the long operations take two optional keyword arguments:
 | `anonymize_session` | yes | bytes, over the copy and its verification |
 | `anonymize.check` | yes | — |
 | `anonymize.verify` | yes | bytes, as for `anonymize_session` |
+| `transform_session` | yes | bytes, over the copy and its verification |
+| `transform.check` | yes | — |
+| `transform.verify` | yes | bytes, as for `transform_session` |
 
 ```python
 token = mef3io.CancelToken()
@@ -607,8 +638,9 @@ stop at the same points). `Cancelled` subclasses `Exception` directly, not
   rename and 1024-byte header patches — is not interruptible: a cancel that
   arrives then is ignored and the call returns its report, so a session is
   never left half-repaired;
-- `anonymize_session` builds the copy in `<dst>.partial/` and renames it to
-  `dst` only after it has been verified; a cancel removes the partial copy.
+- `anonymize_session` and `transform_session` build the copy in
+  `<dst>.partial/` and rename it to `dst` only after it has been verified; a
+  cancel removes the partial copy.
 
 **Progress.** `progress(done, total)` is called first with `(0, total)`, then
 at a bounded rate (about every 1 % of `total`, otherwise at most every

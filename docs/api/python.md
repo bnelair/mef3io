@@ -58,6 +58,24 @@ for the workflow. Python and C++ only (no MATLAB, no C ABI).
 
 ::: mef3io.anonymize.VerifyIssue
 
+## Modified copies
+
+See [Modified copies](../transform.md) for what changes and what is copied as
+stored. The report, check and refusal types are shared with the
+de-identified copies above. Python and C++ only (no MATLAB, no C ABI).
+
+::: mef3io.transform_session
+
+::: mef3io.transform.check
+
+::: mef3io.transform.verify
+
+::: mef3io.TransformReport
+
+::: mef3io.transform.REFUSAL_CODES
+
+::: mef3io.transform.METADATA_FIELDS
+
 ## Cancelling and progress
 
 See the [Python guide](../python.md#cancelling-and-progress).

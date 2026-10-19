@@ -2,6 +2,7 @@
 // (crc + version) to prove the toolchain end to end.
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/map.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
@@ -24,6 +25,7 @@
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
 #include "mef3io/tar.hpp"
+#include "mef3io/transform.hpp"
 #include "mef3io/validate.hpp"
 #include "mef3io/types.hpp"
 #include "mef3io/version.hpp"
@@ -421,7 +423,7 @@ nb::object str_or_none(const std::string& v) {
 }
 
 /// details of a refusal, as on the raised exception and in CheckReport.
-nb::dict refusal_details(const mef3io::AnonymizeRefusal& r) {
+nb::dict refusal_details(const mef3io::CopyRefusal& r) {
   nb::dict d;
   d["channel"] = str_or_none(r.channel);
   d["field"] = str_or_none(r.field);
@@ -458,6 +460,83 @@ nb::dict verify_report_dict(const mef3io::VerifyReport& r) {
   d["times_checked"] = r.times_checked;
   d["text_fields_checked"] = r.text_fields_checked;
   return d;
+}
+
+/// The options every copy operation shares (CopyOptions).
+void set_copy_options(mef3io::CopyOptions& o, bool rename, const std::string& password,
+                      const std::string& output_password_1, const std::string& output_password_2,
+                      std::vector<std::string> channels, std::vector<std::string> exclude_channels) {
+  o.rename = rename;
+  o.password = password;
+  o.output_password_1 = output_password_1;
+  o.output_password_2 = output_password_2;
+  o.channels = std::move(channels);
+  o.exclude_channels = std::move(exclude_channels);
+}
+
+/// A pre-flight result (CopyCheck) as the dict mef3io's CheckReport reads.
+nb::dict check_dict(const mef3io::CopyCheck& c) {
+  nb::list refusals;
+  for (const auto& r : c.refusals) {
+    nb::dict d;
+    d["code"] = r.code;
+    // Messages may name source paths, which need not be UTF-8.
+    d["message"] = nb::steal(PyUnicode_DecodeUTF8(
+        r.message.data(), static_cast<Py_ssize_t>(r.message.size()), "replace"));
+    d["error"] = mef3io::refusal_kind_name(r.kind);
+    d["channel"] = str_or_none(r.channel);
+    d["field"] = str_or_none(r.field);
+    d["inspect_code"] = str_or_none(r.inspect_code);
+    refusals.append(d);
+  }
+  nb::dict out;
+  out["ok"] = c.ok;
+  out["refusals"] = refusals;
+  out["notes"] = c.notes;
+  out["session_name"] = c.session_name;
+  out["channels_kept"] = c.channels_kept;
+  out["channels_excluded"] = c.channels_excluded;
+  return out;
+}
+
+/// The fields every copy report has (CopyReport).
+nb::dict copy_report_dict(const mef3io::CopyReport& r) {
+  nb::dict out;
+  out["destination"] = r.destination;
+  out["session_name"] = r.session_name;
+  out["channels_kept"] = r.channels_kept;
+  out["channels_excluded"] = r.channels_excluded;
+  out["segments"] = r.segments;
+  out["blocks"] = r.blocks;
+  out["blocks_reencrypted"] = r.blocks_reencrypted;
+  out["blocks_decrypted"] = r.blocks_decrypted;
+  out["records"] = r.records;
+  out["seizure_channel_entries_dropped"] = r.seizure_channel_entries_dropped;
+  out["bytes_written"] = r.bytes_written;
+  out["output_encrypted"] = r.output_encrypted;
+  out["not_copied"] = r.not_copied;
+  out["notes"] = r.notes;
+  out["verification"] = verify_report_dict(r.verification);
+  return out;
+}
+
+/// MetadataEdits from the binding's arguments (None = unchanged).
+mef3io::MetadataEdits metadata_edits(std::optional<std::string> subject_name_1,
+                                     std::optional<std::string> subject_name_2,
+                                     std::optional<std::string> subject_id,
+                                     std::optional<std::string> recording_location,
+                                     std::optional<std::string> session_description,
+                                     std::map<std::string, std::string> channel_descriptions,
+                                     std::map<std::string, std::string> reference_descriptions) {
+  mef3io::MetadataEdits m;
+  m.subject_name_1 = std::move(subject_name_1);
+  m.subject_name_2 = std::move(subject_name_2);
+  m.subject_id = std::move(subject_id);
+  m.recording_location = std::move(recording_location);
+  m.session_description = std::move(session_description);
+  m.channel_descriptions = std::move(channel_descriptions);
+  m.reference_descriptions = std::move(reference_descriptions);
+  return m;
 }
 }  // namespace
 
@@ -572,7 +651,7 @@ NB_MODULE(_mef3io, m) {
   // that catches MefError to report a damaged file must not catch it.
   static nb::exception<mef3io::Cancelled> cancelled_error(m, "Cancelled", PyExc_Exception);
 
-  // anonymize refusals (#111): the exception type they always had, plus
+  // copy refusals (anonymize #111, transform #73): the exception type they always had, plus
   // `.code` (stable) and `.details` (channel, field, inspect_code). Registered
   // LAST so it is tried FIRST (nanobind tries translators in reverse order).
   g_refusal_types[static_cast<int>(mef3io::RefusalKind::InvalidArgument)] = PyExc_ValueError;
@@ -584,7 +663,7 @@ NB_MODULE(_mef3io, m) {
   nb::register_exception_translator([](const std::exception_ptr& p, void*) {
     try {
       std::rethrow_exception(p);
-    } catch (const mef3io::AnonymizeError& e) {
+    } catch (const mef3io::CopyError& e) {
       const auto& r = e.refusal();
       PyObject* type = g_refusal_types[static_cast<int>(r.kind)];
       const auto* se = dynamic_cast<const std::exception*>(&e);
@@ -701,36 +780,13 @@ NB_MODULE(_mef3io, m) {
         // The check never calls it; it only needs to know there is one.
         if (has_text_fn)
           o.text_fn = [](const std::string& v, const mef3io::RecordTextField&) { return v; };
-        o.rename = rename;
-        o.password = password;
-        o.output_password_1 = output_password_1;
-        o.output_password_2 = output_password_2;
-        o.channels = std::move(channels);
-        o.exclude_channels = std::move(exclude_channels);
+        set_copy_options(o, rename, password, output_password_1, output_password_2,
+                         std::move(channels), std::move(exclude_channels));
         mef3io::AnonymizeCheck c = hooks.run([&](const mef3io::Control& ctl) {
           return mef3io::check_anonymize(src, dst, o, ctl, shift_us.has_value());
         });
-        nb::list refusals;
-        for (const auto& r : c.refusals) {
-          nb::dict d;
-          d["code"] = r.code;
-          // Messages may name source paths, which need not be UTF-8.
-          d["message"] = nb::steal(PyUnicode_DecodeUTF8(
-              r.message.data(), static_cast<Py_ssize_t>(r.message.size()), "replace"));
-          d["error"] = mef3io::refusal_kind_name(r.kind);
-          d["channel"] = str_or_none(r.channel);
-          d["field"] = str_or_none(r.field);
-          d["inspect_code"] = str_or_none(r.inspect_code);
-          refusals.append(d);
-        }
-        nb::dict out;
-        out["ok"] = c.ok;
-        out["refusals"] = refusals;
-        out["notes"] = c.notes;
-        out["session_name"] = c.session_name;
+        nb::dict out = check_dict(c);
         out["pseudonym"] = c.pseudonym;
-        out["channels_kept"] = c.channels_kept;
-        out["channels_excluded"] = c.channels_excluded;
         return out;
       },
       nb::arg("src"), nb::arg("dst"), nb::arg("shift_us").none() = nb::none(),
@@ -803,18 +859,12 @@ NB_MODULE(_mef3io, m) {
             }
           };
         }
-        o.rename = rename;
-        o.password = password;
-        o.output_password_1 = output_password_1;
-        o.output_password_2 = output_password_2;
-        o.channels = std::move(channels);
-        o.exclude_channels = std::move(exclude_channels);
+        set_copy_options(o, rename, password, output_password_1, output_password_2,
+                         std::move(channels), std::move(exclude_channels));
         mef3io::AnonymizeReport r = hooks.run([&](const mef3io::Control& ctl) {
           return mef3io::anonymize_session(src, dst, o, ctl);
         });
-        nb::dict out;
-        out["destination"] = r.destination;
-        out["session_name"] = r.session_name;
+        nb::dict out = copy_report_dict(r);
         out["pseudonym"] = r.pseudonym;
         out["shift_us"] = r.shift_us;
         out["source_recording_time_offset"] = r.source_recording_time_offset;
@@ -826,21 +876,8 @@ NB_MODULE(_mef3io, m) {
           ctimes[nb::str(t.channel.c_str())] =
               nb::make_tuple(opt_or_none(t.start_us), opt_or_none(t.end_us));
         out["source_channel_times"] = ctimes;
-        out["channels_kept"] = r.channels_kept;
-        out["channels_excluded"] = r.channels_excluded;
-        out["segments"] = r.segments;
-        out["blocks"] = r.blocks;
-        out["blocks_reencrypted"] = r.blocks_reencrypted;
-        out["blocks_decrypted"] = r.blocks_decrypted;
-        out["records"] = r.records;
         out["record_text_fields_changed"] = r.record_text_fields_changed;
         out["record_bodies_cleared"] = r.record_bodies_cleared;
-        out["seizure_channel_entries_dropped"] = r.seizure_channel_entries_dropped;
-        out["bytes_written"] = r.bytes_written;
-        out["output_encrypted"] = r.output_encrypted;
-        out["not_copied"] = r.not_copied;
-        out["notes"] = r.notes;
-        out["verification"] = verify_report_dict(r.verification);
         return out;
       },
       nb::arg("src"), nb::arg("dst"), nb::arg("shift_us"), nb::arg("pseudonym") = "",
@@ -875,6 +912,78 @@ NB_MODULE(_mef3io, m) {
       nb::arg("clear_location") = true, nb::arg("clear_descriptions") = true,
       nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none(),
       "Check a de-identified copy against its source (see mef3io.anonymize.verify).");
+
+  // --- transform (#73): a copy with a choice of channels, passwords, name
+  // and descriptive metadata; times and samples verbatim ---
+#define MEF3IO_TRANSFORM_ARGS                                                                    \
+  const std::string &src, const std::string &dst, bool rename, const std::string &password,     \
+      const std::string &output_password_1, const std::string &output_password_2,                \
+      std::vector<std::string> channels, std::vector<std::string> exclude_channels,              \
+      std::optional<std::string> subject_name_1, std::optional<std::string> subject_name_2,      \
+      std::optional<std::string> subject_id, std::optional<std::string> recording_location,      \
+      std::optional<std::string> session_description,                                            \
+      std::map<std::string, std::string> channel_descriptions,                                   \
+      std::map<std::string, std::string> reference_descriptions, const mef3io::CancelToken *cancel
+#define MEF3IO_TRANSFORM_OPTIONS(o)                                                              \
+  mef3io::TransformOptions o;                                                                    \
+  set_copy_options(o, rename, password, output_password_1, output_password_2,                    \
+                   std::move(channels), std::move(exclude_channels));                            \
+  o.metadata = metadata_edits(std::move(subject_name_1), std::move(subject_name_2),              \
+                              std::move(subject_id), std::move(recording_location),              \
+                              std::move(session_description), std::move(channel_descriptions),   \
+                              std::move(reference_descriptions))
+#define MEF3IO_TRANSFORM_NB_ARGS                                                                 \
+  nb::arg("src"), nb::arg("dst"), nb::arg("rename") = true, nb::arg("password") = "",            \
+      nb::arg("output_password_1") = "", nb::arg("output_password_2") = "",                      \
+      nb::arg("channels") = std::vector<std::string>{},                                          \
+      nb::arg("exclude_channels") = std::vector<std::string>{},                                  \
+      nb::arg("subject_name_1").none() = nb::none(), nb::arg("subject_name_2").none() = nb::none(), \
+      nb::arg("subject_id").none() = nb::none(), nb::arg("recording_location").none() = nb::none(), \
+      nb::arg("session_description").none() = nb::none(),                                        \
+      nb::arg("channel_descriptions") = std::map<std::string, std::string>{},                    \
+      nb::arg("reference_descriptions") = std::map<std::string, std::string>{},                  \
+      nb::arg("cancel").none() = nb::none()
+  m.def(
+      "check_transform",
+      [](MEF3IO_TRANSFORM_ARGS) {
+        PyHooks hooks(cancel, nb::none());
+        MEF3IO_TRANSFORM_OPTIONS(o);
+        const mef3io::CopyCheck c = hooks.run(
+            [&](const mef3io::Control& ctl) { return mef3io::check_transform(src, dst, o, ctl); });
+        return check_dict(c);
+      },
+      MEF3IO_TRANSFORM_NB_ARGS,
+      "Every check transform_session makes before writing; writes nothing "
+      "(see mef3io.transform.check).");
+  m.def(
+      "transform_session",
+      [](MEF3IO_TRANSFORM_ARGS, nb::object progress) {
+        PyHooks hooks(cancel, std::move(progress));
+        MEF3IO_TRANSFORM_OPTIONS(o);
+        const mef3io::TransformReport r = hooks.run([&](const mef3io::Control& ctl) {
+          return mef3io::transform_session(src, dst, o, ctl);
+        });
+        nb::dict out = copy_report_dict(r);
+        out["metadata_fields_changed"] = r.metadata_fields_changed;
+        return out;
+      },
+      MEF3IO_TRANSFORM_NB_ARGS, nb::arg("progress") = nb::none(),
+      "Write a modified copy of a session (see mef3io.transform_session).");
+  m.def(
+      "verify_transform",
+      [](MEF3IO_TRANSFORM_ARGS, nb::object progress) {
+        PyHooks hooks(cancel, std::move(progress));
+        MEF3IO_TRANSFORM_OPTIONS(o);
+        const mef3io::VerifyReport r = hooks.run([&](const mef3io::Control& ctl) {
+          return mef3io::verify_transform(src, dst, o, ctl);
+        });
+        return verify_report_dict(r);
+      },
+      MEF3IO_TRANSFORM_NB_ARGS, nb::arg("progress") = nb::none(),
+      "Check a transformed copy against its source (see mef3io.transform.verify).");
+#undef MEF3IO_TRANSFORM_ARGS
+#undef MEF3IO_TRANSFORM_OPTIONS
+#undef MEF3IO_TRANSFORM_NB_ARGS
 
   // --- inspect (#67): everything about a session without its samples ---
   m.def(
