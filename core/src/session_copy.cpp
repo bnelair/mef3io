@@ -564,14 +564,18 @@ struct Redactor {
       const std::string f = folded(text);
       for (const auto& k : protect)
         for (const auto& sp : occurrences(f, k)) keep.push_back(sp);
+      std::sort(keep.begin(), keep.end());
+      std::size_t ki = 0;  // kept spans before it end before every later match
       std::string out;
       std::size_t copied = 0;  // bytes of `text` already in `out`
       for (std::size_t p = h.find(r.needle); p != std::string::npos;) {
         const std::size_t a = start[p], b = end[p + r.needle.size() - 1];
         bool ok = a >= copied;
         // A match overlapping a kept name (inside it or partly) stays.
-        for (const auto& k : keep)
-          if (a < k.second && k.first < b) ok = false;
+        // Matches only move forward, so spans ending before one are passed.
+        while (ki < keep.size() && keep[ki].second <= a) ++ki;
+        for (std::size_t j = ki; j < keep.size() && keep[j].first < b && ok; ++j)
+          if (a < keep[j].second) ok = false;
         const Span s{p, p + r.needle.size()};
         if (ok && r.mode == Mode::Token) ok = token_run(h, s.first, s.second) == s;
         if (ok && r.mode == Mode::Number) ok = number_run(h, s.first, s.second) == s;
