@@ -14,6 +14,9 @@ sessions written by those tools open in mef3io.
 [![CI](https://img.shields.io/github/actions/workflow/status/bnelair/mef3io/ci.yml?branch=main&label=CI)](https://github.com/bnelair/mef3io/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/github/actions/workflow/status/bnelair/mef3io/docs.yml?branch=main&label=docs)](https://bnelair.github.io/mef3io/)
 [![License](https://img.shields.io/github/license/bnelair/mef3io)](https://github.com/bnelair/mef3io/blob/main/LICENSE)
+[![Coverage: core](https://img.shields.io/endpoint?url=https%3A%2F%2Fgithub.com%2Fbnelair%2Fmef3io%2Freleases%2Flatest%2Fdownload%2Fcoverage-core.json)](https://bnelair.github.io/mef3io/coverage/core/)
+[![Coverage: Python](https://img.shields.io/endpoint?url=https%3A%2F%2Fgithub.com%2Fbnelair%2Fmef3io%2Freleases%2Flatest%2Fdownload%2Fcoverage-python.json)](https://bnelair.github.io/mef3io/coverage/python/)
+[![Downloads](https://img.shields.io/pypi/dm/mef3io)](https://pypi.org/project/mef3io/)
 
 **Documentation: <https://bnelair.github.io/mef3io/>**
 
