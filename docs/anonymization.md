@@ -303,6 +303,7 @@ refusal has a code.
 | `record-locked` | `PasswordError` | check | An annotation the password does not open (listed by `check` after the password refusal). |
 | `record-index-mismatch` | `FormatError` | check | An annotation index does not match its annotation file. |
 | `id-number-time` | `WriteConflictError` | check | An `Epoc` or `Curs` ID number holds a time inside the recording, which the copy would carry. |
+| `text-unremovable` | `WriteConflictError` | check | Text the copy keeps (`text="keep"`, or kept descriptions) holds a removed name in a form the removal does not take out, such as a left-out channel's name glued into a longer word; the copy's check would refuse it. The message names the field, never the text. Drop the text, or clear the descriptions, for this copy. |
 | `block-crc` | `CrcError` | copy | A data block fails its checksum; damaged data is never re-sealed. |
 | `data-damaged` | `FormatError` | copy | A data block runs past its file, or the index and data disagree. |
 | `verify-failed` | `WriteConflictError` | copy | The copy failed its verification (see below); it was removed. |
@@ -419,6 +420,19 @@ They never repeat the value itself. Look at them before sharing the copy.
 With `text="keep"`, names shorter than 4 characters and numbers are replaced
 only as whole words or whole numbers, so "rec" does not change "recorded"
 and the ID "12" does not change "12:30"; those overlaps are notes.
+
+The replacement ignores case and accents the same way the search does, so
+"Muller" in a kept note is taken out for the patient "Müller". What the
+search would still stop is stopped **before** anything is written:
+- an excluded channel "a3" glued into "a3a3" in a kept note is one example;
+- `check` and `anonymize_session` both refuse it with the code
+  `text-unremovable`, naming the field but never the text;
+- the fix is to drop the text, or clear the descriptions, for that copy.
+
+`mef3io.anonymize.redact_text(src, dst, texts, ...)` returns exactly the
+text the copy would keep for the given strings, with the same options. An
+application can use it to compare a copy's text with what mef3io itself would
+leave, without copying the rules. It writes nothing.
 
 For a source that used meflib's recording-time offset, times are also
 compared with the source's *stored* values (the time of day). A negative

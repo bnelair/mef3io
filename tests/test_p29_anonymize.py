@@ -1379,3 +1379,143 @@ def test_cli(tmp_path, rich, capsys):
               "--channel", "ch1", "--exclude-channel", "ch2"])
     assert exc.value.code == 2
     assert not (tmp_path / "C.mefd").exists() and not (tmp_path / "D.mefd").exists()
+
+
+# --------------------------------------------------------------------------- #115 / #114
+
+
+def _kept_text_session(path, subject, channels=("LH1", "LH2"), note="Muller called at night"):
+    with mef3io.Writer(str(path), overwrite=True,
+                       metadata=mef3io.Metadata(subject=subject)) as w:
+        for i, ch in enumerate(channels):
+            w.write(ch, _signal(2560, i), START, FS, precision=3)
+        w.write_annotations([{"type": "Note", "time": START + SECOND, "text": note}])
+    return Path(path)
+
+
+def test_an_unaccented_spelling_of_a_name_is_removed(tmp_path):
+    src = _kept_text_session(tmp_path / "p.mefd", mef3io.Subject(name_1="Jane", name_2="Müller"))
+    rep = _anon(src, tmp_path / "S001.mefd", text="keep")
+    assert rep.verification.ok, rep.verification.summary()
+    [note] = [r for r in _all_records(tmp_path / "S001.mefd") if r["type"] == "Note"]
+    assert "muller" not in note["text"].lower() and "called at night" in note["text"]
+
+
+def test_redact_text_is_exactly_what_the_copy_keeps(tmp_path):
+    texts = ["Muller called at night", "JANE MÜLLER", "Mary_Ann saw MRN12345",
+             "ward LH1, Jane's aura"]
+    src = _kept_text_session(tmp_path / "p.mefd", mef3io.Subject(
+        name_1="Jane", name_2="Müller", id="MRN12345"), note=texts[0])
+    dst = tmp_path / "S001.mefd"
+    got = mef3io.anonymize.redact_text(src, dst, texts)
+    assert not dst.exists()  # nothing written
+    assert got[1].strip() == "" and "12345" not in got[2] and "LH1" in got[3]
+    _anon(src, dst, text="keep")
+    [note] = [r for r in _all_records(dst) if r["type"] == "Note"]
+    assert note["text"] == got[0]
+
+
+def test_redact_text_refuses_what_leaves_it_unknown(tmp_path):
+    with pytest.raises(mef3io.IoError) as exc:
+        mef3io.anonymize.redact_text(tmp_path / "nowhere.mefd", tmp_path / "S.mefd", ["x"])
+    assert exc.value.code == "source-missing"
+    with pytest.raises(TypeError):
+        mef3io.anonymize.redact_text(tmp_path / "nowhere.mefd", tmp_path / "S.mefd", "x")
+
+
+def test_text_the_removal_cannot_take_out_is_refused_up_front(tmp_path):
+    src = _kept_text_session(tmp_path / "p.mefd", mef3io.Subject(), channels=("a3", "LH1"),
+                             note="a3a3 artefact")
+    dst = tmp_path / "S001.mefd"
+    rep = mef3io.anonymize.check(src, dst, SHIFT, exclude_channels=["a3"], text="keep")
+    assert rep.codes == ("text-unremovable",), rep.summary()
+    r = rep.refusals[0]
+    assert r.field == "record text" and "a3a3" not in r.message
+    with pytest.raises(mef3io.WriteConflictError) as exc:
+        _anon(src, dst, exclude_channels=["a3"], text="keep")
+    assert exc.value.code == "text-unremovable"
+    assert not dst.exists() and not Path(str(dst) + ".partial").exists()
+    # Dropping the text makes the same copy possible.
+    assert _anon(src, dst, exclude_channels=["a3"]).verification.ok
+
+
+# --------------------------------------------------------------------------- #123 review round 1
+
+
+@pytest.mark.parametrize("name, note, gone", [
+    ("Zoë", "Zoë1 came", "zoë"),        # 3 letters, 4 bytes: searched anywhere, as before
+    ("Zoë", "Zoëlle came", "zoë"),
+    ("É", "É came", "é"),                # one accented letter is still a name
+])
+def test_short_accented_names_are_removed_as_before(tmp_path, name, note, gone):
+    src = _kept_text_session(tmp_path / "p.mefd", mef3io.Subject(name_1=name), note=note)
+    rep = _anon(src, tmp_path / "S001.mefd", text="keep")
+    assert rep.verification.ok, rep.verification.summary()
+    [kept] = [r for r in _all_records(tmp_path / "S001.mefd") if r["type"] == "Note"]
+    assert gone not in kept["text"].lower() and "came" in kept["text"]
+
+
+def test_an_accent_free_lookalike_of_a_kept_channel_does_not_protect_a_name(tmp_path):
+    src = _kept_text_session(tmp_path / "p.mefd", mef3io.Subject(name_1="Pérez"),
+                             channels=("PER", "LH1"), note="Pérez called")
+    rep = _anon(src, tmp_path / "S001.mefd", text="keep")
+    assert rep.verification.ok, rep.verification.summary()
+    [kept] = [r for r in _all_records(tmp_path / "S001.mefd") if r["type"] == "Note"]
+    assert kept["text"].strip() == "called"
+
+
+def test_redact_text_refuses_a_locked_source(tmp_path):
+    src = _rich_session(tmp_path / "enc.mefd", password=True, unknown=False)
+    for pw in ("", "pw-one"):
+        with pytest.raises(mef3io.PasswordError):
+            mef3io.anonymize.redact_text(src, tmp_path / "S.mefd", ["Jane Roe"], password=pw)
+    assert "Jane" not in mef3io.anonymize.redact_text(src, tmp_path / "S.mefd", ["Jane Roe"],
+                                                     password="pw-two")[0]
+
+
+def test_check_tries_kept_descriptions_with_the_copys_clear_options(tmp_path):
+    src = _kept_text_session(tmp_path / "p.mefd", mef3io.Subject(), channels=("C3", "LH1"),
+                             note="x")
+    _set_description(src, "LH1", "C3C3 bipolar")
+    kw = dict(exclude_channels=["C3"], clear=("subject", "location"))
+    assert mef3io.anonymize.check(src, tmp_path / "S001.mefd", SHIFT, **kw).codes == (
+        "text-unremovable",)
+    assert mef3io.anonymize.check(src, tmp_path / "S001.mefd", SHIFT,
+                                  exclude_channels=["C3"]).ok  # descriptions cleared
+
+
+def test_a_left_out_channels_description_is_not_tried(tmp_path):
+    src = _kept_text_session(tmp_path / "p.mefd", mef3io.Subject(), channels=("C3", "LH1"),
+                             note="x")
+    _set_description(src, "C3", "C3C3 bipolar")  # only on the channel left out
+    rep = _anon(src, tmp_path / "S001.mefd", exclude_channels=["C3"],
+                clear=("subject", "location"))
+    assert rep.verification.ok
+
+
+def test_units_the_removal_cannot_clean_are_refused_up_front(tmp_path):
+    src = tmp_path / "u.mefd"
+    with mef3io.Writer(str(src), overwrite=True, units="mVolt") as w:
+        for i, ch in enumerate(("mV", "LH1")):
+            w.write(ch, _signal(2560, i), START, FS, precision=3)
+    rep = mef3io.anonymize.check(src, tmp_path / "S001.mefd", SHIFT, exclude_channels=["mV"])
+    assert rep.codes == ("text-unremovable",) and rep.refusals[0].field == "units_description"
+
+
+def test_redaction_is_linear_in_the_text(tmp_path):
+    import time
+
+    src = _kept_text_session(tmp_path / "p.mefd", mef3io.Subject(name_1="Jane", name_2="Müller"))
+    text = "Jane met Müller. " * 25_000  # ~430 KB, 50 000 matches
+    t = time.perf_counter()
+    [out] = mef3io.anonymize.redact_text(src, tmp_path / "S.mefd", [text])
+    assert time.perf_counter() - t < 5.0
+    assert "jane" not in out.lower() and "müller" not in out.lower()
+
+
+def _set_description(session, channel, text):
+    for tmet in sorted(Path(session).glob(f"{channel}.timd/*.segd/*.tmet")):
+        raw = bytearray(tmet.read_bytes())
+        raw[S2:S2 + 2048] = _fixed(text, 2048)
+        _reseal(raw, TMET)
+        tmet.write_bytes(bytes(raw))

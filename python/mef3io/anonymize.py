@@ -18,7 +18,7 @@ import datetime as _dt
 import json
 import copy as _copy
 from dataclasses import asdict, dataclass, field, fields, replace
-from typing import Callable, Dict, Iterable, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 from ._cancel import CancelToken, _hooks
 from ._copy import (  # shared with mef3io.transform (#73); re-exported here
@@ -35,6 +35,7 @@ from ._copy import (  # shared with mef3io.transform (#73); re-exported here
     _cli_password,
     _copy_arguments,
     _copy_output_password,
+    _error,
     _fspaths,
     _Refusals,
     _warn_output_passwords,
@@ -49,6 +50,7 @@ __all__ = [
     "VerifyReport",
     "anonymize_session",
     "check",
+    "redact_text",
     "reference_shift",
     "verify",
 ]
@@ -86,6 +88,7 @@ REFUSAL_CODES: Dict[str, Tuple[str, str]] = {
     "pseudonym-contains-identity": ("ValueError", "check"),
     "id-number-time": ("WriteConflictError", "check"),
     "time-overflow": ("FormatError", "defensive"),
+    "text-unremovable": ("WriteConflictError", "check"),
 }
 
 #: ``text(value, info) -> str | None`` for ``text=`` callables. ``info`` is a
@@ -559,8 +562,8 @@ def check(
     refusals = _Refusals(collect=True)
     a = _arguments(refusals, channels=channels, exclude_channels=exclude_channels,
                    output_password=output_password, text=text, clear=clear)
-    for k in ("clear_subject", "clear_location", "clear_descriptions"):
-        del a[k]  # nothing up front depends on them
+    # The clear flags decide what text the copy keeps, which check() tries
+    # (text-unremovable), so they go through as for the copy.
     text_mode = a.pop("text_mode")
     text_fn = a.pop("text_fn")
     raw = _backend().check_anonymize(
@@ -643,6 +646,81 @@ def verify(
         **_hooks(cancel, progress),
     )
     return VerifyReport._from(raw)
+
+
+def redact_text(
+    src,
+    dst,
+    texts: Sequence[str],
+    *,
+    pseudonym: Optional[str] = None,
+    clear: Iterable[str] = _CLEAR_CHOICES,
+    rename: bool = True,
+    password: str = "",
+    channels: Optional[Sequence[str]] = None,
+    exclude_channels: Optional[Sequence[str]] = None,
+    cancel: Optional[CancelToken] = None,
+) -> List[str]:
+    """The text :func:`anonymize_session` would keep, for each of ``texts``.
+
+    Runs the exact removal the copy applies to text it keeps (record text with
+    ``text="keep"``, and the descriptions when ``"descriptions"`` is not in
+    ``clear``), for the same source, destination name and options. An
+    application can then compare a copy's text with what mef3io itself would
+    have left, without copying mef3io's rules. It writes nothing, reads only
+    metadata (what :func:`check` reads), and never logs or stores its inputs.
+
+    It is not a safety check on the result: :func:`check` refuses text the
+    removal cannot take out (code ``text-unremovable``), and :func:`verify`
+    checks every copy.
+
+    Parameters
+    ----------
+    src, dst
+        As for :func:`anonymize_session`; ``dst`` gives the copy's name and
+        need not exist (an existing one is fine: nothing is written).
+    texts : sequence of str
+        The texts to redact. Text that is not valid UTF-8 can be passed with
+        ``errors="surrogateescape"``; it comes back the same way.
+    pseudonym, clear, rename, password, channels, exclude_channels
+        As for :func:`anonymize_session`.
+
+    Returns
+    -------
+    list of str
+        One redacted text per input, in order.
+
+    Raises
+    ------
+    What the copy itself would refuse, raised as :func:`anonymize_session`
+    raises it (its ``.code``): a source that cannot be read or is locked
+    (``source-missing``, ``password-required``, ``password-level1-only``),
+    an unknown channel, a destination or pseudonym holding the patient's
+    identity, and so on. Only refusals that do not decide the redaction are
+    ignored: the destination already existing (``dst-exists``,
+    ``partial-exists``) and text the removal cannot take out
+    (``text-unremovable``, which is what :func:`check` reports).
+    """
+    if isinstance(texts, str):
+        raise _error("TypeError", "argument-type", "texts must be a sequence of str",
+                     field="texts")
+    items = list(texts)
+    if not all(isinstance(t, str) for t in items):
+        raise _error("TypeError", "argument-type", "texts must be str", field="texts")
+    a = _copy_arguments(_Refusals(collect=False), channels=channels,
+                        exclude_channels=exclude_channels, output_password=None)
+    raw = _backend().redact_text(
+        *_fspaths(src, dst),
+        [t.encode("utf-8", "surrogateescape") for t in items],
+        pseudonym=pseudonym or "",
+        rename=bool(rename),
+        password=password or "",
+        channels=a["channels"],
+        exclude_channels=a["exclude_channels"],
+        **_clear_flags(clear),
+        **_hooks(cancel, None),
+    )
+    return [bytes(b).decode("utf-8", "surrogateescape") for b in raw]
 
 
 def reference_shift(

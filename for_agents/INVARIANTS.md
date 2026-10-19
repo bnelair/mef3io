@@ -187,6 +187,12 @@ answered. Rules:
 
 - The name scan is a dumb case-insensitive substring search; refusing a copy
   over a false alarm is acceptable, publishing a leak is not.
+- The scan and the rewrite share ONE thing only: the folded space they match
+  in (`scan_folded`: case and Latin accents). Otherwise the rewrite leaves
+  "Muller" that the scan finds for "Müller" and the copy is refused for
+  nothing (#115). Their matching rules stay separate. What the rewrite still
+  cannot remove is refused before writing (`text-unremovable`), never
+  discovered after a long copy.
 - Rewrite every text field whole, and zero every region another writer may
   fill; never "leave it if unchanged".
 - Every new field the copy carries needs a planted-leak test in

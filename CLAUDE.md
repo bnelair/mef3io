@@ -125,8 +125,29 @@ whole plus each 3+-digit run as a whole number ("EEG-0042" -> "0042"; its
 letters are a prefix). Engine: dropping a segment's FIRST block requires
 `SegmentCopySpec::start_sample` (invalid_argument otherwise; #103 must pass the
 channel-wide count). Case fold covers ASCII + Latin-1 +
-Latin Ext-A and is LENGTH-PRESERVING (the redactor replaces at folded
-offsets); the scanner additionally strips those diacritics (fail closed). Identity checks run before excusing the copy's own name ("S0012"
+Latin Ext-A; `scan_folded` additionally strips those diacritics. BOTH the
+scanner and the Redactor match in that one space (#115: the removal must
+cover what the check looks for — "Muller" for "Müller"); `scan_folded`'s
+start/end maps take a match back to whole original characters, which the
+Redactor replaces, in ONE pass per rule (linear; re-folding per match was
+quadratic: 400 KB of notes took minutes). Its match MODE is still decided by
+the value's case-folded BYTE length (`folded(v).size() < 4` = whole words),
+so "Zoë" (4 bytes) is searched anywhere, as before #115 — deciding it on the
+accent-free length let "Zoë1" through while verify only NOTED it. Kept
+channel names protect only where the text spells them exactly but for case
+(`protect` = folded, located in the original text): "PER" does not shield
+"Pérez". The MATCHING rules stay separate from the scanner's (independence).
+Text the removal still cannot take out (a left-out channel "a3" in "a3a3") is
+refused in the PRE-FLIGHT (`text-unremovable`): it runs copy_redactor +
+build_scanner on every kept field — record text with text="keep"
+(`record_text_fields`), the kept channels' units (always rewritten), and,
+with descriptions kept, the kept channels' OWN descriptions read from their
+.tmets (never a left-out channel's) — so check() reports it and nothing is
+written; check() passes the clear flags for that. A text callback cannot be
+predicted (verify still checks). `redact_text()` (C++ + Python, #114) = that
+same copy_redactor on caller texts, and refuses whatever the copy would
+(locked source, unknown channel, identity in a name) except dst-exists /
+partial-exists / text-unremovable: no rule mirror in applications. Identity checks run before excusing the copy's own name ("S0012"
 vs copy "S001"). Epoc/Curs id_number: absolute window only (the rto window
 reaches small ints). Redactor: <4 chars = whole tokens, numeric = whole
 numbers, never inside kept channel names. Segment number = `.tmet` UH @48,
