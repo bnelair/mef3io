@@ -598,7 +598,12 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   went opposite ways, leaving one unclaimed slot = a NaN at the first block
   boundary of every window starting exactly half a sample off the grid
   (500/250/1000/200 Hz with ms event times). `tests/test_p37_grid_ties.py`
-  scans every integer-us start offset across a sample period.
+  scans every integer-us start offset across a sample period. KNOWN, left
+  as is: when BOTH t0 and t1 are exact ties, `grid_count` can be one more
+  than the samples in [t0, t1), so the last slot is NaN (2 of ~154k swept
+  windows). Using the slot rule for the length would change ordinary
+  on-grid lengths (500 Hz, 1 ms window: 1 -> 0) and the C ABI's
+  `mef3io_reader_n_samples` contract.
 - **Block ranges can OVERLAP on the sample grid.** Only writers that put every
   block start exactly on the grid (mef3io's own) tile the output cleanly;
   foreign recorders carry acquisition jitter + per-block us rounding, so a

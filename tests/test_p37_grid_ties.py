@@ -60,3 +60,31 @@ def test_the_reported_case(ramps):
         # Half a sample before the second block starts: no NaN at y[0].
         y = r.read("ch", START + 9_999_000, START + 29_999_000)
         assert y[0] == 5000 and not np.isnan(y).any()
+
+
+def test_ties_before_the_start_and_around_a_gap(tmp_path):
+    """A tie start before the channel, inside a gap and just before data
+    resumes: NaN exactly where there is no data, a unit ramp elsewhere."""
+    fs, period = 500.0, 2000
+    path = tmp_path / "gap.mefd"
+    with mef3io.Writer(str(path), overwrite=True, block_length=1000) as w:
+        w.write("ch", np.arange(10_000, dtype=float), START, fs=fs, precision=0)
+        # 4 s gap, then 10 000 more samples continuing the ramp's values
+        w.write("ch", np.arange(10_000, 20_000, dtype=float), START + 24_000_000, fs=fs,
+                precision=0)
+    with mef3io.Reader(str(path)) as r:
+        for t0 in (START - 1_001_000, START + 19_001_000, START + 23_999_000):
+            y = r.read("ch", t0, t0 + 10_000_000)
+            have = ~np.isnan(y)
+            assert have.any()
+            # NaN only as one run (before the start, or the gap), data a unit ramp
+            edges = np.flatnonzero(np.diff(have.astype(int)))
+            assert len(edges) <= 2, t0
+            assert (np.diff(y[have]) == 1).all() or len(edges) == 2, t0
+            for run in np.split(y[have], np.flatnonzero(np.diff(y[have]) != 1) + 1):
+                assert (np.diff(run) == 1).all()
+            # every sample placed at its own time: index -> sample time
+            for i in np.flatnonzero(have)[:: max(1, have.sum() // 50)]:
+                v = int(y[i])
+                t_sample = START + (v * period if v < 10_000 else 24_000_000 + (v - 10_000) * period)
+                assert abs((t0 + i * period) - t_sample) <= period // 2, (t0, i, v)
