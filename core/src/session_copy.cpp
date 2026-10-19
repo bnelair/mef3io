@@ -914,6 +914,29 @@ void record_text_fields(
       fn("channel name", seiz_entry_name(r.body, c), true);
 }
 
+/// A Seiz body without the entries of `excluded_keys` (channel_key()s); the
+/// body as stored when it names none of them. `dropped` counts what went.
+/// The copy (kept_body) and a merge's verification both take it from here.
+std::vector<ui1> seiz_without(const RawRecord& r, const std::set<std::string>& excluded_keys,
+                              si8* dropped = nullptr) {
+  if (r.type != "Seiz" || excluded_keys.empty() || !layout_of(r)) return r.body;
+  const std::size_t n = seiz_entry_count(r.body);
+  std::vector<ui1> out(r.body.begin(), r.body.begin() + SEIZ_FIXED);
+  si4 kept = 0;
+  for (std::size_t c = 0; c < n; ++c) {
+    if (excluded_keys.count(channel_key(seiz_entry_name(r.body, c)))) {
+      if (dropped) ++*dropped;
+      continue;
+    }
+    const auto first = r.body.begin() + static_cast<std::ptrdiff_t>(SEIZ_FIXED + c * SEIZ_CHANNEL);
+    out.insert(out.end(), first, first + SEIZ_CHANNEL);
+    ++kept;
+  }
+  if (kept == static_cast<si4>(n)) return r.body;  // nothing left out: as stored
+  write<si4>(out, SEIZ_NCH, kept);
+  return out;
+}
+
 /// One metadata text field a transform sets in a segment's sections.
 struct EditedField {
   std::size_t section;  // S2 or S3 (offset of the section in the .tmet)
@@ -1366,6 +1389,13 @@ class Copier {
   /// per channel and session across all sources, a new one per piece.
   void set_level_uuid(std::optional<Uuid> u) { level_override_ = u; }
 
+  /// A merged record file: its universal header spans [first, last] (user
+  /// uUTC, stored against `rto`), the records it holds.
+  void set_record_span(si8 first, si8 last, si8 rto) {
+    seg_span_ = std::make_pair(first, last);
+    seg_rto_ = rto;
+  }
+
   detail::CopyStats copy_segment_data(const detail::LayoutSegment& seg, const fs::path& dir,
                                       const std::string& channel, const std::string& stem,
                                       std::optional<si8> start_sample) {
@@ -1650,22 +1680,7 @@ class Copier {
   /// A transform keeps a record body as stored, except the Seiz entries of
   /// left-out channels.
   std::vector<ui1> kept_body(const RawRecord& r) {
-    if (r.type != "Seiz" || excluded_.empty() || !layout_of(r)) return r.body;
-    const std::size_t n = seiz_entry_count(r.body);
-    std::vector<ui1> out(r.body.begin(), r.body.begin() + SEIZ_FIXED);
-    si4 kept = 0;
-    for (std::size_t c = 0; c < n; ++c) {
-      const auto first = r.body.begin() + static_cast<std::ptrdiff_t>(SEIZ_FIXED + c * SEIZ_CHANNEL);
-      if (excluded_.count(channel_key(seiz_entry_name(r.body, c)))) {
-        ++rep_.seizure_channel_entries_dropped;
-        continue;
-      }
-      out.insert(out.end(), first, first + SEIZ_CHANNEL);
-      ++kept;
-    }
-    if (kept == static_cast<si4>(n)) return r.body;  // nothing left out: as stored
-    write<si4>(out, SEIZ_NCH, kept);
-    return out;
+    return seiz_without(r, excluded_, &rep_.seizure_channel_entries_dropped);
   }
 
   std::vector<ui1> rewrite_body(const RawRecord& r, RecordTextField tf, const std::string& what) {
@@ -2082,6 +2097,9 @@ class Verifier {
 
   /// Checking a merge (#103): level UUIDs are the merge's own.
   void set_merge(bool on) { merge_ = on; }
+
+  /// The sampling rate of the source segment check_tmet last read.
+  sf8 segment_fs() const { return seg_fs_; }
 
   void set_scanner(Scanner s) { scan_ = std::move(s); }
 
@@ -4084,9 +4102,9 @@ struct MergePlan {
   si8 segments_split = 0;
 };
 
-/// A segment's recorded data as runs [start, end) (user uUTC), from its
-/// index: consecutive blocks join when the next starts no later than half a
-/// sample after the previous ends.
+/// A segment's blocks as [start, end) (user uUTC) from its INDEX copy of
+/// each block's time and count (the header is the authority, #11/#13; a
+/// disagreement shows as a refused verification, never a silent result).
 struct IndexBlock {
   si8 start = 0, end = 0;
 };
@@ -4273,8 +4291,23 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
             const sf8 fs = fmt::TimeSeriesMetadataSection2::parse(
                                std::span<const ui1>(t.bytes).subspan(S2, S2_BYTES))
                                .sampling_frequency;
-            segs.push_back({k, &seg, t.rto, fs, to_user_time(read<si8>(t.bytes, UH_START), t.rto),
-                            to_user_time(read<si8>(t.bytes, UH_END), t.rto), {}, false});
+            // The span from the header, widened to the index's first and
+            // last block: a foreign writer's header time may be unset or
+            // stale, and two segments are compared only where spans meet.
+            si8 a = std::numeric_limits<si8>::max(), b = std::numeric_limits<si8>::min();
+            const si8 ua = read<si8>(t.bytes, UH_START), ub = read<si8>(t.bytes, UH_END);
+            if (!is_sentinel(ua, false)) a = to_user_time(ua, t.rto);
+            if (!is_sentinel(ub, false)) b = to_user_time(ub, t.rto);
+            const std::uint64_t isize = src.file_size(seg.tidx);
+            if (isize >= UH + ENTRY) {
+              const std::size_t n = static_cast<std::size_t>((isize - UH) / ENTRY);
+              const auto e0 = src.read_range(seg.tidx, UH, ENTRY);
+              const auto el = src.read_range(seg.tidx, UH + (n - 1) * ENTRY, ENTRY);
+              a = std::min(a, to_user_time(read<si8>(e0, 8), t.rto));
+              b = std::max(b, sample_time(to_user_time(read<si8>(el, 8), t.rto),
+                                          read<ui4>(el, 24), fs));
+            }
+            segs.push_back({k, &seg, t.rto, fs, a, b, {}, false});
           } catch (...) {
             // the source's own pre-flight already reported it
           }
@@ -4324,6 +4357,11 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
       Seg& sg = segs[i];
       const std::size_t n = static_cast<std::size_t>(
           (m.sources[sg.source]->pf.source->file_size(sg.seg->tidx) - UH) / ENTRY);
+      if (n == 0) {  // a segment without blocks has nothing to merge
+        m.notes.push_back(m.sources[sg.source]->path + ": " + sg.seg->dir() +
+                          " holds no blocks; it is left out");
+        continue;
+      }
       if (foreign[i].empty()) {
         pieces.push_back({sg.source, sg.seg, {0, n}, sg.start, 0, 0});
         continue;
@@ -4332,9 +4370,13 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
       for (const auto& b : foreign[i]) starts.push_back(b.start);
       std::sort(starts.begin(), starts.end());
       const auto& bl = blocks_of(sg);
+      // The same half-sample tolerance as the overlap check: foreign data
+      // starting up to half a sample before a block's end lies in the gap
+      // after it (recorders round times to whole microseconds).
+      const si8 tol = static_cast<si8>(std::llround(0.5e6 / std::max(sg.fs, 1e-9)));
       std::size_t first = 0, cut = 0;
       for (std::size_t b = 1; b < bl.size(); ++b) {
-        while (cut < starts.size() && starts[cut] < bl[b - 1].end) ++cut;
+        while (cut < starts.size() && starts[cut] < bl[b - 1].end - tol) ++cut;
         if (cut < starts.size() && starts[cut] < bl[b].start) {  // foreign data in this gap
           pieces.push_back({sg.source, sg.seg, {first, b}, bl[first].start, 0, 0});
           first = b;
@@ -4413,7 +4455,7 @@ VerifyReport verify_merge_impl(MergePlan& m, const std::string& dst_path, const 
                                        ", the merge planned " + std::to_string(pieces.size()));
       continue;
     }
-    si8 prev_end = std::numeric_limits<si8>::min();
+    std::optional<si8> prev_end;  // the previous segment's end, once there is one
     for (std::size_t k = 0; k < pieces.size(); ++k) {
       const auto& pc = pieces[k];
       const auto& ds = dc.segments[k];
@@ -4435,10 +4477,63 @@ VerifyReport verify_merge_impl(MergePlan& m, const std::string& dst_path, const 
       const auto uh = dst.read_range(ds.tmet, 0, UH);
       const si8 rto = m.sources[pc.source]->pf.plan->rto;
       const si8 a = to_user_time(read<si8>(uh, UH_START), rto), b = to_user_time(read<si8>(uh, UH_END), rto);
-      if (a < prev_end) problem(ds.dir(), "segment", "overlaps the segment before it in time");
-      prev_end = std::max(prev_end, b);
+      // The overlap check's half-sample tolerance (recorder rounding).
+      const si8 tol = static_cast<si8>(std::llround(0.5e6 / std::max(vv.segment_fs(), 1e-9)));
+      if (prev_end && a < *prev_end - tol)
+        problem(ds.dir(), "segment", "overlaps the segment before it in time");
+      prev_end = std::max(prev_end.value_or(b), b);
       ++rep.segments;
     }
+  }
+
+  // The plan itself, checked rather than trusted: the pieces of each source
+  // segment tile its blocks exactly once.
+  {
+    std::map<const detail::LayoutSegment*, std::vector<std::pair<std::size_t, std::size_t>>> tiles;
+    std::map<const detail::LayoutSegment*, std::size_t> owner;
+    for (const auto& [ch, pieces] : m.pieces)
+      for (const auto& pc : pieces) {
+        tiles[pc.segment].push_back(pc.entries);
+        owner[pc.segment] = pc.source;
+      }
+    for (auto& [seg, t] : tiles) {
+      std::sort(t.begin(), t.end());
+      const std::size_t n = static_cast<std::size_t>(
+          (m.sources[owner[seg]]->pf.source->file_size(seg->tidx) - UH) / ENTRY);
+      std::size_t next = 0;
+      for (const auto& [a, b] : t) {
+        if (a != next || b <= a) problem(seg->dir(), "merge plan", "its pieces do not tile its blocks");
+        next = b;
+      }
+      if (next != n) problem(seg->dir(), "merge plan", "its pieces do not cover all its blocks");
+    }
+  }
+  // Level UUIDs: one per segment of the result (all its files), one per
+  // channel, one for the session, all different.
+  {
+    std::set<Uuid> seen;
+    auto level_of = [&](const std::string& rel) {
+      return uuid_at(dst.read_range(rel, 0, UH), UH_LEVEL_UUID);
+    };
+    auto one_level = [&](const std::vector<std::string>& files, const std::string& where) {
+      std::optional<Uuid> u;
+      for (const auto& f : files) {
+        if (!dst.exists(f)) continue;
+        const Uuid x = level_of(f);
+        if (u && x != *u) problem(where, "level_UUID", "differs between files of one level");
+        u = x;
+      }
+      if (u && (all_zero(*u) || !seen.insert(*u).second))
+        problem(where, "level_UUID", "is unset or shared with another level");
+    };
+    for (const auto& dc : dlayout.channels)
+      for (const auto& ds : dc.segments)
+        one_level({ds.tmet, ds.tidx, ds.tdat, ds.rdat(), ridx_of(ds.rdat())}, ds.dir());
+    for (const auto& ch : dch) {
+      const std::string r = ch + ".timd/" + ch + ".rdat";
+      one_level({r, ridx_of(r)}, ch + ".timd");
+    }
+    one_level({m.new_name + ".rdat", m.new_name + ".ridx"}, m.new_name + ".rdat");
   }
 
   // Channel- and session-level annotations: the sources', merged by time.
@@ -4451,31 +4546,21 @@ VerifyReport verify_merge_impl(MergePlan& m, const std::string& dst_path, const 
       problem(drel, "records", std::string("cannot be read: ") + e.what());
       return;
     }
-    struct Want { si8 t; const RawRecord* r; std::vector<ui1> body; };
+    struct Want { si8 t; const RawRecord* r; std::vector<ui1> body; si8 idx_time; };
     std::vector<RawRecordFile> files;
     files.reserve(from.size());
     std::vector<Want> want;
     for (const auto& [k, rel] : from) {
       files.push_back(read_record_file(*m.sources[k]->pf.source, rel, m.sources[k]->options.password));
+      const RawRecordFile& f = files.back();
       const si8 rto = m.sources[k]->pf.plan->rto;
-      for (const auto& r : files.back().records) {
-        std::vector<ui1> body = r.body;
-        if (r.type == "Seiz" && layout_of(r)) {  // left-out channels' entries go
-          std::vector<ui1> out(r.body.begin(), r.body.begin() + SEIZ_FIXED);
-          si4 n = 0;
-          for (std::size_t c = 0; c < seiz_entry_count(r.body); ++c) {
-            if (excluded_keys.count(channel_key(seiz_entry_name(r.body, c)))) continue;
-            const auto e = r.body.begin() + static_cast<std::ptrdiff_t>(SEIZ_FIXED + c * SEIZ_CHANNEL);
-            out.insert(out.end(), e, e + SEIZ_CHANNEL);
-            ++n;
-          }
-          if (static_cast<std::size_t>(n) != seiz_entry_count(r.body)) {
-            write<si4>(out, SEIZ_NCH, n);
-            body = std::move(out);
-          }
-        }
+      for (std::size_t i = 0; i < f.records.size(); ++i) {
+        const RawRecord& r = f.records[i];
+        si8 idx_time = r.time;  // the source index's time for it, else its own
+        for (const auto& e : f.ridx)
+          if (read<si8>(e, 8) == f.record_offsets[i]) idx_time = read<si8>(e, 16);
         want.push_back({is_sentinel(r.time, false) ? r.time : to_user_time(r.time, rto), &r,
-                        std::move(body)});
+                        seiz_without(r, excluded_keys), idx_time});
       }
     }
     std::stable_sort(want.begin(), want.end(), [](const Want& a, const Want& b) { return a.t < b.t; });
@@ -4497,7 +4582,47 @@ VerifyReport verify_merge_impl(MergePlan& m, const std::string& dst_path, const 
                         std::all_of(b.body.begin() + static_cast<std::ptrdiff_t>(wb.size()),
                                     b.body.end(), [](ui1 c) { return c == PAD_BYTE; });
       if (!same) problem(loc, "record", "is not the sources' record at this place in time order");
+      if (b.enc != record_encryption(a.enc, !vos[0].output_password.empty(), false))
+        problem(loc, "record header encryption", "does not match the output passwords");
+      // Its index entry: found by offset, the record's type, version and
+      // encryption, and the source index's time.
+      const std::array<ui1, RIDX>* e = nullptr;
+      for (const auto& x : d.ridx)
+        if (read<si8>(x, 8) == d.record_offsets[i]) e = &x;
+      if (!e) {
+        problem(loc, "record index", "has no entry pointing at the record");
+      } else if (!std::equal(b.type_bytes.begin(), b.type_bytes.end(), e->begin()) ||
+                 (*e)[5] != b.vmaj || (*e)[6] != b.vmin || static_cast<si1>((*e)[7]) != b.enc ||
+                 read<si8>(*e, 16) != want[i].idx_time) {
+        problem(loc, "record index entry", "is not the source's for this record");
+      }
     }
+    // The file's headers: the first source's, as a copy's (times aside),
+    // counting what it holds and spanning its records.
+    const RawRecordFile& first = files.front();
+    Verifier& vv = *v[from.front().first];
+    vv.set_cut_segment(true);
+    vv.check_uh(first.uh, d.uh, drel);
+    if (d.has_ridx) vv.check_uh(first.has_ridx ? first.ridx_uh : first.uh, d.ridx_uh,
+                                ridx_of(drel), false, !first.has_ridx);
+    else problem(drel, "record index", "is missing");
+    vv.set_cut_segment(false);
+    si8 largest = 0;
+    for (const auto& r : d.records) largest = std::max(largest, static_cast<si8>(RHDR + r.body.size()));
+    vv.check_counts(d.uh, static_cast<si8>(d.records.size()), largest, drel);
+    if (d.has_ridx)
+      vv.check_counts(d.ridx_uh, static_cast<si8>(d.records.size()), static_cast<si8>(RIDX),
+                      ridx_of(drel));
+    std::optional<si8> lo, hi;
+    for (const auto& w : want)
+      if (!is_sentinel(w.t, false)) {
+        lo = std::min(lo.value_or(w.t), w.t);
+        hi = std::max(hi.value_or(w.t), w.t);
+      }
+    const si8 rto = m.sources[from.front().first]->pf.plan->rto;
+    if (lo && (to_user_time(read<si8>(d.uh, UH_START), rto) != *lo ||
+               to_user_time(read<si8>(d.uh, UH_END), rto) != *hi))
+      problem(drel, "universal header times", "do not span the records the file holds");
   };
   for (const auto& ch : dch) {
     std::vector<std::pair<std::size_t, std::string>> from;
@@ -4602,6 +4727,14 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
                          return a.sort_time < b.sort_time;
                        });
       cps[first]->set_level_uuid(level_uuid);
+      // The file's header spans the records it now holds.
+      std::optional<si8> lo, hi;
+      for (const auto& r : all)
+        if (!is_sentinel(r.sort_time, false)) {
+          lo = std::min(lo.value_or(r.sort_time), r.sort_time);
+          hi = std::max(hi.value_or(r.sort_time), r.sort_time);
+        }
+      if (lo) cps[first]->set_record_span(*lo, *hi, m.sources[first]->pf.plan->rto);
       cps[first]->write_records(all, *headers, "merged " + out_rdat.filename().string(), out_rdat,
                                 ch);
       cps[first]->end_segment();

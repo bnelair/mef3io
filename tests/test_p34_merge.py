@@ -158,8 +158,6 @@ def test_encrypted_and_tar_sources(tmp_path):
     ("patient", "merge-identity-differs"),
     ("one", "merge-too-few"),
     ("passwords", "merge-passwords-count"),
-    ("window", "merge-time-range"),
-    ("rename", "merge-rename"),
 ])
 def test_refusals_before_anything_is_written(tmp_path, case, code):
     a = _session(tmp_path / "a.mefd", [(0, 60)])
@@ -170,11 +168,6 @@ def test_refusals_before_anything_is_written(tmp_path, case, code):
     }.get(case, lambda: _session(tmp_path / "b.mefd", [(100, 10)]))()
     sources = [a] if case == "one" else [a, other]
     kw = {"passwords": ["x"]} if case == "passwords" else {}
-    if case in ("window", "rename"):  # options the Python API does not take: the core refuses
-        o = dict(time_range=(START, START + SECOND)) if case == "window" else {}
-        raw = m.check_merge([str(s) for s in sources], str(tmp_path / "m.mefd"))
-        assert raw["ok"]  # without them the merge is fine
-        return
     rep = mef3io.merge.check(sources, tmp_path / "m.mefd", **kw)
     assert code in rep.codes, rep.summary()
     with pytest.raises((ValueError, RuntimeError)) as exc:
@@ -248,3 +241,66 @@ def test_every_code_only_a_merge_raises_is_documented():
         r"^\| `([a-z0-9-]+)` \| `(\w+)` \| (\w+) \|", DOCS.read_text(encoding="utf-8"),
         re.MULTILINE)}
     assert rows == {k: v for k, v in REFUSAL_CODES.items() if k not in TRANSFORM}
+
+
+# --------------------------------------------------------------------------- review round 1
+
+
+def _one(path, t_us, n, rate=FS, channels=("A",)):
+    with mef3io.Writer(str(path), overwrite=True) as w:
+        for ch in channels:
+            w.write(ch, np.arange(n) * 1.0, START + t_us, rate, precision=0)
+    return Path(path)
+
+
+@pytest.mark.parametrize("rate", [499.7, 1024.0])
+def test_a_recording_starting_a_microsecond_early_merges(tmp_path, rate):
+    """B starts at A's end truncated to whole microseconds (recorder rounding):
+    within half a sample, so accepted by the check AND by the copy."""
+    n = int(rate * 10)
+    a = _one(tmp_path / "a.mefd", 0, n, rate)
+    end = int(n * 1e6 / rate)  # truncated
+    b = _one(tmp_path / "b.mefd", end - 1, n, rate)
+    assert mef3io.merge.check([a, b], tmp_path / "m.mefd").ok
+    rep = _quiet(mef3io.merge_sessions, [a, b], tmp_path / "m.mefd")
+    assert rep.verification.ok, rep.summary()
+
+
+def test_data_starting_just_inside_a_blocks_end_splits_there(tmp_path):
+    # A: one segment, 0-60 s and 120-180 s; B starts 0.4 sample before A's
+    # 60-s block end, inside A's gap: A is split, nothing refused late.
+    a = _session(tmp_path / "a.mefd", [(0, 60), (120, 60)], channels=("A",))
+    b = _one(tmp_path / "b.mefd", 60 * SECOND - int(0.4e6 / FS), int(FS * 30))
+    assert mef3io.merge.check([a, b], tmp_path / "m.mefd").ok
+    rep = _quiet(mef3io.merge_sessions, [a, b], tmp_path / "m.mefd")
+    assert rep.verification.ok and rep.segments_split == 1, rep.summary()
+
+
+def _merged_with_notes(tmp_path):
+    a = _session(tmp_path / "a.mefd", [(0, 20)], channels=("A",), notes=[(5, "a")])
+    b = _session(tmp_path / "b.mefd", [(40, 20)], channels=("A",), notes=[(45, "b")])
+    _quiet(mef3io.merge_sessions, [a, b], tmp_path / "m.mefd")
+    return a, b, tmp_path / "m.mefd"
+
+
+def test_merged_record_files_span_their_records(tmp_path):
+    a, b, mm = _merged_with_notes(tmp_path)
+    uh = (mm / "m.rdat").read_bytes()[:UH]
+    start, end = struct.unpack_from("<qq", uh, 16)
+    assert (-start, -end) == (START + 5 * SECOND, START + 45 * SECOND)
+
+
+@pytest.mark.parametrize("rel, offset, fmt, value, field", [
+    ("m.ridx", UH + 16, "<q", -(START + 50 * SECOND), "record index entry"),  # a record's time
+    ("m.rdat", 24, "<q", -(START + 99 * SECOND), "universal header times"),
+    ("A.timd/A-000000.segd/A-000000.tidx", 820, "16s", b"\x01" * 16, "level_UUID"),
+])
+def test_verify_catches_tampered_merge_headers(tmp_path, rel, offset, fmt, value, field):
+    a, b, mm = _merged_with_notes(tmp_path)
+    f = mm / rel
+    raw = bytearray(f.read_bytes())
+    struct.pack_into(fmt, raw, offset, value)
+    _reseal(raw)
+    f.write_bytes(bytes(raw))
+    v = mef3io.merge.verify([a, b], mm)
+    assert not v.ok and any(field in p.field for p in v.problems), v.summary()

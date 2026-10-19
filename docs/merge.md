@@ -29,15 +29,18 @@ python -m mef3io merge stay.mefd stay_part1.mefd stay_part2.mefd
 
 ## When a merge is refused
 
-The checks run **before anything is written**. `mef3io.merge.check(...)`
-lists every refusal without writing:
+These checks run **before anything is written**. `mef3io.merge.check(...)`
+lists every refusal without writing. What only the copy itself can find (a
+damaged data block, or a block whose index and header disagree about its
+time) stops the merge later and leaves nothing behind:
 
 - **Overlapping data.** Two recordings hold samples of the same channel at
   the same moment. The check compares the **recorded data** (from each
   segment's block index), not just where each recording starts and ends.
   Recordings that take turns merge fine: A records and stops, B records and
-  stops, then A continues. Small overlaps between a recording's own blocks
-  (recorder timing jitter) never count. The message names the channel, the
+  stops, then A continues. Overlaps up to half a sample are recorder
+  rounding (times are stored in whole microseconds) and are allowed, and a
+  recording's own slightly overlapping blocks never count. The message names the channel, the
   two recordings and the time.
 - **Different sampling rates** for the same channel: a channel keeps one rate.
 - **Different recording-time offsets** (meflib's date masking): times are
@@ -77,6 +80,10 @@ and only published when the check passes:
 
 A recording that already fails the validator should be
 [repaired](validation.md) first.
+
+Splitting into many segments costs some extra time at the end: every file of
+the result is flushed to disk before it is published, and each segment has a
+few files.
 
 `mef3io.merge.verify(sources, dst, ...)` re-checks a merged session later.
 

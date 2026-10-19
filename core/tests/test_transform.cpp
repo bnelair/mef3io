@@ -251,3 +251,18 @@ TEST_CASE("merge_sessions: recordings that take turns merge; overlapping data is
   CHECK(std::any_of(chk.refusals.begin(), chk.refusals.end(),
                     [](const CopyRefusal& r) { return r.code == "merge-overlap"; }));
 }
+
+TEST_CASE("check_merge: options a merge does not take are refused with their codes") {
+  const auto dir = fresh("mef3io_merge_options");
+  const std::string a = write_session(dir);
+  const auto other = fresh("mef3io_merge_options_b");
+  const std::string b = write_session(other);
+  MergeOptions o;
+  o.time_range = std::make_pair(START, START + 1'000'000);
+  o.rename = false;
+  const CopyCheck c = check_merge({a, b}, (dir / "m.mefd").string(), o);
+  std::vector<std::string> codes;
+  for (const auto& r : c.refusals) codes.push_back(r.code);
+  CHECK(std::count(codes.begin(), codes.end(), "merge-time-range") == 1);
+  CHECK(std::count(codes.begin(), codes.end(), "merge-rename") == 1);
+}

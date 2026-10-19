@@ -139,10 +139,24 @@ spans, segment number). Level UUIDs are the merge's own
 `set_merge` relaxes only the 1:1 level check. Annotations: session/channel
 level merged by time (`prepare_records` + `write_records`, the split of
 copy_records), segment level with their piece (time bounds lo/hi).
-`verify_merge_impl`: each segment against its piece in lockstep
-(`check_segment_data_cut(..., piece)`), merged annotations against the
-sources' sorted by time, segments never overlapping, the validator with NO
-excusal (renumbered: repair sources first). time_range is refused with a
+ONE half-sample tolerance everywhere (recorders round times to whole µs):
+the overlap check, the split (foreign data starting within half a sample
+before a block's end lies in the gap after it) and verify's
+segments-in-order check — they disagreed once and accepted merges failed
+late. Segment spans = UH times widened to the first/last index entry (a
+foreign UH may be unset or stale); segments without blocks are left out
+(noted). Merged record files' UH start/end = min/max record time
+(`set_record_span`).
+`verify_merge_impl` (does NOT trust the plan): the pieces of each source
+segment must tile [0, n) exactly; one level UUID per result segment (all its
+files), per channel and for the session, all distinct; each segment against
+its piece in lockstep (`check_segment_data_cut(..., piece)`); merged
+annotations against the sources' sorted by time, PLUS their headers
+(check_uh as a copy of the first source's, counts, span) and every .ridx
+entry (by offset: type/version/encryption, the source index's time);
+segments never overlapping (with the tolerance); the validator with NO
+excusal (renumbered: repair sources first). The Seiz entry filter is one
+function (`seiz_without`) for the copy and this check. time_range is refused with a
 merge for now (`merge-time-range`); anonymize after merging.
 Transform rules, test-pinned (`tests/test_p33_transform.py`,
 `core/tests/test_transform.cpp`): every stored time VERBATIM (Copier::time
