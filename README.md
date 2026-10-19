@@ -148,6 +148,11 @@ pages such as
   stored, and the copy is checked against its source before it is saved.
   Python and C++; see
   [Modified copies](https://bnelair.github.io/mef3io/transform/).
+- **Recordings merged into one.** `mef3io.merge_sessions` joins two or
+  more recordings: parts of one stay, recordings that take turns, or
+  different amplifiers. Overlapping data is refused before anything is
+  written, and the result is checked against every source. See
+  [Merging recordings](https://bnelair.github.io/mef3io/merge/).
 - **One file instead of a folder.** A session can be packed into a single
   `.mefd.tar` and read in place, without unpacking.
 

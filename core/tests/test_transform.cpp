@@ -216,3 +216,38 @@ TEST_CASE("transform_session time_range: an exact cut holds exactly the window")
   wrong.time_range = std::make_pair(t0, t1 + 1'000'000);
   CHECK_FALSE(verify_transform(src, dst, wrong).ok);
 }
+
+TEST_CASE("merge_sessions: recordings that take turns merge; overlapping data is refused") {
+  const auto dir = fresh("mef3io_merge_core");
+  auto write = [&](const std::string& name, std::vector<std::pair<si8, std::size_t>> chunks) {
+    const std::string path = (dir / name).string();
+    SessionWriter w(path, true);
+    for (const auto& [t, n] : chunks) {
+      std::vector<si4> x(n);
+      for (std::size_t i = 0; i < n; ++i) x[i] = static_cast<si4>(i % 1000);
+      w.write_int32("a", x, 1.0, START + t, 1000.0, {}, false);  // one segment, gaps between
+    }
+    return path;
+  };
+  // A: 0-10 s and 30-40 s in ONE segment; B: 15-25 s, inside A's gap.
+  const std::string a = write("a.mefd", {{0, 10'000}, {30'000'000, 10'000}});
+  const std::string b = write("b.mefd", {{15'000'000, 10'000}});
+  MergeOptions o;
+  const MergeReport rep = merge_sessions({a, b}, (dir / "m.mefd").string(), o);
+  REQUIRE(rep.verification.ok);
+  CHECK(rep.segments == 3);
+  CHECK(rep.segments_split == 1);
+  Session m((dir / "m.mefd").string());
+  const auto segs = m.segment_map("a");
+  REQUIRE(segs.size() == 3);
+  CHECK(segs[0].start_time == START);
+  CHECK(segs[1].start_time == START + 15'000'000);
+  CHECK(segs[2].start_time == START + 30'000'000);
+  CHECK(verify_merge({a, b}, (dir / "m.mefd").string(), o).ok);
+
+  const std::string c = write("c.mefd", {{5'000'000, 10'000}});  // 5-15 s: overlaps A
+  const CopyCheck chk = check_merge({a, c}, (dir / "n.mefd").string(), o);
+  CHECK_FALSE(chk.ok);
+  CHECK(std::any_of(chk.refusals.begin(), chk.refusals.end(),
+                    [](const CopyRefusal& r) { return r.code == "merge-overlap"; }));
+}

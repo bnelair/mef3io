@@ -71,6 +71,7 @@ nav:
       - Long recordings: long_recordings.md
       - De-identification & the recording-time offset: anonymization.md
       - Modified copies (channels, passwords, details): transform.md
+      - Merging recordings: merge.md
   - API reference:
       - Python: api/python.md
       - MATLAB: api/matlab.md

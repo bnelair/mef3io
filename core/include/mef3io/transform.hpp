@@ -210,6 +210,51 @@ struct TransformReport : CopyReport {
   si8 metadata_fields_changed = 0;
 };
 
+/// Merging several recordings into one (#103). The transform's rules apply
+/// to every source (times and samples verbatim; channels, passwords and
+/// metadata edits as asked), `rename` is implied (the result is named after
+/// `dst`), and a cut is not combined with it yet (`time_range` must be unset).
+struct MergeOptions : TransformOptions {
+  /// The password that opens each source, in the order of `sources`. Empty =
+  /// CopyOptions::password for every source.
+  std::vector<std::string> passwords;
+};
+
+struct MergeReport : TransformReport {
+  std::vector<std::string> sources;  ///< as given
+  /// Source segments split in two or more pieces because another source's
+  /// data lies in one of their gaps (each piece is its own segment).
+  si8 segments_split = 0;
+};
+
+/// Merge `sources` (`.mefd` directories or `.mefd.tar` archives, at least
+/// two) into ONE new session `dst`. Refused before anything is written
+/// (check_merge lists everything):
+///   * `merge-overlap`: two sources hold samples of the same channel at the
+///     same moment (compared on the RECORDED data, from the indexes, so
+///     recordings that take turns merge; a source's own overlapping blocks
+///     never count);
+///   * `merge-rate-differs`: a channel has different sampling rates;
+///   * `merge-rto-differs`: the sources use different recording-time
+///     offsets (times are copied verbatim);
+///   * `merge-identity-differs`: the sources' subject fields differ and
+///     `metadata` does not set them for the result;
+/// plus every refusal a transform of each source would meet. Each source
+/// segment becomes one segment of the result, split at gaps where another
+/// source's data lies so that the result's segments never overlap; they are
+/// ordered by time and renumbered per channel. Annotations are merged by
+/// time. The result is verified against the sources before it is published.
+MergeReport merge_sessions(const std::vector<std::string>& sources, const std::string& dst,
+                           const MergeOptions& options, const Control& ctl = {});
+
+/// Every check merge_sessions makes before it writes, without writing.
+CopyCheck check_merge(const std::vector<std::string>& sources, const std::string& dst,
+                      const MergeOptions& options, const Control& ctl = {});
+
+/// Check a merged session against its sources. Reads all; writes nothing.
+VerifyReport verify_merge(const std::vector<std::string>& sources, const std::string& dst,
+                          const MergeOptions& options, const Control& ctl = {});
+
 /// Write a modified copy of `src` (a `.mefd` directory or `.mefd.tar`) to
 /// `dst` (a new `.mefd` directory). See the top of this file.
 ///
