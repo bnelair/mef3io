@@ -413,3 +413,131 @@ def test_the_cli_points_per_channel_fields_to_their_options(tmp_path, rich, caps
     with pytest.raises(SystemExit):
         main(["transform", str(src), str(tmp_path / "x.mefd"), "--set", "channel_descriptions=x"])
     assert "--channel-description CHANNEL=TEXT" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- cut (#103)
+
+SIX = 6 * SECOND
+
+
+def _two_segment_session(path, password=False):
+    """ch1: two segments (0-60 s, 120-150 s); ch2: one (0-60 s); notes in
+    and out of a window, and a Seiz that straddles its start."""
+    kw = dict(password1="pw-one", password2="pw-two") if password else {}
+    with mef3io.Writer(str(path), overwrite=True, **kw) as w:
+        for i, ch in enumerate(("ch1", "ch2")):
+            w.write(ch, np.cumsum(np.random.default_rng(i).normal(size=256 * 60)).round(3),
+                    START, 256.0, precision=3)
+        w.write("ch1", np.arange(256 * 30) * 1.0, START + 120 * SECOND, 256.0, precision=3,
+                new_segment=True)
+        w.write_annotations([{"type": "Note", "time": START + 5 * SECOND, "text": "inside"},
+                             {"type": "Note", "time": START + 50 * SECOND, "text": "outside"}])
+    return Path(path)
+
+
+def _same_over(src, dst, t0, t1, pw_src="", pw_dst=""):
+    a, b = _read_all(src, pw_src), _read_all(dst, pw_dst)
+    with mef3io.Reader(str(src), pw_src) as r, mef3io.Reader(str(dst), pw_dst) as c:
+        for ch in c.channels:
+            x, y = r.read(ch, t0, t1), c.read(ch, t0, t1)
+            np.testing.assert_array_equal(x, y)
+            assert c.info(ch)["start_time"] >= t0 and c.info(ch)["end_time"] <= t1
+    return a, b
+
+
+def test_an_exact_cut_holds_exactly_the_window(tmp_path):
+    src = _two_segment_session(tmp_path / "p.mefd")
+    t0, t1 = START + 3_123_456, START + 20 * SECOND
+    rep = _transform(src, tmp_path / "cut.mefd", time_range=(t0, t1))
+    assert rep.verification.ok, rep.summary()
+    assert rep.blocks_trimmed > 0 and rep.records_outside_window == 1
+    _same_over(src, tmp_path / "cut.mefd", t0, t1)
+    with mef3io.Reader(str(tmp_path / "cut.mefd")) as c:
+        assert [s["segment"] for s in c.segments("ch1")] == [0]
+        assert [r["text"] for r in c.records(level="all") if r["type"] == "Note"] == ["inside"]
+    assert mef3io.validate_session(str(tmp_path / "cut.mefd")).ok
+
+
+def test_a_cut_across_segments_renumbers_them(tmp_path):
+    src = _two_segment_session(tmp_path / "p.mefd")
+    t0, t1 = START + 50 * SECOND, START + 130 * SECOND
+    rep = _transform(src, tmp_path / "two.mefd", time_range=(t0, t1))
+    assert rep.verification.ok, rep.summary()
+    _same_over(src, tmp_path / "two.mefd", t0, t1)
+    with mef3io.Reader(str(tmp_path / "two.mefd")) as c:
+        segs = c.segments("ch1")
+        assert [s["segment"] for s in segs] == [0, 1]
+        assert segs[1]["start_sample"] == segs[0]["number_of_samples"]
+    assert mef3io.validate_session(str(tmp_path / "two.mefd")).ok
+
+
+def test_a_whole_block_cut_decodes_nothing(tmp_path):
+    src = _two_segment_session(tmp_path / "p.mefd")
+    t0, t1 = START + 3_123_456, START + 20 * SECOND
+    rep = _transform(src, tmp_path / "whole.mefd", time_range=(t0, t1), exact=False)
+    assert rep.verification.ok and rep.blocks_trimmed == 0
+    with mef3io.Reader(str(src)) as r, mef3io.Reader(str(tmp_path / "whole.mefd")) as c:
+        np.testing.assert_array_equal(r.read("ch2", t0, t1), c.read("ch2", t0, t1))
+        assert c.info("ch2")["start_time"] <= t0  # a whole first block
+
+
+def test_an_anonymized_cut(tmp_path):
+    src = _two_segment_session(tmp_path / "p.mefd")
+    t0, t1 = START + 3_123_456, START + 20 * SECOND
+    shift = -7000 * 86_400 * SECOND
+    rep = mef3io.anonymize_session(src, tmp_path / "S001.mefd", shift, time_range=(t0, t1))
+    assert rep.verification.ok and rep.blocks_trimmed > 0
+    with mef3io.Reader(str(src)) as r, mef3io.Reader(str(tmp_path / "S001.mefd")) as c:
+        for ch in c.channels:
+            np.testing.assert_array_equal(r.read(ch, t0, t1), c.read(ch, t0 + shift, t1 + shift))
+    assert mef3io.anonymize.verify(src, tmp_path / "S001.mefd", shift, time_range=(t0, t1)).ok
+
+
+def test_a_cut_of_an_encrypted_source_rekeys_the_trimmed_blocks(tmp_path):
+    src = GOLDEN / "meflib_red_encrypted.mefd"
+    with mef3io.Reader(str(src), "pass2") as r:
+        info = r.info(r.channels[0])
+        t0 = info["start_time"] + (info["end_time"] - info["start_time"]) // 3
+        t1 = info["start_time"] + 2 * (info["end_time"] - info["start_time"]) // 3
+    for name, out in (("re", ("a1", "a2")), ("de", None)):
+        rep = _transform(src, tmp_path / f"{name}.mefd", password="pass2", output_password=out,
+                         time_range=(t0, t1))
+        assert rep.verification.ok, rep.summary()
+        _same_over(src, tmp_path / f"{name}.mefd", t0, t1, "pass2", "a2" if out else "")
+
+
+def test_a_tampered_trimmed_block_fails_verification(tmp_path):
+    src = _two_segment_session(tmp_path / "p.mefd")
+    t0, t1 = START + 3_123_456, START + 20 * SECOND
+    copy = tmp_path / "cut.mefd"
+    _transform(src, copy, time_range=(t0, t1))
+    tdat = copy / "ch2.timd" / "ch2-000000.segd" / "ch2-000000.tdat"
+    raw = bytearray(tdat.read_bytes())
+    raw[UH + 304 + 20] ^= 0x01  # the first (trimmed) block's payload
+    nb = struct.unpack_from("<I", raw, UH + 36)[0]
+    struct.pack_into("<I", raw, UH, m.crc32(bytes(raw[UH + 4:UH + nb])))
+    _reseal(raw)
+    tdat.write_bytes(bytes(raw))
+    v = mef3io.transform.verify(src, copy, time_range=(t0, t1))
+    assert not v.ok and any(p.field in ("samples", "block") for p in v.problems), v.summary()
+
+
+def test_cut_refusals(tmp_path, rich):
+    src, _, _ = rich
+    rep = mef3io.transform.check(src, tmp_path / "x.mefd", time_range=(START + SECOND, START))
+    assert rep.codes == ("time-range-invalid",)
+    rep = mef3io.transform.check(src, tmp_path / "x.mefd", time_range=(1, 2))
+    assert rep.codes == ("time-range-empty",)
+    with pytest.raises(TypeError) as exc:
+        mef3io.transform.check(src, tmp_path / "x.mefd", time_range=(1.5, 2))
+    assert exc.value.code == "argument-type"
+
+
+def test_the_cli_cuts(tmp_path, capsys):
+    from mef3io.__main__ import main
+
+    src = _two_segment_session(tmp_path / "p.mefd")
+    t0, t1 = START + 3_123_456, START + 20 * SECOND
+    assert main(["transform", str(src), str(tmp_path / "c.mefd"), "--start", str(t0), "--end",
+                 str(t1), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["blocks_trimmed"] > 0

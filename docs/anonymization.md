@@ -289,6 +289,8 @@ refusal has a code.
 | `inspect-blocker` | `WriteConflictError` | defensive | A blocking `inspect` warning this table does not know yet (`details["inspect_code"]` names it). |
 | `channel-unknown` | `ValueError` | check | A named channel is not in the session (`details["channel"]`). |
 | `no-channels-left` | `ValueError` | check | The selection leaves no channel. |
+| `time-range-invalid` | `ValueError` | check | `time_range` does not start before it ends. |
+| `time-range-empty` | `ValueError` | check | No channel of the copy has samples inside `time_range`. |
 | `shift-below-floor` | `ValueError` | check | The shift is smaller than the recording's span plus one day. |
 | `shift-not-positive` | `ValueError` | check | The shift moves a time to 1970 or before (a block index, data header or block time: only in the copy pass). |
 | `rename-name-mismatch` | `ValueError` | check | `rename=False` and the destination is not named after the source. |

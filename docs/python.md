@@ -523,7 +523,10 @@ rep = mef3io.transform_session(
 print(rep.summary())
 ```
 
-The details are in [Modified copies](transform.md). From a terminal:
+`time_range=(start_us, end_us)` keeps only that window (a **cut**: edge
+blocks trimmed exactly, segments renumbered); it works the same way with
+`anonymize_session`. The details are in [Modified copies](transform.md). From
+a terminal:
 `python -m mef3io transform SRC DST --exclude-channel ECG --set subject_id=S-017`.
 Python and C++ only, not MATLAB.
 

@@ -91,6 +91,9 @@ struct VerifyOptions {
   bool clear_subject = true;
   bool clear_location = true;
   bool clear_descriptions = true;
+  /// The cut the copy was made with (CopyOptions::time_range / exact).
+  std::optional<std::pair<si8, si8>> time_range;
+  bool exact = true;
 };
 
 /// The names anonymize used before the copy types were shared (#73).

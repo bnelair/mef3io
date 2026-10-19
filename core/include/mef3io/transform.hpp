@@ -58,6 +58,17 @@ struct CopyOptions {
   /// (folder, session-level record files, every universal header). false:
   /// the source's name is kept, and the stem of `dst` must equal it.
   bool rename = true;
+  /// A cut (#103): keep only the samples whose time lies in [first, second),
+  /// in uUTC as the SOURCE stores them (before any shift). Unset = all.
+  /// Segments outside it are not read; blocks outside it are left out;
+  /// annotations are kept when their time lies in it (a Seiz or Epoc
+  /// record also when its span overlaps it).
+  std::optional<std::pair<si8, si8>> time_range;
+  /// With time_range: true (default) = the two edge blocks per channel and
+  /// segment are decoded, trimmed to the window and re-encoded, so the copy
+  /// holds exactly the window; false = whole edge blocks are kept and
+  /// nothing is decoded (a block's worth of extra samples at each edge).
+  bool exact = true;
 };
 
 /// Edits to the descriptive metadata of a transformed copy. Unset = copied
@@ -176,6 +187,8 @@ struct CopyReport {
   si8 blocks_decrypted = 0;    ///< source-encrypted blocks written plain
   si8 records = 0;
   si8 seizure_channel_entries_dropped = 0;
+  si8 blocks_trimmed = 0;          ///< cut: edge blocks re-encoded to the window
+  si8 records_outside_window = 0;  ///< cut: annotations left out
   std::uint64_t bytes_written = 0;
   bool output_encrypted = false;
   /// Files in the source that are not part of the MEF layout and were not

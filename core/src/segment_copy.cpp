@@ -171,6 +171,20 @@ CopyStats copy_segment(const SegmentCopySpec& spec) {
           continue;
         }
         kept_any = true;
+        if (!cb.replacement.empty()) {
+          // A re-encoded block: written instead of the source's (its samples
+          // no longer follow from the source's numbering).
+          if (!spec.start_sample)
+            throw std::invalid_argument(
+                "copy_segment: a replacement block needs SegmentCopySpec::start_sample (its "
+                "samples renumber the segment)");
+          if (cb.replacement.size() < RED ||
+              byteio::read<ui4>(cb.replacement, 36) != cb.replacement.size())
+            throw std::logic_error("copy_segment: a replacement block must be a whole RED block");
+          block = std::span<ui1>(cb.replacement);
+          byteio::write<ui4>(cb.entry, 28, static_cast<ui4>(block.size()));
+          renumber = true;
+        }
         if (dropped_since_kept) {
           // The samples between this block and the previous kept one are gone.
           const ui1 flag = fmt::RedBlockHeader::DISCONTINUITY_MASK;
@@ -195,7 +209,8 @@ CopyStats copy_segment(const SegmentCopySpec& spec) {
             (byteio::read<ui1>(block, 4) & fmt::RedBlockHeader::DISCONTINUITY_MASK) != 0;
         st.blocks += 1;
         st.samples += samples;
-        st.max_block_bytes = std::max(st.max_block_bytes, nb);
+        const ui4 written = static_cast<ui4>(block.size());
+        st.max_block_bytes = std::max(st.max_block_bytes, written);
         st.max_block_samples = std::max(st.max_block_samples, samples);
         st.max_difference_bytes = std::max(st.max_difference_bytes, diff);
         if (discont) {
@@ -204,7 +219,7 @@ CopyStats copy_segment(const SegmentCopySpec& spec) {
         }
         run_blocks += 1;
         run_samples += samples;
-        run_bytes += nb;
+        run_bytes += written;
         st.max_contiguous_blocks = std::max(st.max_contiguous_blocks, run_blocks);
         st.max_contiguous_samples = std::max(st.max_contiguous_samples, run_samples);
         st.max_contiguous_block_bytes = std::max(st.max_contiguous_block_bytes, run_bytes);

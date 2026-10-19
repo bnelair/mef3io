@@ -53,6 +53,9 @@ COPY_REFUSAL_CODES: Dict[str, Tuple[str, str]] = {
     # channel selection
     "channel-unknown": ("ValueError", "check"),
     "no-channels-left": ("ValueError", "check"),
+    # a cut (time_range)
+    "time-range-invalid": ("ValueError", "check"),
+    "time-range-empty": ("ValueError", "check"),
     # the copy's names
     "rename-name-mismatch": ("ValueError", "check"),
     "name-too-long": ("ValueError", "check"),
@@ -321,7 +324,22 @@ def _output_passwords(output_password, refusals: _Refusals) -> Tuple[str, str]:
     return pw  # type: ignore[return-value]
 
 
-def _copy_arguments(refusals: _Refusals, *, channels, exclude_channels, output_password) -> dict:
+def _time_range(time_range):
+    """``time_range=(start_us, end_us)`` as the extension takes it, or None."""
+    if time_range is None:
+        return None
+    try:
+        t0, t1 = time_range
+    except (TypeError, ValueError):
+        t0 = t1 = None
+    if not all(isinstance(t, int) and not isinstance(t, bool) for t in (t0, t1)):
+        raise _error("TypeError", "argument-type",
+                     "time_range must be a pair of integers (start_us, end_us)", field="time_range")
+    return (int(t0), int(t1))
+
+
+def _copy_arguments(refusals: _Refusals, *, channels, exclude_channels, output_password,
+                    time_range=None, exact=True) -> dict:
     """The checks every copy makes in Python, in the order the copy makes
     them, and the extension's keyword arguments for them."""
     if channels is not None and exclude_channels is not None:
@@ -334,7 +352,7 @@ def _copy_arguments(refusals: _Refusals, *, channels, exclude_channels, output_p
                      "the selection leaves no channel to copy (channels=[])", field="channels")
     out1, out2 = _output_passwords(output_password, refusals)
     return dict(output_password_1=out1, output_password_2=out2, channels=names,
-                exclude_channels=excluded)
+                exclude_channels=excluded, time_range=_time_range(time_range), exact=bool(exact))
 
 
 def _warn_output_passwords(a: dict) -> None:
@@ -395,6 +413,12 @@ def _add_copy_cli_arguments(p) -> None:
                      help="copy only this channel (repeatable)")
     sel.add_argument("--exclude-channel", action="append", default=None,
                      help="leave this channel out (repeatable)")
+    p.add_argument("--start", type=int, metavar="UUTC",
+                   help="cut: keep only samples from this time (microseconds since 1970, UTC)")
+    p.add_argument("--end", type=int, metavar="UUTC",
+                   help="cut: keep only samples before this time")
+    p.add_argument("--whole-blocks", action="store_true",
+                   help="cut: keep whole blocks at the edges instead of trimming them exactly")
     p.add_argument("--json", action="store_true", help="print the report as JSON")
 
 
@@ -410,7 +434,11 @@ def _cli_password(parser, args) -> str:
 
 
 def _cli_copy_kwargs(args, password: str) -> dict:
+    if (args.start is None) != (args.end is None):
+        raise SystemExit("error: --start and --end go together")
     return dict(
+        time_range=None if args.start is None else (args.start, args.end),
+        exact=not args.whole_blocks,
         rename=not args.no_rename,
         password=password,
         output_password=tuple(args.output_password) if args.output_password else None,

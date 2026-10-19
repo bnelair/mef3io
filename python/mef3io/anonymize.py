@@ -36,6 +36,7 @@ from ._copy import (  # shared with mef3io.transform (#73); re-exported here
     _copy_arguments,
     _copy_output_password,
     _error,
+    _time_range,
     _fspaths,
     _Refusals,
     _warn_output_passwords,
@@ -127,6 +128,9 @@ class AnonymizeReport:
         they may hold text or dates that cannot be found.
     seizure_channel_entries_dropped : int
         Per-channel entries of ``Seiz`` records that named an excluded channel.
+    blocks_trimmed, records_outside_window : int
+        A cut (``time_range``): edge blocks re-encoded to the window, and
+        annotations left out.
     bytes_written : int
     output_encrypted : bool
     not_copied : tuple of str
@@ -172,6 +176,8 @@ class AnonymizeReport:
     record_text_fields_changed: int
     record_bodies_cleared: int
     seizure_channel_entries_dropped: int
+    blocks_trimmed: int
+    records_outside_window: int
     bytes_written: int
     output_encrypted: bool
     not_copied: Tuple[str, ...]
@@ -286,11 +292,11 @@ def _clear_flags(clear: Iterable[str], refusals: Optional[_Refusals] = None) -> 
 
 
 def _arguments(refusals: _Refusals, *, channels, exclude_channels, output_password, text,
-               clear) -> dict:
+               clear, time_range=None, exact=True) -> dict:
     """The checks made in Python, in the order anonymize_session makes them,
     and the extension's keyword arguments."""
     copy = _copy_arguments(refusals, channels=channels, exclude_channels=exclude_channels,
-                           output_password=output_password)
+                           output_password=output_password, time_range=time_range, exact=exact)
     if callable(text):
         text_mode, text_fn = "callback", text
     elif isinstance(text, str) and text in ("drop", "keep"):
@@ -315,6 +321,8 @@ def anonymize_session(
     output_password: Optional[Sequence[str]] = None,
     channels: Optional[Sequence[str]] = None,
     exclude_channels: Optional[Sequence[str]] = None,
+    time_range: Optional[Tuple[int, int]] = None,
+    exact: bool = True,
     progress: Optional[Callable[[int, int], object]] = None,
     cancel: Optional[CancelToken] = None,
 ) -> AnonymizeReport:
@@ -415,6 +423,14 @@ def anonymize_session(
         Leave these channels out. Nothing of an excluded channel stays in the
         copy: no folder, no records, no entry in a ``Seiz`` record, and its
         name is redacted from kept text.
+    time_range : (int, int), optional
+        Cut: keep only the samples whose time lies in ``[start, end)``, uUTC
+        as the SOURCE holds it (before the shift); annotations are kept when
+        their time lies in it (a ``Seiz`` or ``Epoc`` record also when its
+        span overlaps it). See :func:`mef3io.transform_session`.
+    exact : bool, optional
+        With ``time_range``: ``True`` (default) trims the edge blocks to the
+        window exactly; ``False`` keeps them whole (nothing is decoded).
     progress : callable, optional
         ``progress(done, total)`` in bytes (the copy and its verification).
     cancel : CancelToken, optional
@@ -463,7 +479,7 @@ def anonymize_session(
     """
     a = _arguments(_Refusals(collect=False), channels=channels,
                    exclude_channels=exclude_channels, output_password=output_password,
-                   text=text, clear=clear)
+                   text=text, clear=clear, time_range=time_range, exact=exact)
     _warn_output_passwords(a)
     text_mode = a.pop("text_mode")
     raw = _backend().anonymize_session(
@@ -492,6 +508,8 @@ def check(
     output_password: Optional[Sequence[str]] = None,
     channels: Optional[Sequence[str]] = None,
     exclude_channels: Optional[Sequence[str]] = None,
+    time_range: Optional[Tuple[int, int]] = None,
+    exact: bool = True,
     cancel: Optional[CancelToken] = None,
 ) -> CheckReport:
     """Every check :func:`anonymize_session` makes before it writes, without writing.
@@ -537,7 +555,7 @@ def check(
     shift_us : int, optional
         The shift to check. ``None`` skips the shift checks (for a shift not
         chosen yet).
-    pseudonym, clear, text, rename, password, output_password, channels, exclude_channels
+    pseudonym, clear, text, rename, password, output_password, channels, exclude_channels, time_range, exact
         As for :func:`anonymize_session`. A ``text`` callable is never called.
     cancel : CancelToken, optional
         Stop the check from another thread; :class:`Cancelled` is raised.
@@ -561,7 +579,8 @@ def check(
     """
     refusals = _Refusals(collect=True)
     a = _arguments(refusals, channels=channels, exclude_channels=exclude_channels,
-                   output_password=output_password, text=text, clear=clear)
+                   output_password=output_password, text=text, clear=clear,
+                   time_range=time_range, exact=exact)
     # The clear flags decide what text the copy keeps, which check() tries
     # (text-unremovable), so they go through as for the copy.
     text_mode = a.pop("text_mode")
@@ -588,6 +607,8 @@ def verify(
     password: str = "",
     output_password: Union[None, str, Sequence[str]] = None,
     clear: Iterable[str] = _CLEAR_CHOICES,
+    time_range: Optional[Tuple[int, int]] = None,
+    exact: bool = True,
     progress: Optional[Callable[[int, int], object]] = None,
     cancel: Optional[CancelToken] = None,
 ) -> VerifyReport:
@@ -630,6 +651,8 @@ def verify(
         Opens an encrypted copy: its level-2 password, or the pair.
     clear : iterable of str, optional
         What the copy was asked to clear (as for :func:`anonymize_session`).
+    time_range, exact : optional
+        The cut the copy was made with (as for :func:`anonymize_session`).
     progress, cancel : optional
         As for :func:`anonymize_session`.
 
@@ -643,6 +666,8 @@ def verify(
         password=password or "",
         output_password=_copy_output_password(output_password),
         **_clear_flags(clear),
+        time_range=_time_range(time_range),
+        exact=bool(exact),
         **_hooks(cancel, progress),
     )
     return VerifyReport._from(raw)

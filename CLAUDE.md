@@ -74,6 +74,27 @@ transform_session are ONE driver (`run_copy`: preflight -> Copier pass into
 `Copier` and ONE `Verifier`, steered by `Rules` (`anon` set = anonymize;
 unset = transform with `edits`). NEVER fork a second copy path for a new
 operation (cut/merge #103, re-encode #121): add rules or options to this one.
+CUT (#103, `CopyOptions::time_range` + `exact`, both operations): decided per
+block from the RED HEADER's time and count; sample i of a block at t lies at
+t + i*1e6/fs (`sample_time`), a block keeps [i0, i1) (`window_slice`); fully
+outside = dropped (engine flags the next kept block), straddling + exact =
+`trim_block` decodes, slices and RE-ENCODES with red::encode_block (source's
+encryption level with the copy's keys, plain without passwords; time in the
+source's stored convention via `stored_like`, shifted when anonymizing) and
+hands it to the engine as `CopyBlock::replacement` (the engine sets offset,
+block_bytes, CRC; requires `start_sample`). A segment's data is now copied
+BEFORE its .tmet (`copy_segment`), so section 2's derived fields
+(serialize_derived_fields, never re-serialize) and every file's UH start/end
+(`seg_span_`) and segment number (UH @48, `seg_number_`) describe what was
+kept; segments outside the window are not read, ones that keep no block are
+removed, the rest renumbered from 0 with channel-wide start_sample. Records:
+`record_in_window` (time in window; Seiz/Epoc also by span; no time = kept).
+Verify: copy segments matched to source segments by TIME (each source
+segment's own rto); `check_segment_data_cut`: a kept-whole block must be
+byte-identical (check_block, discontinuity bit free), a trimmed one decodes
+to exactly the source's samples from i0; plus INDEPENDENT checks: every
+sample inside the window, total samples == what the source index has in it.
+Cut UH times / derived s2 fields are left to the validator (verify runs it).
 Transform rules, test-pinned (`tests/test_p33_transform.py`,
 `core/tests/test_transform.cpp`): every stored time VERBATIM (Copier::time
 returns it unchanged; no Shifter, so no rto refusals: rto, DST, GMT kept);

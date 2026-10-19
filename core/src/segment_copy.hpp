@@ -16,9 +16,10 @@
 //     counts, the maxima, the contiguous-run trio), so a caller that drops
 //     blocks can write declarations that match.
 //
-// anonymize_session (#70) keeps every block and only patches its time. A
-// later cut/merge (#103) selects blocks through the same hook — which is why
-// the engine is generic rather than anonymize-specific.
+// anonymize_session (#70) keeps every block and only patches its time. A cut
+// (#103) selects blocks through the same hook and replaces its two edge
+// blocks with re-encoded ones (CopyBlock::replacement) — which is why the
+// engine is generic rather than anonymize-specific.
 //
 // Integrity first: a block whose stored CRC does not verify, whose index
 // entry disagrees with its header about its size, or that lies outside the
@@ -31,6 +32,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 #include "mef3io/control.hpp"
 #include "mef3io/headers.hpp"
@@ -44,6 +46,12 @@ struct CopyBlock {
   std::size_t index = 0;          ///< position in the SOURCE index
   std::span<ui1> entry;           ///< the source index entry, 56 bytes, editable
   std::span<ui1> block;           ///< header + payload, block_bytes long, editable
+  /// Set by a hook that re-encodes the block (a cut's edge block, #103): a
+  /// whole RED block (header + payload, 8-byte aligned) written INSTEAD of
+  /// `block`. The hook fills `entry` to describe it (start time, samples,
+  /// min/max, flags); the engine sets its file offset and block_bytes and
+  /// re-seals its CRC, as for any block.
+  std::vector<ui1> replacement;
 };
 
 /// What the engine wrote, in section-2 terms.

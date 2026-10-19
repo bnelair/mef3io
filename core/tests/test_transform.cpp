@@ -184,3 +184,35 @@ TEST_CASE("transform_session refuses bad edits up front, and leaves nothing behi
   CHECK_FALSE(fsys::exists(dst));
   CHECK_FALSE(fsys::exists(dst + ".partial"));
 }
+
+TEST_CASE("transform_session time_range: an exact cut holds exactly the window") {
+  const auto dir = fresh("mef3io_transform_cut");
+  const std::string src = write_session(dir);  // 60 s at 1 kHz per channel
+  const std::string dst = (dir / "cut.mefd").string();
+  TransformOptions o;
+  const si8 t0 = START + 1'234'567, t1 = START + 20'000'000;
+  o.time_range = std::make_pair(t0, t1);
+  const TransformReport rep = transform_session(src, dst, o);
+  REQUIRE(rep.verification.ok);
+  CHECK(rep.blocks_trimmed > 0);
+  Session s1(src), s2(dst);
+  for (const auto& ch : s2.channels()) {
+    const auto& info = s2.channel_info(ch);
+    CHECK(info.start_time >= t0);
+    CHECK(info.end_time <= t1);
+    const auto r1 = s1.read_runs(ch), r2 = s2.read_runs(ch);
+    REQUIRE(r2.size() == 1);
+    // The copy's samples are the source's from the first one at or after t0.
+    const si8 skip = (r2[0].start_uutc - r1[0].start_uutc) / 1000;  // 1 kHz
+    REQUIRE(skip >= 0);
+    CHECK(r2[0].start_uutc == r1[0].start_uutc + skip * 1000);
+    REQUIRE(r2[0].samples.size() == static_cast<std::size_t>((t1 - r2[0].start_uutc + 999) / 1000));
+    CHECK(std::equal(r2[0].samples.begin(), r2[0].samples.end(),
+                     r1[0].samples.begin() + skip));
+    CHECK(s2.segment_map(ch).front().segment_number == 0);
+  }
+  CHECK(verify_transform(src, dst, o).ok);
+  TransformOptions wrong = o;  // the same copy against another window
+  wrong.time_range = std::make_pair(t0, t1 + 1'000'000);
+  CHECK_FALSE(verify_transform(src, dst, wrong).ok);
+}

@@ -4,6 +4,7 @@
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/map.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
@@ -465,7 +466,11 @@ nb::dict verify_report_dict(const mef3io::VerifyReport& r) {
 /// The options every copy operation shares (CopyOptions).
 void set_copy_options(mef3io::CopyOptions& o, bool rename, const std::string& password,
                       const std::string& output_password_1, const std::string& output_password_2,
-                      std::vector<std::string> channels, std::vector<std::string> exclude_channels) {
+                      std::vector<std::string> channels, std::vector<std::string> exclude_channels,
+                      std::optional<std::pair<std::int64_t, std::int64_t>> time_range = std::nullopt,
+                      bool exact = true) {
+  o.time_range = time_range;
+  o.exact = exact;
   o.rename = rename;
   o.password = password;
   o.output_password_1 = output_password_1;
@@ -512,6 +517,8 @@ nb::dict copy_report_dict(const mef3io::CopyReport& r) {
   out["blocks_decrypted"] = r.blocks_decrypted;
   out["records"] = r.records;
   out["seizure_channel_entries_dropped"] = r.seizure_channel_entries_dropped;
+  out["blocks_trimmed"] = r.blocks_trimmed;
+  out["records_outside_window"] = r.records_outside_window;
   out["bytes_written"] = r.bytes_written;
   out["output_encrypted"] = r.output_encrypted;
   out["not_copied"] = r.not_copied;
@@ -769,7 +776,8 @@ NB_MODULE(_mef3io, m) {
          bool clear_descriptions, const std::string& text, bool has_text_fn, bool rename,
          const std::string& password, const std::string& output_password_1,
          const std::string& output_password_2, std::vector<std::string> channels,
-         std::vector<std::string> exclude_channels, const mef3io::CancelToken* cancel) {
+         std::vector<std::string> exclude_channels, std::optional<std::pair<std::int64_t, std::int64_t>> time_range, bool exact,
+         const mef3io::CancelToken* cancel) {
         PyHooks hooks(cancel, nb::none());
         mef3io::AnonymizeOptions o;
         o.shift_us = shift_us.value_or(0);
@@ -785,7 +793,7 @@ NB_MODULE(_mef3io, m) {
         if (has_text_fn)
           o.text_fn = [](const std::string& v, const mef3io::RecordTextField&) { return v; };
         set_copy_options(o, rename, password, output_password_1, output_password_2,
-                         std::move(channels), std::move(exclude_channels));
+                         std::move(channels), std::move(exclude_channels), time_range, exact);
         mef3io::AnonymizeCheck c = hooks.run([&](const mef3io::Control& ctl) {
           return mef3io::check_anonymize(src, dst, o, ctl, shift_us.has_value());
         });
@@ -800,6 +808,7 @@ NB_MODULE(_mef3io, m) {
       nb::arg("rename") = true, nb::arg("password") = "", nb::arg("output_password_1") = "",
       nb::arg("output_password_2") = "", nb::arg("channels") = std::vector<std::string>{},
       nb::arg("exclude_channels") = std::vector<std::string>{},
+      nb::arg("time_range").none() = nb::none(), nb::arg("exact") = true,
       nb::arg("cancel").none() = nb::none(),
       "Every check anonymize_session makes before writing; writes nothing "
       "(see mef3io.anonymize.check).");
@@ -810,8 +819,8 @@ NB_MODULE(_mef3io, m) {
          bool clear_descriptions, const std::string& text, nb::object text_fn, bool rename,
          const std::string& password, const std::string& output_password_1,
          const std::string& output_password_2, std::vector<std::string> channels,
-         std::vector<std::string> exclude_channels, const mef3io::CancelToken* cancel,
-         nb::object progress) {
+         std::vector<std::string> exclude_channels, std::optional<std::pair<std::int64_t, std::int64_t>> time_range, bool exact,
+         const mef3io::CancelToken* cancel, nb::object progress) {
         PyHooks hooks(cancel, std::move(progress));
         mef3io::AnonymizeOptions o;
         o.shift_us = shift_us;
@@ -866,7 +875,7 @@ NB_MODULE(_mef3io, m) {
           };
         }
         set_copy_options(o, rename, password, output_password_1, output_password_2,
-                         std::move(channels), std::move(exclude_channels));
+                         std::move(channels), std::move(exclude_channels), time_range, exact);
         mef3io::AnonymizeReport r = hooks.run([&](const mef3io::Control& ctl) {
           return mef3io::anonymize_session(src, dst, o, ctl);
         });
@@ -893,6 +902,7 @@ NB_MODULE(_mef3io, m) {
       nb::arg("output_password_1") = "", nb::arg("output_password_2") = "",
       nb::arg("channels") = std::vector<std::string>{},
       nb::arg("exclude_channels") = std::vector<std::string>{},
+      nb::arg("time_range").none() = nb::none(), nb::arg("exact") = true,
       nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none(),
       "Write a de-identified copy of a session (see mef3io.anonymize_session).");
   m.def(
@@ -935,10 +945,12 @@ NB_MODULE(_mef3io, m) {
       "verify_anonymized",
       [](const std::string& src, const std::string& dst, std::int64_t shift_us,
          const std::string& password, const std::string& output_password, bool clear_subject,
-         bool clear_location, bool clear_descriptions, const mef3io::CancelToken* cancel,
-         nb::object progress) {
+         bool clear_location, bool clear_descriptions, std::optional<std::pair<std::int64_t, std::int64_t>> time_range, bool exact,
+         const mef3io::CancelToken* cancel, nb::object progress) {
         PyHooks hooks(cancel, std::move(progress));
         mef3io::VerifyOptions o;
+        o.time_range = time_range;
+        o.exact = exact;
         o.password = password;
         o.output_password = output_password;
         o.clear_subject = clear_subject;
@@ -952,6 +964,7 @@ NB_MODULE(_mef3io, m) {
       nb::arg("src"), nb::arg("dst"), nb::arg("shift_us"), nb::arg("password") = "",
       nb::arg("output_password") = "", nb::arg("clear_subject") = true,
       nb::arg("clear_location") = true, nb::arg("clear_descriptions") = true,
+      nb::arg("time_range").none() = nb::none(), nb::arg("exact") = true,
       nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none(),
       "Check a de-identified copy against its source (see mef3io.anonymize.verify).");
 
@@ -965,11 +978,13 @@ NB_MODULE(_mef3io, m) {
       std::optional<std::string> subject_id, std::optional<std::string> recording_location,      \
       std::optional<std::string> session_description,                                            \
       std::map<std::string, std::string> channel_descriptions,                                   \
-      std::map<std::string, std::string> reference_descriptions, const mef3io::CancelToken *cancel
+      std::map<std::string, std::string> reference_descriptions,                                 \
+      std::optional<std::pair<std::int64_t, std::int64_t>> time_range, bool exact,               \
+      const mef3io::CancelToken *cancel
 #define MEF3IO_TRANSFORM_OPTIONS(o)                                                              \
   mef3io::TransformOptions o;                                                                    \
   set_copy_options(o, rename, password, output_password_1, output_password_2,                    \
-                   std::move(channels), std::move(exclude_channels));                            \
+                   std::move(channels), std::move(exclude_channels), time_range, exact);         \
   o.metadata = metadata_edits(std::move(subject_name_1), std::move(subject_name_2),              \
                               std::move(subject_id), std::move(recording_location),              \
                               std::move(session_description), std::move(channel_descriptions),   \
@@ -984,6 +999,7 @@ NB_MODULE(_mef3io, m) {
       nb::arg("session_description").none() = nb::none(),                                        \
       nb::arg("channel_descriptions") = std::map<std::string, std::string>{},                    \
       nb::arg("reference_descriptions") = std::map<std::string, std::string>{},                  \
+      nb::arg("time_range").none() = nb::none(), nb::arg("exact") = true,                        \
       nb::arg("cancel").none() = nb::none()
   m.def(
       "check_transform",
