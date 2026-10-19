@@ -124,8 +124,8 @@ jobs:
 
   # Test coverage of the release (scripts/coverage.sh): only here, never in
   # the per-push CI. Its report and badge files are attached to the release;
-  # the README badges read them from releases/latest/download/, and the docs
-  # site copies the report (docs.yml).
+  # the docs site copies them (docs.yml), and the README badges read the badge
+  # files from the site.
   coverage:
     # Releases only (not branch dry runs); at -O0 with atomic counters this
     # takes a while.

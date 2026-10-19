@@ -81,8 +81,8 @@ per-push CI, so everyday runs stay fast. `scripts/coverage.sh` does it:
   - two badge files for shields.io.
 
 The release workflow attaches the report (`coverage-report.tar.gz`) and the
-badge files to the GitHub release, then rebuilds the docs site, which serves
-the report and the badge files. The README badges read them from the site. The docs site carries the latest report:
+badge files to the GitHub release, then rebuilds the docs site. The site
+serves the latest report, and the README badges read their files from it:
 - [C++ core](https://bnelair.github.io/mef3io/coverage/core/);
 - [Python layer](https://bnelair.github.io/mef3io/coverage/python/).
 
