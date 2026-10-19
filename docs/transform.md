@@ -113,7 +113,9 @@ that:
 - every other byte of every header, metadata section and annotation body
   equals the source's. The allowed exceptions are the names (when renamed),
   the UUIDs, the password fields, the encryption flags, the provenance
-  region, the CRCs and the edited fields, which must hold exactly the edit.
+  region, the CRCs and the edited fields, which must hold exactly the edit;
+- each file's entry count and largest entry size match what the copy
+  actually holds.
 
 Call `mef3io.transform.verify(src, dst, metadata=..., output_password=...)`
 to re-check a copy later. `mef3io.transform.check(src, dst, ...)` runs every

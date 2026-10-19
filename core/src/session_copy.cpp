@@ -838,6 +838,56 @@ const BodyLayout* layout_of(const RawRecord& r) {
   return &it->second;
 }
 
+/// How many channel entries a Seiz body holds: its declared count, bounded
+/// by what the body has room for (mefrec.h:110-131). The one place every
+/// reader of Seiz entries (copy, pre-flight, verification) takes it from.
+std::size_t seiz_entry_count(const std::vector<ui1>& b) {
+  const si4 declared = read<si4>(b, SEIZ_NCH);
+  const std::size_t room = (b.size() - SEIZ_FIXED) / SEIZ_CHANNEL;
+  return std::min(room, static_cast<std::size_t>(std::max<si4>(declared, 0)));
+}
+
+std::string seiz_entry_name(const std::vector<ui1>& b, std::size_t c) {
+  return read_string(b, SEIZ_FIXED + c * SEIZ_CHANNEL, SEIZ_CHANNEL_NAME);
+}
+
+/// One metadata text field a transform sets in a segment's sections.
+struct EditedField {
+  std::size_t section;  // S2 or S3 (offset of the section in the .tmet)
+  std::size_t offset, bytes;
+  std::string value;
+};
+
+/// The MetadataEdits that apply to `channel`'s segments. The copy writes
+/// them and the verification expects them from this one table.
+std::vector<EditedField> edited_fields(const MetadataEdits& m, const std::string& channel) {
+  std::vector<EditedField> v;
+  auto add = [&](std::size_t sec, std::size_t off, std::size_t n,
+                 const std::optional<std::string>& x) {
+    if (x) v.push_back({sec, off, n, *x});
+  };
+  add(S3, S3_NAME1, S3_SUBJECT_BYTES, m.subject_name_1);
+  add(S3, S3_NAME2, S3_SUBJECT_BYTES, m.subject_name_2);
+  add(S3, S3_ID, S3_SUBJECT_BYTES, m.subject_id);
+  add(S3, S3_LOCATION, S3_LOCATION_BYTES, m.recording_location);
+  add(S2, S2_SESSION_DESC, S2_DESC_BYTES, m.session_description);
+  if (const auto it = m.channel_descriptions.find(channel); it != m.channel_descriptions.end())
+    v.push_back({S2, S2_CHANNEL_DESC, S2_DESC_BYTES, it->second});
+  if (const auto it = m.reference_descriptions.find(channel);
+      it != m.reference_descriptions.end())
+    v.push_back({S2, S2_REFERENCE_DESC, S2_DESC_BYTES, it->second});
+  return v;
+}
+
+/// A record's encryption byte in the copy: level 2 with output passwords
+/// (records may hold identifying text); otherwise 0, except that a transform
+/// keeps a source's own "not encrypted" value (it changes no byte it has no
+/// reason to).
+si1 record_encryption(si1 source, bool encrypt, bool anonymize) {
+  if (encrypt) return fmt::LEVEL_2_ENCRYPTION;
+  return (!anonymize && source <= 0) ? source : si1{0};
+}
+
 // ---------------------------------------------------------------------------
 // Metadata images.
 // ---------------------------------------------------------------------------
@@ -1032,8 +1082,8 @@ class Copier {
       std::fill(s1.begin(), s1.end(), ui1{0});
     } else {
       // A transform: the sections as stored, except the edited fields.
-      for (const auto& f : edited_fields(channel)) {
-        auto sec = f.section == 2 ? s2 : s3;
+      for (const auto& f : edited_fields(*rules_.edits, channel)) {
+        auto sec = f.section == S2 ? s2 : s3;
         if (read_string(sec, f.offset, f.bytes) != f.value || !terminated_clean(sec, f)) {
           write_string(sec, f.offset, f.bytes, f.value);
           ++trep_->metadata_fields_changed;
@@ -1154,9 +1204,8 @@ class Copier {
         body = kept_body(r);
       }
       if (body.size() % 16) body.resize((body.size() + 15) & ~std::size_t{15}, PAD_BYTE);
-      si1 enc = 0;
+      const si1 enc = record_encryption(r.enc, out_.encrypt, rules_.anonymize());
       if (out_.encrypt) {
-        enc = fmt::LEVEL_2_ENCRYPTION;  // records may hold identifying text
         auto e = crypto::aes128_ecb_encrypt(body, *out_.keys.level2_key);
         std::copy(e.begin(), e.end(), body.begin());
       }
@@ -1213,34 +1262,6 @@ class Copier {
     if (progress_) progress_(rdat.size() + ridx.size());
   }
 
-  /// One metadata text field a transform sets in a segment's sections.
-  struct EditedField {
-    int section;  // 2 or 3
-    std::size_t offset, bytes;
-    std::string value;
-  };
-
-  /// The edits that apply to `channel`'s segments (MetadataEdits).
-  std::vector<EditedField> edited_fields(const std::string& channel) const {
-    std::vector<EditedField> v;
-    if (!rules_.edits) return v;
-    const MetadataEdits& m = *rules_.edits;
-    auto add = [&](int sec, std::size_t off, std::size_t n, const std::optional<std::string>& x) {
-      if (x) v.push_back({sec, off, n, *x});
-    };
-    add(3, S3_NAME1, S3_SUBJECT_BYTES, m.subject_name_1);
-    add(3, S3_NAME2, S3_SUBJECT_BYTES, m.subject_name_2);
-    add(3, S3_ID, S3_SUBJECT_BYTES, m.subject_id);
-    add(3, S3_LOCATION, S3_LOCATION_BYTES, m.recording_location);
-    add(2, S2_SESSION_DESC, S2_DESC_BYTES, m.session_description);
-    if (const auto it = m.channel_descriptions.find(channel); it != m.channel_descriptions.end())
-      v.push_back({2, S2_CHANNEL_DESC, S2_DESC_BYTES, it->second});
-    if (const auto it = m.reference_descriptions.find(channel);
-        it != m.reference_descriptions.end())
-      v.push_back({2, S2_REFERENCE_DESC, S2_DESC_BYTES, it->second});
-    return v;
-  }
-
  private:
   /// The field holds nothing after its terminator (an edit to the same value
   /// leaves such a field alone; anything hidden there is rewritten away).
@@ -1253,15 +1274,12 @@ class Copier {
   /// left-out channels.
   std::vector<ui1> kept_body(const RawRecord& r) {
     if (r.type != "Seiz" || excluded_.empty() || !layout_of(r)) return r.body;
-    const si4 declared = read<si4>(r.body, SEIZ_NCH);
-    const std::size_t room = (r.body.size() - SEIZ_FIXED) / SEIZ_CHANNEL;
-    const std::size_t n = std::min(room, static_cast<std::size_t>(std::max<si4>(declared, 0)));
+    const std::size_t n = seiz_entry_count(r.body);
     std::vector<ui1> out(r.body.begin(), r.body.begin() + SEIZ_FIXED);
     si4 kept = 0;
     for (std::size_t c = 0; c < n; ++c) {
       const auto first = r.body.begin() + static_cast<std::ptrdiff_t>(SEIZ_FIXED + c * SEIZ_CHANNEL);
-      if (excluded_.count(channel_key(read_string(r.body, SEIZ_FIXED + c * SEIZ_CHANNEL,
-                                                  SEIZ_CHANNEL_NAME)))) {
+      if (excluded_.count(channel_key(seiz_entry_name(r.body, c)))) {
         ++rep_.seizure_channel_entries_dropped;
         continue;
       }
@@ -1309,9 +1327,7 @@ class Copier {
       return b;
     }
     // Seiz channel entries: excluded channels leave, the rest are shifted.
-    const si4 declared = read<si4>(b, SEIZ_NCH);
-    const std::size_t room = (b.size() - SEIZ_FIXED) / SEIZ_CHANNEL;
-    const std::size_t n = std::min(room, static_cast<std::size_t>(std::max<si4>(declared, 0)));
+    const std::size_t n = seiz_entry_count(b);
     std::vector<ui1> out(b.begin(), b.begin() + SEIZ_FIXED);
     si4 kept = 0;
     for (std::size_t c = 0; c < n; ++c) {
@@ -1682,9 +1698,15 @@ class Verifier {
 
   void set_scanner(Scanner s) { scan_ = std::move(s); }
 
-  void check_uh(std::span<const ui1> s, std::span<const ui1> d, const std::string& loc) {
+  /// `counts_from_source`: the entry count and maximum entry size (32..48)
+  /// are the source's (a .tmet, which the copy does not resize); otherwise
+  /// they are checked against what the copy holds (check_counts).
+  /// `rebuilt_index`: a record index the copy built because the source had
+  /// none, from the record file's header (file type "ridx").
+  void check_uh(std::span<const ui1> s, std::span<const ui1> d, const std::string& loc,
+                bool counts_from_source = false, bool rebuilt_index = false) {
     if (transform()) {
-      check_uh_transform(s, d, loc);
+      check_uh_transform(s, d, loc, counts_from_source, rebuilt_index);
       return;
     }
     time_field(read<si8>(s, UH_START), read<si8>(d, UH_START), loc, "universal header start_time");
@@ -1718,12 +1740,14 @@ class Verifier {
   }
 
   /// A transform's universal header: the source's, byte for byte, except
-  /// the CRCs, the session name (when renamed), the UUIDs, the password
-  /// fields, the provenance region, and the entry count and maximum entry
-  /// size (32..48), which the copy derives from what it wrote: the source's
-  /// may be another writer's (or unset), and the validator checks the copy's
-  /// against its data.
-  void check_uh_transform(std::span<const ui1> s, std::span<const ui1> d, const std::string& loc) {
+  /// the CRCs, the session name (when renamed), the UUIDs (new file UUID,
+  /// level UUIDs remapped one to one, provenance_UUID naming the source), the
+  /// password fields, the provenance region (exactly the source's stamped as
+  /// a transform, or untouched when another program owns it) and, unless
+  /// `counts_from_source`, the entry count and maximum entry size, which the
+  /// copy derives from what it wrote and check_counts verifies against it.
+  void check_uh_transform(std::span<const ui1> s, std::span<const ui1> d, const std::string& loc,
+                          bool counts_from_source, bool rebuilt_index) {
     if (crc::calculate(d.subspan(4, UH - 4)) != read<ui4>(d, 0))
       problem(loc, "universal header CRC", "does not verify");
     if (read_string(d, UH_SESSION_NAME, UH_NAME_BYTES) != dst_.session_name())
@@ -1731,30 +1755,52 @@ class Verifier {
     time_field(read<si8>(s, UH_START), read<si8>(d, UH_START), loc, "universal header start_time");
     time_field(read<si8>(s, UH_END), read<si8>(d, UH_END), loc, "universal header end_time");
     struct Span { std::size_t from, to; const char* what; };
-    const std::vector<Span> same = {
-        {8, 16, "file type and version"},
+    std::vector<Span> same = {
+        {rebuilt_index ? std::size_t{13} : std::size_t{8}, 16, "file type and version"},
         {48, 52, "segment number"},
         {UH_CHANNEL_NAME, UH_SESSION_NAME, "channel_name"},
         {UH_ANON_NAME, UH_LEVEL_UUID, "anonymized_name"},
         {UH_PROTECTED, fmt::provenance::REGION_OFFSET, "protected region"},
     };
+    if (counts_from_source) same.push_back({32, 48, "entry count and maximum entry size"});
     for (const auto& x : same)
       if (!std::equal(s.begin() + x.from, s.begin() + x.to, d.begin() + x.from))
         problem(loc, std::string("universal header ") + x.what, "differs from the source's");
+    if (rebuilt_index && read_string(d, 8, 5) != fmt::FILE_TYPE_RECORD_INDICES)
+      problem(loc, "universal header file type", "is not a record index");
     if (uuid_at(d, UH_FILE_UUID) == uuid_at(s, UH_FILE_UUID))
       problem(loc, "universal header file_UUID", "is the source's; a copy is a new file");
     const Uuid sp = uuid_at(s, UH_PROV_UUID);
     if (uuid_at(d, UH_PROV_UUID) != (all_zero(sp) ? uuid_at(s, UH_FILE_UUID) : sp))
       problem(loc, "universal header provenance_UUID", "does not name the source file");
-    fmt::UniversalHeader hs = fmt::UniversalHeader::parse(s), hd = fmt::UniversalHeader::parse(d);
-    if (fmt::provenance::read(hs).present || all_zero(hs.discretionary_region)) {
-      const auto pv = fmt::provenance::read(hd);
-      if (!pv.present ||
-          pv.last_operation != static_cast<ui1>(fmt::provenance::Operation::Transform))
-        problem(loc, "provenance", "is not stamped as a transform (operation 8)");
-    } else if (hs.discretionary_region != hd.discretionary_region) {
-      problem(loc, "provenance region", "belongs to another program and was changed");
+    // Level UUIDs: a new one per source level, the same for every file of it.
+    const Uuid sl = uuid_at(s, UH_LEVEL_UUID), dl = uuid_at(d, UH_LEVEL_UUID);
+    bool level_ok = all_zero(sl) == all_zero(dl);
+    if (!all_zero(sl)) {
+      const auto it = level_map_.emplace(sl, dl).first;  // the first file of that level sets it
+      level_ok = level_ok && sl != dl && it->second == dl;
     }
+    if (!level_ok) problem(loc, "universal header level_UUID", "is not the source level's new UUID");
+    // Provenance: the source's region as stamp_modified leaves it (which
+    // declines another program's region, so that one must be unchanged).
+    fmt::UniversalHeader want = fmt::UniversalHeader::parse(s);
+    fmt::provenance::stamp_modified(want, fmt::provenance::Operation::Transform);
+    if (!std::equal(want.discretionary_region.begin(), want.discretionary_region.end(),
+                    d.begin() + fmt::provenance::REGION_OFFSET))
+      problem(loc, "provenance region",
+              "is not the source's stamped as a transform (operation 8), or another program's "
+              "region was changed");
+  }
+
+  /// The entry count and maximum entry size of a file the copy wrote, against
+  /// what it holds (any copy: the engine derives them, and the validator
+  /// reports a wrong maximum only as Info and never reads record files).
+  void check_counts(std::span<const ui1> d, si8 entries, si8 max_entry, const std::string& loc) {
+    if (read<si8>(d, 32) != entries)
+      problem(loc, "universal header number_of_entries",
+              "is not the number of entries the file holds");
+    if (read<si8>(d, 40) != max_entry)
+      problem(loc, "universal header maximum_entry_size", "is not the largest entry's size");
   }
 
   void collect_source_uuids(std::span<const ui1> uh) {
@@ -1776,7 +1822,7 @@ class Verifier {
     }
     collect_source_uuids(std::span<const ui1>(s.bytes).first(UH));
     std::span<const ui1> sb(s.bytes), db(d.bytes);
-    check_uh(sb.first(UH), db.first(UH), drel);
+    check_uh(sb.first(UH), db.first(UH), drel, /*counts_from_source=*/true);
     if (transform()) {
       check_sections_transform(sb, db, drel, d);
       dst_encrypted_ = d.s2_level > 0;
@@ -1855,20 +1901,8 @@ class Verifier {
     const std::string channel = drel.substr(0, drel.find(".timd/"));
     std::vector<ui1> expect(sb.begin(), sb.end());
     std::span<ui1> e(expect);
-    auto set = [&](std::size_t sec, std::size_t off, std::size_t n, const std::string& v) {
-      write_string(e.subspan(sec), off, n, v);
-    };
-    const MetadataEdits& m = *edits_;
-    if (m.subject_name_1) set(S3, S3_NAME1, S3_SUBJECT_BYTES, *m.subject_name_1);
-    if (m.subject_name_2) set(S3, S3_NAME2, S3_SUBJECT_BYTES, *m.subject_name_2);
-    if (m.subject_id) set(S3, S3_ID, S3_SUBJECT_BYTES, *m.subject_id);
-    if (m.recording_location) set(S3, S3_LOCATION, S3_LOCATION_BYTES, *m.recording_location);
-    if (m.session_description) set(S2, S2_SESSION_DESC, S2_DESC_BYTES, *m.session_description);
-    if (const auto it = m.channel_descriptions.find(channel); it != m.channel_descriptions.end())
-      set(S2, S2_CHANNEL_DESC, S2_DESC_BYTES, it->second);
-    if (const auto it = m.reference_descriptions.find(channel);
-        it != m.reference_descriptions.end())
-      set(S2, S2_REFERENCE_DESC, S2_DESC_BYTES, it->second);
+    for (const auto& f : edited_fields(*edits_, channel))
+      write_string(e.subspan(f.section), f.offset, f.bytes, f.value);
     rep_.text_fields_checked += 7;
     rep_.times_checked += 4;  // rto, DST start/end, GMT: inside section 3
     if (!std::equal(e.begin() + S2, e.begin() + S2 + S2_BYTES, db.begin() + S2))
@@ -1893,6 +1927,7 @@ class Verifier {
     }
     ui4 dcrc_x = fmt::CRC_START_VALUE, dcrc_d = fmt::CRC_START_VALUE;
     std::uint64_t dexpect = UH;
+    ui4 dmax = 0;  // the largest block the copy holds
     constexpr std::size_t CHUNK = 8192, BATCH = 8u << 20;
     for (std::size_t first = 0; first < n; first += CHUNK) {
       ctl_.check();
@@ -1918,6 +1953,7 @@ class Verifier {
           }
           if (j > i && (so + sn - slo > BATCH || dof + dn - dlo > BATCH || so < shi)) break;
           if (j == i) { slo = so; dlo = dof; }
+          dmax = std::max(dmax, dn);
           shi = std::max(shi, so + sn);
           dhi = dof + dn;
           dexpect = dhi;
@@ -1954,6 +1990,8 @@ class Verifier {
       }
     }
     if (dexpect != dtdat) problem(d.tdat, "data file", "holds bytes no index entry describes");
+    check_counts(duh_x, static_cast<si8>(n), static_cast<si8>(ENTRY), d.tidx);
+    check_counts(duh_d, static_cast<si8>(n), static_cast<si8>(dmax), d.tdat);
     if (read<ui4>(duh_x, 4) != dcrc_x) problem(d.tidx, "body CRC", "does not verify");
     if (read<ui4>(duh_d, 4) != dcrc_d) problem(d.tdat, "body CRC", "does not verify");
   }
@@ -2019,8 +2057,17 @@ class Verifier {
     collect_source_uuids(s.uh);
     if (s.has_ridx) collect_source_uuids(s.ridx_uh);
     check_uh(s.uh, d.uh, drel);
-    if (d.has_ridx) check_uh(s.has_ridx ? s.ridx_uh : s.uh, d.ridx_uh, ridx_of(drel));
+    if (d.has_ridx)
+      check_uh(s.has_ridx ? s.ridx_uh : s.uh, d.ridx_uh, ridx_of(drel), false, !s.has_ridx);
     else problem(drel, "record index", "is missing");
+    {
+      si8 largest = 0;
+      for (const auto& r : d.records)
+        largest = std::max(largest, static_cast<si8>(RHDR + r.body.size()));
+      const si8 n = static_cast<si8>(d.records.size());
+      check_counts(d.uh, n, largest, drel);
+      if (d.has_ridx) check_counts(d.ridx_uh, n, static_cast<si8>(RIDX), ridx_of(drel));
+    }
     if (s.records.size() != d.records.size()) {
       problem(drel, "records", "the copy holds " + std::to_string(d.records.size()) +
                                    " record(s), the source " + std::to_string(s.records.size()));
@@ -2036,6 +2083,8 @@ class Verifier {
         continue;
       }
       time_field(a.time, b.time, loc, "record header time");
+      if (b.enc != record_encryption(a.enc, !o_.output_password.empty(), !transform()))
+        problem(loc, "record header encryption", "does not match the output passwords");
       if (d.has_ridx) {
         // Index entries are matched to records by file offset, not position.
         const auto* de = index_entry(d, i);
@@ -2045,6 +2094,10 @@ class Verifier {
         } else {
           time_field(se ? read<si8>(*se, 16) : a.time, read<si8>(*de, 16), loc,
                      "record index time");
+          // Type, version and encryption as the record's own header says.
+          if (!std::equal(b.type_bytes.begin(), b.type_bytes.end(), de->begin()) ||
+              (*de)[5] != b.vmaj || (*de)[6] != b.vmin || static_cast<si1>((*de)[7]) != b.enc)
+            problem(loc, "record index entry", "type, version or encryption differs from the record's");
         }
       }
       check_body(a, b, loc, excluded);
@@ -2052,34 +2105,48 @@ class Verifier {
   }
 
   /// A transform keeps a body as stored (padded to 16 bytes), except the
-  /// Seiz entries of left-out channels.
+  /// Seiz entries of left-out channels. Checked entry by entry rather than by
+  /// rebuilding the body the way the copy does: the fixed part equal but for
+  /// the count, and the copy's entries, in order, exactly the source's
+  /// entries that name a kept channel.
   void check_body_transform(const RawRecord& a, const RawRecord& b, const std::string& loc,
                             const std::set<std::string>& excluded) {
-    std::vector<ui1> want = a.body;
-    if (a.type == "Seiz" && layout_of(a)) {
-      const si4 declared = read<si4>(a.body, SEIZ_NCH);
-      const std::size_t room = (a.body.size() - SEIZ_FIXED) / SEIZ_CHANNEL;
-      const std::size_t n = std::min(room, static_cast<std::size_t>(std::max<si4>(declared, 0)));
-      std::vector<ui1> out(a.body.begin(), a.body.begin() + SEIZ_FIXED);
-      si4 kept = 0;
-      for (std::size_t c = 0; c < n; ++c) {
-        const std::size_t e = SEIZ_FIXED + c * SEIZ_CHANNEL;
-        if (excluded.count(channel_key(read_string(a.body, e, SEIZ_CHANNEL_NAME)))) continue;
-        out.insert(out.end(), a.body.begin() + static_cast<std::ptrdiff_t>(e),
-                   a.body.begin() + static_cast<std::ptrdiff_t>(e + SEIZ_CHANNEL));
-        ++kept;
-      }
-      if (kept != static_cast<si4>(n)) {
-        write<si4>(out, SEIZ_NCH, kept);
-        want = std::move(out);
-      }
+    auto padding_only = [](const std::vector<ui1>& v, std::size_t from) {
+      return v.size() >= from && v.size() - from < 16 &&
+             std::all_of(v.begin() + static_cast<std::ptrdiff_t>(from), v.end(),
+                         [](ui1 c) { return c == PAD_BYTE; });
+    };
+    if (a.type != "Seiz" || !layout_of(a)) {
+      if (!(b.body.size() >= a.body.size() &&
+            std::equal(a.body.begin(), a.body.end(), b.body.begin()) &&
+            padding_only(b.body, a.body.size())))
+        problem(loc, "record body", "differs from the source's");
+      return;
     }
-    const bool same = b.body.size() >= want.size() &&
-                      std::equal(want.begin(), want.end(), b.body.begin()) &&
-                      std::all_of(b.body.begin() + static_cast<std::ptrdiff_t>(want.size()),
-                                  b.body.end(), [](ui1 c) { return c == PAD_BYTE; }) &&
-                      b.body.size() - want.size() < 16;
-    if (!same) problem(loc, "record body", "differs from the source's");
+    if (b.body.size() < SEIZ_FIXED ||
+        !std::equal(a.body.begin(), a.body.begin() + SEIZ_NCH, b.body.begin()) ||
+        !std::equal(a.body.begin() + SEIZ_NCH + 4, a.body.begin() + SEIZ_FIXED,
+                    b.body.begin() + SEIZ_NCH + 4)) {
+      problem(loc, "record body", "differs from the source's");
+      return;
+    }
+    std::size_t k = 0;  // the copy's next entry
+    const std::size_t have = seiz_entry_count(b.body);
+    for (std::size_t c = 0; c < seiz_entry_count(a.body); ++c) {
+      if (excluded.count(channel_key(seiz_entry_name(a.body, c)))) continue;
+      const auto src = a.body.begin() + static_cast<std::ptrdiff_t>(SEIZ_FIXED + c * SEIZ_CHANNEL);
+      if (k >= have || !std::equal(src, src + SEIZ_CHANNEL,
+                                   b.body.begin() + static_cast<std::ptrdiff_t>(
+                                                        SEIZ_FIXED + k * SEIZ_CHANNEL))) {
+        problem(loc, "Seiz channels", "are not the source's entries for the kept channels");
+        return;
+      }
+      ++k;
+    }
+    const bool whole = k == seiz_entry_count(a.body);  // nothing left out: stored as is
+    if (k != have || read<si4>(b.body, SEIZ_NCH) != static_cast<si4>(k) ||
+        !padding_only(b.body, whole ? a.body.size() : SEIZ_FIXED + k * SEIZ_CHANNEL))
+      problem(loc, "Seiz channels", "the copy lists other entries than the source's kept ones");
   }
 
   static const std::array<ui1, RIDX>* index_entry(const RawRecordFile& f, std::size_t i) {
@@ -2139,11 +2206,7 @@ class Verifier {
     if (a.type != "Seiz") return;
     // Channel entries: the source's minus the excluded, in order, shifted.
     std::vector<std::size_t> want;
-    const auto entries = [](const RawRecord& r) {
-      const si4 declared = read<si4>(r.body, SEIZ_NCH);
-      const std::size_t room = (r.body.size() - SEIZ_FIXED) / SEIZ_CHANNEL;
-      return std::min(room, static_cast<std::size_t>(std::max<si4>(declared, 0)));
-    };
+    const auto entries = [](const RawRecord& r) { return seiz_entry_count(r.body); };
     for (std::size_t c = 0; c < entries(a); ++c)
       if (!excluded.count(
               channel_key(read_string(a.body, SEIZ_FIXED + c * SEIZ_CHANNEL, SEIZ_CHANNEL_NAME))))
@@ -2181,6 +2244,7 @@ class Verifier {
   const SourcePlan& plan_;
   const VerifyOptions& o_;
   const MetadataEdits* edits_;  // set = a transform
+  std::map<Uuid, Uuid> level_map_;  // transform: source level UUID -> the copy's
   const Control& ctl_;
   std::function<void(std::uint64_t)> progress_;
   VerifyReport& rep_;
@@ -2809,10 +2873,7 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
         for (std::size_t off : lay->times)
           shift_time(read<si8>(r.body, off), what + " body time", true, channel);
         if (r.type == "Seiz") {  // the entries the copy keeps, as rewrite_body does
-          const si4 declared = read<si4>(r.body, SEIZ_NCH);
-          const std::size_t room = (r.body.size() - SEIZ_FIXED) / SEIZ_CHANNEL;
-          const std::size_t n =
-              std::min(room, static_cast<std::size_t>(std::max<si4>(declared, 0)));
+          const std::size_t n = seiz_entry_count(r.body);
           for (std::size_t c = 0; c < n; ++c) {
             const std::size_t e = SEIZ_FIXED + c * SEIZ_CHANNEL;
             if (excluded_keys.count(channel_key(read_string(r.body, e, SEIZ_CHANNEL_NAME))))

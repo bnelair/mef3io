@@ -345,3 +345,71 @@ def test_the_cli_writes_a_copy(tmp_path, rich, capsys):
     assert b["ch1"][0]["channel_description"] == "contact 1"
     assert main(["transform", str(src), str(dst)]) == 2
     assert "error (dst-exists)" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- review round 1
+
+
+def test_a_source_without_a_record_index_is_copied(tmp_path):
+    src = _rich_session(tmp_path / "jane_roe.mefd")
+    (Path(src) / "ch1.timd" / "ch1.ridx").unlink()  # the copy rebuilds it
+    rep = _transform(src, tmp_path / "copy.mefd")
+    assert rep.verification.ok, rep.summary()
+    assert (tmp_path / "copy.mefd" / "ch1.timd" / "ch1.ridx").exists()
+    assert _transform(src, tmp_path / "again.mefd").verification.ok
+
+
+def _reseal_uh(path):
+    raw = bytearray(Path(path).read_bytes())
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH])))
+    Path(path).write_bytes(bytes(raw))
+    return raw
+
+
+def _poke(path, offset, fmt, value):
+    raw = bytearray(Path(path).read_bytes())
+    struct.pack_into(fmt, raw, offset, value)
+    Path(path).write_bytes(bytes(raw))
+    _reseal_uh(path)
+
+
+@pytest.mark.parametrize("rel, offset, fmt, value, field", [
+    ("study2.rdat", 40, "<q", 1, "maximum_entry_size"),
+    ("study2.ridx", 32, "<q", 2, "number_of_entries"),
+    ("ch1.timd/ch1-000000.segd/ch1-000000.tdat", 40, "<q", 1, "maximum_entry_size"),
+    ("ch1.timd/ch1-000000.segd/ch1-000000.tidx", 40, "<q", 7, "maximum_entry_size"),
+    ("study2.ridx", UH, "4s", b"Junk", "record index entry"),
+    ("ch1.timd/ch1-000000.segd/ch1-000000.tidx", 820, "16s", None, "level_UUID"),
+    ("ch1.timd/ch1-000000.segd/ch1-000000.tmet", 960 + 52, "<I", 99, "provenance region"),
+])
+def test_verify_catches_a_wrong_count_entry_uuid_or_provenance(tmp_path, rich, rel, offset, fmt,
+                                                               value, field):
+    src, _, _ = rich
+    copy = tmp_path / "study2.mefd"
+    assert _transform(src, copy).verification.ok
+    if value is None:  # the source's own level UUID: no longer remapped
+        value = (Path(src) / rel).read_bytes()[820:836]
+        assert value != bytes(16)
+    _poke(copy / rel, offset, fmt, value)
+    v = mef3io.transform.verify(src, copy)
+    assert not v.ok and any(field in p.field for p in v.problems), v.summary()
+
+
+def test_a_records_own_not_encrypted_byte_is_kept(tmp_path, rich):
+    src, _, _ = rich
+    rdat = Path(src) / "jane_roe.rdat"
+    stored = rdat.read_bytes()[UH + 11]  # the hand-built records store -1
+    assert stored == 0xFF
+    copy = tmp_path / "keep.mefd"
+    _transform(src, copy)
+    assert (copy / "keep.rdat").read_bytes()[UH + 11] == 0xFF
+    assert (copy / "keep.ridx").read_bytes()[UH + 7] == 0xFF
+
+
+def test_the_cli_points_per_channel_fields_to_their_options(tmp_path, rich, capsys):
+    from mef3io.__main__ import main
+
+    src, _, _ = rich
+    with pytest.raises(SystemExit):
+        main(["transform", str(src), str(tmp_path / "x.mefd"), "--set", "channel_descriptions=x"])
+    assert "--channel-description CHANNEL=TEXT" in capsys.readouterr().err

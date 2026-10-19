@@ -89,8 +89,13 @@ names/ID, location, session description, per-channel channel/reference
 descriptions) go into the STORED section images (never re-serialized); a
 value that does not fit is REFUSED (`metadata-too-long`), never cut. Its
 verification compares every other byte to the source: UH except CRCs,
-session name, 32..48 (counts/max sizes the engine derives; the validator
-checks them), UUIDs, password fields, provenance; s1 beyond the levels; s2/s3
+session name, UUIDs (file new, level remapped 1:1, provenance_UUID = source),
+password fields, provenance (= the source's region after stamp_modified),
+and 32..48 outside .tmet: entry count / max entry size are checked against
+what the copy HOLDS (`check_counts`, both modes; the validator reports a
+wrong maximum only as Info and never reads record files, so it cannot be
+relied on); record index entries' type/version/encryption against their
+record; records keep a source's own "not encrypted" byte; s1 beyond the levels; s2/s3
 = source + the edits exactly; entries/blocks beyond offset, CRC and
 encryption bits; bodies padded with 0x7e only. Python: shared report and
 refusal plumbing in `python/mef3io/_copy.py` (COPY_REFUSAL_CODES +

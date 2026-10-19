@@ -440,6 +440,10 @@ def _main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     password = _cli_password(parser, args)
     metadata: Dict[str, object] = dict(_pairs(parser, args.set, "--set"))
+    for key in _PER_CHANNEL:
+        if key in metadata:
+            parser.error(f"--set {key}=... is per channel: use "
+                         f"--{key[:-1].replace('_', '-')} CHANNEL=TEXT")
     if args.channel_description:
         metadata["channel_descriptions"] = _pairs(parser, args.channel_description,
                                                   "--channel-description")
