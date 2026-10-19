@@ -274,6 +274,10 @@ CASES = {
     "segment folder names another number": (
         "segment-number-mismatch", _mutated(lambda s: _rename_segment(s, "ch3-000007", "ch3"))),
     "kept text glued to a left-out channel": ("text-unremovable", _glued),
+    "a backwards time range": ("time-range-invalid",
+                               lambda t, p: _plain(t, p, time_range=(START + DAY, START))),
+    "a time range outside the recording": (
+        "time-range-empty", lambda t, p: _plain(t, p, time_range=(START - 2 * DAY, START - DAY))),
     "segment folder without a number": (
         "segment-folder-unnumbered", _mutated(lambda s: _rename_segment(s, "ch3-Jane", "ch3"))),
     # --- one per further code that can be decided up front ---------------

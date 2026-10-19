@@ -93,6 +93,9 @@ class TransformReport:
     session_name : str
         The copy's session name (its folder's stem).
     channels_kept, channels_excluded : tuple of str
+    channels_without_samples : tuple of str
+        A cut: channels left out because they have no sample in the window
+        (also in ``channels_excluded``).
     segments, blocks, records : int
         What was copied.
     blocks_reencrypted, blocks_decrypted : int
@@ -100,6 +103,9 @@ class TransformReport:
         passwords, or decrypted because the copy has none.
     seizure_channel_entries_dropped : int
         Per-channel entries of ``Seiz`` records that named a left-out channel.
+    blocks_trimmed, records_outside_window : int
+        A cut (``time_range``): edge blocks re-encoded to the window, and
+        annotations left out.
     metadata_fields_changed : int
         Metadata fields whose stored value changed (one per field per
         segment).
@@ -117,12 +123,15 @@ class TransformReport:
     session_name: str
     channels_kept: Tuple[str, ...]
     channels_excluded: Tuple[str, ...]
+    channels_without_samples: Tuple[str, ...]
     segments: int
     blocks: int
     blocks_reencrypted: int
     blocks_decrypted: int
     records: int
     seizure_channel_entries_dropped: int
+    blocks_trimmed: int
+    records_outside_window: int
     metadata_fields_changed: int
     bytes_written: int
     output_encrypted: bool
@@ -134,7 +143,8 @@ class TransformReport:
     def _from(cls, d: dict) -> "TransformReport":
         d = dict(d)
         d["verification"] = VerifyReport._from(d["verification"])
-        for k in ("channels_kept", "channels_excluded", "not_copied", "notes"):
+        for k in ("channels_kept", "channels_excluded", "channels_without_samples", "not_copied",
+                  "notes"):
             d[k] = tuple(d[k])
         return cls(**d)
 
@@ -200,9 +210,10 @@ def _metadata(metadata: Optional[Mapping], refusals: _Refusals) -> dict:
 
 
 def _arguments(refusals: _Refusals, *, channels, exclude_channels, output_password,
-               metadata) -> dict:
+               metadata, time_range=None, exact=True) -> dict:
     return dict(**_copy_arguments(refusals, channels=channels, exclude_channels=exclude_channels,
-                                  output_password=output_password),
+                                  output_password=output_password, time_range=time_range,
+                                  exact=exact),
                 **_metadata(metadata, refusals))
 
 
@@ -214,6 +225,8 @@ def transform_session(
     exclude_channels: Optional[Sequence[str]] = None,
     output_password: Optional[Sequence[str]] = None,
     metadata: Optional[Mapping] = None,
+    time_range: Optional[Tuple[int, int]] = None,
+    exact: bool = True,
     rename: bool = True,
     password: str = "",
     progress: Optional[Callable[[int, int], object]] = None,
@@ -267,6 +280,20 @@ def transform_session(
         / ``reference_descriptions`` (dicts from a channel of the copy to its
         str). Each value must fit its field (``ValueError`` otherwise; it is
         never cut). Fields not given are copied as stored.
+    time_range : (int, int), optional
+        Cut (#103): keep only the samples whose time lies in ``[start, end)``,
+        uUTC. Segments outside it are not read; blocks outside it are left
+        out; the segments it keeps are renumbered from 0 and their
+        declarations describe what they hold. Annotations are kept when their
+        time lies in the window (a ``Seiz`` or ``Epoc`` record also when its
+        span overlaps it). The copy is verified against the source over the
+        window: blocks kept whole are byte-identical, trimmed ones hold
+        exactly the source's samples.
+    exact : bool, optional
+        With ``time_range``: ``True`` (default) decodes, trims and re-encodes
+        the edge block of each segment at each end, so the copy holds exactly
+        the window (the cost does not depend on the window's length);
+        ``False`` keeps whole edge blocks and decodes nothing.
     rename : bool, optional
         ``True`` (default) gives the copy the stem of ``dst`` as its session
         name. ``False`` keeps the source's session name, and the stem of
@@ -318,7 +345,8 @@ def transform_session(
     True
     """
     a = _arguments(_Refusals(collect=False), channels=channels, exclude_channels=exclude_channels,
-                   output_password=output_password, metadata=metadata)
+                   output_password=output_password, metadata=metadata, time_range=time_range,
+                   exact=exact)
     _warn_output_passwords(a)
     raw = _backend().transform_session(
         *_fspaths(src, dst), rename=bool(rename), password=password or "", **a,
@@ -334,6 +362,8 @@ def check(
     exclude_channels: Optional[Sequence[str]] = None,
     output_password: Optional[Sequence[str]] = None,
     metadata: Optional[Mapping] = None,
+    time_range: Optional[Tuple[int, int]] = None,
+    exact: bool = True,
     rename: bool = True,
     password: str = "",
     cancel: Optional[CancelToken] = None,
@@ -355,7 +385,8 @@ def check(
     """
     refusals = _Refusals(collect=True)
     a = _arguments(refusals, channels=channels, exclude_channels=exclude_channels,
-                   output_password=output_password, metadata=metadata)
+                   output_password=output_password, metadata=metadata, time_range=time_range,
+                   exact=exact)
     raw = _backend().check_transform(*_fspaths(src, dst), rename=bool(rename),
                                      password=password or "", **a, **_hooks(cancel, None))
     return _check_report(raw, refusals, a)
@@ -369,6 +400,8 @@ def verify(
     exclude_channels: Optional[Sequence[str]] = None,
     output_password: Optional[Sequence[str]] = None,
     metadata: Optional[Mapping] = None,
+    time_range: Optional[Tuple[int, int]] = None,
+    exact: bool = True,
     password: str = "",
     progress: Optional[Callable[[int, int], object]] = None,
     cancel: Optional[CancelToken] = None,
@@ -395,7 +428,8 @@ def verify(
     del channels, exclude_channels  # read from the copy
     refusals = _Refusals(collect=False)
     a = _arguments(refusals, channels=None, exclude_channels=None,
-                   output_password=output_password, metadata=metadata)
+                   output_password=output_password, metadata=metadata, time_range=time_range,
+                   exact=exact)
     raw = _backend().verify_transform(*_fspaths(src, dst), password=password or "", **a,
                                       **_hooks(cancel, progress))
     return VerifyReport._from(raw)

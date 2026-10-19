@@ -77,6 +77,65 @@ python -m mef3io transform patient.mefd patient_eeg.mefd \
   transform (operation 8, `transform`), unless the region belongs to another
   program, in which case it is left untouched.
 
+## Keep only a time window (cut)
+
+`time_range=(start_us, end_us)` keeps only the samples whose time lies in
+`[start, end)`, in microseconds since 1970 (UTC), as the recording stores them:
+
+```python
+rep = mef3io.transform_session("patient.mefd", "seizure_2h.mefd",
+                               time_range=(onset - 3600_000_000, onset + 3600_000_000))
+```
+
+- **Segments outside the window** are not read at all, and in the ones
+  that overlap it only the blocks around the window are read: a one-minute
+  cut of a month-long recording reads about a minute of data.
+- **Blocks outside it** are left out. Blocks inside it are copied with their
+  samples byte for byte; the first block kept after a dropped one is marked
+  as following a gap.
+- **Channels with no sample in the window** are left out, and the report
+  names them (`channels_without_samples`).
+- **Edges:** at each edge of the window, the one block that straddles it is
+  decoded, trimmed and re-encoded, so the copy holds exactly the window. The
+  cost does not depend on how long the window is. `exact=False` keeps those
+  edge blocks whole instead (nothing is decoded, at most a block's worth of
+  extra samples at each end).
+- **Segments are renumbered:** the segments that keep samples are numbered
+  from 0, and each one's metadata describes what it now holds (counts,
+  duration, start and end times).
+- **Annotations** are kept when their time lies in the window. A seizure or
+  epoch annotation is also kept when its span overlaps the window.
+- **Every other rule on this page still applies**, so a cut combines with
+  channels, passwords, a new name and metadata edits in one pass.
+- **With `anonymize_session`**, the same `time_range` (in the original
+  times) cuts before every time is shifted.
+
+**Which samples a cut keeps:** exactly those whose time is at or after
+`start` and before `end`. The copy's first sample is the first one at or after
+`start`. `Reader.read(start, end)` works differently, on a regular grid: it
+can put a sample up to half a sample period before `start` into its first
+slot. So reading the source and the copy with the same `read(start, end)` can
+differ by that one edge sample. To compare them, read the copy whole and the
+source from the copy's start time.
+
+The cut is checked like everything else:
+- blocks kept whole must be byte-identical to the source's;
+- trimmed blocks must hold exactly the source's samples at the same times;
+- every kept sample must lie in the window;
+- the copy must hold as many samples as the source has in the window.
+
+A cut writes new declarations (counts, durations, start and end times) for
+each segment it keeps. If the source already fails the validator for one of
+those, the cut is refused rather than risk passing a mistake of its own. Run
+`python -m mef3io validate` on the source, and `repair` it first (see
+[Validation & repair](validation.md)).
+
+From the command line, add `--start` and `--end` (and `--whole-blocks`) to
+`python -m mef3io transform` or `anonymize`.
+
+To split a recording into pieces (for example one per day), make one cut
+per piece.
+
 ## Metadata edits
 
 `metadata=` is a mapping of the fields to set. Fields you leave out are
@@ -146,3 +205,6 @@ never raises the anonymization-only ones:
 | `metadata-too-long` | `ValueError` | check | A value does not fit its field (`details["field"]`); it is never cut. |
 | `metadata-invalid` | `ValueError` | check | A value contains a NUL character. |
 | `metadata-channel-unknown` | `ValueError` | check | A per-channel entry names a channel that is not in the copy (`details["channel"]`). |
+
+A cut adds two codes that both copies share (`time-range-invalid`,
+`time-range-empty`); they are in [the shared table](anonymization.md#refusal-codes).
