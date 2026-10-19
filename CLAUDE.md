@@ -944,7 +944,13 @@ offset_known=false also for rto != 0 with non-negated stored times.
 read-only. `rename_archive` uses `detail::rename_no_replace`
 (core/src/no_replace.hpp: renameat2 RENAME_NOREPLACE / renamex_np RENAME_EXCL
 / MoveFileExW without replace) and REFUSES where unsupported, never falling
-back; name <= 246 bytes. rename_session (journal, marker, undo) is #72 part 2
+back; name <= 246 bytes and a PORTABLE file name (`check_portable_name`: no
+control char — a NUL once dropped the .mefd.tar suffix —, none of
+`/\:*?"<>|`, no Windows device name, no trailing dot/space); refused while
+`<archive>.tmp` (archive_session's temp) or `.partial` is beside it.
+time_range takes min/max over BOTH files read (segments numbered against
+time are still handled; a middle segment earlier than both is not seen).
+name_drift's `consistent` includes the session .ridx name. rename_session (journal, marker, undo) is #72 part 2
 and must reuse no_replace.hpp.
 VERIFY BEFORE PUBLISHING: `scripts/verify_local.sh` (`--full-bench`,
 `--no-bench`) is the single entry point — builds, asserts the IN-TREE extension

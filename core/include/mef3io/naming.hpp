@@ -39,7 +39,10 @@ struct TimeRange {
 };
 
 /// The first and last sample time of a session (`.mefd` or `.mefd.tar`),
-/// reading only the first and last segment's .tmet of each channel. A wrong
+/// reading only the first and last segment's .tmet of each channel (the
+/// bytes read are O(channels); listing the session still checks each
+/// segment's files exist). A middle segment earlier than both is not seen:
+/// segments are numbered in time order by every writer we know of. A wrong
 /// password throws PasswordError; no password on an encrypted session is
 /// allowed (offset_known is then false).
 TimeRange time_range(const std::string& path, const std::string& password = "",
@@ -73,9 +76,12 @@ struct ArchiveRename {
 /// Rename a `.mefd.tar` file to `<new_name>.mefd.tar` in the same folder.
 /// Refused (std::invalid_argument / IoError), never truncated or replaced:
 /// a name over 246 bytes of UTF-8 (so the file name fits 255 bytes), a name
-/// with a path separator, a target that exists, a source that is not a
-/// `.mefd.tar`, a `<path>.partial` beside it (being written), and a file
-/// system without a no-replace rename (never falls back to a plain one).
+/// that is not a portable file name (a folder, a control character, a
+/// character or device name Windows cannot use, a trailing dot or space), a
+/// target that exists, a source that is not a `.mefd.tar`, an archive being
+/// written (`<path>.tmp` or `.partial` beside it), and a file system without
+/// a no-replace rename (never falls back to a plain one). A symlink is
+/// renamed itself, not its target.
 ArchiveRename rename_archive(const std::string& path, const std::string& new_name);
 
 }  // namespace mef3io

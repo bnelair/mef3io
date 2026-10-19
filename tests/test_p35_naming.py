@@ -77,6 +77,26 @@ def test_time_range_of_a_legacy_session_with_an_offset(tmp_path):
     assert r.offset_known and r.start_uutc == s.start_time == START
 
 
+def test_time_range_with_segments_numbered_against_time(tmp_path):
+    with mef3io.Writer(str(tmp_path / "s.mefd"), overwrite=True) as w:
+        w.write("A", np.arange(2560) * 1.0, START + 1000 * SECOND, 256.0, precision=0)
+    seg0 = tmp_path / "s.mefd" / "A.timd" / "A-000000.segd"
+    with mef3io.Writer(str(tmp_path / "t.mefd"), overwrite=True) as w:
+        w.write("A", np.arange(2560) * 1.0, START, 256.0, precision=0)
+    seg1 = tmp_path / "s.mefd" / "A.timd" / "A-000001.segd"
+    shutil.copytree(tmp_path / "t.mefd" / "A.timd" / "A-000000.segd", seg1)
+    for f in list(seg1.iterdir()):
+        f.rename(seg1 / ("A-000001" + f.suffix))
+    r = mef3io.time_range(tmp_path / "s.mefd")
+    assert r.start_uutc == START  # the later-numbered, earlier segment still counts
+
+
+def test_name_drift_sees_a_renamed_record_index(tmp_path):
+    src = _session(tmp_path / "P.mefd", segments=1)
+    os.rename(src / "P.ridx", src / "Q.ridx")
+    assert not mef3io.name_drift(src).consistent
+
+
 def test_name_drift_finds_a_folder_renamed_behind_the_sessions_back(tmp_path):
     src = _session(tmp_path / "Patient.mefd", segments=2)
     d = mef3io.name_drift(src)
@@ -116,6 +136,11 @@ def test_rename_archive_refusals(tmp_path):
         mef3io.rename_archive(tar, "sub/dir")
     with pytest.raises(ValueError):
         mef3io.rename_archive(src, "z")  # a folder session: not this function
-    (tmp_path / "s.mefd.tar.partial").write_bytes(b"")
+    for bad in ("a\x00b", "a:b", "a*b", "CON", "lpt1", "name.", "name ", "tab\tx"):
+        with pytest.raises(ValueError):
+            mef3io.rename_archive(tar, bad)
+        assert tar.exists()  # nothing changed
+    # archive_session writes <archive>.tmp while it works
+    (tmp_path / "s.mefd.tar.tmp").write_bytes(b"")
     with pytest.raises(mef3io.IoError, match="being written"):
         mef3io.rename_archive(tar, "z")

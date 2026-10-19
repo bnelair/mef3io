@@ -59,7 +59,10 @@ def time_range(path, password: str = "", *, cancel: Optional[CancelToken] = None
 
     Only the first and last segment's ``.tmet`` of each channel is read
     (about 16 KB each), never a block index or data file, so it suits
-    ordering many sessions by time. Works on ``.mefd`` folders and
+    ordering many sessions by time. Listing the session still checks that
+    each segment's files exist. Segments are assumed numbered in time order,
+    as every known writer numbers them: a middle segment earlier than the
+    first and last is not seen. Works on ``.mefd`` folders and
     ``.mefd.tar`` archives. An encrypted session can be ordered without its
     password (``offset_known`` is then ``False``); a wrong password raises
     :class:`PasswordError`.
@@ -77,7 +80,8 @@ class NameDrift:
     folder : str
         The folder's (or archive's) name without ``.mefd`` / ``.mefd.tar``.
     record_files : tuple of str
-        The names of the session-level annotation files (``<name>.rdat``).
+        The names of the session-level annotation files (``<name>.rdat``);
+        ``consistent`` also requires their ``.ridx`` to carry the same name.
     stored_names : dict of str to int
         Each distinct name stored in the files' headers, with how many
         files hold it.
@@ -122,8 +126,11 @@ def rename_archive(path, new_name: str) -> ArchiveRename:
 
     The rename never replaces an existing file: where the file system cannot
     guarantee that, it is refused rather than done unsafely. Also refused: a
-    name over 246 bytes of UTF-8 (never truncated), a name with a folder in
-    it, an archive with a ``.partial`` file beside it (being written).
+    name over 246 bytes of UTF-8 (never truncated); a name that is not a
+    portable file name (a folder, a control character, ``:*?"<>|``, a
+    Windows device name such as ``CON``, a trailing dot or space); an archive
+    being written (``.tmp`` or ``.partial`` beside it). A symlink is renamed
+    itself, not the file it points to.
     Undo it with ``rename_archive(new_path, old_name)``.
     """
     return ArchiveRename(**_backend().rename_archive(os.fspath(path), new_name))

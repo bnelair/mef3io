@@ -3,7 +3,9 @@
 #include "mef3io/naming.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
+#include <set>
 #include <functional>
 #include <stdexcept>
 
@@ -26,6 +28,33 @@ namespace {
 constexpr std::size_t UH = fmt::UNIVERSAL_HEADER_BYTES;
 constexpr std::size_t UH_START = 16, UH_END = 24, UH_SESSION_NAME = 308, UH_NAME_BYTES = 256;
 
+/// A session name that is a portable file name: no folder, no control
+/// character (a NUL would cut the name short), none of the characters or
+/// device names Windows cannot use, no trailing dot or space. Throws
+/// std::invalid_argument naming the problem. rename_session (#72, second
+/// part) uses the same rule.
+void check_portable_name(const std::string& name) {
+  if (name.empty() || name == "." || name == "..")
+    throw std::invalid_argument("the new name is empty");
+  for (const unsigned char c : name) {
+    if (c < 0x20 || c == 0x7f)
+      throw std::invalid_argument("the new name contains a control character");
+    if (std::string("/\\:*?\"<>|").find(static_cast<char>(c)) != std::string::npos)
+      throw std::invalid_argument(std::string("the new name contains '") + static_cast<char>(c) +
+                                  "', which is not allowed in file names everywhere");
+  }
+  if (name.back() == '.' || name.back() == ' ')
+    throw std::invalid_argument("the new name ends in a dot or a space");
+  std::string upper;
+  for (const char c : name.substr(0, name.find('.')))
+    upper += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+  static const std::set<std::string> reserved = {"CON", "PRN", "AUX", "NUL"};
+  if (reserved.count(upper) ||
+      ((upper.rfind("COM", 0) == 0 || upper.rfind("LPT", 0) == 0) && upper.size() == 4 &&
+       upper[3] >= '1' && upper[3] <= '9'))
+    throw std::invalid_argument("the new name is a reserved device name on Windows");
+}
+
 }  // namespace
 
 TimeRange time_range(const std::string& path, const std::string& password, const Control& ctl) {
@@ -36,9 +65,10 @@ TimeRange time_range(const std::string& path, const std::string& password, const
   for (const auto& c : layout.channels) {
     if (c.segments.empty()) continue;
     ++r.channels;
-    // The first segment's start and the last segment's end (segments are in
-    // number order, which is time order for every writer we know of; the two
-    // ends are also compared with each other below).
+    // The first and last segment by number (time order for every writer we
+    // know of). Both files' start and end count, so two segments numbered
+    // against time order are still handled; a middle segment earlier than
+    // both is not seen (docs: time_range trades that for its speed).
     for (const auto* seg : {&c.segments.front(), &c.segments.back()}) {
       ctl.check();
       const auto bytes = src->read_range(seg->tmet, 0, fmt::METADATA_FILE_BYTES);
@@ -53,8 +83,7 @@ TimeRange time_range(const std::string& path, const std::string& password, const
       for (const si8 v : {s, e}) {
         if (v == fmt::UUTC_NO_ENTRY) continue;
         const si8 t = to_user_time(v, rto);
-        if (seg == &c.segments.front() || &c.segments.front() == &c.segments.back())
-          r.start_uutc = std::min(r.start_uutc.value_or(t), t);
+        r.start_uutc = std::min(r.start_uutc.value_or(t), t);
         r.end_uutc = std::max(r.end_uutc.value_or(t), t);
       }
       if (&c.segments.front() == &c.segments.back()) break;
@@ -68,9 +97,13 @@ NameDrift name_drift(const std::string& path, const Control& ctl) {
   const auto src = open_session_source(path);
   NameDrift d;
   d.folder = src->session_name();
-  for (const auto& e : src->list_dir(""))
-    if (!e.is_dir && e.name.size() > 5 && e.name.substr(e.name.size() - 5) == ".rdat")
-      d.record_files.push_back(e.name.substr(0, e.name.size() - 5));
+  std::vector<std::string> index_files;
+  for (const auto& e : src->list_dir("")) {
+    if (e.is_dir || e.name.size() <= 5) continue;
+    const std::string ext = e.name.substr(e.name.size() - 5), stem = e.name.substr(0, e.name.size() - 5);
+    if (ext == ".rdat") d.record_files.push_back(stem);
+    if (ext == ".ridx") index_files.push_back(stem);
+  }
   // Every file's universal header: 1024 bytes each.
   std::function<void(const std::string&)> walk = [&](const std::string& rel) {
     for (const auto& e : src->list_dir(rel)) {
@@ -94,16 +127,14 @@ NameDrift name_drift(const std::string& path, const Control& ctl) {
                  (d.stored_names.empty() || d.stored_names.begin()->first == d.folder) &&
                  std::all_of(d.record_files.begin(), d.record_files.end(),
                              [&](const std::string& r) { return r == d.folder; }) &&
-                 d.record_files.size() <= 1;
+                 d.record_files.size() <= 1 && index_files == d.record_files;
   return d;
 }
 
 ArchiveRename rename_archive(const std::string& path, const std::string& new_name) {
   if (!path_has_suffix(path, ".mefd.tar"))
     throw std::invalid_argument("rename_archive renames a .mefd.tar archive: " + path);
-  if (new_name.empty() || new_name.find('/') != std::string::npos ||
-      new_name.find('\\') != std::string::npos || new_name == "." || new_name == "..")
-    throw std::invalid_argument("the new name must be a plain name, without a folder");
+  check_portable_name(new_name);
   // <name>.mefd.tar must fit a 255-byte file name.
   if (new_name.size() > 246)
     throw std::invalid_argument("the new name is " + std::to_string(new_name.size()) +
@@ -111,9 +142,14 @@ ArchiveRename rename_archive(const std::string& path, const std::string& new_nam
   fs::path from(path);
   if (from.filename().empty()) from = from.parent_path();
   if (!fs::is_regular_file(from)) throw IoError("not an archive file: " + from.string());
-  std::error_code ec;  // a name too long for a ".partial" beside it cannot have one
-  if (fs::exists(fs::path(from.string() + ".partial"), ec))
-    throw IoError("the archive is being written (a .partial file is beside it): " + from.string());
+  // Being written: archive_session writes `<archive>.tmp` and renames it;
+  // a copy writes `<dst>.partial`. (A name too long for either cannot have one.)
+  for (const char* ext : {".tmp", ".partial"}) {
+    std::error_code ec;
+    if (fs::exists(fs::path(from.string() + ext), ec))
+      throw IoError("the archive is being written (a " + std::string(ext) +
+                    " file is beside it): " + from.string());
+  }
   const fs::path to = from.parent_path() / (new_name + ".mefd.tar");
   std::string why;
   switch (detail::rename_no_replace(from, to, why)) {
