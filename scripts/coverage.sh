@@ -18,6 +18,17 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 OUT="$REPO/coverage"
+
+# The extension link in python/mef3io is the one scripts/dev_build.sh made:
+# restore it on exit (whatever happens), so a local run never leaves the
+# developer on the instrumented -O0 build or on a dangling link.
+DEV_LINK="$(ls python/mef3io/_mef3io*.so 2>/dev/null | head -1 || true)"
+DEV_TARGET="$( [ -n "$DEV_LINK" ] && readlink "$DEV_LINK" || true)"
+restore_link() {
+  rm -f python/mef3io/_mef3io*.so
+  if [ -n "$DEV_TARGET" ]; then ln -sf "$DEV_TARGET" "$DEV_LINK"; fi
+}
+trap restore_link EXIT
 rm -rf "$OUT" build/coverage build/coverage-core
 mkdir -p "$OUT"
 
@@ -42,7 +53,8 @@ cmake -S core -B build/coverage-core -G Ninja -DCMAKE_BUILD_TYPE=Debug \
 cmake --build build/coverage-core
 ctest --test-dir build/coverage-core --output-on-failure
 
-# 3. The Python suite, measured on the Python side too.
+# 3. The Python suite, measured on the Python side too. A failing test stops
+#    the script (no report): the release's CI has already run the suites.
 python3 -m coverage run --source=python/mef3io --omit='*/pure/*' -m pytest tests -q -p no:cacheprovider
 python3 -m coverage html -d "$OUT/python" --title "mef3io Python layer"
 PY_PCT="$(python3 -m coverage report --format=total)"

@@ -127,6 +127,10 @@ jobs:
   # the README badges read them from releases/latest/download/, and the docs
   # site copies the report (docs.yml).
   coverage:
+    # Releases only (not branch dry runs); at -O0 with atomic counters this
+    # takes a while.
+    if: startsWith(github.ref, 'refs/tags/')
+    timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -134,6 +138,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Tools and the test oracle
+        # The test dependencies mirror pyproject's [test] and [edf] extras
+        # (mef3io itself is built in place, never installed: CLAUDE.md).
         run: |
           sudo apt-get update && sudo apt-get install -y ninja-build
           python -m pip install --upgrade pip
