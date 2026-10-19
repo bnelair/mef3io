@@ -535,6 +535,17 @@ What it guarantees:
     encrypted);
   - a name already out of step (fix that first, below).
 
+**Do not rename a session that is being recorded into.** A rename
+refuses a session with a writer's temporary file in it, and an open
+`Writer` refuses to write once the folder has moved. Nothing stops a
+recording that appends while the rename runs, though, so stop the
+acquisition (or rename between recordings).
+
+A rollback puts the old names back. If nothing else wrote to a file since,
+its old bytes are restored exactly; if something did (a program that does
+not know the marker appended data), only the name and the description are
+restored, so that write is kept.
+
 `backup_dir` chooses where the journal and old headers live while the
 operation runs. They are deleted when it completes. The default is
 `<session>.repair-backup` beside the session. The old name is identifying, so

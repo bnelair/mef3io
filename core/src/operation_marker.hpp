@@ -19,6 +19,7 @@
 #include <system_error>
 
 #include "durability.hpp"
+#include "no_replace.hpp"
 #include "mef3io/errors.hpp"
 #include "mef3io/naming.hpp"
 #include "mef3io/source.hpp"
@@ -63,18 +64,33 @@ inline std::optional<OperationMarker> read_operation_marker(const std::filesyste
 /// Write the marker, refusing to replace one, and flush it AND its directory
 /// entry: nothing may change before the marker is durable.
 inline void write_operation_marker(const std::filesystem::path& dir, const OperationMarker& m) {
+  // Written whole under a temporary name and renamed into place (never
+  // replacing one), so a failure part-way never leaves a marker without its
+  // id: such a marker would refuse every write with no journal to match.
   const auto file = dir / OPERATION_MARKER;
-  std::error_code ec;
-  if (std::filesystem::exists(file, ec))
-    throw WriteConflictError("the session already carries an operation marker: " + dir.string());
-  {
-    std::ofstream out(file, std::ios::binary | std::ios::trunc);
-    if (!out) throw IoError("cannot write the operation marker: " + file.string());
-    out << OPERATION_MARKER_MAGIC << "\ntool " << m.tool << "\noperation " << m.operation
-        << "\nid " << m.id << "\n";
-    finish_stream(out, file.string());
+  const auto part = dir / (std::string(OPERATION_MARKER) + ".part");
+  try {
+    {
+      std::ofstream out(part, std::ios::binary | std::ios::trunc);
+      if (!out) throw IoError("cannot write the operation marker: " + part.string());
+      out << OPERATION_MARKER_MAGIC << "\ntool " << m.tool << "\noperation " << m.operation
+          << "\nid " << m.id << "\n";
+      finish_stream(out, part.string());
+    }
+    fsync_file_or_throw(part.string());
+    std::string why;
+    switch (rename_no_replace(part, file, why)) {
+      case NoReplaceResult::Renamed: break;
+      case NoReplaceResult::TargetExists:
+        throw WriteConflictError("the session already carries an operation marker: " +
+                                 dir.string());
+      default: throw IoError("cannot place the operation marker (" + why + ")");
+    }
+  } catch (...) {
+    std::error_code ec;
+    std::filesystem::remove(part, ec);
+    throw;
   }
-  fsync_file_or_throw(file.string());
   fsync_directory(dir);
 }
 

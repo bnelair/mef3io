@@ -8,11 +8,13 @@
 // Not a public header: it is included by .cpp files inside core/src only.
 #pragma once
 
+#include <algorithm>
 #include <filesystem>
 #include <span>
 #include <fstream>
 #include <string>
 #include <system_error>
+#include <vector>
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -197,7 +199,8 @@ inline void finish_stream(std::ofstream& f, const std::string& path) {
 // then rename over the target. A crash or a full disk leaves the original
 // untouched instead of a truncated one — which matters because the file being
 // replaced is the only record of what the (much larger) .tdat contains.
-inline void write_all_atomic(const std::string& path, std::span<const ui1> bytes) {
+inline void write_all_atomic(const std::string& path, std::span<const ui1> bytes,
+                             bool flush = true) {
   const fsys::path target(path);
   const fsys::path tmp =
       target.parent_path() / (target.filename().string() + ".mef3io-repair-tmp");
@@ -223,14 +226,47 @@ inline void write_all_atomic(const std::string& path, std::span<const ui1> bytes
     // renaming an unflushed file over a good one hands back a durability
     // guarantee the caller did not get. replace_file is the portable swap
     // (MoveFileEx + WRITE_THROUGH on Windows).
-    fsync_file_or_throw(tmp.string());
+    if (flush) fsync_file_or_throw(tmp.string());
     replace_file(tmp, target);
   } catch (...) {
     std::error_code ignored;
     fsys::remove(tmp, ignored);
     throw;
   }
-  fsync_directory(target.parent_path());
+  if (flush) fsync_directory(target.parent_path());
+}
+
+/// Flush many files written without a flush, and their folders, in one
+/// batch. Linux: one syncfs per file system (flushing thousands of headers
+/// one fsync at a time took ~20 ms each, 38 minutes for a 64-channel x
+/// 600-segment rename). Elsewhere: each file, then each folder.
+inline void flush_files(const std::vector<fsys::path>& files) {
+  if (files.empty()) return;
+#if defined(__linux__)
+  std::vector<dev_t> done;
+  for (const auto& f : files) {
+    struct stat s {};
+    if (::stat(f.c_str(), &s) != 0) continue;
+    if (std::find(done.begin(), done.end(), s.st_dev) != done.end()) continue;
+    const int fd = ::open(f.c_str(), O_RDONLY);
+    if (fd < 0 || ::syncfs(fd) != 0) {
+      const int e = errno;
+      if (fd >= 0) ::close(fd);
+      throw IoError("could not flush to disk, the write is not durable: " + f.string() + " (" +
+                    std::error_code(e, std::generic_category()).message() + ")");
+    }
+    ::close(fd);
+    done.push_back(s.st_dev);
+  }
+#else
+  std::vector<fsys::path> dirs;
+  for (const auto& f : files) {
+    fsync_file_or_throw(f.string());
+    if (std::find(dirs.begin(), dirs.end(), f.parent_path()) == dirs.end())
+      dirs.push_back(f.parent_path());
+  }
+  for (const auto& d : dirs) fsync_directory(d);
+#endif
 }
 
 }  // namespace mef3io::detail

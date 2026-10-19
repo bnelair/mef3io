@@ -61,26 +61,25 @@ def _files(root):
     return out
 
 
-def _masked(rel, b, desc=True):
-    """The bytes a rename may change, blanked: CRCs, the name, the
+def _masked(rel, b):
+    """The bytes a rename may change, blanked: the header CRC, the name, the
     provenance region and, in a .tmet, the description and its body CRC."""
     b = bytearray(b)
-    b[0:8] = bytes(8)
+    b[0:8 if rel.endswith(".tmet") else 4] = bytes(8 if rel.endswith(".tmet") else 4)
     b[NAME] = bytes(256)
     b[REGION] = bytes(64)
     return bytes(b)
 
 
-def _assert_only_names_changed(before, after, encrypted=False):
+def _assert_only_names_changed(before, after):
+    """Encrypted too: section 2 is AES-ECB and the description is
+    block-aligned in it, so only its own ciphertext blocks change."""
     assert before.keys() == after.keys()
     for rel in before:
         a, b = _masked(rel, before[rel]), _masked(rel, after[rel])
-        if rel.endswith(".tmet") and not encrypted:
+        if rel.endswith(".tmet"):
             a, b = bytearray(a), bytearray(b)
             a[S2_DESC] = b[S2_DESC] = bytes(2048)
-        if rel.endswith(".tmet") and encrypted:
-            a, b = bytearray(a), bytearray(b)
-            a[S2:S2 + 10752] = b[S2:S2 + 10752] = bytes(10752)
         assert bytes(a) == bytes(b), rel
 
 
@@ -181,7 +180,7 @@ def test_encrypted_needs_the_level_1_password(tmp_path):
     assert mef3io.operation_marker(src) is None
     rep = mef3io.rename_session(src, "b", password="pw-one")
     assert len(rep.descriptions_changed) == 4
-    _assert_only_names_changed(before, _files(rep.new_path), encrypted=True)
+    _assert_only_names_changed(before, _files(rep.new_path))
     with mef3io.Reader(rep.new_path, password="pw-two") as r:
         assert r.metadata.acquisition.session_description == "b"
     _clean(rep.new_path, password="pw-two")
@@ -286,22 +285,72 @@ def test_a_crash_at_every_point_is_rolled_back(tmp_path):
                 mef3io.Writer(str(where))
             with pytest.warns(mef3io.SessionOperationWarning):
                 mef3io.Reader(str(where)).close()
-        # The next call settles it, then renames (after the last point the
-        # rename had finished: only its journal is left, which fix_name_drift
-        # discards as well).
-        rep = (mef3io.fix_name_drift(where) if k == points - 1
-               else mef3io.rename_session(where, "b"))
-        assert (rep.rolled_back != "") == marked, k
-        assert rep.journals_discarded == (0 if marked or rep.rolled_back else
-                                          (1 if k in (0, points - 1) else 0)), k
+        # The next call settles it: a rollback that restores every byte
+        # (nothing else wrote meanwhile), or, at the first and last point, a
+        # journal discarded. fix_name_drift then has nothing to do.
+        settled = mef3io.fix_name_drift(where)
+        assert (settled.rolled_back != "") == marked, k
+        assert settled.journals_discarded == (0 if marked else 1), k
+        assert not settled.changed, k
+        if k < points - 1:
+            assert _files(root / "a.mefd") == before, k  # exactly, provenance included
+            rep = mef3io.rename_session(root / "a.mefd", "b")
+            assert rep.changed
         dst = root / "b.mefd"
-        if k == points - 1:
-            assert not rep.changed  # it had finished
         _assert_only_names_changed(before, _files(dst))
         assert _stored_names(dst) == {"b"} and mef3io.name_drift(dst).consistent
         assert mef3io.operation_marker(dst) is None
         assert [p.name for p in root.iterdir()] == ["b.mefd"], k
         _clean(dst)
+
+
+def test_a_failure_at_every_point_is_rolled_back_in_process(tmp_path):
+    points = _points(tmp_path)
+    for k in range(1, points - 1):
+        root = tmp_path / f"run{k}"
+        root.mkdir()
+        src = _session(root / "a.mefd")
+        before = _files(src)
+        with pytest.raises(mef3io.IoError, match="simulated failure"):
+            mef3io.rename_session(src, "b", _fail_at=k)
+        assert _files(src) == before, k
+        assert mef3io.operation_marker(src) is None
+        assert [p.name for p in root.iterdir()] == ["a.mefd"], k
+
+
+def test_a_copy_made_mid_operation_does_not_roll_back_the_original(tmp_path):
+    src = _session(tmp_path / "a.mefd", segments=1, channels=("A",))
+    with pytest.raises(mef3io.IoError):
+        mef3io.rename_session(src, "b", _crash_at=3)
+    copy = tmp_path / "c.mefd"
+    shutil.copytree(src, copy)
+    original = _files(src)
+    with pytest.raises(mef3io.WriteConflictError, match="another folder"):
+        mef3io.rename_session(copy, "z")
+    assert _files(src) == original and not (tmp_path / "z.mefd").exists()
+    mef3io.fix_name_drift(src)  # the original's own call rolls it back
+    assert _stored_names(src) == {"a"}
+
+
+def test_a_rollback_keeps_an_append_made_meanwhile(tmp_path):
+    """A writer that ignored the marker (another tool) appended between the
+    crash and the rollback: the rollback restores the names, not the bytes."""
+    src = _session(tmp_path / "a.mefd", segments=1, channels=("A",), description="a")
+    with pytest.raises(mef3io.IoError):
+        mef3io.rename_session(src, "b", _crash_at=4)
+    marker = src / ".mef3io-operation"
+    saved = marker.read_bytes()
+    marker.unlink()
+    with mef3io.Writer(str(src)) as w:
+        w.write("A", np.arange(2560) * 1.0, START + 10 * SECOND, 256.0, precision=0)
+    marker.write_bytes(saved)
+    rep = mef3io.fix_name_drift(src)
+    assert rep.rolled_back
+    assert _stored_names(src) == {"a"} and mef3io.name_drift(src).consistent
+    _clean(src)
+    with mef3io.Reader(str(src)) as r:
+        assert r.metadata.acquisition.session_description == "a"
+        assert np.count_nonzero(~np.isnan(r.read("A"))) == 2 * 2560
 
 
 def test_rollback_restores_the_old_bytes(tmp_path):

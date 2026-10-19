@@ -166,6 +166,9 @@ class RenameReport:
         first, or ``""``.
     journals_discarded : int
         Journals of operations that never started or had finished, removed.
+    notes : tuple of str
+        Things to know, e.g. a marker that could not be removed after the
+        operation completed.
     operation : str
         ``"rename"`` or ``"fix-name-drift"``.
     """
@@ -182,6 +185,7 @@ class RenameReport:
     rolled_back: str
     journals_discarded: int
     operation: str
+    notes: Tuple[str, ...] = ()
 
     @property
     def changed(self) -> bool:
@@ -217,7 +221,8 @@ def _report(d: dict, operation: str) -> RenameReport:
         descriptions_changed=tuple(d["descriptions_changed"]),
         records_renamed=tuple(tuple(r) for r in d["records_renamed"]),
         files=files, rolled_back=d["rolled_back"],
-        journals_discarded=d["journals_discarded"], operation=operation)
+        journals_discarded=d["journals_discarded"], operation=operation,
+        notes=tuple(d["notes"]))
 
 
 def _descriptions(descriptions: Optional[Sequence[str]]) -> Optional[List[str]]:
@@ -230,7 +235,7 @@ def _descriptions(descriptions: Optional[Sequence[str]]) -> Optional[List[str]]:
 
 def rename_session(path, new_name: str, *, password: str = "", backup_dir=None,
                    descriptions: Optional[Sequence[str]] = None,
-                   _crash_at: int = -1) -> RenameReport:
+                   _crash_at: int = -1, _fail_at: int = -1) -> RenameReport:
     """Rename a ``.mefd`` session in every place its name lives.
 
     A session's name is stored in four places, and other MEF software reads
@@ -296,13 +301,13 @@ def rename_session(path, new_name: str, *, password: str = "", backup_dir=None,
     """
     d = _backend().rename_session(os.fspath(path), new_name, password or "",
                                   os.fspath(backup_dir) if backup_dir else "",
-                                  _descriptions(descriptions), _crash_at)
+                                  _descriptions(descriptions), _crash_at, _fail_at)
     return _report(d, "rename")
 
 
 def fix_name_drift(path, target: Optional[str] = None, *, password: str = "", backup_dir=None,
                    descriptions: Optional[Sequence[str]] = None,
-                   _crash_at: int = -1) -> RenameReport:
+                   _crash_at: int = -1, _fail_at: int = -1) -> RenameReport:
     """Bring a session's stored names in line with its folder.
 
     For a session whose folder another tool renamed (:func:`name_drift`
@@ -318,7 +323,7 @@ def fix_name_drift(path, target: Optional[str] = None, *, password: str = "", ba
     """
     d = _backend().fix_name_drift(os.fspath(path), target or "", password or "",
                                   os.fspath(backup_dir) if backup_dir else "",
-                                  _descriptions(descriptions), _crash_at)
+                                  _descriptions(descriptions), _crash_at, _fail_at)
     return _report(d, "fix-name-drift")
 
 

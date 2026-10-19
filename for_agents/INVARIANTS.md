@@ -274,7 +274,10 @@ finished: discarded. Marker alone: every write refuses
 every write call, repair, recover --apply, archive, and the copy pre-flight as
 `source-mid-operation`); `clear_operation_marker` only when `name_drift` is
 consistent. A new in-place write path must call `refuse_if_mid_operation`.
-Every rename is no-replace (`no_replace.hpp`), temp names are 32-char tokens,
+Rollback is FIELD-WISE (exact bytes only when nothing else wrote the file),
+flushes are BATCHED (one backup blob, one `flush_files` pass), and a marker
+whose journal describes another folder is refused (a copy). Every rename is
+no-replace (`no_replace.hpp`), temp names are 32-char tokens,
 and an undo is a LOGICAL inverse (rename back, only the descriptions changed),
 never a byte restore. Headers are patched as bytes (name field, provenance
 region, CRCs); `UniversalHeader::serialize` would cut a 256-byte name that

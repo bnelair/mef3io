@@ -965,8 +965,23 @@ recreate a renamed session at the old path). Reader warns
 `SessionOperationWarning`. `rename_session` refuses a drifted session
 (fix_name_drift first) and same name; `fix_name_drift` never renames the
 folder. Undo = `RenameReport.undo()` (logical, `descriptions=` restricts to
-what changed). `durability.hpp` now also holds `finish_stream` and
-`write_all_atomic` (were duplicated in writer/validate). Not done: NFD length
+what changed). `durability.hpp` now also holds `finish_stream`,
+`write_all_atomic` (were duplicated in writer/validate; `flush=false` for
+batching) and `flush_files` (ONE syncfs per file system on Linux, else per
+file + folder). PERFORMANCE RULE: never flush per header — backups go into
+ONE `<id>.backup` blob (sizes in the journal) with one fsync, patches are
+written unflushed and flushed in one batch before the names move; per-file
+fsync made a 600-segment rename 35.7 s, batched 0.8 s. ROLLBACK IS
+FIELD-WISE: a file is restored byte-exact only when it differs from its
+backup in nothing but CRCs/name/provenance/description; otherwise only the
+name and description bytes go back (s2 is AES-ECB and the description is
+block-aligned, so its ciphertext is copied without a password) — a byte
+restore would erase an append made meanwhile. A marker whose journal
+describes ANOTHER folder (a copy made mid-operation) is refused, never
+rolled back. Folder names are taken from the DISK entry (case-insensitive
+volumes) and converted as UTF-8 (`u8`/`str` helpers; path::string() is ANSI
+on Windows — repo-wide gap elsewhere). Known gap: a Writer appending DURING
+a rename can race it (needs a cross-process write lock, filed as an issue). Not done: NFD length
 check on HFS+ (the file system refuses at the folder step, which rolls back),
 per-segment end time/entry counts in the report (`files` has size+mtime).
 VERIFY BEFORE PUBLISHING: `scripts/verify_local.sh` (`--full-bench`,

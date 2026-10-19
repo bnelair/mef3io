@@ -114,6 +114,9 @@ struct RenameOptions {
   /// change (header, record file, folder); the last point = marker removed,
   /// journal not yet. -1 (default): never.
   int crash_at = -1;
+  /// For tests only: fail at this point with an ordinary error, which the
+  /// operation rolls back itself before rethrowing. -1 (default): never.
+  int fail_at = -1;
 };
 
 struct RenameReport {
@@ -133,6 +136,9 @@ struct RenameReport {
   /// Journals of finished or never-started operations on this session that
   /// were found and discarded.
   std::size_t journals_discarded = 0;
+  /// Things the caller should know (e.g. a marker left over after a
+  /// completed operation).
+  std::vector<std::string> notes;
 };
 
 /// Rename a directory session (`<parent>/<old>.mefd` -> `<parent>/<new_name>.mefd`)

@@ -205,3 +205,14 @@ def test_concurrent_calls_on_one_reader(small):
         for t in threads:
             t.join()
         assert not errors, errors[0]
+
+
+def test_a_rename_does_not_hold_the_gil(many_segments, tmp_path):
+    """fix_name_drift (the copy's folder name differs from the stored one)
+    reads and rewrites every file's header, as rename_session does."""
+    def make(i=[0]):
+        i[0] += 1
+        copy = tmp_path / f"r{i[0]}.mefd"
+        shutil.copytree(many_segments, copy)
+        return lambda: mef3io.fix_name_drift(copy)
+    _assert_releases(make, runs=2)
