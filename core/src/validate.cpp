@@ -1,5 +1,6 @@
 // mef3io — session validation and targeted repair. See validate.hpp for the
 // contract; this file holds the check registry and the repair mechanics.
+#include "operation_marker.hpp"
 #include "mef3io/validate.hpp"
 
 #include "durability.hpp"
@@ -1133,67 +1134,8 @@ using detail::fsync_directory;
 using detail::fsync_file;
 using detail::fsync_file_or_throw;
 
-void finish_stream(std::ofstream& f, const std::string& path) {
-  f.flush();
-  if (!f) throw IoError("write failed (disk full?): " + path);
-  f.close();
-  if (!f) throw IoError("close failed, data may not have reached disk: " + path);
-}
-
-void replace_file(const fsys::path& tmp, const fsys::path& target) {
-#ifdef _WIN32
-  if (MoveFileExW(tmp.wstring().c_str(), target.wstring().c_str(),
-                  MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-    return;
-  const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
-  throw IoError("cannot replace " + target.string() + ": " + ec.message());
-#else
-  std::error_code ec;
-  fsys::rename(tmp, target, ec);
-  if (!ec) return;
-  throw IoError("cannot replace " + target.string() + ": " + ec.message());
-#endif
-}
-
-// Replace a file's contents atomically: fill a sibling temp file, flush it,
-// then rename over the target. A crash or a full disk leaves the original
-// untouched instead of a truncated one — which matters because the file being
-// replaced is the only record of what the (much larger) .tdat contains.
-void write_all_atomic(const std::string& path, std::span<const ui1> bytes) {
-  const fsys::path target(path);
-  const fsys::path tmp =
-      target.parent_path() / (target.filename().string() + ".mef3io-repair-tmp");
-  // EVERY failure path removes the temp, not just a failed rename. The temp is
-  // a sibling, so it lands INSIDE the .segd directory: a half-written file
-  // named like a metadata file, left in a clinical session indefinitely, and
-  // `archive_session` packs it into the .mefd.tar as if it were data. The
-  // writer's own write_file_atomic already guards its whole body this way.
-  try {
-    {
-      std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-      if (!f) throw IoError("cannot open for write: " + tmp.string());
-      f.write(reinterpret_cast<const char*>(bytes.data()),
-              static_cast<std::streamsize>(bytes.size()));
-      if (!f) throw IoError("write failed: " + tmp.string());
-      finish_stream(f, tmp.string());
-    }
-  // The target still exists here, so its mode/owner can be carried across
-  // before it is replaced. Then flush the data before the rename, and the
-  // directory entry after it.
-    copy_file_identity(target, tmp);
-    // Flush before the rename, and fail loudly if the flush did not happen:
-    // renaming an unflushed file over a good one hands back a durability
-    // guarantee the caller did not get. replace_file is the portable swap
-    // (MoveFileEx + WRITE_THROUGH on Windows).
-    fsync_file_or_throw(tmp.string());
-    replace_file(tmp, target);
-  } catch (...) {
-    std::error_code ignored;
-    fsys::remove(tmp, ignored);
-    throw;
-  }
-  fsync_directory(target.parent_path());
-}
+using detail::finish_stream;
+using detail::write_all_atomic;
 
 // Patch the first 1024 bytes of a file in place. Deliberately NOT atomic: the
 // alternative is rewriting a multi-gigabyte .tdat to change its header, and
@@ -1911,6 +1853,7 @@ Report repair_session(const std::string& path, const RepairSelection& selection,
   if (path_has_suffix(path, ".tar"))
     throw IoError("cannot repair a tar session archive in place: " + path +
                   " (extract it first with extract_session)");
+  detail::refuse_if_mid_operation(path);
   return run(path, opts, &selection, ctl);
 }
 

@@ -1,4 +1,5 @@
 // mef3io — crash recovery. See recover.hpp for what this is and is not.
+#include "operation_marker.hpp"
 #include "mef3io/recover.hpp"
 
 #include <algorithm>
@@ -153,6 +154,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
   if (!path_has_suffix(path, ".mefd"))
     throw IoError("session directory must end with .mefd: " + path);
   if (!fsys::is_directory(path)) throw IoError("no such session directory: " + path);
+  if (apply) detail::refuse_if_mid_operation(path);
 
   const fsys::path root(path);
   RecoveryReport report;

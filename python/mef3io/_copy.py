@@ -34,6 +34,7 @@ COPY_REFUSAL_CODES: Dict[str, Tuple[str, str]] = {
     "partial-exists": ("IoError", "check"),
     "source-missing": ("IoError", "check"),
     "dst-inside-src": ("IoError", "check"),
+    "source-mid-operation": ("WriteConflictError", "check"),
     # opening the source
     "source-unreadable": ("IoError", "check"),
     "source-damaged": ("FormatError", "check"),

@@ -268,6 +268,7 @@ refusal has a code.
 | `dst-not-mefd` | `IoError` | check | The destination does not end in `.mefd`. |
 | `dst-exists` | `IoError` | check | The destination exists (also when it appears while copying). |
 | `partial-exists` | `IoError` | check | A `<dst>.partial` from an earlier run is in the way. |
+| `source-mid-operation` | `WriteConflictError` | check | The source carries an operation marker: a [rename](python.md#renaming-a-session) was interrupted. Run it again to roll it back. |
 | `source-missing` | `IoError` | check | The source does not exist. |
 | `dst-inside-src` | `IoError` | check | The destination lies inside the source (or the other way round). |
 | `source-unreadable` | `IoError` | check | The source cannot be opened as a session (not `.mefd` / `.mefd.tar`, a compressed archive, an unreadable file). |

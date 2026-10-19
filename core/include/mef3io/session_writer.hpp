@@ -156,6 +156,7 @@ class SessionWriter {
   si8 block_length_for(sf8 fs) const;
   // Load fs/ufact/total_samples/last_end_uutc from the channel's last segment
   // on disk (for sessions reopened with overwrite=false). No-op once hydrated.
+  void check_still_writable() const;
   void hydrate(const std::string& channel, ChannelState& st);
   // What the on-disk segments of a level (one channel, or the whole session)
   // say about the recording-time offset (see session_writer.cpp).

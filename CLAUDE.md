@@ -950,8 +950,25 @@ control char — a NUL once dropped the .mefd.tar suffix —, none of
 `<archive>.tmp` (archive_session's temp) or `.partial` is beside it.
 time_range takes min/max over BOTH files read (segments numbered against
 time are still handled; a middle segment earlier than both is not seen).
-name_drift's `consistent` includes the session .ridx name. rename_session (journal, marker, undo) is #72 part 2
-and must reuse no_replace.hpp.
+name_drift's `consistent` includes the session .ridx name.
+RENAME (#72 part 2, `core/src/rename.cpp`; rules in for_agents/INVARIANTS.md
+§15): `rename_session` / `fix_name_drift` change the folder, the root
+`<name>.rdat/.ridx`, every UH session_name and s2 session_description where it
+EQUALS the old name; provenance op 7 `rename`. Journal (backup_dir, default
+`<session>.repair-backup`, found again via every `*.repair-backup` beside the
+session because the folder may have moved) -> marker `.mef3io-operation` ->
+changes -> marker removed -> journal removed. The next call rolls an
+interrupted one back, then does its own work. Marker without journal refuses
+every write (`detail::refuse_if_mid_operation`; SessionWriter also checks on
+each write call and refuses if its folder vanished, so an open Writer cannot
+recreate a renamed session at the old path). Reader warns
+`SessionOperationWarning`. `rename_session` refuses a drifted session
+(fix_name_drift first) and same name; `fix_name_drift` never renames the
+folder. Undo = `RenameReport.undo()` (logical, `descriptions=` restricts to
+what changed). `durability.hpp` now also holds `finish_stream` and
+`write_all_atomic` (were duplicated in writer/validate). Not done: NFD length
+check on HFS+ (the file system refuses at the folder step, which rolls back),
+per-segment end time/entry counts in the report (`files` has size+mtime).
 VERIFY BEFORE PUBLISHING: `scripts/verify_local.sh` (`--full-bench`,
 `--no-bench`) is the single entry point — builds, asserts the IN-TREE extension
 is the one under test (not an installed wheel), runs the C++ + Python suites,

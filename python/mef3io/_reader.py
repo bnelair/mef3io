@@ -58,6 +58,18 @@ class UnreadableSegmentWarning(MefWarning):
     """
 
 
+class SessionOperationWarning(MefWarning):
+    """The session is in the middle of an in-place operation (a rename, #72).
+
+    The operation was interrupted, or is still running in another process:
+    its marker is in the session folder. Until it is finished or rolled back
+    the session's name can be half-changed, so other MEF software may miss
+    its annotations, and mef3io refuses to write to it. Reads are not
+    affected. Run the same operation again (with the same backup folder) to
+    roll it back; ``details`` holds the marker (tool, operation, id).
+    """
+
+
 class BlockCopyWarning(MefWarning):
     """A block's two stored copies of its start time or sample count disagree.
 
@@ -385,6 +397,17 @@ class Reader:
                 _emit(UnreadableSegmentWarning, _unreadable_warning_text(problems),
                       path=self._path, details=problems, stacklevel=2,
                       also=_identity_of(self._impl))
+
+        from . import _mef3io as _ext  # noqa: PLC0415 - one stat, never cached
+
+        marker = _ext.operation_marker(self._path)
+        if marker is not None:
+            _emit(SessionOperationWarning,
+                  f"the session is in the middle of an operation ({marker['operation']}, "
+                  f"started by {marker['tool']}) that was interrupted or is still running: "
+                  "reads are unaffected, writes are refused until it is finished or rolled "
+                  "back (run the same operation again)",
+                  path=self._path, details=[marker], stacklevel=2)
 
         if warn_declarations and self._declaration_issues:
             _emit(SessionDeclarationWarning,

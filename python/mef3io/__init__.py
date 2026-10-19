@@ -36,7 +36,17 @@ from .anonymize import AnonymizeReport, VerifyReport, anonymize_session  # noqa:
 from . import transform  # noqa: E402  (mef3io.transform.check, .verify, ...)
 from .transform import TransformReport, transform_session  # noqa: E402
 from . import naming  # noqa: E402
-from .naming import TimeRange, name_drift, rename_archive, time_range  # noqa: E402
+from .naming import (  # noqa: E402
+    RenameReport,
+    TimeRange,
+    clear_operation_marker,
+    fix_name_drift,
+    name_drift,
+    operation_marker,
+    rename_archive,
+    rename_session,
+    time_range,
+)
 from ._inspect import (  # noqa: E402
     ChannelSummary,
     IdentityField,
@@ -53,6 +63,7 @@ from ._reader import (  # noqa: E402
     PasswordInteropWarning,
     Reader,
     SessionDeclarationWarning,
+    SessionOperationWarning,
     UnreadableSegmentWarning,
 )
 from ._warnings import MefWarning  # noqa: E402
@@ -94,6 +105,8 @@ __all__ = [
     "anonymize_session", "AnonymizeReport", "VerifyReport",
     "transform_session", "TransformReport",
     "time_range", "TimeRange", "name_drift", "rename_archive",
+    "rename_session", "fix_name_drift", "RenameReport", "operation_marker",
+    "clear_operation_marker",
     # Not "inspect": `from mef3io import *` would shadow the standard library's.
     "SessionSummary", "ChannelSummary", "SegmentSummary",
     "RecordSummary", "IdentityField", "SummaryWarning",
@@ -107,6 +120,7 @@ __all__ = [
     "PasswordInteropWarning",
     "SessionDeclarationWarning",
     "UnreadableSegmentWarning",
+    "SessionOperationWarning",
     "MefError", "FormatError", "CrcError", "PasswordError", "IoError",
     "WriteConflictError",
     "CancelToken", "Cancelled",

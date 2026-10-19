@@ -24,6 +24,7 @@
 //     mefrec.h (offsets below);
 //   * session-level records are `<session>.mefd/<session>.rdat`
 //     (meflib.c:6335), so a renamed copy renames them too.
+#include "operation_marker.hpp"
 #include "mef3io/anonymize.hpp"
 #include "mef3io/transform.hpp"
 
@@ -3159,6 +3160,9 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
     add(RefusalKind::Io, "source-missing", "the source does not exist: " + src_path, {}, "src");
     return pf;  // nothing below can be decided
   }
+  if (const auto m = operation_marker(src_path))
+    add(RefusalKind::WriteConflict, "source-mid-operation", detail::mid_operation_message(*m), {},
+        "src");
   if (path_inside(dst, src_path) || path_inside(src_path, dst))
     add(RefusalKind::Io, "dst-inside-src",
         "the destination must not be inside the source: " + dst.string(), {}, "dst");

@@ -231,7 +231,7 @@ inverse S-box used to be filled lazily, a data race).
 public text names a private third-party product. CLAUDE.md, tests and scripts
 are exempt; this folder is public, so keep such names out of it.
 
-## 12. One copy engine: a transform changes only what it was asked to
+## 14. One copy engine: a transform changes only what it was asked to
 
 `transform_session` (#73) is the same engine as `anonymize_session`
 (`core/src/session_copy.cpp`: one `preflight`, one `Copier`, one `Verifier`,
@@ -252,3 +252,31 @@ one `run_copy`), steered by `Rules`. Rules:
 - Shared refusal codes are documented once (docs/anonymization.md), and
   docs/transform.md documents only the transform's own;
   `tests/test_p33_transform.py` keeps both equal to the code tables.
+
+## 15. An in-place operation that takes several steps is journaled and marked
+
+`rename_session` / `fix_name_drift` (#72, `core/src/rename.cpp`) change many
+files and up to three names. Order, all load-bearing:
+
+1. Check everything first (CRCs, the password, the names, nothing being
+   written); refuse with nothing changed.
+2. Back up the old headers (whole `.tmet`: 16 KB) and write the JOURNAL to
+   the backup folder, flushed.
+3. Write the MARKER (`<session>/.mef3io-operation`, fixed name, holds only
+   tool / operation / id) and flush it with its directory entry.
+4. Change: headers, then the session-level record files, then the folder.
+5. Remove the marker FIRST, then the journal.
+
+Marker + journal = interrupted: the next call rolls it back (old bytes
+restored, renames undone; idempotent). Journal alone = never started or
+finished: discarded. Marker alone: every write refuses
+(`detail::refuse_if_mid_operation`, called by SessionWriter on open AND on
+every write call, repair, recover --apply, archive, and the copy pre-flight as
+`source-mid-operation`); `clear_operation_marker` only when `name_drift` is
+consistent. A new in-place write path must call `refuse_if_mid_operation`.
+Every rename is no-replace (`no_replace.hpp`), temp names are 32-char tokens,
+and an undo is a LOGICAL inverse (rename back, only the descriptions changed),
+never a byte restore. Headers are patched as bytes (name field, provenance
+region, CRCs); `UniversalHeader::serialize` would cut a 256-byte name that
+fills its field. Tests: `tests/test_p36_rename.py` (a crash at EVERY point via
+the test-only `_crash_at`, which leaves the disk as a crash would).

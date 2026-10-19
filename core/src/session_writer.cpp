@@ -1,4 +1,5 @@
 // mef3io — high-level session writer.
+#include "operation_marker.hpp"
 #include "mef3io/session_writer.hpp"
 
 #include <algorithm>
@@ -101,6 +102,9 @@ SessionWriter::SessionWriter(const std::string& mefd_path, bool overwrite, std::
     throw IoError("session directory must end with .mefd: " + mefd_path_);
   if (fs::exists(mefd_path_) && !fs::is_directory(mefd_path_))
     throw IoError("session path exists and is not a directory: " + mefd_path_);
+  // Mid-rename (#72): no write, not even an overwrite, until it is finished
+  // or rolled back — its journal would otherwise restore stale headers.
+  detail::refuse_if_mid_operation(mefd_path_);
   if (overwrite && fs::exists(mefd_path_)) fs::remove_all(mefd_path_);
   fs::create_directories(mefd_path_);
   session_name_ = fs::path(mefd_path_).stem().string();
@@ -138,6 +142,18 @@ SessionWriter::SessionWriter(const std::string& mefd_path, bool overwrite, std::
     channels_[ch].last_segment = static_cast<int>(last);
     channels_[ch].hydrated = (nseg == 0);
   }
+}
+
+// A Writer is often held open for a whole acquisition. If the session was
+// renamed or moved in the meantime (#72), writing to the old path would
+// silently start a NEW session there; and while a rename is running its
+// journal would restore headers older than this write. Refuse both. One stat
+// per write call.
+void SessionWriter::check_still_writable() const {
+  if (!fs::is_directory(mefd_path_))
+    throw IoError("the session folder is no longer there (renamed or moved since this writer "
+                  "opened it?): " + mefd_path_ + "; open a writer on its new path");
+  detail::refuse_if_mid_operation(mefd_path_);
 }
 
 void SessionWriter::hydrate(const std::string& channel, ChannelState& st) {
@@ -387,6 +403,7 @@ si8 SessionWriter::new_segment_rto(const std::string& channel, ChannelState& st)
 void SessionWriter::write_records(std::optional<std::string> channel,
                                   const std::vector<Record>& records) {
   if (records.empty()) return;  // write_records writes nothing for an empty batch
+  check_still_writable();
   // Store the times the way the reader resolves this level (time.hpp,
   // to_stored_time): -t at offset 0 (byte-identical to earlier releases),
   // rto - t under an anonymization offset (date stays hidden). Everything
@@ -457,6 +474,7 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
                                          const std::vector<si4>& samples,
                                          std::span<const ui1> valid, sf8 ufact, si8 start_uutc,
                                          sf8 fs, bool new_segment) {
+  check_still_writable();
   ChannelState& st = channels_[channel];
   hydrate(channel, st);
   const si8 n = static_cast<si8>(samples.size());
