@@ -122,18 +122,60 @@ jobs:
           name: matlab-bundle
           path: bundle/*.zip
 
-  # GitHub release with the MATLAB bundle attached.
-  github-release:
+  # Test coverage of the release (scripts/coverage.sh): only here, never in
+  # the per-push CI. Its report and badge files are attached to the release;
+  # the docs site copies them (docs.yml), and the README badges read the badge
+  # files from the site.
+  coverage:
+    # Releases only (not branch dry runs); at -O0 with atomic counters this
+    # takes a while.
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [package-matlab]
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tools and the test oracle
+        # The test dependencies mirror pyproject's [test] and [edf] extras
+        # (mef3io itself is built in place, never installed: CLAUDE.md).
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build
+          python -m pip install --upgrade pip
+          pip install nanobind cmake numpy pytest pandas pymef mef-tools pyedflib coverage gcovr
+      - name: Measure
+        run: scripts/coverage.sh
+      - name: Package the report
+        run: tar -czf coverage-report.tar.gz coverage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            coverage-report.tar.gz
+            coverage/coverage-core.json
+            coverage/coverage-python.json
+
+  # GitHub release with the MATLAB bundle and the coverage report attached.
+  # Coverage never blocks the release: without it, the release goes out with
+  # the MATLAB bundle only.
+  github-release:
+    if: always() && startsWith(github.ref, 'refs/tags/') && needs.package-matlab.result == 'success'
+    needs: [package-matlab, coverage]
     permissions:
       contents: write
+      actions: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: matlab-bundle
           path: bundle
+      - uses: actions/download-artifact@v4
+        if: needs.coverage.result == 'success'
+        with:
+          name: coverage
+          path: cov
       - name: Create release and attach the MATLAB bundle
         env:
           GH_TOKEN: ${{ github.token }}
@@ -142,3 +184,16 @@ jobs:
             --title "$GITHUB_REF_NAME" --generate-notes || true
           gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --clobber bundle/*.zip
+      - name: Attach the coverage report
+        if: needs.coverage.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
+            cov/coverage-report.tar.gz cov/coverage/coverage-core.json \
+            cov/coverage/coverage-python.json
+      - name: Rebuild the docs site, so it carries this release's coverage report
+        if: needs.coverage.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run docs.yml --repo "$GITHUB_REPOSITORY" --ref main

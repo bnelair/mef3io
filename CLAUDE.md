@@ -988,6 +988,15 @@ files). `ChannelSummary.channel_description` is an identity value: only with
 messages and `problems` still contain paths (they are data, documented as
 identifiable). Tests: tests/test_p30_warning_paths.py, p26, p27.
 
+COVERAGE runs ONLY on a release (user decision 2026-10-19, never per-push):
+`scripts/coverage.sh` (atomic gcov counters: the decoder's threads otherwise
+race into negative hits) → gcovr for core/src + core/include (both suites
+exercise it) and coverage.py for python/mef3io → coverage/ HTML + shields
+endpoint JSONs; release.yml's `coverage` job attaches them to the GitHub
+release (never blocking it) and re-runs docs.yml, which copies the latest
+report (and the badge JSONs) into the site; README badges read
+bnelair.github.io/mef3io/coverage/*.json (no redirect, unlike release
+downloads). The script restores the dev extension link on exit.
 VERIFY BEFORE PUBLISHING: `scripts/verify_local.sh` (`--full-bench`,
 `--no-bench`) is the single entry point — builds, asserts the IN-TREE extension
 is the one under test (not an installed wheel), runs the C++ + Python suites,

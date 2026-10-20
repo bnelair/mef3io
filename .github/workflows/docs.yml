@@ -34,6 +34,17 @@ jobs:
         run: PYTHONPATH=python mkdocs build --strict
       - name: Generate C++ reference (Doxygen) into the site
         run: MEF3IO_VERSION="$(tr -d ' \n' < VERSION)" doxygen docs/Doxyfile
+      - name: The latest release's test coverage report (made by release.yml)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # No release with a report yet: the site simply has none.
+        run: |
+          if gh release download --repo "$GITHUB_REPOSITORY" --pattern coverage-report.tar.gz \
+               --dir "$RUNNER_TEMP" 2>/dev/null; then
+            tar -xzf "$RUNNER_TEMP/coverage-report.tar.gz" -C site
+          else
+            echo "no coverage report on the latest release"
+          fi
       - name: Check the built site names no private product
         # Same list as tests/test_p25_public_text.py, encoded so this file
         # does not spell it out; covers the generated API reference too.
