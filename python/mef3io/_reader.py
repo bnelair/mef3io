@@ -708,6 +708,46 @@ class Reader:
         """
         return self._ensure_impl().segments(channel)
 
+    def block_envelope(self, channel: str, t0: Optional[int] = None,
+                       t1: Optional[int] = None) -> dict:
+        """Minimum and maximum of every data block, from the block index alone.
+
+        A fast envelope for viewers: only each segment's block index is read
+        (about 2% of the data), no signal is decoded, and segments outside the
+        window are skipped. A whole day of a channel recorded in 10-second
+        blocks is 8,640 rows.
+
+        Parameters
+        ----------
+        channel : str
+            Channel name.
+        t0, t1 : int, optional
+            Window in uUTC, ``[t0, t1)``; a block is returned when it overlaps
+            the window. ``None`` (default) means the start or end of the
+            channel.
+
+        Returns
+        -------
+        dict of numpy.ndarray
+            One row per block, in time order: ``start_uutc`` (int64, the first
+            sample), ``end_uutc`` (int64, just past the last sample: start +
+            samples / fs), ``min`` and ``max`` (float64, in the channel's
+            units, scaled like :meth:`read`). ``min``/``max`` are NaN where
+            the writer left a block's extremes unset. Gaps in the recording
+            are simply absent rows: compare ``end_uutc`` with the next
+            ``start_uutc``.
+
+        Notes
+        -----
+        The resolution is the block length: mef3io writes 10-second blocks by
+        default (1-second blocks at 5 kHz and above), ``Writer(block_length=)``
+        sets it, and other writers choose their own. Block times come from the
+        index; :meth:`read` places samples by each block's own header, which
+        agrees on every consistent file (see :meth:`read_raw` for blocks
+        whose two copies disagree).
+        """
+        return self._ensure_impl().block_envelope(channel, t0, t1)
+
     def toc(self, channel: str) -> list[dict]:
         """Block-level table of contents, for seeking and viewers.
 

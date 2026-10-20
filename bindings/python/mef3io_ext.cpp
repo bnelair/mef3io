@@ -1916,6 +1916,23 @@ NB_MODULE(_mef3io, m) {
              }
              return out;
            })
+      .def(
+          "block_envelope",
+          [](mef3io::Reader& r, const std::string& ch, std::optional<std::int64_t> t0,
+             std::optional<std::int64_t> t1) {
+            mef3io::BlockEnvelope e;
+            {
+              nb::gil_scoped_release rel;  // reads the .tidx of every segment in the window
+              e = r.block_envelope(ch, t0, t1);
+            }
+            nb::dict d;
+            d["start_uutc"] = vec_to_numpy(std::move(e.start_uutc));
+            d["end_uutc"] = vec_to_numpy(std::move(e.end_uutc));
+            d["min"] = vec_to_numpy(std::move(e.minimum));
+            d["max"] = vec_to_numpy(std::move(e.maximum));
+            return d;
+          },
+          nb::arg("channel"), nb::arg("t0").none() = nb::none(), nb::arg("t1").none() = nb::none())
       .def("toc",
            [](mef3io::Reader& r, const std::string& ch) {
              std::vector<mef3io::BlockIndexEntry> entries;

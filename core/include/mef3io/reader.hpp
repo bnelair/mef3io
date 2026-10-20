@@ -110,6 +110,14 @@ class Reader {
     return session_.read_index(channel);
   }
 
+  /// Min/max of each data block of @p channel overlapping [t0, t1), from the
+  /// block index alone (nothing decoded): a fast envelope for viewers. Scaled
+  /// like read(); NaN where a writer left a block's extremes unset.
+  BlockEnvelope block_envelope(const std::string& channel, std::optional<si8> t0 = std::nullopt,
+                               std::optional<si8> t1 = std::nullopt) {
+    return session_.block_envelope(channel, t0, t1);
+  }
+
   /// Per-segment map of @p channel: each segment's time and sample ranges and
   /// block count, from metadata only (nothing decoded). Locates data across
   /// large gaps; complements toc(), which is block-level.

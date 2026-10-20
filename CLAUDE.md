@@ -625,6 +625,13 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   its field exactly. Edit the STORED image with `serialize_derived_fields`
   instead (decrypt → edit → re-encrypt when the section is encrypted), which is
   what the validator's repair path already did.
+- **`block_envelope` (Session/Reader, viewers)** reads ONLY `.tidx` (rchar-
+  pinned in test_p38) and skips segments outside the window by their .tmet
+  UH times before touching their index. Per-block min/max are the INDEX
+  copies (raw counts, scaled by the channel ufact like read()); RED_NAN ->
+  NaN. Times come from the index entries, not the RED headers (reading those
+  would mean touching .tdat); read() places by the header copy, which agrees
+  on any consistent file. Python + C++ only (no C ABI/MATLAB yet).
 - **Grid placement ties (#129).** `reader.cpp` has TWO roundings and they
   must stay different: `grid_count` (window length, `llround`, argument never
   negative; the C ABI's `mef3io_reader_n_samples` mirrors it) and

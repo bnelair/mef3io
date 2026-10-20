@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <cstring>
 #include <stdexcept>
 
@@ -705,6 +706,63 @@ std::vector<BlockIndexEntry> Session::read_index(const std::string& channel) {
   // cached index. The index is ~2% of the data, so an unbounded cache grows
   // to several GB on a session of a few hundred gigabytes.
   trim_index_cache();
+  return out;
+}
+
+BlockEnvelope Session::block_envelope(const std::string& channel, std::optional<si8> t0,
+                                     std::optional<si8> t1) {
+  auto it = channels_.find(channel);
+  if (it == channels_.end()) throw std::out_of_range("no such channel: " + channel);
+  Channel& ch = it->second;
+  const sf8 fs = ch.info.sampling_frequency;
+  const sf8 uf = ch.info.units_conversion_factor;
+  const sf8 nan = std::numeric_limits<sf8>::quiet_NaN();
+  const si8 lo = t0.value_or(std::numeric_limits<si8>::min());
+  const si8 hi = t1.value_or(std::numeric_limits<si8>::max());
+
+  BlockEnvelope out;
+  for (auto& seg : ch.segments) {
+    const std::size_t mark = out.start_uutc.size();
+    if (!with_segment(channel, seg, [&] {
+          auto& md = segment_metadata(seg);
+          const si8 rto = segment_rto(md);
+          // Skip a segment wholly outside the window before touching its
+          // index (a day-long session has thousands of them).
+          const si8 s0 = to_user_time(md.universal_header.start_time, rto);
+          const si8 s1 = to_user_time(md.universal_header.end_time, rto);
+          if (md.universal_header.start_time != fmt::UUTC_NO_ENTRY &&
+              md.universal_header.end_time != fmt::UUTC_NO_ENTRY && (s1 < lo || s0 >= hi))
+            return;
+          const auto idx_pin = segment_index(seg);  // keeps the bytes alive for this call
+          const std::span<const ui1> idx(*idx_pin);
+          const std::size_t n = index_entry_count(idx, source_->describe(seg.tidx_path));
+          for (std::size_t i = 0; i < n; ++i) {
+            const auto e = fmt::TimeSeriesIndex::parse(
+                idx.subspan(fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES,
+                            fmt::TIME_SERIES_INDEX_BYTES));
+            if (e.file_offset < 0 || e.number_of_samples == 0 || e.number_of_samples == fmt::UI4_NO_ENTRY)
+              continue;
+            const si8 b0 = to_user_time(e.start_time, rto);
+            const si8 b1 = b0 + static_cast<si8>(std::llround(
+                                    static_cast<sf8>(e.number_of_samples) * 1e6 / fs));
+            if (b1 <= lo || b0 >= hi) continue;
+            out.start_uutc.push_back(b0);
+            out.end_uutc.push_back(b1);
+            out.minimum.push_back(e.minimum_sample_value == fmt::RED_NAN
+                                      ? nan
+                                      : static_cast<sf8>(e.minimum_sample_value) * uf);
+            out.maximum.push_back(e.maximum_sample_value == fmt::RED_NAN
+                                      ? nan
+                                      : static_cast<sf8>(e.maximum_sample_value) * uf);
+          }
+        })) {
+      out.start_uutc.resize(mark);
+      out.end_uutc.resize(mark);
+      out.minimum.resize(mark);
+      out.maximum.resize(mark);
+    }
+  }
+  trim_index_cache();  // safe point: nothing holds a span into a cached index
   return out;
 }
 
