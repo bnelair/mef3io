@@ -107,3 +107,39 @@ def test_unset_extremes_are_nan(tmp_path):
         env = r.block_envelope("ch")
     assert np.isnan(env["min"][0]) and np.isnan(env["max"][0])
     assert env["min"][1] == 2560 and env["max"][1] == 5119
+
+
+def test_a_legacy_session(tmp_path):
+    """mef_tools (the legacy stack) writes the same index fields."""
+    pytest.importorskip("mef_tools", reason="legacy oracle not installed")
+    from mef_tools.io import MefWriter
+
+    path = tmp_path / "legacy.mefd"
+    w = MefWriter(str(path), overwrite=True)
+    w.write_data(np.arange(20_000, dtype=np.int32) * 1.0, "ch", START, 500.0, precision=0)
+    del w
+    with mef3io.Reader(str(path)) as r:
+        env = r.block_envelope("ch")
+        assert len(env["min"]) >= 1
+        assert env["min"].min() == 0 and env["max"].max() == 19_999
+        window = r.block_envelope("ch", START + 10 * SECOND, START + 11 * SECOND)
+        assert 1 <= len(window["min"]) <= 2
+        assert window["start_uutc"][0] <= START + 10 * SECOND < window["end_uutc"][-1]
+
+
+def test_a_lenient_reader_skips_an_unreadable_segment(tmp_path):
+    path = tmp_path / "damaged.mefd"
+    with mef3io.Writer(str(path), overwrite=True) as w:
+        for k in range(3):
+            w.write("ch", np.arange(int(20 * FS), dtype=float), START + k * 60 * SECOND, fs=FS,
+                    precision=0, new_segment=True)
+    tmets = sorted(path.rglob("*.tmet"))
+    raw = bytearray(tmets[1].read_bytes())
+    raw[2000] ^= 0xFF  # damage the middle segment's metadata (its CRC fails)
+    tmets[1].write_bytes(bytes(raw))
+    with pytest.warns(mef3io.UnreadableSegmentWarning):
+        r = mef3io.Reader(str(path), strict=False)
+    with r:
+        env = r.block_envelope("ch")
+    # two readable segments of 2 blocks each; nothing of the damaged one
+    assert list((env["start_uutc"] - START) // SECOND) == [0, 10, 120, 130]

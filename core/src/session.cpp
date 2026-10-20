@@ -717,6 +717,8 @@ BlockEnvelope Session::block_envelope(const std::string& channel, std::optional<
   const sf8 fs = ch.info.sampling_frequency;
   const sf8 uf = ch.info.units_conversion_factor;
   const sf8 nan = std::numeric_limits<sf8>::quiet_NaN();
+  if (!(fs > 0) || !std::isfinite(fs))
+    throw FormatError("channel " + channel + " has no valid sampling frequency");
   const si8 lo = t0.value_or(std::numeric_limits<si8>::min());
   const si8 hi = t1.value_or(std::numeric_limits<si8>::max());
 
@@ -730,8 +732,15 @@ BlockEnvelope Session::block_envelope(const std::string& channel, std::optional<
           // index (a day-long session has thousands of them).
           const si8 s0 = to_user_time(md.universal_header.start_time, rto);
           const si8 s1 = to_user_time(md.universal_header.end_time, rto);
-          if (md.universal_header.start_time != fmt::UUTC_NO_ENTRY &&
-              md.universal_header.end_time != fmt::UUTC_NO_ENTRY && (s1 < lo || s0 >= hi))
+          // Only when those times are plausible (a foreign writer may leave
+          // them 0 or unset), and with a second of margin for recorder
+          // jitter: a wrong skip would silently drop blocks read() returns.
+          constexpr si8 MARGIN = 1'000'000;
+          const bool plausible = md.universal_header.start_time != fmt::UUTC_NO_ENTRY &&
+                                 md.universal_header.end_time != fmt::UUTC_NO_ENTRY &&
+                                 s0 > 0 && s1 >= s0;
+          if (plausible && ((lo > std::numeric_limits<si8>::min() + MARGIN && s1 < lo - MARGIN) ||
+                            (hi < std::numeric_limits<si8>::max() - MARGIN && s0 >= hi + MARGIN)))
             return;
           const auto idx_pin = segment_index(seg);  // keeps the bytes alive for this call
           const std::span<const ui1> idx(*idx_pin);
