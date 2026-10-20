@@ -121,6 +121,43 @@ block-interval / recording-duration on every channel, it would have excused
 the cut's own block_interval bug. Reader.read(t0, t1) can put a sample up to half a period before t0
 in slot 0, so tests compare the cut read whole against the source read from
 the cut's start time.
+MERGE (#103 second half, `merge_sessions` / `check_merge` / `verify_merge`,
+MergeOptions = TransformOptions + per-source `passwords`): the SAME engine —
+one Copier per source (transform rules), one `preflight()` per source run
+with that source's share of the selection and of the per-channel metadata
+(a channel only some sources hold is not "unknown" to the others), then the
+merge's own checks in `preflight_merge`: rto equal, one rate per channel,
+subject fields equal unless set by metadata, and OVERLAP ON RECORDED DATA —
+only segments whose UH spans overlap across sources have their indexes read
+(`index_blocks`), and blocks overlap only beyond half a sample (a source's own
+jitter never counts). Pieces: a segment is split where another source's
+data starts in one of its gaps (`MergePiece.entries`, block boundaries, no
+decoding); pieces sorted by time, numbered from 0, each copied with
+`Copier::copy_segment(..., piece)` (the cut's reshape path: derived s2,
+spans, segment number). Level UUIDs are the merge's own
+(`set_level_uuid`: one per channel and session, new per piece); Verifier
+`set_merge` relaxes only the 1:1 level check. Annotations: session/channel
+level merged by time (`prepare_records` + `write_records`, the split of
+copy_records), segment level with their piece (time bounds lo/hi).
+ONE half-sample tolerance everywhere (recorders round times to whole µs):
+the overlap check, the split (foreign data starting within half a sample
+before a block's end lies in the gap after it) and verify's
+segments-in-order check — they disagreed once and accepted merges failed
+late. Segment spans = UH times widened to the first/last index entry (a
+foreign UH may be unset or stale); segments without blocks are left out
+(noted). Merged record files' UH start/end = min/max record time
+(`set_record_span`).
+`verify_merge_impl` (does NOT trust the plan): the pieces of each source
+segment must tile [0, n) exactly; one level UUID per result segment (all its
+files), per channel and for the session, all distinct; each segment against
+its piece in lockstep (`check_segment_data_cut(..., piece)`); merged
+annotations against the sources' sorted by time, PLUS their headers
+(check_uh as a copy of the first source's, counts, span) and every .ridx
+entry (by offset: type/version/encryption, the source index's time);
+segments never overlapping (with the tolerance); the validator with NO
+excusal (renumbered: repair sources first). The Seiz entry filter is one
+function (`seiz_without`) for the copy and this check. time_range is refused with a
+merge for now (`merge-time-range`); anonymize after merging.
 Transform rules, test-pinned (`tests/test_p33_transform.py`,
 `core/tests/test_transform.cpp`): every stored time VERBATIM (Copier::time
 returns it unchanged; no Shifter, so no rto refusals: rto, DST, GMT kept);

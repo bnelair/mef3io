@@ -1041,6 +1041,77 @@ NB_MODULE(_mef3io, m) {
       },
       MEF3IO_TRANSFORM_NB_ARGS, nb::arg("progress") = nb::none(),
       "Check a transformed copy against its source (see mef3io.transform.verify).");
+  // --- merge (#103): several sessions into one ---
+#define MEF3IO_MERGE_ARGS                                                                        \
+  const std::vector<std::string> &sources, const std::string &dst,                               \
+      std::vector<std::string> passwords, const std::string &output_password_1,                  \
+      const std::string &output_password_2, std::vector<std::string> channels,                   \
+      std::vector<std::string> exclude_channels, std::optional<std::string> subject_name_1,      \
+      std::optional<std::string> subject_name_2, std::optional<std::string> subject_id,          \
+      std::optional<std::string> recording_location,                                             \
+      std::optional<std::string> session_description,                                            \
+      std::map<std::string, std::string> channel_descriptions,                                   \
+      std::map<std::string, std::string> reference_descriptions, const mef3io::CancelToken *cancel
+#define MEF3IO_MERGE_OPTIONS(o)                                                                  \
+  mef3io::MergeOptions o;                                                                        \
+  set_copy_options(o, true, "", output_password_1, output_password_2, std::move(channels),       \
+                   std::move(exclude_channels));                                                 \
+  o.passwords = std::move(passwords);                                                            \
+  o.metadata = metadata_edits(std::move(subject_name_1), std::move(subject_name_2),              \
+                              std::move(subject_id), std::move(recording_location),              \
+                              std::move(session_description), std::move(channel_descriptions),   \
+                              std::move(reference_descriptions))
+#define MEF3IO_MERGE_NB_ARGS                                                                     \
+  nb::arg("sources"), nb::arg("dst"), nb::arg("passwords") = std::vector<std::string>{},         \
+      nb::arg("output_password_1") = "", nb::arg("output_password_2") = "",                      \
+      nb::arg("channels") = std::vector<std::string>{},                                          \
+      nb::arg("exclude_channels") = std::vector<std::string>{},                                  \
+      nb::arg("subject_name_1").none() = nb::none(), nb::arg("subject_name_2").none() = nb::none(), \
+      nb::arg("subject_id").none() = nb::none(), nb::arg("recording_location").none() = nb::none(), \
+      nb::arg("session_description").none() = nb::none(),                                        \
+      nb::arg("channel_descriptions") = std::map<std::string, std::string>{},                    \
+      nb::arg("reference_descriptions") = std::map<std::string, std::string>{},                  \
+      nb::arg("cancel").none() = nb::none()
+  m.def(
+      "check_merge",
+      [](MEF3IO_MERGE_ARGS) {
+        PyHooks hooks(cancel, nb::none());
+        MEF3IO_MERGE_OPTIONS(o);
+        const mef3io::CopyCheck c = hooks.run(
+            [&](const mef3io::Control& ctl) { return mef3io::check_merge(sources, dst, o, ctl); });
+        return check_dict(c);
+      },
+      MEF3IO_MERGE_NB_ARGS, "Every check merge_sessions makes before writing (see mef3io.merge).");
+  m.def(
+      "merge_sessions",
+      [](MEF3IO_MERGE_ARGS, nb::object progress) {
+        PyHooks hooks(cancel, std::move(progress));
+        MEF3IO_MERGE_OPTIONS(o);
+        const mef3io::MergeReport r = hooks.run([&](const mef3io::Control& ctl) {
+          return mef3io::merge_sessions(sources, dst, o, ctl);
+        });
+        nb::dict out = copy_report_dict(r);
+        out["metadata_fields_changed"] = r.metadata_fields_changed;
+        out["sources"] = r.sources;
+        out["segments_split"] = r.segments_split;
+        return out;
+      },
+      MEF3IO_MERGE_NB_ARGS, nb::arg("progress") = nb::none(),
+      "Merge several sessions into one (see mef3io.merge_sessions).");
+  m.def(
+      "verify_merge",
+      [](MEF3IO_MERGE_ARGS, nb::object progress) {
+        PyHooks hooks(cancel, std::move(progress));
+        MEF3IO_MERGE_OPTIONS(o);
+        const mef3io::VerifyReport r = hooks.run(
+            [&](const mef3io::Control& ctl) { return mef3io::verify_merge(sources, dst, o, ctl); });
+        return verify_report_dict(r);
+      },
+      MEF3IO_MERGE_NB_ARGS, nb::arg("progress") = nb::none(),
+      "Check a merged session against its sources (see mef3io.merge.verify).");
+#undef MEF3IO_MERGE_ARGS
+#undef MEF3IO_MERGE_OPTIONS
+#undef MEF3IO_MERGE_NB_ARGS
 #undef MEF3IO_TRANSFORM_ARGS
 #undef MEF3IO_TRANSFORM_OPTIONS
 #undef MEF3IO_TRANSFORM_NB_ARGS
