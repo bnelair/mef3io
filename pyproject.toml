@@ -5,12 +5,12 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "mef3io"
 dynamic = ["version"]
-description = "Read, write and de-identify MEF 3.0 (Multiscale Electrophysiology Format) recordings: EEG, iEEG, ECG and other regularly sampled signals, from Python, MATLAB and C++"
+description = "Read, write, de-identify, cut and merge MEF 3.0 (Multiscale Electrophysiology Format) recordings: EEG, iEEG, ECG and other regularly sampled signals, from Python, MATLAB and C++"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "Filip Mivalt" }]
-keywords = ["MEF", "MEF3", "MEF 3.0", "Multiscale Electrophysiology Format", "EEG", "iEEG", "SEEG", "ECoG", "ECG", "biosignals", "electrophysiology", "neuroscience", "anonymization", "de-identification", "meflib", "pymef"]
+keywords = ["MEF", "MEF3", "MEF 3.0", "Multiscale Electrophysiology Format", "EEG", "iEEG", "SEEG", "ECoG", "ECG", "biosignals", "electrophysiology", "neuroscience", "anonymization", "de-identification", "merge", "meflib", "pymef"]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Science/Research",

@@ -22,8 +22,10 @@
       module names in 4.1 are not the ones the code uses;
     - features added later are not planned here: `inspect`, cancelling and
       progress, the validator with repair and recovery, single-file
-      `.mefd.tar` sessions, and de-identified copies (`anonymize_session`,
-      see [De-identification](anonymization.md)).
+      `.mefd.tar` sessions, de-identified copies (`anonymize_session`,
+      see [De-identification](anonymization.md)), modified copies, cut and
+      merge ([Modified copies](transform.md), [Merging](merge.md)), and
+      session renaming.
 
 ## 1. Goal
 

@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 title: "mef3io: MEF 3.0 (Multiscale Electrophysiology Format) read/write with a single C++ core and Python/MATLAB bindings"
-abstract: "mef3io reads and writes MEF 3.0 (Multiscale Electrophysiology Format) recordings, such as EEG, intracranial EEG and ECG, from Python, MATLAB and C++. One C++ core implements the format; files it writes open in meflib, pymef and mef_tools, and theirs open in mef3io. It also validates and repairs sessions, and makes de-identified copies of them for sharing."
+abstract: "mef3io reads and writes MEF 3.0 (Multiscale Electrophysiology Format) recordings, such as EEG, intracranial EEG and ECG, from Python, MATLAB and C++. One C++ core implements the format; files it writes open in meflib, pymef and mef_tools, and theirs open in mef3io. It also validates and repairs sessions, makes de-identified copies of them for sharing, and writes modified copies and merged recordings."
 message: "If you use mef3io in research, please cite it."
 type: software
 authors:
