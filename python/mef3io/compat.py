@@ -136,6 +136,18 @@ class MefReader:
         raw = self.get_raw_data([channels], t_stamp1, t_stamp2)[0]
         return raw * self.get_channel_info(channels)["ufact"][0]
 
+    def block_envelope(self, channel: str, t_stamp1=None, t_stamp2=None) -> dict:
+        """Per-block minimum and maximum from the block index alone.
+
+        Not part of the legacy ``mef_tools`` API: the same as
+        :meth:`mef3io.Reader.block_envelope`, here so code that holds a
+        ``MefReader`` (such as a server) needs no second reader. Returns NumPy
+        arrays ``start_uutc``, ``end_uutc``, ``min``, ``max``, one row per
+        data block overlapping ``[t_stamp1, t_stamp2)``, scaled like
+        :meth:`get_data`.
+        """
+        return self._r.block_envelope(channel, t_stamp1, t_stamp2)
+
     def get_annotations(self, channel: Optional[str] = None):
         """Records as a list of dicts (legacy ``mef_tools`` signature).
 
