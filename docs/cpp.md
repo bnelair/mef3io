@@ -168,7 +168,9 @@ mef3io::TransformReport rep = mef3io::transform_session("patient.mefd", "eeg.mef
 ```
 
 `check_transform` and `verify_transform` mirror their anonymize
-counterparts. The options, refusals and reports are shared:
+counterparts. `merge_sessions(sources, dst, MergeOptions)` (with
+`check_merge` / `verify_merge`) merges several sessions on the same engine;
+see [Merging recordings](merge.md). The options, refusals and reports are shared:
 - `AnonymizeOptions` and `TransformOptions` both extend `CopyOptions`;
 - `AnonymizeError` is an alias of `CopyError`.
 

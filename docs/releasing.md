@@ -60,10 +60,34 @@ and dispatches the **release** workflow, which:
 3. publishes wheels + sdist to PyPI (`twine`, `PYPI_Token_General` secret);
 4. assembles the MATLAB bundle (`mef3io-matlab-vX.Y.Z.zip`: the `+mef3io`
    classes plus the tested MEX binaries for all three platforms) and creates
-   the GitHub release with it attached.
+   the GitHub release with it attached;
+5. measures test coverage (`scripts/coverage.sh`, below) and attaches the
+   report and the badge files to the release.
 
 Dispatching the release workflow manually on a branch is a **dry run**:
 wheels and MEX build as artifacts, publishing is skipped.
+
+## Test coverage
+
+Coverage is measured **only when a version is released**, never in the
+per-push CI, so everyday runs stay fast. `scripts/coverage.sh` does it:
+
+- **Builds:** the extension and the C++ tests are built with coverage
+  instrumentation (atomic counters, because decoding runs on many threads).
+- **Runs:** the C++ suite and the whole Python suite.
+- **Writes:**
+  - the C++ core's line coverage, as both suites exercise it (gcovr);
+  - the Python layer's (coverage.py);
+  - two badge files for shields.io.
+
+The release workflow attaches the report (`coverage-report.tar.gz`) and the
+badge files to the GitHub release, then rebuilds the docs site. The site
+serves the latest report, and the README badges read their files from it:
+- [C++ core](https://bnelair.github.io/mef3io/coverage/core/);
+- [Python layer](https://bnelair.github.io/mef3io/coverage/python/).
+
+A coverage failure never blocks a release. Run the script yourself to see the
+report locally (it writes `coverage/`).
 
 ## CI
 

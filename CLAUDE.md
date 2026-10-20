@@ -121,6 +121,43 @@ block-interval / recording-duration on every channel, it would have excused
 the cut's own block_interval bug. Reader.read(t0, t1) can put a sample up to half a period before t0
 in slot 0, so tests compare the cut read whole against the source read from
 the cut's start time.
+MERGE (#103 second half, `merge_sessions` / `check_merge` / `verify_merge`,
+MergeOptions = TransformOptions + per-source `passwords`): the SAME engine —
+one Copier per source (transform rules), one `preflight()` per source run
+with that source's share of the selection and of the per-channel metadata
+(a channel only some sources hold is not "unknown" to the others), then the
+merge's own checks in `preflight_merge`: rto equal, one rate per channel,
+subject fields equal unless set by metadata, and OVERLAP ON RECORDED DATA —
+only segments whose UH spans overlap across sources have their indexes read
+(`index_blocks`), and blocks overlap only beyond half a sample (a source's own
+jitter never counts). Pieces: a segment is split where another source's
+data starts in one of its gaps (`MergePiece.entries`, block boundaries, no
+decoding); pieces sorted by time, numbered from 0, each copied with
+`Copier::copy_segment(..., piece)` (the cut's reshape path: derived s2,
+spans, segment number). Level UUIDs are the merge's own
+(`set_level_uuid`: one per channel and session, new per piece); Verifier
+`set_merge` relaxes only the 1:1 level check. Annotations: session/channel
+level merged by time (`prepare_records` + `write_records`, the split of
+copy_records), segment level with their piece (time bounds lo/hi).
+ONE half-sample tolerance everywhere (recorders round times to whole µs):
+the overlap check, the split (foreign data starting within half a sample
+before a block's end lies in the gap after it) and verify's
+segments-in-order check — they disagreed once and accepted merges failed
+late. Segment spans = UH times widened to the first/last index entry (a
+foreign UH may be unset or stale); segments without blocks are left out
+(noted). Merged record files' UH start/end = min/max record time
+(`set_record_span`).
+`verify_merge_impl` (does NOT trust the plan): the pieces of each source
+segment must tile [0, n) exactly; one level UUID per result segment (all its
+files), per channel and for the session, all distinct; each segment against
+its piece in lockstep (`check_segment_data_cut(..., piece)`); merged
+annotations against the sources' sorted by time, PLUS their headers
+(check_uh as a copy of the first source's, counts, span) and every .ridx
+entry (by offset: type/version/encryption, the source index's time);
+segments never overlapping (with the tolerance); the validator with NO
+excusal (renumbered: repair sources first). The Seiz entry filter is one
+function (`seiz_without`) for the copy and this check. time_range is refused with a
+merge for now (`merge-time-range`); anonymize after merging.
 Transform rules, test-pinned (`tests/test_p33_transform.py`,
 `core/tests/test_transform.cpp`): every stored time VERBATIM (Copier::time
 returns it unchanged; no Shifter, so no rto refusals: rto, DST, GMT kept);
@@ -588,6 +625,22 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   its field exactly. Edit the STORED image with `serialize_derived_fields`
   instead (decrypt → edit → re-encrypt when the section is encrypted), which is
   what the validator's repair path already did.
+- **Grid placement ties (#129).** `reader.cpp` has TWO roundings and they
+  must stay different: `grid_count` (window length, `llround`, argument never
+  negative; the C ABI's `mef3io_reader_n_samples` mirrors it) and
+  `grid_slot` (where a block's first sample lands: nearest slot, a TIE to the
+  EARLIER slot whatever the sign, `ceil(x - 0.5)`, so slot 0 is the first
+  sample at or after t0). `llround` for placement rounded halves away from
+  zero: the block holding t0 (negative offset) and later blocks (positive)
+  went opposite ways, leaving one unclaimed slot = a NaN at the first block
+  boundary of every window starting exactly half a sample off the grid
+  (500/250/1000/200 Hz with ms event times). `tests/test_p37_grid_ties.py`
+  scans every integer-us start offset across a sample period. KNOWN, left
+  as is: when BOTH t0 and t1 are exact ties, `grid_count` can be one more
+  than the samples in [t0, t1), so the last slot is NaN (2 of ~154k swept
+  windows). Using the slot rule for the length would change ordinary
+  on-grid lengths (500 Hz, 1 ms window: 1 -> 0) and the C ABI's
+  `mef3io_reader_n_samples` contract.
 - **Block ranges can OVERLAP on the sample grid.** Only writers that put every
   block start exactly on the grid (mef3io's own) tile the output cleanly;
   foreign recorders carry acquisition jitter + per-block us rounding, so a
@@ -984,6 +1037,15 @@ on Windows — repo-wide gap elsewhere). Known gap: a Writer appending DURING
 a rename can race it (needs a cross-process write lock, filed as an issue). Not done: NFD length
 check on HFS+ (the file system refuses at the folder step, which rolls back),
 per-segment end time/entry counts in the report (`files` has size+mtime).
+COVERAGE runs ONLY on a release (user decision 2026-10-19, never per-push):
+`scripts/coverage.sh` (atomic gcov counters: the decoder's threads otherwise
+race into negative hits) → gcovr for core/src + core/include (both suites
+exercise it) and coverage.py for python/mef3io → coverage/ HTML + shields
+endpoint JSONs; release.yml's `coverage` job attaches them to the GitHub
+release (never blocking it) and re-runs docs.yml, which copies the latest
+report (and the badge JSONs) into the site; README badges read
+bnelair.github.io/mef3io/coverage/*.json (no redirect, unlike release
+downloads). The script restores the dev extension link on exit.
 VERIFY BEFORE PUBLISHING: `scripts/verify_local.sh` (`--full-bench`,
 `--no-bench`) is the single entry point — builds, asserts the IN-TREE extension
 is the one under test (not an installed wheel), runs the C++ + Python suites,

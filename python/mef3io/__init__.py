@@ -35,6 +35,8 @@ from . import anonymize  # noqa: E402  (mef3io.anonymize.verify, ...)
 from .anonymize import AnonymizeReport, VerifyReport, anonymize_session  # noqa: E402
 from . import transform  # noqa: E402  (mef3io.transform.check, .verify, ...)
 from .transform import TransformReport, transform_session  # noqa: E402
+from . import merge  # noqa: E402  (mef3io.merge.check, .verify, ...)
+from .merge import MergeReport, merge_sessions  # noqa: E402
 from . import naming  # noqa: E402
 from .naming import (  # noqa: E402
     RenameReport,
@@ -103,7 +105,7 @@ __all__ = [
     "MefReader", "MefWriter", "archive_session", "extract_session",
     "password_interop_issue",
     "anonymize_session", "AnonymizeReport", "VerifyReport",
-    "transform_session", "TransformReport",
+    "transform_session", "TransformReport", "merge_sessions", "MergeReport",
     "time_range", "TimeRange", "name_drift", "rename_archive",
     "rename_session", "fix_name_drift", "RenameReport", "operation_marker",
     "clear_operation_marker",

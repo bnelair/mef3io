@@ -58,6 +58,10 @@ version number.
   name, edited subject details and descriptions. Every time and sample is
   copied as stored, and the copy is verified against its source. Python and
   C++ — see [Modified copies](transform.md).
+- **Merging recordings** — `mef3io.merge_sessions` merges two or more
+  recordings into one session: parts of one stay, or recordings that take
+  turns, checked for overlapping data before anything is written. Python and
+  C++ — see [Merging recordings](merge.md).
 - **Deterministic** — output is byte-identical regardless of thread count.
 - **Responsive, with thread-safe reads** — opening, reading and writing
   release Python's GIL, so a GUI stays responsive while a session opens or
@@ -140,6 +144,7 @@ The same session opens in MATLAB (`mef3io.Reader('session.mefd')`) and C++
 | [Format reference](mef3_format.md) | the MEF 3.0 on-disk structure, field by field |
 | [De-identification](anonymization.md) | de-identified copies with `anonymize_session`, and why meflib's recording-time offset (deprecated) is not anonymization |
 | [Modified copies](transform.md) | copies with chosen channels, passwords, name and details, with `transform_session` |
+| [Merging recordings](merge.md) | two or more recordings into one session, with `merge_sessions` |
 | [Performance & legacy comparison](legacy_comparison.md) | measured speed, encryption, and quantization differences |
 
 ## Scope and limitations
