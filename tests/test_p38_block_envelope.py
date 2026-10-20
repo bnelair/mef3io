@@ -143,3 +143,13 @@ def test_a_lenient_reader_skips_an_unreadable_segment(tmp_path):
         env = r.block_envelope("ch")
     # two readable segments of 2 blocks each; nothing of the damaged one
     assert list((env["start_uutc"] - START) // SECOND) == [0, 10, 120, 130]
+
+
+def test_the_legacy_reader_offers_it_too(session):
+    path, _, _ = session
+    from mef3io import MefReader
+    with mef3io.Reader(str(path)) as r:
+        expected = r.block_envelope("ch", START, START + 30 * SECOND)
+    got = MefReader(str(path)).block_envelope("ch", START, START + 30 * SECOND)
+    for key in ("start_uutc", "end_uutc", "min", "max"):
+        np.testing.assert_array_equal(got[key], expected[key])

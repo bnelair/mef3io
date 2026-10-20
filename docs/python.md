@@ -246,6 +246,9 @@ env["min"], env["max"]                            # float64, in the channel's un
 - Gaps are absent rows: compare `end_uutc` with the next `start_uutc`.
 - `toc()` returns the same blocks for the whole channel as one dict each,
   unscaled; `block_envelope` is the one to use for drawing.
+- The compat `MefReader` has it too (`MefReader.block_envelope(channel,
+  t_stamp1, t_stamp2)`), so code built on the legacy API needs no second
+  reader.
 
 ### `records(channel=None, segment=None, level=None)`
 
