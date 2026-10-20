@@ -5,6 +5,7 @@ Newest first.
 
 | Version | Released | Main changes |
 |---|---|---|
+| [Unreleased](unreleased.md) | — | a read starting exactly half a sample off the grid no longer returns a NaN (#129) |
 | [1.4.0](1.4.0.md) | 2026-10-16 | `anonymize_session` and `anonymize.check`: de-identified copies with every date moved; opening a session no longer freezes other Python threads; one `Reader` shared safely between threads; warnings carry the path as data (`MefWarning`); `inspect()` reports legacy password matches and channel descriptions |
 | [1.3.0](1.3.0.md) | 2026-10-16 | `inspect()`, cancelling and progress, encrypted data blocks from other writers decoded correctly, safer `extract_session(overwrite=True)` |
 | [1.2.0](1.2.0.md) | 2026-10-15 | lenient reading (`strict=False`), records at every level, provenance stamp, faster snapshot cache, recording-time-offset fixes |

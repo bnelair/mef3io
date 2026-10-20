@@ -12,9 +12,23 @@
 
 namespace mef3io {
 namespace {
-// Sample index on the [t0, fs) grid nearest to absolute uUTC `t`.
-si8 grid_index(si8 t, si8 t0, sf8 fs) {
-  return static_cast<si8>(std::llround(static_cast<sf8>(t - t0) * fs / 1e6));
+// Number of output samples of a window [t0, t1) (the C ABI's
+// mef3io_reader_n_samples mirrors it). Its argument is never negative.
+si8 grid_count(si8 t1, si8 t0, sf8 fs) {
+  return static_cast<si8>(std::llround(static_cast<sf8>(t1 - t0) * fs / 1e6));
+}
+
+// Output slot of a sample (or block start) at absolute uUTC `t`: the nearest
+// slot of the [t0, fs) grid, a TIE going to the EARLIER slot whatever the
+// sign of t - t0 (#129). So slot 0 holds the first sample at or after t0.
+// std::llround rounds halves away from zero: the block holding t0 (negative
+// offset) went one way and every later block (positive offset) the other,
+// leaving one slot no block claimed -- a NaN at the first block boundary of
+// any window starting exactly half a sample off the grid (at 500 Hz, every
+// millisecond time ending in 1 ms). One rule for every block keeps
+// consecutive blocks exactly their length apart.
+si8 grid_slot(si8 t, si8 t0, sf8 fs) {
+  return static_cast<si8>(std::ceil(static_cast<sf8>(t - t0) * fs / 1e6 - 0.5));
 }
 
 // Half-open output ranges claimed by one block, and the set already claimed by
@@ -66,7 +80,7 @@ RawData Reader::read_raw(const std::string& channel, std::optional<si8> t0_opt,
   out.sampling_frequency = fs;
   out.units_conversion_factor = ci.units_conversion_factor;
 
-  si8 n = grid_index(t1, t0, fs);
+  si8 n = grid_count(t1, t0, fs);
   if (n < 0) n = 0;
   out.samples.assign(static_cast<std::size_t>(n), 0);
   out.valid.assign(static_cast<std::size_t>(n), 0);
@@ -97,7 +111,7 @@ RawData Reader::read_raw(const std::string& channel, std::optional<si8> t0_opt,
     std::vector<std::pair<si8, si8>> owned;
     for (std::size_t r = n_jobs; r-- > 0;) {
       const BlockJob& job = jobs.jobs[r];
-      idx0[r] = grid_index(job.start_uutc, t0, fs);
+      idx0[r] = grid_slot(job.start_uutc, t0, fs);
       // Trim to the requested window before claiming, so samples outside it
       // never mask a block that does fall inside.
       const si8 b = std::max<si8>(idx0[r], 0);
