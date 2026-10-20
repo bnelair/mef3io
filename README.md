@@ -14,6 +14,9 @@ sessions written by those tools open in mef3io.
 [![CI](https://img.shields.io/github/actions/workflow/status/bnelair/mef3io/ci.yml?branch=main&label=CI)](https://github.com/bnelair/mef3io/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/github/actions/workflow/status/bnelair/mef3io/docs.yml?branch=main&label=docs)](https://bnelair.github.io/mef3io/)
 [![License](https://img.shields.io/github/license/bnelair/mef3io)](https://github.com/bnelair/mef3io/blob/main/LICENSE)
+[![Coverage: core](https://img.shields.io/endpoint?url=https%3A%2F%2Fbnelair.github.io%2Fmef3io%2Fcoverage%2Fcoverage-core.json)](https://bnelair.github.io/mef3io/coverage/core/)
+[![Coverage: Python](https://img.shields.io/endpoint?url=https%3A%2F%2Fbnelair.github.io%2Fmef3io%2Fcoverage%2Fcoverage-python.json)](https://bnelair.github.io/mef3io/coverage/python/)
+[![Downloads](https://img.shields.io/pypi/dm/mef3io)](https://pypi.org/project/mef3io/)
 
 **Documentation: <https://bnelair.github.io/mef3io/>**
 
@@ -148,6 +151,11 @@ pages such as
   stored, and the copy is checked against its source before it is saved.
   Python and C++; see
   [Modified copies](https://bnelair.github.io/mef3io/transform/).
+- **Recordings merged into one.** `mef3io.merge_sessions` joins two or
+  more recordings: parts of one stay, recordings that take turns, or
+  different amplifiers. Overlapping data is refused before anything is
+  written, and the result is checked against every source. See
+  [Merging recordings](https://bnelair.github.io/mef3io/merge/).
 - **One file instead of a folder.** A session can be packed into a single
   `.mefd.tar` and read in place, without unpacking.
 

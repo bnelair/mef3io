@@ -36,6 +36,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <random>
 #include <set>
@@ -913,6 +914,29 @@ void record_text_fields(
       fn("channel name", seiz_entry_name(r.body, c), true);
 }
 
+/// A Seiz body without the entries of `excluded_keys` (channel_key()s); the
+/// body as stored when it names none of them. `dropped` counts what went.
+/// The copy (kept_body) and a merge's verification both take it from here.
+std::vector<ui1> seiz_without(const RawRecord& r, const std::set<std::string>& excluded_keys,
+                              si8* dropped = nullptr) {
+  if (r.type != "Seiz" || excluded_keys.empty() || !layout_of(r)) return r.body;
+  const std::size_t n = seiz_entry_count(r.body);
+  std::vector<ui1> out(r.body.begin(), r.body.begin() + SEIZ_FIXED);
+  si4 kept = 0;
+  for (std::size_t c = 0; c < n; ++c) {
+    if (excluded_keys.count(channel_key(seiz_entry_name(r.body, c)))) {
+      if (dropped) ++*dropped;
+      continue;
+    }
+    const auto first = r.body.begin() + static_cast<std::ptrdiff_t>(SEIZ_FIXED + c * SEIZ_CHANNEL);
+    out.insert(out.end(), first, first + SEIZ_CHANNEL);
+    ++kept;
+  }
+  if (kept == static_cast<si4>(n)) return r.body;  // nothing left out: as stored
+  write<si4>(out, SEIZ_NCH, kept);
+  return out;
+}
+
 /// One metadata text field a transform sets in a segment's sections.
 struct EditedField {
   std::size_t section;  // S2 or S3 (offset of the section in the .tmet)
@@ -1150,7 +1174,9 @@ class Copier {
     const Uuid old_level = uuid_at(uh, UH_LEVEL_UUID);
     const Uuid old_file = uuid_at(uh, UH_FILE_UUID);
     Uuid level{};
-    if (!all_zero(old_level)) {
+    if (level_override_) {
+      level = *level_override_;
+    } else if (!all_zero(old_level)) {
       auto it = level_map_.find(old_level);
       if (it == level_map_.end()) it = level_map_.emplace(old_level, random_uuid()).first;
       level = it->second;
@@ -1299,8 +1325,11 @@ class Copier {
   /// `next_start`: the channel-wide sample its first sample gets (a cut
   /// renumbers), advanced by what it holds.
   bool copy_segment(const detail::LayoutSegment& seg, const fs::path& cdir,
-                    const std::string& channel, int number, si8& next_start) {
+                    const std::string& channel, int number, si8& next_start,
+                    std::optional<std::pair<std::size_t, std::size_t>> piece = std::nullopt) {
     ctl_.check();
+    piece_ = piece;
+    const bool reshape = window_ || piece_;  // the copy's segments differ from the source's
     TmetImage t = open_tmet(src_, seg.tmet, rules_.copy->password);
     seg_keys_ = t.keys;
     seg_rto_ = t.rto;
@@ -1316,6 +1345,8 @@ class Copier {
       if (!is_sentinel(a, false) && !is_sentinel(b, false) &&
           !(to_user_time(a, t.rto) < window_->second && to_user_time(b, t.rto) > window_->first))
         return false;
+    }
+    if (reshape) {
       if (!(seg_fs_ > 0))
         refuse(RefusalKind::Format, "data-damaged",
                src_.describe(seg.tmet) + " has no valid sampling frequency, so its samples "
@@ -1328,9 +1359,9 @@ class Copier {
     fs::create_directory(sdir);
     const si8 start = next_start;
     const detail::CopyStats st =
-        copy_segment_data(seg, sdir, channel, stem, window_ ? std::optional<si8>(start)
-                                                            : std::nullopt);
-    if (window_ && st.blocks == 0) {  // only gaps of it lay in the window
+        copy_segment_data(seg, sdir, channel, stem, reshape ? std::optional<si8>(start)
+                                                             : std::nullopt);
+    if (reshape && st.blocks == 0) {  // only gaps of it lay in the window
       written.resize(written.size() - 2);
       rep_.blocks -= st.blocks;
       rep_.bytes_written -= st.output_bytes;
@@ -1339,7 +1370,7 @@ class Copier {
       end_segment();
       return false;
     }
-    copy_tmet(std::move(t), seg.tmet, sdir / (stem + ".tmet"), channel, window_ ? &st : nullptr,
+    copy_tmet(std::move(t), seg.tmet, sdir / (stem + ".tmet"), channel, reshape ? &st : nullptr,
               start);
     next_start += st.samples;
     return true;
@@ -1350,6 +1381,19 @@ class Copier {
   void end_segment() {
     seg_span_.reset();
     seg_number_.reset();
+    piece_.reset();
+    level_override_.reset();
+  }
+
+  /// A merge (#103) names the level each file belongs to itself: one UUID
+  /// per channel and session across all sources, a new one per piece.
+  void set_level_uuid(std::optional<Uuid> u) { level_override_ = u; }
+
+  /// A merged record file: its universal header spans [first, last] (user
+  /// uUTC, stored against `rto`), the records it holds.
+  void set_record_span(si8 first, si8 last, si8 rto) {
+    seg_span_ = std::make_pair(first, last);
+    seg_rto_ = rto;
   }
 
   detail::CopyStats copy_segment_data(const detail::LayoutSegment& seg, const fs::path& dir,
@@ -1360,6 +1404,8 @@ class Copier {
     if (window_)  // only the blocks around the window are read
       spec.entries =
           window_entries(src_, seg.tidx, seg_rto_, window_->first, window_->second, seg_reach_us_);
+    else if (piece_)  // a merge: one piece of the segment
+      spec.entries = piece_;
     std::optional<si8> first_t, end_t;  // a cut: the kept samples' span (user uUTC)
     native_max_ = std::numeric_limits<si4>::min();
     native_min_ = std::numeric_limits<si4>::max();
@@ -1388,6 +1434,10 @@ class Copier {
           trim_block(cb, stored, t, k0, k1, what, channel);
           return true;
         }
+      } else if (piece_) {  // a merge piece: its span, from the headers
+        const si8 t = to_user_time(read<si8>(cb.block, 40), seg_rto_);
+        if (!first_t) first_t = t;
+        end_t = sample_time(t, read<ui4>(cb.block, 32), seg_fs_);
       }
       if (rules_.anonymize()) {
         write<si8>(cb.block, 40, sh_(read<si8>(cb.block, 40), what + " start time"));
@@ -1432,7 +1482,7 @@ class Copier {
       return true;
     };
     spec.on_header = [&](std::span<ui1> uh, bool is_tdat) {
-      if (window_ && first_t) seg_span_ = std::make_pair(*first_t, *end_t);
+      if ((window_ || piece_) && first_t) seg_span_ = std::make_pair(*first_t, *end_t);
       patch_uh(uh, channel + (is_tdat ? " data" : " index"), channel);
     };
     detail::CopyStats st;
@@ -1499,24 +1549,30 @@ class Copier {
     track_extrema(cb.entry);
   }
 
-  /// One record file pair -> `out_rdat` (+ .ridx).
-  void copy_records(const std::string& rdat_rel, const fs::path& out_rdat, RecordLevel level,
-                    const std::string& channel, int segment) {
-    ctl_.check();
-    RawRecordFile f = read_record_file(src_, rdat_rel, rules_.copy->password);
+  /// One record as the copy writes it: header + body, and its index entry
+  /// without the file offset (set when the file is written).
+  struct OutRecord {
+    si8 sort_time = 0;  ///< user uUTC, for a merge's order
+    std::vector<ui1> bytes;
+    std::array<ui1, RIDX> entry{};
+  };
+
+  /// A source record file's records as the copy writes them (rules applied,
+  /// re-encrypted, a cut's window and `keep` honoured), and its headers.
+  std::vector<OutRecord> prepare_records(const RawRecordFile& f, const std::string& rdat_rel,
+                                         RecordLevel level, const std::string& channel,
+                                         int segment,
+                                         const std::function<bool(si8)>& keep = {}) {
     const std::string where = src_.describe(rdat_rel);
-    std::vector<ui1> rdat(f.uh);
-    std::vector<ui1> ridx(f.has_ridx ? f.ridx_uh : f.uh);
-    if (!f.has_ridx) write_string(ridx, 8, 5, fmt::FILE_TYPE_RECORD_INDICES);
-    ui4 max_entry = 0;
-    si8 n = 0;  // records written
+    std::vector<OutRecord> out;
     for (std::size_t i = 0; i < f.records.size(); ++i) {
-      RawRecord& r = f.records[i];
+      const RawRecord& r = f.records[i];
       if (window_ && !record_in_window(r, sh_.rto, window_->first, window_->second)) {
         ++rep_.records_outside_window;
         continue;
       }
-      ++n;
+      if (keep && !keep(is_sentinel(r.time, false) ? r.time : to_user_time(r.time, sh_.rto)))
+        continue;
       const std::string what = "record " + std::to_string(i) + " (" + r.type + ") of " + where;
       const si8 t = time(r.time, what + " time");
       std::vector<ui1> body;
@@ -1532,25 +1588,21 @@ class Copier {
         auto e = crypto::aes128_ecb_encrypt(body, *out_.keys.level2_key);
         std::copy(e.begin(), e.end(), body.begin());
       }
-      std::vector<ui1> rec(RHDR, 0);
-      std::copy(r.type_bytes.begin(), r.type_bytes.end(), rec.begin() + 4);
-      write<ui1>(rec, 9, r.vmaj);
-      write<ui1>(rec, 10, r.vmin);
-      write<si1>(rec, 11, enc);
-      write<ui4>(rec, 12, static_cast<ui4>(body.size()));
-      write<si8>(rec, 16, t);
-      rec.insert(rec.end(), body.begin(), body.end());
-      write<ui4>(rec, 0, crc::calculate(std::span<const ui1>(rec).subspan(4)));
-      const si8 offset = static_cast<si8>(rdat.size());
-      rdat.insert(rdat.end(), rec.begin(), rec.end());
-      max_entry = std::max(max_entry, static_cast<ui4>(rec.size()));
-
-      std::array<ui1, RIDX> e{};
-      std::copy(r.type_bytes.begin(), r.type_bytes.end(), e.begin());
-      e[5] = r.vmaj;
-      e[6] = r.vmin;
-      e[7] = static_cast<ui1>(enc);
-      write<si8>(e, 8, offset);
+      OutRecord o;
+      o.sort_time = is_sentinel(r.time, false) ? r.time : to_user_time(r.time, sh_.rto);
+      o.bytes.assign(RHDR, 0);
+      std::copy(r.type_bytes.begin(), r.type_bytes.end(), o.bytes.begin() + 4);
+      write<ui1>(o.bytes, 9, r.vmaj);
+      write<ui1>(o.bytes, 10, r.vmin);
+      write<si1>(o.bytes, 11, enc);
+      write<ui4>(o.bytes, 12, static_cast<ui4>(body.size()));
+      write<si8>(o.bytes, 16, t);
+      o.bytes.insert(o.bytes.end(), body.begin(), body.end());
+      write<ui4>(o.bytes, 0, crc::calculate(std::span<const ui1>(o.bytes).subspan(4)));
+      std::copy(r.type_bytes.begin(), r.type_bytes.end(), o.entry.begin());
+      o.entry[5] = r.vmaj;
+      o.entry[6] = r.vmin;
+      o.entry[7] = static_cast<ui1>(enc);
       // The index entry is matched to its record by file offset, never by
       // position; an index that names no such offset is refused.
       si8 idx_time = r.time;
@@ -1565,24 +1617,57 @@ class Copier {
                  channel);
         idx_time = read<si8>(*it, 16);
       }
-      write<si8>(e, 16, time(idx_time, "record index entry " + std::to_string(i) + " of " + where));
+      write<si8>(o.entry, 16, time(idx_time, "record index entry " + std::to_string(i) + " of " + where));
+      out.push_back(std::move(o));
+    }
+    return out;
+  }
+
+  /// Write records (in the given order) to `out_rdat` (+ .ridx), with the
+  /// universal headers of `f` (a source record file of the same level).
+  void write_records(const std::vector<OutRecord>& recs, const RawRecordFile& f,
+                     const std::string& what, const fs::path& out_rdat,
+                     const std::string& channel) {
+    std::vector<ui1> rdat(f.uh);
+    std::vector<ui1> ridx(f.has_ridx ? f.ridx_uh : f.uh);
+    if (!f.has_ridx) write_string(ridx, 8, 5, fmt::FILE_TYPE_RECORD_INDICES);
+    ui4 max_entry = 0;
+    for (const auto& o : recs) {
+      std::array<ui1, RIDX> e = o.entry;
+      write<si8>(e, 8, static_cast<si8>(rdat.size()));
+      rdat.insert(rdat.end(), o.bytes.begin(), o.bytes.end());
+      max_entry = std::max(max_entry, static_cast<ui4>(o.bytes.size()));
       ridx.insert(ridx.end(), e.begin(), e.end());
       ++rep_.records;
     }
-    auto seal = [&](std::vector<ui1>& file, si8 max, const std::string& what) {
+    const si8 n = static_cast<si8>(recs.size());
+    auto seal = [&](std::vector<ui1>& file, si8 max, const std::string& label) {
       std::span<ui1> uh(file.data(), UH);
-      patch_uh(uh, what, channel);
+      patch_uh(uh, label, channel);
       write<si8>(uh, 32, n);
       write<si8>(uh, 40, max);
       write<ui4>(file, 4, crc::calculate(std::span<const ui1>(file).subspan(UH)));
       write<ui4>(file, 0, crc::calculate(std::span<const ui1>(file).subspan(4, UH - 4)));
     };
-    seal(rdat, max_entry, "record file " + where);
-    seal(ridx, static_cast<si8>(RIDX), "record index of " + where);
+    seal(rdat, max_entry, "record file " + what);
+    seal(ridx, static_cast<si8>(RIDX), "record index of " + what);
     write_out(out_rdat, rdat);
     write_out(fs::path(ridx_of(out_rdat.string())), ridx);
     if (progress_) progress_(rdat.size() + ridx.size());
   }
+
+  /// One record file pair -> `out_rdat` (+ .ridx).
+  void copy_records(const std::string& rdat_rel, const fs::path& out_rdat, RecordLevel level,
+                    const std::string& channel, int segment,
+                    const std::function<bool(si8)>& keep = {}) {
+    ctl_.check();
+    const RawRecordFile f = read_record_file(src_, rdat_rel, rules_.copy->password);
+    write_records(prepare_records(f, rdat_rel, level, channel, segment, keep), f,
+                  src_.describe(rdat_rel), out_rdat, channel);
+  }
+
+  /// The source this copier reads.
+  const SessionSource& source() const { return src_; }
 
  private:
   /// The field holds nothing after its terminator (an edit to the same value
@@ -1595,22 +1680,7 @@ class Copier {
   /// A transform keeps a record body as stored, except the Seiz entries of
   /// left-out channels.
   std::vector<ui1> kept_body(const RawRecord& r) {
-    if (r.type != "Seiz" || excluded_.empty() || !layout_of(r)) return r.body;
-    const std::size_t n = seiz_entry_count(r.body);
-    std::vector<ui1> out(r.body.begin(), r.body.begin() + SEIZ_FIXED);
-    si4 kept = 0;
-    for (std::size_t c = 0; c < n; ++c) {
-      const auto first = r.body.begin() + static_cast<std::ptrdiff_t>(SEIZ_FIXED + c * SEIZ_CHANNEL);
-      if (excluded_.count(channel_key(seiz_entry_name(r.body, c)))) {
-        ++rep_.seizure_channel_entries_dropped;
-        continue;
-      }
-      out.insert(out.end(), first, first + SEIZ_CHANNEL);
-      ++kept;
-    }
-    if (kept == static_cast<si4>(n)) return r.body;  // nothing left out: as stored
-    write<si4>(out, SEIZ_NCH, kept);
-    return out;
+    return seiz_without(r, excluded_, &rep_.seizure_channel_entries_dropped);
   }
 
   std::vector<ui1> rewrite_body(const RawRecord& r, RecordTextField tf, const std::string& what) {
@@ -1699,6 +1769,8 @@ class Copier {
   si8 seg_reach_us_ = 0;                          // longest_block_us
   std::optional<std::pair<si8, si8>> seg_span_;   // its kept samples' span
   std::optional<si4> seg_number_;                 // its number in the copy
+  std::optional<std::pair<std::size_t, std::size_t>> piece_;  // a merge: the entries copied
+  std::optional<Uuid> level_override_;            // a merge: the file's level UUID
   si4 native_max_ = 0, native_min_ = 0;           // its kept samples' extrema
 };
 
@@ -2023,6 +2095,12 @@ class Verifier {
   /// derived declarations describe what it holds, not the source segment.
   void set_cut_segment(bool on) { cut_segment_ = on; }
 
+  /// Checking a merge (#103): level UUIDs are the merge's own.
+  void set_merge(bool on) { merge_ = on; }
+
+  /// The sampling rate of the source segment check_tmet last read.
+  sf8 segment_fs() const { return seg_fs_; }
+
   void set_scanner(Scanner s) { scan_ = std::move(s); }
 
   /// `counts_from_source`: the entry count and maximum entry size (32..48)
@@ -2116,7 +2194,9 @@ class Verifier {
     // Level UUIDs: a new one per source level, the same for every file of it.
     const Uuid sl = uuid_at(s, UH_LEVEL_UUID), dl = uuid_at(d, UH_LEVEL_UUID);
     bool level_ok = all_zero(sl) == all_zero(dl);
-    if (!all_zero(sl)) {
+    if (merge_) {  // a merge names every level itself: never the source's, that is all
+      level_ok = all_zero(sl) || sl != dl;
+    } else if (!all_zero(sl)) {
       const auto it = level_map_.emplace(sl, dl).first;  // the first file of that level sets it
       level_ok = level_ok && sl != dl && it->second == dl;
     }
@@ -2360,8 +2440,12 @@ class Verifier {
   /// range searched must hold nothing of the window (an index out of order
   /// there would hide blocks). Both files are read in bounded batches, only
   /// around the window.
-  void check_segment_data_cut(const detail::LayoutSegment& s, const detail::LayoutSegment& d) {
-    const auto [t0, t1] = *o_.time_range;
+  /// `piece`: a merge's piece, the source entries [first, last) copied whole
+  /// (no window: every block of the range is kept).
+  void check_segment_data_cut(const detail::LayoutSegment& s, const detail::LayoutSegment& d,
+                              std::optional<std::pair<std::size_t, std::size_t>> piece = {}) {
+    const si8 t0 = piece ? std::numeric_limits<si8>::min() + 1 : o_.time_range->first;
+    const si8 t1 = piece ? std::numeric_limits<si8>::max() : o_.time_range->second;
     const bool exact = o_.exact;
     const auto dtidx = dst_.file_size(d.tidx), dtdat = dst_.file_size(d.tdat);
     const auto stdat = src_.file_size(s.tdat);
@@ -2379,7 +2463,8 @@ class Verifier {
     const auto de = dst_.read_range(d.tidx, UH, nd * ENTRY);  // the copy: O(window)
     const ui4 dcrc_x = crc::calculate(de, fmt::CRC_START_VALUE);
     const std::size_t ns = static_cast<std::size_t>((src_.file_size(s.tidx) - UH) / ENTRY);
-    const auto [f, l] = window_entries(src_, s.tidx, seg_rto_, t0, t1, seg_reach_us_);
+    const auto [f, l] =
+        piece ? *piece : window_entries(src_, s.tidx, seg_rto_, t0, t1, seg_reach_us_);
 
     // A source block's header (time, samples), read at the entry's offset.
     auto header_of = [&](std::span<const ui1> block) {
@@ -2387,7 +2472,7 @@ class Verifier {
                             static_cast<std::size_t>(read<ui4>(block, 32)));
     };
     for (const std::size_t i : {f > 0 ? f - 1 : ns, l})
-      if (i < ns) {
+      if (i < ns && !piece) {  // a piece's neighbours belong to other pieces
         const auto e = src_.read_range(s.tidx, UH + i * ENTRY, ENTRY);
         const auto off = static_cast<std::uint64_t>(read<si8>(e, 0));
         if (off + fmt::RED_BLOCK_HEADER_BYTES > stdat) continue;  // the validator's
@@ -2590,7 +2675,8 @@ class Verifier {
   }
 
   void check_records(const std::string& srel, const std::string& drel,
-                     const std::set<std::string>& excluded) {
+                     const std::set<std::string>& excluded,
+                     const std::function<bool(si8)>& keep_time = {}) {
     ctl_.check();
     RawRecordFile s = read_record_file(src_, srel, o_.password);
     RawRecordFile d;
@@ -2616,10 +2702,14 @@ class Verifier {
     }
     // A cut keeps the records in its window (the same rule as the copy).
     std::vector<std::size_t> keep;
-    for (std::size_t i = 0; i < s.records.size(); ++i)
-      if (!o_.time_range ||
-          record_in_window(s.records[i], sh_.rto, o_.time_range->first, o_.time_range->second))
-        keep.push_back(i);
+    for (std::size_t i = 0; i < s.records.size(); ++i) {
+      const RawRecord& r = s.records[i];
+      if (o_.time_range && !record_in_window(r, sh_.rto, o_.time_range->first, o_.time_range->second))
+        continue;
+      if (keep_time && !keep_time(is_sentinel(r.time, false) ? r.time : to_user_time(r.time, sh_.rto)))
+        continue;
+      keep.push_back(i);
+    }
     if (keep.size() != d.records.size()) {
       problem(drel, "records", "the copy holds " + std::to_string(d.records.size()) +
                                    " record(s), the source " + std::to_string(keep.size()));
@@ -2800,6 +2890,7 @@ class Verifier {
   std::map<Uuid, Uuid> level_map_;  // transform: source level UUID -> the copy's
   // A cut (#103): set while a segment of the copy is checked.
   bool cut_segment_ = false;
+  bool merge_ = false;
   si8 seg_rto_ = 0;  // the source segment's
   sf8 seg_fs_ = 0;
   si8 seg_reach_us_ = 0;
@@ -3974,6 +4065,781 @@ VerifyReport verify_transform(const std::string& src, const std::string& dst,
   vo.time_range = options.time_range;
   vo.exact = options.exact;
   return verify_standalone(src, dst, 0, vo, &options.metadata, ctl);
+}
+
+// ---------------------------------------------------------------------------
+// Merge (#103): several sessions into one, on the same engine. Each source is
+// copied with its own Copier under the transform's rules; the merge decides
+// which piece of which source segment becomes which segment of the result.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// One segment of the result: a run of a source segment's blocks.
+struct MergePiece {
+  std::size_t source = 0;
+  const detail::LayoutSegment* segment = nullptr;
+  std::pair<std::size_t, std::size_t> entries;  ///< [first, last) of its index
+  si8 start = 0;   ///< its first block's time (index, user uUTC)
+  si8 lo = 0, hi = 0;  ///< the record times its segment-level annotations take
+};
+
+struct MergeSourcePlan {
+  std::string path;
+  TransformOptions options;  ///< this source's password and channel selection
+  Preflight pf;
+  bool used = true;          ///< holds a channel of the result
+};
+
+struct MergePlan {
+  std::vector<std::unique_ptr<MergeSourcePlan>> sources;  // stable addresses (Rules point in)
+  std::vector<CopyRefusal> refusals;
+  std::vector<std::string> notes;
+  std::set<std::string> kept, excluded;  // over all sources
+  std::map<std::string, std::vector<MergePiece>> pieces;  // per kept data channel, by time
+  fs::path dst, partial;
+  std::string new_name;
+  si8 segments_split = 0;
+};
+
+/// A segment's blocks as [start, end) (user uUTC) from its INDEX copy of
+/// each block's time and count (the header is the authority, #11/#13; a
+/// disagreement shows as a refused verification, never a silent result).
+struct IndexBlock {
+  si8 start = 0, end = 0;
+};
+std::vector<IndexBlock> index_blocks(const SessionSource& src, const detail::LayoutSegment& seg,
+                                     si8 rto, sf8 fs) {
+  std::vector<IndexBlock> out;
+  const std::uint64_t size = src.file_size(seg.tidx);
+  if (size < UH) return out;
+  const std::size_t n = static_cast<std::size_t>((size - UH) / ENTRY);
+  const auto es = src.read_range(seg.tidx, UH, n * ENTRY);
+  out.reserve(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    const si8 t = to_user_time(read<si8>(es, i * ENTRY + 8), rto);
+    out.push_back({t, sample_time(t, read<ui4>(es, i * ENTRY + 24), fs)});
+  }
+  return out;
+}
+
+MergePlan preflight_merge(const std::vector<std::string>& sources, const std::string& dst_path,
+                          const MergeOptions& o, const Control& ctl, bool collect) {
+  MergePlan m;
+  auto add = [&](RefusalKind kind, std::string code, std::string message, std::string channel = {},
+                 std::string field = {}) {
+    CopyRefusal r{std::move(code), std::move(message), kind, std::move(channel), std::move(field),
+                  {}};
+    if (!collect) raise(std::move(r));
+    m.refusals.push_back(std::move(r));
+  };
+  ctl.check();
+  if (sources.size() < 2)
+    add(RefusalKind::InvalidArgument, "merge-too-few", "a merge needs at least two sources", {},
+        "sources");
+  if (!o.passwords.empty() && o.passwords.size() != sources.size())
+    add(RefusalKind::InvalidArgument, "merge-passwords-count",
+        "passwords must hold one password per source (or be empty)", {}, "passwords");
+  if (o.time_range)
+    add(RefusalKind::InvalidArgument, "merge-time-range",
+        "a merge cannot be combined with time_range yet: cut the result afterwards", {},
+        "time_range");
+  if (!o.rename)
+    add(RefusalKind::InvalidArgument, "merge-rename",
+        "a merge is named after the destination; rename=False does not apply", {}, "rename");
+
+  // Each source's channels (a directory listing), to give each its share of
+  // the selection: a channel only some sources hold is not "unknown" to the
+  // others.
+  std::set<std::string> all_channels;
+  std::vector<std::set<std::string>> holds(sources.size());
+  for (std::size_t k = 0; k < sources.size(); ++k) {
+    try {
+      const auto src = open_session_source(sources[k]);
+      const auto layout = detail::discover_layout(*src);
+      for (const auto& c : layout.channels) holds[k].insert(c.name);
+      for (const auto& c : layout.record_only_channels) holds[k].insert(c);
+    } catch (...) {
+      // the source's own pre-flight below reports it
+    }
+    all_channels.insert(holds[k].begin(), holds[k].end());
+  }
+  for (const auto* list : {&o.channels, &o.exclude_channels})
+    for (const auto& c : *list)
+      if (!all_channels.count(c))
+        add(RefusalKind::InvalidArgument, "channel-unknown", "unknown channel: " + c, c,
+            list == &o.channels ? "channels" : "exclude_channels");
+
+  for (std::size_t k = 0; k < sources.size(); ++k) {
+    auto sp = std::make_unique<MergeSourcePlan>();
+    sp->path = sources[k];
+    TransformOptions& so = sp->options;
+    static_cast<CopyOptions&>(so) = o;
+    // (A count mismatch is refused above; never index past the list.)
+    so.password = k < o.passwords.size() ? o.passwords[k] : o.password;
+    so.rename = true;
+    so.time_range.reset();
+    auto mine = [&](const std::vector<std::string>& v) {
+      std::vector<std::string> out;
+      for (const auto& c : v)
+        if (holds[k].count(c)) out.push_back(c);
+      return out;
+    };
+    so.channels = mine(o.channels);
+    so.exclude_channels = mine(o.exclude_channels);
+    if (!o.channels.empty() && so.channels.empty()) sp->used = false;
+    so.metadata = o.metadata;
+    for (auto* per : {&so.metadata.channel_descriptions, &so.metadata.reference_descriptions})
+      for (auto it = per->begin(); it != per->end();)
+        it = holds[k].count(it->first) ? std::next(it) : per->erase(it);
+    if (sp->used) {
+      sp->pf = preflight(sources[k], dst_path, Rules{&so, nullptr, &so.metadata}, ctl,
+                         /*collect=*/true, /*check_shift=*/false);
+      for (auto& r : sp->pf.refusals) {
+        // The destination's refusals come once, not once per source.
+        const bool dup = std::any_of(m.refusals.begin(), m.refusals.end(), [&](const CopyRefusal& x) {
+          return x.code == r.code && x.field == r.field && x.channel == r.channel &&
+                 x.message == r.message;
+        });
+        if (dup) continue;
+        if (r.channel.empty() && r.field != "dst")
+          r.message = sources[k] + ": " + r.message;  // which source
+        if (!collect) raise(std::move(r));
+        m.refusals.push_back(std::move(r));
+      }
+      for (const auto& n : sp->pf.notes) m.notes.push_back(sources[k] + ": " + n);
+      if (sp->pf.plan) {
+        m.kept.insert(sp->pf.kept.begin(), sp->pf.kept.end());
+        m.excluded.insert(sp->pf.excluded.begin(), sp->pf.excluded.end());
+      }
+      m.dst = sp->pf.dst;
+      m.partial = sp->pf.partial;
+      m.new_name = sp->pf.new_name;
+    }
+    m.sources.push_back(std::move(sp));
+  }
+  for (const auto& c : m.kept) m.excluded.erase(c);  // kept by any source = kept
+  // Everything below needs every used source readable.
+  for (const auto& sp : m.sources)
+    if (sp->used && !sp->pf.plan) return m;
+
+  // ---- the sources must agree where their data meet ----------------------
+  // Recording-time offset: times are copied verbatim.
+  std::set<si8> rtos;
+  for (const auto& sp : m.sources)
+    if (sp->used) rtos.insert(sp->pf.plan->rto);
+  if (rtos.size() > 1)
+    add(RefusalKind::WriteConflict, "merge-rto-differs",
+        "the sources use different recording-time offsets, so their times cannot be copied "
+        "into one session as they are",
+        {}, "sources");
+  // One sampling rate per channel.
+  std::map<std::string, std::set<sf8>> rates;
+  for (const auto& sp : m.sources)
+    if (sp->used)
+      for (const auto& c : sp->pf.plan->summary.channels)
+        if (m.kept.count(c.name) && c.sampling_frequency) rates[c.name].insert(*c.sampling_frequency);
+  for (const auto& [ch, r] : rates)
+    if (r.size() > 1)
+      add(RefusalKind::WriteConflict, "merge-rate-differs",
+          "channel " + ch + " has different sampling rates in different sources", ch,
+          "sampling_frequency");
+  // The patient: the same in every source, or set for the result.
+  const MetadataEdits& me = o.metadata;
+  for (const auto& [field, edit] :
+       {std::pair<const char*, bool>{"subject_name_1", me.subject_name_1.has_value()},
+        {"subject_name_2", me.subject_name_2.has_value()},
+        {"subject_id", me.subject_id.has_value()},
+        {"recording_location", me.recording_location.has_value()}}) {
+    std::set<std::string> values;
+    for (const auto& sp : m.sources)
+      if (sp->used)
+        for (const auto& f : sp->pf.plan->summary.identity)
+          if (f.name == field)
+            for (const auto& v : f.values)
+              if (!v.empty()) values.insert(v);
+    if (values.size() > 1 && !edit)
+      add(RefusalKind::WriteConflict, "merge-identity-differs",
+          std::string("the sources hold different values of ") + field +
+              " (different patients?); set it for the result with metadata, or check the "
+              "sources",
+          {}, field);
+  }
+
+  // ---- overlap, on the recorded data, and the pieces ----------------------
+  for (const auto& ch : m.kept) {
+    struct Seg {
+      std::size_t source;
+      const detail::LayoutSegment* seg;
+      si8 rto = 0;
+      sf8 fs = 0;
+      si8 start = 0, end = 0;  // UH span
+      std::vector<IndexBlock> blocks;
+      bool read = false;
+    };
+    std::vector<Seg> segs;
+    for (std::size_t k = 0; k < m.sources.size(); ++k) {
+      const auto& sp = *m.sources[k];
+      if (!sp.used || !sp.pf.kept.count(ch)) continue;
+      const SessionSource& src = *sp.pf.source;
+      for (const auto& c : sp.pf.plan->layout.channels) {
+        if (c.name != ch) continue;
+        for (const auto& seg : c.segments) {
+          ctl.check();
+          try {
+            const TmetImage t = open_tmet(src, seg.tmet, sp.options.password);
+            const sf8 fs = fmt::TimeSeriesMetadataSection2::parse(
+                               std::span<const ui1>(t.bytes).subspan(S2, S2_BYTES))
+                               .sampling_frequency;
+            // The span from the header, widened to the index's first and
+            // last block: a foreign writer's header time may be unset or
+            // stale, and two segments are compared only where spans meet.
+            si8 a = std::numeric_limits<si8>::max(), b = std::numeric_limits<si8>::min();
+            const si8 ua = read<si8>(t.bytes, UH_START), ub = read<si8>(t.bytes, UH_END);
+            if (!is_sentinel(ua, false)) a = to_user_time(ua, t.rto);
+            if (!is_sentinel(ub, false)) b = to_user_time(ub, t.rto);
+            const std::uint64_t isize = src.file_size(seg.tidx);
+            if (isize >= UH + ENTRY) {
+              const std::size_t n = static_cast<std::size_t>((isize - UH) / ENTRY);
+              const auto e0 = src.read_range(seg.tidx, UH, ENTRY);
+              const auto el = src.read_range(seg.tidx, UH + (n - 1) * ENTRY, ENTRY);
+              a = std::min(a, to_user_time(read<si8>(e0, 8), t.rto));
+              b = std::max(b, sample_time(to_user_time(read<si8>(el, 8), t.rto),
+                                          read<ui4>(el, 24), fs));
+            }
+            segs.push_back({k, &seg, t.rto, fs, a, b, {}, false});
+          } catch (...) {
+            // the source's own pre-flight already reported it
+          }
+        }
+      }
+    }
+    std::sort(segs.begin(), segs.end(), [](const Seg& a, const Seg& b) { return a.start < b.start; });
+    auto blocks_of = [&](Seg& sg) -> const std::vector<IndexBlock>& {
+      if (!sg.read) {
+        sg.blocks = index_blocks(*m.sources[sg.source]->pf.source, *sg.seg, sg.rto, sg.fs);
+        sg.read = true;
+      }
+      return sg.blocks;
+    };
+    // Segments of different sources whose spans overlap: compare their data.
+    bool overlap = false;
+    std::vector<std::vector<IndexBlock>> foreign(segs.size());  // other sources' data in each span
+    for (std::size_t i = 0; i < segs.size() && !overlap; ++i)
+      for (std::size_t j = i + 1; j < segs.size() && segs[j].start < segs[i].end && !overlap; ++j) {
+        if (segs[i].source == segs[j].source) continue;
+        const auto& a = blocks_of(segs[i]);
+        const auto& b = blocks_of(segs[j]);
+        const si8 tol = static_cast<si8>(std::llround(0.5e6 / std::max(segs[i].fs, 1e-9)));
+        std::size_t p = 0;
+        for (const auto& x : a) {
+          while (p < b.size() && b[p].end <= x.start + tol) ++p;
+          for (std::size_t q = p; q < b.size() && b[q].start < x.end - tol; ++q) {
+            overlap = true;
+            add(RefusalKind::WriteConflict, "merge-overlap",
+                "channel " + ch + ": " + m.sources[segs[i].source]->path + " and " +
+                    m.sources[segs[j].source]->path + " both hold samples from " +
+                    std::to_string(std::max(x.start, b[q].start)) + " to " +
+                    std::to_string(std::min(x.end, b[q].end)) + " (uUTC)",
+                ch, "sources");
+            break;
+          }
+          if (overlap) break;
+        }
+        foreign[i].insert(foreign[i].end(), b.begin(), b.end());
+        foreign[j].insert(foreign[j].end(), a.begin(), a.end());
+      }
+    if (overlap) continue;
+    // Each segment: split where another source's data lies between two of
+    // its blocks, so that the result's segments never overlap in time.
+    std::vector<MergePiece> pieces;
+    for (std::size_t i = 0; i < segs.size(); ++i) {
+      Seg& sg = segs[i];
+      const std::size_t n = static_cast<std::size_t>(
+          (m.sources[sg.source]->pf.source->file_size(sg.seg->tidx) - UH) / ENTRY);
+      if (n == 0) {  // a segment without blocks has nothing to merge
+        m.notes.push_back(m.sources[sg.source]->path + ": " + sg.seg->dir() +
+                          " holds no blocks; it is left out");
+        continue;
+      }
+      if (foreign[i].empty()) {
+        pieces.push_back({sg.source, sg.seg, {0, n}, sg.start, 0, 0});
+        continue;
+      }
+      std::vector<si8> starts;
+      for (const auto& b : foreign[i]) starts.push_back(b.start);
+      std::sort(starts.begin(), starts.end());
+      const auto& bl = blocks_of(sg);
+      // The same half-sample tolerance as the overlap check: foreign data
+      // starting up to half a sample before a block's end lies in the gap
+      // after it (recorders round times to whole microseconds).
+      const si8 tol = static_cast<si8>(std::llround(0.5e6 / std::max(sg.fs, 1e-9)));
+      std::size_t first = 0, cut = 0;
+      for (std::size_t b = 1; b < bl.size(); ++b) {
+        while (cut < starts.size() && starts[cut] < bl[b - 1].end - tol) ++cut;
+        if (cut < starts.size() && starts[cut] < bl[b].start) {  // foreign data in this gap
+          pieces.push_back({sg.source, sg.seg, {first, b}, bl[first].start, 0, 0});
+          first = b;
+        }
+      }
+      pieces.push_back({sg.source, sg.seg, {first, bl.size()}, bl.empty() ? sg.start : bl[first].start, 0, 0});
+      if (first > 0) ++m.segments_split;
+    }
+    std::stable_sort(pieces.begin(), pieces.end(),
+                     [](const MergePiece& a, const MergePiece& b) { return a.start < b.start; });
+    // A split segment's own annotations go to the piece their time falls in.
+    for (std::size_t i = 0; i < pieces.size(); ++i) {
+      auto& pc = pieces[i];
+      pc.lo = std::numeric_limits<si8>::min();
+      pc.hi = std::numeric_limits<si8>::max();
+      for (const auto& other : pieces) {
+        if (other.segment != pc.segment || &other == &pc) continue;
+        if (other.start < pc.start) pc.lo = std::max(pc.lo, pc.start);
+        if (other.start > pc.start) pc.hi = std::min(pc.hi, other.start);
+      }
+    }
+    m.pieces[ch] = std::move(pieces);
+  }
+  return m;
+}
+
+/// The merged result against its sources: every segment against its piece
+/// (lockstep, blocks byte-identical), annotations at every level against the
+/// sources' merged by time, no two segments of a channel overlapping, and the
+/// validator.
+VerifyReport verify_merge_impl(MergePlan& m, const std::string& dst_path, const Control& ctl,
+                               std::function<void(std::uint64_t)> progress) {
+  VerifyReport rep;
+  const auto dsrc = open_session_source(dst_path);
+  const SessionSource& dst = *dsrc;
+  const auto dlayout = detail::discover_layout(dst);
+  std::set<std::string> dch;
+  for (const auto& c : dlayout.channels) dch.insert(c.name);
+  for (const auto& c : dlayout.record_only_channels) dch.insert(c);
+  rep.channels.assign(dch.begin(), dch.end());
+  rep.excluded_channels.assign(m.excluded.begin(), m.excluded.end());
+  auto problem = [&](const std::string& loc, const std::string& field, const std::string& msg) {
+    rep.problems.push_back({loc, field, msg});
+  };
+  if (dch != m.kept) problem(dst_path, "channels", "the result does not hold exactly the kept channels");
+
+  // One Verifier per source (its plan, password and options).
+  std::vector<std::unique_ptr<Verifier>> v;
+  std::vector<VerifyOptions> vos(m.sources.size());
+  std::vector<VerifyReport> parts(m.sources.size());
+  for (std::size_t k = 0; k < m.sources.size(); ++k) {
+    auto& sp = *m.sources[k];
+    vos[k].password = sp.options.password;
+    vos[k].output_password = sp.options.output_password_2;
+    if (!sp.used) {
+      v.push_back(nullptr);
+      continue;
+    }
+    v.push_back(std::make_unique<Verifier>(*sp.pf.source, dst, *sp.pf.plan, 0, vos[k],
+                                           &sp.options.metadata, ctl, progress, parts[k]));
+    v.back()->set_kept(dch);
+    v.back()->set_merge(true);
+  }
+
+  std::set<std::string> excluded_keys;
+  for (const auto& c : m.excluded) excluded_keys.insert(channel_key(c));
+  for (const auto& dc : dlayout.channels) {
+    const auto it = m.pieces.find(dc.name);
+    if (it == m.pieces.end()) {
+      problem(dc.name, "channel", "has segments no source piece accounts for");
+      continue;
+    }
+    const auto& pieces = it->second;
+    if (dc.segments.size() != pieces.size()) {
+      problem(dc.name, "segments", "the result holds " + std::to_string(dc.segments.size()) +
+                                       ", the merge planned " + std::to_string(pieces.size()));
+      continue;
+    }
+    std::optional<si8> prev_end;  // the previous segment's end, once there is one
+    for (std::size_t k = 0; k < pieces.size(); ++k) {
+      const auto& pc = pieces[k];
+      const auto& ds = dc.segments[k];
+      if (ds.number != static_cast<int>(k))
+        problem(ds.dir(), "segment", "is not numbered in order from 0");
+      Verifier& vv = *v[pc.source];
+      vv.set_cut_segment(true);
+      vv.check_tmet(pc.segment->tmet, ds.tmet);
+      vv.check_segment_data_cut(*pc.segment, ds, pc.entries);
+      const auto& src = *m.sources[pc.source]->pf.source;
+      const bool s_rec = src.exists(pc.segment->rdat()), d_rec = dst.exists(ds.rdat());
+      if (s_rec && d_rec)
+        vv.check_records(pc.segment->rdat(), ds.rdat(), excluded_keys,
+                         [&](si8 t) { return t >= pc.lo && t < pc.hi; });
+      else if (!s_rec && d_rec)
+        problem(ds.dir(), "segment records", "present in the result, not in its source");
+      vv.set_cut_segment(false);
+      // Segments in time order, never overlapping.
+      const auto uh = dst.read_range(ds.tmet, 0, UH);
+      const si8 rto = m.sources[pc.source]->pf.plan->rto;
+      const si8 a = to_user_time(read<si8>(uh, UH_START), rto), b = to_user_time(read<si8>(uh, UH_END), rto);
+      // The overlap check's half-sample tolerance (recorder rounding).
+      const si8 tol = static_cast<si8>(std::llround(0.5e6 / std::max(vv.segment_fs(), 1e-9)));
+      if (prev_end && a < *prev_end - tol)
+        problem(ds.dir(), "segment", "overlaps the segment before it in time");
+      prev_end = std::max(prev_end.value_or(b), b);
+      ++rep.segments;
+    }
+  }
+
+  // The plan itself, checked rather than trusted: the pieces of each source
+  // segment tile its blocks exactly once.
+  {
+    std::map<const detail::LayoutSegment*, std::vector<std::pair<std::size_t, std::size_t>>> tiles;
+    std::map<const detail::LayoutSegment*, std::size_t> owner;
+    for (const auto& [ch, pieces] : m.pieces)
+      for (const auto& pc : pieces) {
+        tiles[pc.segment].push_back(pc.entries);
+        owner[pc.segment] = pc.source;
+      }
+    for (auto& [seg, t] : tiles) {
+      std::sort(t.begin(), t.end());
+      const std::size_t n = static_cast<std::size_t>(
+          (m.sources[owner[seg]]->pf.source->file_size(seg->tidx) - UH) / ENTRY);
+      std::size_t next = 0;
+      for (const auto& [a, b] : t) {
+        if (a != next || b <= a) problem(seg->dir(), "merge plan", "its pieces do not tile its blocks");
+        next = b;
+      }
+      if (next != n) problem(seg->dir(), "merge plan", "its pieces do not cover all its blocks");
+    }
+  }
+  // Level UUIDs: one per segment of the result (all its files), one per
+  // channel, one for the session, all different.
+  {
+    std::set<Uuid> seen;
+    auto level_of = [&](const std::string& rel) {
+      return uuid_at(dst.read_range(rel, 0, UH), UH_LEVEL_UUID);
+    };
+    auto one_level = [&](const std::vector<std::string>& files, const std::string& where) {
+      std::optional<Uuid> u;
+      for (const auto& f : files) {
+        if (!dst.exists(f)) continue;
+        const Uuid x = level_of(f);
+        if (u && x != *u) problem(where, "level_UUID", "differs between files of one level");
+        u = x;
+      }
+      if (u && (all_zero(*u) || !seen.insert(*u).second))
+        problem(where, "level_UUID", "is unset or shared with another level");
+    };
+    for (const auto& dc : dlayout.channels)
+      for (const auto& ds : dc.segments)
+        one_level({ds.tmet, ds.tidx, ds.tdat, ds.rdat(), ridx_of(ds.rdat())}, ds.dir());
+    for (const auto& ch : dch) {
+      const std::string r = ch + ".timd/" + ch + ".rdat";
+      one_level({r, ridx_of(r)}, ch + ".timd");
+    }
+    one_level({m.new_name + ".rdat", m.new_name + ".ridx"}, m.new_name + ".rdat");
+  }
+
+  // Channel- and session-level annotations: the sources', merged by time.
+  auto merged_records = [&](const std::string& drel,
+                            const std::vector<std::pair<std::size_t, std::string>>& from) {
+    RawRecordFile d;
+    try {
+      d = read_record_file(dst, drel, vos.empty() ? "" : vos[0].output_password);
+    } catch (const std::exception& e) {
+      problem(drel, "records", std::string("cannot be read: ") + e.what());
+      return;
+    }
+    struct Want { si8 t; const RawRecord* r; std::vector<ui1> body; si8 idx_time; };
+    std::vector<RawRecordFile> files;
+    files.reserve(from.size());
+    std::vector<Want> want;
+    for (const auto& [k, rel] : from) {
+      files.push_back(read_record_file(*m.sources[k]->pf.source, rel, m.sources[k]->options.password));
+      const RawRecordFile& f = files.back();
+      const si8 rto = m.sources[k]->pf.plan->rto;
+      for (std::size_t i = 0; i < f.records.size(); ++i) {
+        const RawRecord& r = f.records[i];
+        si8 idx_time = r.time;  // the source index's time for it, else its own
+        for (const auto& e : f.ridx)
+          if (read<si8>(e, 8) == f.record_offsets[i]) idx_time = read<si8>(e, 16);
+        want.push_back({is_sentinel(r.time, false) ? r.time : to_user_time(r.time, rto), &r,
+                        seiz_without(r, excluded_keys), idx_time});
+      }
+    }
+    std::stable_sort(want.begin(), want.end(), [](const Want& a, const Want& b) { return a.t < b.t; });
+    if (want.size() != d.records.size()) {
+      problem(drel, "records", "the result holds " + std::to_string(d.records.size()) +
+                                   ", the sources " + std::to_string(want.size()));
+      return;
+    }
+    for (std::size_t i = 0; i < want.size(); ++i) {
+      const RawRecord& a = *want[i].r;
+      const RawRecord& b = d.records[i];
+      const std::string loc = drel + " record " + std::to_string(i);
+      ++rep.records;
+      const auto& wb = want[i].body;
+      const bool same = a.type_bytes == b.type_bytes && a.vmaj == b.vmaj && a.vmin == b.vmin &&
+                        a.time == b.time && b.body.size() >= wb.size() &&
+                        b.body.size() - wb.size() < 16 &&
+                        std::equal(wb.begin(), wb.end(), b.body.begin()) &&
+                        std::all_of(b.body.begin() + static_cast<std::ptrdiff_t>(wb.size()),
+                                    b.body.end(), [](ui1 c) { return c == PAD_BYTE; });
+      if (!same) problem(loc, "record", "is not the sources' record at this place in time order");
+      if (b.enc != record_encryption(a.enc, !vos[0].output_password.empty(), false))
+        problem(loc, "record header encryption", "does not match the output passwords");
+      // Its index entry: found by offset, the record's type, version and
+      // encryption, and the source index's time.
+      const std::array<ui1, RIDX>* e = nullptr;
+      for (const auto& x : d.ridx)
+        if (read<si8>(x, 8) == d.record_offsets[i]) e = &x;
+      if (!e) {
+        problem(loc, "record index", "has no entry pointing at the record");
+      } else if (!std::equal(b.type_bytes.begin(), b.type_bytes.end(), e->begin()) ||
+                 (*e)[5] != b.vmaj || (*e)[6] != b.vmin || static_cast<si1>((*e)[7]) != b.enc ||
+                 read<si8>(*e, 16) != want[i].idx_time) {
+        problem(loc, "record index entry", "is not the source's for this record");
+      }
+    }
+    // The file's headers: the first source's, as a copy's (times aside),
+    // counting what it holds and spanning its records.
+    const RawRecordFile& first = files.front();
+    Verifier& vv = *v[from.front().first];
+    vv.set_cut_segment(true);
+    vv.check_uh(first.uh, d.uh, drel);
+    if (d.has_ridx) vv.check_uh(first.has_ridx ? first.ridx_uh : first.uh, d.ridx_uh,
+                                ridx_of(drel), false, !first.has_ridx);
+    else problem(drel, "record index", "is missing");
+    vv.set_cut_segment(false);
+    si8 largest = 0;
+    for (const auto& r : d.records) largest = std::max(largest, static_cast<si8>(RHDR + r.body.size()));
+    vv.check_counts(d.uh, static_cast<si8>(d.records.size()), largest, drel);
+    if (d.has_ridx)
+      vv.check_counts(d.ridx_uh, static_cast<si8>(d.records.size()), static_cast<si8>(RIDX),
+                      ridx_of(drel));
+    std::optional<si8> lo, hi;
+    for (const auto& w : want)
+      if (!is_sentinel(w.t, false)) {
+        lo = std::min(lo.value_or(w.t), w.t);
+        hi = std::max(hi.value_or(w.t), w.t);
+      }
+    const si8 rto = m.sources[from.front().first]->pf.plan->rto;
+    if (lo && (to_user_time(read<si8>(d.uh, UH_START), rto) != *lo ||
+               to_user_time(read<si8>(d.uh, UH_END), rto) != *hi))
+      problem(drel, "universal header times", "do not span the records the file holds");
+  };
+  for (const auto& ch : dch) {
+    std::vector<std::pair<std::size_t, std::string>> from;
+    const std::string rel = ch + ".timd/" + ch + ".rdat";
+    for (std::size_t k = 0; k < m.sources.size(); ++k)
+      if (m.sources[k]->used && m.sources[k]->pf.source->exists(rel)) from.push_back({k, rel});
+    if (!from.empty()) merged_records(rel, from);
+    else if (dst.exists(rel)) problem(rel, "channel records", "present in the result, in no source");
+  }
+  {
+    std::vector<std::pair<std::size_t, std::string>> from;
+    for (std::size_t k = 0; k < m.sources.size(); ++k)
+      if (m.sources[k]->used && !m.sources[k]->pf.session_records.empty())
+        from.push_back({k, m.sources[k]->pf.session_records});
+    if (!from.empty()) merged_records(m.new_name + ".rdat", from);
+  }
+
+  // The validator: nothing on the result (sources' own findings are not
+  // excused: their segments are renumbered; repair the sources first).
+  {
+    ValidateOptions vo;
+    vo.exact_difference_bytes = false;
+    vo.password = vos.empty() ? "" : vos[0].output_password;
+    Control inner;
+    inner.cancel = ctl.cancel;
+    const Report dr = validate_session(dst_path, vo, inner);
+    for (const auto& f : dr.findings)
+      if (f.severity != Severity::Info)
+        problem(f.path, f.check_id, "the validator reports on the result: " + f.message);
+    for (const auto& sk : dr.skipped)
+      problem(sk.path, "validator", "could not check a segment of the result: " + sk.reason);
+  }
+  for (const auto& part : parts) {
+    rep.problems.insert(rep.problems.end(), part.problems.begin(), part.problems.end());
+    rep.blocks += part.blocks;
+    rep.records += part.records;
+    rep.times_checked += part.times_checked;
+    rep.text_fields_checked += part.text_fields_checked;
+  }
+  rep.ok = rep.problems.empty();
+  return rep;
+}
+
+void run_merge(const std::vector<std::string>& sources, const std::string& dst_path,
+               const MergeOptions& o, const Control& ctl, MergeReport& rep) {
+  MergePlan m = preflight_merge(sources, dst_path, o, ctl, /*collect=*/false);
+  if (!m.refusals.empty()) raise(m.refusals.front());
+  const OutputKeys out = output_keys(o);
+  rep.sources = sources;
+  rep.destination = m.dst.string();
+  rep.session_name = m.new_name;
+  rep.channels_kept.assign(m.kept.begin(), m.kept.end());
+  rep.channels_excluded.assign(m.excluded.begin(), m.excluded.end());
+  rep.output_encrypted = out.encrypt;
+  rep.notes = m.notes;
+  rep.segments_split = m.segments_split;
+
+  std::uint64_t total_bytes = 0;
+  for (const auto& sp : m.sources)
+    if (sp->used) total_bytes += sp->pf.plan->summary.total_bytes;
+  detail::ProgressReporter progress(ctl, std::max<std::uint64_t>(1, 3 * total_bytes));
+  std::function<void(std::uint64_t)> on_bytes;
+  if (progress.active()) on_bytes = [&](std::uint64_t n) { progress.add(n); };
+
+  const fs::path root = m.partial / m.dst.filename();
+  try {
+    progress.start();
+    fs::create_directories(root);
+    std::vector<Shifter> shifters;
+    shifters.reserve(m.sources.size());
+    std::vector<std::unique_ptr<Copier>> cps;
+    for (auto& sp : m.sources) {
+      shifters.push_back(Shifter{sp->used ? sp->pf.plan->rto : 0, 0});
+      if (!sp->used) {
+        cps.push_back(nullptr);
+        continue;
+      }
+      cps.push_back(std::make_unique<Copier>(*sp->pf.source,
+                                             Rules{&sp->options, nullptr, &sp->options.metadata},
+                                             shifters.back(), nullptr, m.new_name, "", m.excluded,
+                                             m.kept, out, ctl, on_bytes, rep, nullptr, &rep));
+    }
+    const Uuid session_uuid = random_uuid();
+    // Annotations of one level from several sources: merged by time.
+    auto merge_records = [&](const std::vector<std::pair<std::size_t, std::string>>& from,
+                             const fs::path& out_rdat, RecordLevel level, const std::string& ch,
+                             const Uuid& level_uuid) {
+      std::vector<Copier::OutRecord> all;
+      std::optional<RawRecordFile> headers;
+      std::size_t first = from.front().first;
+      for (const auto& [k, rel] : from) {
+        ctl.check();
+        RawRecordFile f = read_record_file(*m.sources[k]->pf.source, rel,
+                                           m.sources[k]->options.password);
+        auto recs = cps[k]->prepare_records(f, rel, level, ch, -1);
+        all.insert(all.end(), std::make_move_iterator(recs.begin()),
+                   std::make_move_iterator(recs.end()));
+        if (!headers) headers = std::move(f);
+      }
+      std::stable_sort(all.begin(), all.end(),
+                       [](const Copier::OutRecord& a, const Copier::OutRecord& b) {
+                         return a.sort_time < b.sort_time;
+                       });
+      cps[first]->set_level_uuid(level_uuid);
+      // The file's header spans the records it now holds.
+      std::optional<si8> lo, hi;
+      for (const auto& r : all)
+        if (!is_sentinel(r.sort_time, false)) {
+          lo = std::min(lo.value_or(r.sort_time), r.sort_time);
+          hi = std::max(hi.value_or(r.sort_time), r.sort_time);
+        }
+      if (lo) cps[first]->set_record_span(*lo, *hi, m.sources[first]->pf.plan->rto);
+      cps[first]->write_records(all, *headers, "merged " + out_rdat.filename().string(), out_rdat,
+                                ch);
+      cps[first]->end_segment();
+    };
+    for (const auto& ch : m.kept) {
+      const fs::path cdir = root / (ch + ".timd");
+      fs::create_directory(cdir);
+      const Uuid channel_uuid = random_uuid();
+      std::vector<std::pair<std::size_t, std::string>> from;
+      const std::string crec = ch + ".timd/" + ch + ".rdat";
+      for (std::size_t k = 0; k < m.sources.size(); ++k)
+        if (cps[k] && m.sources[k]->pf.source->exists(crec)) from.push_back({k, crec});
+      if (!from.empty()) merge_records(from, cdir / (ch + ".rdat"), RecordLevel::Channel, ch, channel_uuid);
+      const auto it = m.pieces.find(ch);
+      if (it == m.pieces.end()) continue;  // record-only channel
+      si8 next_start = 0;
+      int number = 0;
+      for (const auto& pc : it->second) {
+        Copier& cp = *cps[pc.source];
+        cp.set_level_uuid(random_uuid());
+        if (!cp.copy_segment(*pc.segment, cdir, ch, number, next_start, pc.entries)) continue;
+        const std::string stem = canonical_segment_stem(ch, number);
+        if (m.sources[pc.source]->pf.source->exists(pc.segment->rdat())) {
+          const si8 lo = pc.lo, hi = pc.hi;
+          cp.copy_records(pc.segment->rdat(), cdir / (stem + ".segd") / (stem + ".rdat"),
+                          RecordLevel::Segment, ch, number,
+                          [lo, hi](si8 t) { return t >= lo && t < hi; });
+        }
+        cp.end_segment();
+        ++number;
+        ++rep.segments;
+      }
+    }
+    {
+      std::vector<std::pair<std::size_t, std::string>> from;
+      for (std::size_t k = 0; k < m.sources.size(); ++k)
+        if (cps[k] && !m.sources[k]->pf.session_records.empty())
+          from.push_back({k, m.sources[k]->pf.session_records});
+      if (!from.empty())
+        merge_records(from, root / (m.new_name + ".rdat"), RecordLevel::Session, "", session_uuid);
+    }
+    for (const auto& cp : cps)
+      if (cp)
+        for (const auto& f : cp->written) detail::fsync_file_or_throw(f);
+
+    rep.verification = verify_merge_impl(m, root.string(), ctl, on_bytes);
+    if (!rep.verification.ok) {
+      std::string msg = "the merged session failed verification, so it was not published (" +
+                        std::to_string(rep.verification.problems.size()) + " problem(s)):";
+      const std::size_t show = std::min<std::size_t>(rep.verification.problems.size(), 10);
+      for (std::size_t i = 0; i < show; ++i) {
+        const auto& p = rep.verification.problems[i];
+        msg += "\n  - " + p.location + ": " + p.field + " " + p.message;
+      }
+      refuse(RefusalKind::WriteConflict, "verify-failed", msg);
+    }
+    ctl.check();
+    progress.finish();
+    if (fs::exists(m.dst))
+      refuse(RefusalKind::Io, "dst-exists",
+             "the destination appeared while merging: " + m.dst.string(), {}, "dst");
+    fs::rename(root, m.dst);
+    detail::fsync_directory(m.dst.parent_path().empty() ? fs::path(".") : m.dst.parent_path());
+  } catch (...) {
+    std::error_code ec;
+    fs::remove_all(m.partial, ec);
+    throw;
+  }
+  std::error_code ec;
+  fs::remove_all(m.partial, ec);
+}
+
+}  // namespace
+
+MergeReport merge_sessions(const std::vector<std::string>& sources, const std::string& dst,
+                           const MergeOptions& o, const Control& ctl) {
+  return coded([&] {
+    MergeReport rep;
+    run_merge(sources, dst, o, ctl, rep);
+    return rep;
+  });
+}
+
+CopyCheck check_merge(const std::vector<std::string>& sources, const std::string& dst,
+                      const MergeOptions& o, const Control& ctl) {
+  MergePlan m = preflight_merge(sources, dst, o, ctl, /*collect=*/true);
+  CopyCheck c;
+  c.ok = m.refusals.empty();
+  c.refusals = std::move(m.refusals);
+  c.notes = std::move(m.notes);
+  c.session_name = m.new_name;
+  c.channels_kept.assign(m.kept.begin(), m.kept.end());
+  c.channels_excluded.assign(m.excluded.begin(), m.excluded.end());
+  return c;
+}
+
+VerifyReport verify_merge(const std::vector<std::string>& sources, const std::string& dst,
+                          const MergeOptions& o, const Control& ctl) {
+  // The plan is the merge's own (pieces from the sources' indexes), made as
+  // if the result did not exist yet.
+  MergePlan m = preflight_merge(sources, dst + ".verify-plan.mefd", o, ctl, /*collect=*/true);
+  for (const auto& r : m.refusals)
+    if (r.code != "dst-exists" && r.code != "partial-exists") raise(r);
+  m.new_name = session_name_from_path(dst);
+  return verify_merge_impl(m, dst, ctl, {});
 }
 
 }  // namespace mef3io

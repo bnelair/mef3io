@@ -36,6 +36,7 @@ COMMANDS = {
     "recover": "after an interrupted write, make the index and data agree again",
     "anonymize": "write a de-identified copy: every time shifted, identity removed",
     "transform": "write a copy with chosen channels, passwords, name and details",
+    "merge": "merge two or more recordings into one new session",
 }
 
 
@@ -81,6 +82,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .transform import _main as _transform_main
 
         return _transform_main(rest)
+    if command == "merge":
+        from .merge import _main as _merge_main
+
+        return _merge_main(rest)
     raise AssertionError(f"unhandled command {command}")  # pragma: no cover
 
 

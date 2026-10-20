@@ -20,3 +20,5 @@ tmp/
 # agent worktrees and local Claude Code state
 .claude/worktrees/
 .claude/settings.local.json
+coverage/
+.coverage
