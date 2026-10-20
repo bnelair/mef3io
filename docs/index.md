@@ -55,9 +55,15 @@ version number.
   [De-identification](anonymization.md).
 - **Modified copies** — `mef3io.transform_session` writes a copy with only
   the changes you ask for: chosen channels, new passwords or none, a new
-  name, edited subject details and descriptions. Every time and sample is
+  name, edited subject details and descriptions, optionally only a time window. Every time and sample is
   copied as stored, and the copy is verified against its source. Python and
   C++ — see [Modified copies](transform.md).
+- **Renaming without breaking anything** — `mef3io.rename_session` changes a
+  session's name in the folder, the session-level annotation files and every
+  file's header as one operation that a crash cannot leave half-done and
+  that can be undone; `mef3io.name_drift` says whether they agree. Python
+  and C++ — see
+  [Ordering and naming many sessions](python.md#ordering-and-naming-many-sessions).
 - **Merging recordings** — `mef3io.merge_sessions` merges two or more
   recordings into one session: parts of one stay, or recordings that take
   turns, checked for overlapping data before anything is written. Python and
@@ -144,6 +150,7 @@ The same session opens in MATLAB (`mef3io.Reader('session.mefd')`) and C++
 | [Format reference](mef3_format.md) | the MEF 3.0 on-disk structure, field by field |
 | [De-identification](anonymization.md) | de-identified copies with `anonymize_session`, and why meflib's recording-time offset (deprecated) is not anonymization |
 | [Modified copies](transform.md) | copies with chosen channels, passwords, name and details, with `transform_session` |
+| [Python guide: naming](python.md#ordering-and-naming-many-sessions) | `rename_session`, `name_drift`, `time_range` |
 | [Merging recordings](merge.md) | two or more recordings into one session, with `merge_sessions` |
 | [Performance & legacy comparison](legacy_comparison.md) | measured speed, encryption, and quantization differences |
 
@@ -163,8 +170,9 @@ The same session opens in MATLAB (`mef3io.Reader('session.mefd')`) and C++
   ([compatibility](encryption_model.md#compatibility-with-other-mef-30-tools)).
 - Every record type MEF 3.0 defines is read; `Note`, `SyLg` and `EDFA` can be
   written with their text.
-- De-identification, `inspect`, validation and repair, and cancelling and
-  progress are in Python and C++, not in MATLAB.
+- De-identification, modified copies, cut, merge, renaming, `inspect`,
+  validation and repair, and cancelling and progress are in Python and C++,
+  not in MATLAB.
 - The pure-Python fallback backend is not implemented.
 - Sessions written by mef3io **≤ 1.1.2** declare some buffer sizes as `0`,
   which can crash meflib-based readers (mef3io and pymef read them fine);

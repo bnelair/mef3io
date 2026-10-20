@@ -89,7 +89,7 @@ for the workflow. Python and C++ only (no MATLAB, no C ABI).
 ## Modified copies
 
 See [Modified copies](../transform.md) for what changes and what is copied as
-stored. The report, check and refusal types are shared with the
+stored. `time_range=` (a cut) is described there too. The report, check and refusal types are shared with the
 de-identified copies above. Python and C++ only (no MATLAB, no C ABI).
 
 ::: mef3io.transform_session
@@ -103,6 +103,20 @@ de-identified copies above. Python and C++ only (no MATLAB, no C ABI).
 ::: mef3io.transform.REFUSAL_CODES
 
 ::: mef3io.transform.METADATA_FIELDS
+
+## Merged sessions
+
+See [Merging recordings](../merge.md). Python and C++ only (no MATLAB, no C ABI).
+
+::: mef3io.merge_sessions
+
+::: mef3io.merge.check
+
+::: mef3io.merge.verify
+
+::: mef3io.MergeReport
+
+::: mef3io.merge.REFUSAL_CODES
 
 ## Cancelling and progress
 

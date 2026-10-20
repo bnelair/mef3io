@@ -147,15 +147,22 @@ pages such as
   limits.
 - **Copies with only what you need.** `mef3io.transform_session` writes a
   copy with chosen channels, new passwords (or none), a new name and edited
-  subject details or descriptions. Every time and sample is copied as
-  stored, and the copy is checked against its source before it is saved.
-  Python and C++; see
+  subject details or descriptions, and can keep only a time window
+  (`time_range=`). Every time and sample is copied as stored, and the copy
+  is checked against its source before it is saved. Python and C++; see
   [Modified copies](https://bnelair.github.io/mef3io/transform/).
 - **Recordings merged into one.** `mef3io.merge_sessions` joins two or
   more recordings: parts of one stay, recordings that take turns, or
   different amplifiers. Overlapping data is refused before anything is
   written, and the result is checked against every source. See
   [Merging recordings](https://bnelair.github.io/mef3io/merge/).
+- **Renaming without breaking anything.** A session's name is stored in the
+  folder, the session-level annotation files and every file's header.
+  `mef3io.rename_session` changes all of them as one operation that a crash
+  cannot leave half-done and that can be undone; `mef3io.name_drift` tells
+  whether they agree, and `mef3io.time_range` gives a session's first and
+  last sample time for ordering many sessions. Python and C++; see the
+  [Python guide](https://bnelair.github.io/mef3io/python/#ordering-and-naming-many-sessions).
 - **One file instead of a folder.** A session can be packed into a single
   `.mefd.tar` and read in place, without unpacking.
 
@@ -210,8 +217,8 @@ Changes in every version, and what an upgrade asks of you, are listed in the
   [De-identification](https://bnelair.github.io/mef3io/anonymization/).
 - **MATLAB** reads and writes sessions, annotations and metadata, packs and
   unpacks `.mefd.tar` archives and recovers interrupted writes. Inspecting,
-  validating and repairing, cancelling and progress, and de-identification
-  are in Python and C++ only.
+  validating and repairing, cancelling and progress, de-identification,
+  modified copies, cut, merge and renaming are in Python and C++ only.
 - **Pure-Python backend** is not implemented (`backend="pure"` raises); the
   wheels carry the compiled core.
 

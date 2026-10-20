@@ -271,7 +271,7 @@ gate the signal itself: the samples are readable without any password (see
   mapping. It is not a pure re-key: the copy is de-identified and every time
   is shifted, by at least the recording's span + 1 day
   ([De-identification](anonymization.md)). A pure re-key is `transform_session`
-  ([#73](https://github.com/bnelair/mef3io/issues/73)), once it exists. New files are
+  ([Modified copies](transform.md)). New files are
   never written with the old rule. Appending to an old segment keeps that
   segment's keys (changing them would mean re-encrypting it) and warns; a
   new segment uses meflib's rule.

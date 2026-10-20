@@ -30,6 +30,7 @@ Install: `pip install mef3io` (Python 3.10+, numpy only). MATLAB: the mef3io-mat
 - [De-identification](https://bnelair.github.io/mef3io/anonymization/): de-identified copies with anonymize_session (check before copying, channel exclusion, encryption, verification, refusal codes; Python and C++), and why meflib's recording-time offset is not anonymization (deprecated)
 - [Merging recordings](https://bnelair.github.io/mef3io/merge/): merge_sessions, two or more sessions into one; overlapping data refused up front, interleaved recordings merge, segments split at gaps, verified against every source (Python and C++)
 - [Modified copies](https://bnelair.github.io/mef3io/transform/): transform_session, a copy with chosen channels, new passwords or none, a new name and edited descriptive metadata; every time and sample copied as stored, verified against the source (Python and C++)
+- [Ordering and naming sessions](https://bnelair.github.io/mef3io/python/#ordering-and-naming-many-sessions): time_range, name_drift, rename_session (all four stored names, journaled, undo), fix_name_drift, rename_archive, the operation marker (Python and C++)
 - [Release notes](https://bnelair.github.io/mef3io/release_notes/): changes and upgrade notes per version
 
 ## Optional

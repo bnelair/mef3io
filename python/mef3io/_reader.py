@@ -114,7 +114,7 @@ class LegacyPasswordWarning(MefWarning):
     re-encrypts every file with meflib's mapping. That copy is NOT a pure
     re-key: it is de-identified and every time is shifted (by at least the
     recording's span + 1 day). A pure re-key is ``transform_session``
-    (issue #73), once it exists.
+    (see the transform guide).
 
     The fallback cannot tell who wrote a file: it also accepts a SECOND
     password, the one whose old-mapping bytes equal the real key (for a
@@ -159,8 +159,7 @@ def _legacy_password_warning_text(what: str) -> str:
         "pymef cannot open these files with this password. A re-keyed copy is "
         "mef3io.anonymize_session(..., output_password=(level1, level2)), but it "
         "also de-identifies the copy and shifts every time (by at least the "
-        "recording's span + 1 day); a pure re-key is transform_session (#73), once it "
-        "exists."
+        "recording's span + 1 day); a pure re-key is mef3io.transform_session."
     )
 
 
