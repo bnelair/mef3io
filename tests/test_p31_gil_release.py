@@ -216,3 +216,8 @@ def test_a_rename_does_not_hold_the_gil(many_segments, tmp_path):
         shutil.copytree(many_segments, copy)
         return lambda: mef3io.fix_name_drift(copy)
     _assert_releases(make, runs=2)
+
+
+def test_block_envelope_does_not_hold_the_gil(many_segments):
+    """block_envelope reads every segment's .tidx (fresh Reader: cold index cache)."""
+    _assert_releases(lambda: (lambda r=m.Reader(many_segments): r.block_envelope("ch", None, None)))

@@ -131,6 +131,17 @@ struct BlockIndexEntry {
   bool discontinuity = false;
 };
 
+// Per-block extremes of a channel over a time window, from the block index
+// alone (block_envelope): one row per data block, nothing decoded. Values are
+// scaled like read() (the channel's conversion factor); a writer that left a
+// block's min/max unset (RED_NAN) gives NaN there.
+struct BlockEnvelope {
+  std::vector<si8> start_uutc;  // first sample of the block
+  std::vector<si8> end_uutc;    // just past its last sample: start + n / fs
+  std::vector<sf8> minimum;
+  std::vector<sf8> maximum;
+};
+
 // Per-segment map entry: where one segment's data lies in time and in
 // channel-wide sample indices. Metadata only — nothing is decoded — so it is
 // cheap even for huge sessions, and it locates data across arbitrary gaps.
@@ -243,6 +254,13 @@ class Session {
   // All RED block index entries for a channel (across segments), with absolute
   // times resolved. Does not decode data. For viewers / seeking.
   std::vector<BlockIndexEntry> read_index(const std::string& channel);
+
+  // Min/max of every data block overlapping [t0, t1) (unset ends = the whole
+  // channel), from the block index only: no .tdat byte is read. Segments
+  // outside the window are skipped without reading their index. Times come
+  // from the index entries (a block's RED header copy is not read here).
+  BlockEnvelope block_envelope(const std::string& channel, std::optional<si8> t0 = std::nullopt,
+                               std::optional<si8> t1 = std::nullopt);
 
   // Per-segment map of a channel, sorted by segment number: time range, sample
   // range and block count of each segment, from metadata only. Use this to see

@@ -139,6 +139,7 @@ with mef3io.Reader("session.mefd") as r:          # password="..." if encrypted
     xi = r.read_raw("ch1", t0, t1)                # int32 + validity mask
     r.segments("ch1")                             # per-segment map
     r.toc("ch1")                                  # block-level index
+    r.block_envelope("ch1", t0, t1)               # per-block min/max, index only
     r.records()                                   # session-level annotations
     r.records("ch1")                              # ch1's channel- + segment-level ones
 ```
@@ -223,6 +224,28 @@ for files from another writer or from mef3io before 1.2; see the
 [provenance region](mef3_format.md#provenance-region-mef3io-12-frozen-format)) — from metadata only (nothing decoded), so it is
 cheap even for huge, gap-riddled sessions. `toc` is the finer per-RED-block
 view (start time, sample counts, extrema, discontinuity flags).
+
+### `block_envelope(channel, t0=None, t1=None)`
+
+The minimum and maximum of every data block overlapping `[t0, t1)`, read from
+the block index alone: no signal is decoded and segments outside the window
+are skipped. It is the fast way to draw a whole day, or a whole recording, as
+an envelope.
+
+```python
+env = r.block_envelope("ch1")                     # the whole channel
+env["start_uutc"], env["end_uutc"]                # int64 arrays, one row per block
+env["min"], env["max"]                            # float64, in the channel's units
+```
+
+- The resolution is the block length: mef3io writes 10-second blocks by
+  default (1-second blocks at 5 kHz and above); other writers choose their
+  own. A day of one channel in 10-second blocks is 8,640 rows.
+- Values are scaled like `read()`. A block whose writer left its extremes
+  unset gives NaN.
+- Gaps are absent rows: compare `end_uutc` with the next `start_uutc`.
+- `toc()` returns the same blocks for the whole channel as one dict each,
+  unscaled; `block_envelope` is the one to use for drawing.
 
 ### `records(channel=None, segment=None, level=None)`
 
