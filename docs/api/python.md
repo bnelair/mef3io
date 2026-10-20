@@ -33,6 +33,20 @@ See the [Python guide](../python.md#inspecting-a-session-without-reading-its-sam
 
 ::: mef3io.SummaryWarning
 
+## Ordering and naming sessions
+
+::: mef3io.time_range
+
+::: mef3io.naming.TimeRange
+
+::: mef3io.name_drift
+
+::: mef3io.naming.NameDrift
+
+::: mef3io.rename_archive
+
+::: mef3io.naming.ArchiveRename
+
 ## De-identified copies
 
 See [De-identification](../anonymization.md#de-identified-copies-with-anonymize_session)

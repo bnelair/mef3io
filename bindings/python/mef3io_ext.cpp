@@ -20,6 +20,7 @@
 #include "mef3io/crypto.hpp"
 #include "mef3io/inspect.hpp"
 #include "mef3io/metadata.hpp"
+#include "mef3io/naming.hpp"
 #include "mef3io/reader.hpp"
 #include "mef3io/recover.hpp"
 #include "mef3io/red.hpp"
@@ -1115,6 +1116,54 @@ NB_MODULE(_mef3io, m) {
 #undef MEF3IO_TRANSFORM_ARGS
 #undef MEF3IO_TRANSFORM_OPTIONS
 #undef MEF3IO_TRANSFORM_NB_ARGS
+
+  // --- naming (#72, first part) ---
+  m.def(
+      "time_range",
+      [](const std::string& path, const std::string& password, const mef3io::CancelToken* cancel) {
+        PyHooks hooks(cancel, nb::none());
+        const mef3io::TimeRange r = hooks.run(
+            [&](const mef3io::Control& ctl) { return mef3io::time_range(path, password, ctl); });
+        nb::dict d;
+        d["start_uutc"] = opt_or_none(r.start_uutc);
+        d["end_uutc"] = opt_or_none(r.end_uutc);
+        d["offset_known"] = r.offset_known;
+        d["channels"] = r.channels;
+        d["files_read"] = r.files_read;
+        return d;
+      },
+      nb::arg("path"), nb::arg("password") = "", nb::arg("cancel").none() = nb::none(),
+      "A session's first and last sample time, fast (see mef3io.time_range).");
+  m.def(
+      "name_drift",
+      [](const std::string& path, const mef3io::CancelToken* cancel) {
+        PyHooks hooks(cancel, nb::none());
+        const mef3io::NameDrift r =
+            hooks.run([&](const mef3io::Control& ctl) { return mef3io::name_drift(path, ctl); });
+        nb::dict d;
+        d["folder"] = r.folder;
+        d["record_files"] = r.record_files;
+        nb::dict names;
+        for (const auto& [k, v] : r.stored_names) names[nb::str(k.c_str())] = v;
+        d["stored_names"] = names;
+        d["files_read"] = r.files_read;
+        d["consistent"] = r.consistent;
+        return d;
+      },
+      nb::arg("path"), nb::arg("cancel").none() = nb::none(),
+      "Where a session's name is stored and whether the places agree (see mef3io.name_drift).");
+  m.def(
+      "rename_archive",
+      [](const std::string& path, const std::string& new_name) {
+        const mef3io::ArchiveRename r = mef3io::rename_archive(path, new_name);
+        nb::dict d;
+        d["old_path"] = r.old_path;
+        d["new_path"] = r.new_path;
+        d["inside_keeps_old_name"] = r.inside_keeps_old_name;
+        return d;
+      },
+      nb::arg("path"), nb::arg("new_name"),
+      "Rename a .mefd.tar archive without ever replacing a file (see mef3io.rename_archive).");
 
   // --- inspect (#67): everything about a session without its samples ---
   m.def(

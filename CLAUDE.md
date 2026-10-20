@@ -988,6 +988,23 @@ files). `ChannelSummary.channel_description` is an identity value: only with
 messages and `problems` still contain paths (they are data, documented as
 identifiable). Tests: tests/test_p30_warning_paths.py, p26, p27.
 
+NAMING (#72 first part, `core/src/naming.cpp`, `mef3io.naming`):
+`time_range` reads ONLY the first and last segment's .tmet of each channel
+(load_time_series_metadata_partial, so no password works and reports
+offset_known=false; a wrong one throws), rchar-pinned in test_p35;
+offset_known=false also for rto != 0 with non-negated stored times.
+`name_drift` reads every file's 1 KB UH (session_name) + root *.rdat names;
+read-only. `rename_archive` uses `detail::rename_no_replace`
+(core/src/no_replace.hpp: renameat2 RENAME_NOREPLACE / renamex_np RENAME_EXCL
+/ MoveFileExW without replace) and REFUSES where unsupported, never falling
+back; name <= 246 bytes and a PORTABLE file name (`check_portable_name`: no
+control char — a NUL once dropped the .mefd.tar suffix —, none of
+`/\:*?"<>|`, no Windows device name, no trailing dot/space); refused while
+`<archive>.tmp` (archive_session's temp) or `.partial` is beside it.
+time_range takes min/max over BOTH files read (segments numbered against
+time are still handled; a middle segment earlier than both is not seen).
+name_drift's `consistent` includes the session .ridx name. rename_session (journal, marker, undo) is #72 part 2
+and must reuse no_replace.hpp.
 COVERAGE runs ONLY on a release (user decision 2026-10-19, never per-push):
 `scripts/coverage.sh` (atomic gcov counters: the decoder's threads otherwise
 race into negative hits) → gcovr for core/src + core/include (both suites

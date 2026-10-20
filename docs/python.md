@@ -469,6 +469,30 @@ because `inspect` never opens a `.tdat`.
     `inspect` is available in Python and C++ (`mef3io/inspect.hpp`,
     `inspect_session`), not in MATLAB or the C ABI.
 
+## Ordering and naming many sessions
+
+`mef3io.time_range(path)` gives a session's first and last sample time
+reading only the first and last segment's metadata of each channel, never an
+index or data file. That makes it fast enough to sort hundreds of recordings,
+even on a network drive:
+
+```python
+paths = sorted(Path("incoming").glob("*.mefd"))
+ranges = {p: mef3io.time_range(p) for p in paths}
+by_time = sorted(paths, key=lambda p: ranges[p].start_uutc)
+```
+
+`offset_known` is `False` when the times cannot be shown as absolute (an
+encrypted session opened without the password that unlocks its time offset,
+or an ambiguous legacy offset).
+
+`mef3io.name_drift(path)` lists where a session's name is stored: its folder,
+its session-level annotation file and every file's header. It also says
+whether they agree. A folder renamed with the file manager leaves them
+disagreeing, and other MEF software then silently misses the session's
+annotations. `mef3io.rename_archive(tar, new_name)` renames a `.mefd.tar`
+file without ever replacing another. The archive's inside keeps the old name.
+
 ## De-identified copies
 
 `mef3io.anonymize_session(src, dst, shift_us)` writes a copy of a session

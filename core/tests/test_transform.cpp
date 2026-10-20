@@ -12,6 +12,7 @@
 #include "mef3io/byteio.hpp"
 #include "mef3io/crc.hpp"
 #include "mef3io/headers.hpp"
+#include "mef3io/naming.hpp"
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
 #include "mef3io/transform.hpp"
@@ -215,6 +216,19 @@ TEST_CASE("transform_session time_range: an exact cut holds exactly the window")
   TransformOptions wrong = o;  // the same copy against another window
   wrong.time_range = std::make_pair(t0, t1 + 1'000'000);
   CHECK_FALSE(verify_transform(src, dst, wrong).ok);
+}
+
+TEST_CASE("time_range and name_drift: first/last metadata only; names agree") {
+  const auto dir = fresh("mef3io_naming_core");
+  const std::string src = write_session(dir);
+  const TimeRange r = time_range(src);
+  REQUIRE(r.start_uutc);
+  CHECK(*r.start_uutc == START);
+  CHECK(r.offset_known);
+  CHECK(r.files_read == 2);  // one segment per channel: read once each
+  const NameDrift d = name_drift(src);
+  CHECK(d.consistent);
+  CHECK(d.folder == "subject_x");
 }
 
 TEST_CASE("merge_sessions: recordings that take turns merge; overlapping data is refused") {
