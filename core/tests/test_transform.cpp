@@ -231,6 +231,39 @@ TEST_CASE("time_range and name_drift: first/last metadata only; names agree") {
   CHECK(d.folder == "subject_x");
 }
 
+TEST_CASE("rename_session: all four places, a crash rolled back, writes refused meanwhile") {
+  const auto dir = fresh("mef3io_rename_core");
+  const std::string src = write_session(dir);
+  const auto target = (dir / "pt1.mefd").string();
+  RenameOptions crash;
+  crash.crash_at = 3;  // the marker is in, two headers changed
+  REQUIRE_THROWS_AS(rename_session(src, "pt1", crash), IoError);
+  REQUIRE(operation_marker(src));
+  CHECK(operation_marker(src)->operation == "rename");
+  CHECK_THROWS_AS(SessionWriter(src), WriteConflictError);
+  CHECK_THROWS_AS(clear_operation_marker(src), WriteConflictError);  // half-changed
+
+  const RenameReport rep = rename_session(src, "pt1");  // rolls back, then renames
+  CHECK(!rep.rolled_back.empty());
+  CHECK(rep.new_path == fsys::absolute(target).string());
+  CHECK(rep.folder_renamed);
+  const NameDrift d = name_drift(target);
+  CHECK(d.consistent);
+  CHECK(d.folder == "pt1");
+  REQUIRE(d.stored_names.size() == 1);
+  CHECK(d.stored_names.begin()->first == "pt1");
+  CHECK(!operation_marker(target));
+  CHECK(!fsys::exists(src));
+  CHECK(!fsys::exists(src + ".repair-backup"));
+
+  // Undo: back to the old name, exactly the descriptions changed.
+  RenameOptions undo;
+  undo.descriptions = rep.descriptions_changed;
+  const RenameReport back = rename_session(target, "subject_x", undo);
+  CHECK(back.descriptions_changed == rep.descriptions_changed);
+  CHECK(name_drift(src).consistent);
+}
+
 TEST_CASE("merge_sessions: recordings that take turns merge; overlapping data is refused") {
   const auto dir = fresh("mef3io_merge_core");
   auto write = [&](const std::string& name, std::vector<std::pair<si8, std::size_t>> chunks) {

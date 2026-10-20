@@ -493,6 +493,85 @@ disagreeing, and other MEF software then silently misses the session's
 annotations. `mef3io.rename_archive(tar, new_name)` renames a `.mefd.tar`
 file without ever replacing another. The archive's inside keeps the old name.
 
+### Renaming a session
+
+Do not rename a `.mefd` folder with the file manager. A session's name is
+stored in four places, and other MEF software reads all of them:
+1. the folder, `<name>.mefd`;
+2. the session's annotation files, `<name>.rdat` / `<name>.ridx`;
+3. the name in every file's header;
+4. each channel's session description, where it is just the name.
+
+`mef3io.rename_session` changes all four together:
+
+```python
+rep = mef3io.rename_session("incoming/3f2a9c.mefd", "pt1")
+print(rep.new_path)          # incoming/pt1.mefd
+rep.undo()                   # back to 3f2a9c, exactly
+```
+
+What it guarantees:
+- **Only the name changes.** No sample, block index or time is touched, and
+  a description that merely mentions the name is kept. Each changed file is
+  stamped `rename` in its [provenance](mef3_format.md) region.
+- **A crash cannot leave it half-done.**
+  - Before the first change, it writes the old headers and a journal of the
+    planned steps to the backup folder, then a marker into the session.
+  - If the operation is interrupted, the next `rename_session` or
+    `fix_name_drift` call on the session (with the same `backup_dir`) rolls
+    it back first.
+  - While the marker is there, mef3io refuses to write to the session,
+    copies refuse it as a source, and the Reader warns with
+    `SessionOperationWarning`.
+- **Nothing is ever replaced.** Every rename uses the operating system's
+  no-replace rename. A file system without one refuses rather than risk it.
+- **Refused up front**, with nothing changed:
+  - a name that is not a portable file name or is over 250 bytes (never
+    truncated);
+  - a target that exists, or a session being written (a `.partial` copy
+    beside it, a writer's temporary file inside it);
+  - a damaged header (validate and repair first);
+  - an encrypted session without the password (the descriptions are
+    encrypted);
+  - a name already out of step (fix that first, below).
+
+**Do not rename a session that is being recorded into.** A rename
+refuses a session with a writer's temporary file in it, and an open
+`Writer` refuses to write once the folder has moved. Nothing stops a
+recording that appends while the rename runs, though, so stop the
+acquisition (or rename between recordings).
+
+A rollback puts the old names back. If nothing else wrote to a file since,
+its old bytes are restored exactly; if something did (a program that does
+not know the marker appended data), only the name and the description are
+restored, so that write is kept.
+
+`backup_dir` chooses where the journal and old headers live while the
+operation runs. They are deleted when it completes. The default is
+`<session>.repair-backup` beside the session. The old name is identifying, so
+an application should pass a folder of its own.
+
+**Undo** is a logical inverse, never a byte restore: `rep.undo()` renames
+back and reverts only the descriptions the rename changed. Data appended
+since is kept. `rep.files` gives each changed file's size and modification
+time right after the operation, so an application can tell whether the
+session was written to since.
+
+**A folder renamed by another tool** leaves `name_drift(path).consistent`
+False. `mef3io.fix_name_drift(path)` sets the stored names and the annotation
+files to the folder's name, with the same safety. It never renames the
+folder. It refuses when the old name is ambiguous (the files store different
+names, or there are several session-level annotation files).
+
+**A marker whose journal is lost** (the backup folder was deleted, or another
+machine started the operation): every write refuses, and the message says
+why. `mef3io.clear_operation_marker(path)` removes the marker, but only when
+`name_drift` shows the name consistent. A half-changed session keeps its
+marker.
+
+A `.mefd.tar` archive is renamed with `rename_archive`. To change the name
+inside it, extract, rename and archive again.
+
 ## De-identified copies
 
 `mef3io.anonymize_session(src, dst, shift_us)` writes a copy of a session

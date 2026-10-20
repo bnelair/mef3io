@@ -821,8 +821,8 @@ TEST_CASE("provenance region: frozen layout, bounds, saturation, foreign data",
     REQUIRE(std::string(pv::operation_name(4)) == "recovery");
     REQUIRE(std::string(pv::operation_name(5)) == "metadata-update");
     REQUIRE(std::string(pv::operation_name(6)) == "anonymize");
-    // 7 is reserved for #72 and deliberately unassigned here.
-    REQUIRE(pv::operation_name(7) == nullptr);
+    REQUIRE(static_cast<int>(Op::Rename) == 7);
+    REQUIRE(std::string(pv::operation_name(7)) == "rename");
     REQUIRE(std::string(pv::operation_name(8)) == "transform");
     REQUIRE(static_cast<int>(Op::SegmentRepaired) == 9);
     REQUIRE(std::string(pv::operation_name(9)) == "segment-repaired");

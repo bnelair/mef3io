@@ -47,6 +47,18 @@ See the [Python guide](../python.md#inspecting-a-session-without-reading-its-sam
 
 ::: mef3io.naming.ArchiveRename
 
+::: mef3io.rename_session
+
+::: mef3io.fix_name_drift
+
+::: mef3io.naming.RenameReport
+
+::: mef3io.operation_marker
+
+::: mef3io.clear_operation_marker
+
+::: mef3io.SessionOperationWarning
+
 ## De-identified copies
 
 See [De-identification](../anonymization.md#de-identified-copies-with-anonymize_session)

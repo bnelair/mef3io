@@ -1165,6 +1165,82 @@ NB_MODULE(_mef3io, m) {
       nb::arg("path"), nb::arg("new_name"),
       "Rename a .mefd.tar archive without ever replacing a file (see mef3io.rename_archive).");
 
+  // --- rename_session / fix_name_drift (#72, second part) ---
+  auto rename_dict = [](const mef3io::RenameReport& r) {
+    nb::dict d;
+    d["old_path"] = r.old_path;
+    d["new_path"] = r.new_path;
+    d["old_name"] = r.old_name;
+    d["new_name"] = r.new_name;
+    d["folder_renamed"] = r.folder_renamed;
+    d["files_changed"] = r.files_changed;
+    d["descriptions_changed"] = r.descriptions_changed;
+    nb::list recs;
+    for (const auto& [a, b] : r.records_renamed) recs.append(nb::make_tuple(a, b));
+    d["records_renamed"] = recs;
+    d["rolled_back"] = r.rolled_back;
+    d["journals_discarded"] = r.journals_discarded;
+    d["notes"] = r.notes;
+    return d;
+  };
+  auto rename_opts = [](std::string password, std::string backup_dir,
+                        std::optional<std::vector<std::string>> descriptions, int crash_at,
+                        int fail_at) {
+    mef3io::RenameOptions o;
+    o.crash_at = crash_at;
+    o.fail_at = fail_at;
+    o.password = std::move(password);
+    o.backup_dir = std::move(backup_dir);
+    o.descriptions = std::move(descriptions);
+    return o;
+  };
+  m.def(
+      "rename_session",
+      [=](const std::string& path, const std::string& new_name, std::string password,
+          std::string backup_dir, std::optional<std::vector<std::string>> descriptions,
+          int crash_at, int fail_at) {
+        const auto o = rename_opts(std::move(password), std::move(backup_dir), std::move(descriptions), crash_at, fail_at);
+        mef3io::RenameReport r;
+        {
+          nb::gil_scoped_release release;
+          r = mef3io::rename_session(path, new_name, o);
+        }
+        return rename_dict(r);
+      },
+      nb::arg("path"), nb::arg("new_name"), nb::arg("password") = "", nb::arg("backup_dir") = "",
+      nb::arg("descriptions").none() = nb::none(), nb::arg("_crash_at") = -1, nb::arg("_fail_at") = -1,
+      "Rename a directory session in every place its name lives (see mef3io.rename_session).");
+  m.def(
+      "fix_name_drift",
+      [=](const std::string& path, const std::string& target, std::string password,
+          std::string backup_dir, std::optional<std::vector<std::string>> descriptions,
+          int crash_at, int fail_at) {
+        const auto o = rename_opts(std::move(password), std::move(backup_dir), std::move(descriptions), crash_at, fail_at);
+        mef3io::RenameReport r;
+        {
+          nb::gil_scoped_release release;
+          r = mef3io::fix_name_drift(path, target, o);
+        }
+        return rename_dict(r);
+      },
+      nb::arg("path"), nb::arg("target") = "", nb::arg("password") = "", nb::arg("backup_dir") = "",
+      nb::arg("descriptions").none() = nb::none(), nb::arg("_crash_at") = -1, nb::arg("_fail_at") = -1,
+      "Set the stored names to the folder's name (see mef3io.fix_name_drift).");
+  m.def(
+      "operation_marker",
+      [](const std::string& path) -> nb::object {
+        const auto mk = mef3io::operation_marker(path);
+        if (!mk) return nb::none();
+        nb::dict d;
+        d["tool"] = mk->tool;
+        d["operation"] = mk->operation;
+        d["id"] = mk->id;
+        return d;
+      },
+      nb::arg("path"), "The session's operation marker, or None.");
+  m.def("clear_operation_marker", &mef3io::clear_operation_marker, nb::arg("path"),
+        "Remove an operation marker whose journal is lost (see mef3io.clear_operation_marker).");
+
   // --- inspect (#67): everything about a session without its samples ---
   m.def(
       "inspect_session",

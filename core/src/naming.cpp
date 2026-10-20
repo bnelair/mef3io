@@ -6,9 +6,9 @@
 #include <cctype>
 #include <filesystem>
 #include <set>
-#include <functional>
 #include <stdexcept>
 
+#include "naming_rules.hpp"
 #include "no_replace.hpp"
 #include "session_layout.hpp"
 
@@ -25,36 +25,9 @@ namespace mef3io {
 
 namespace {
 
+using detail::check_portable_name;
 constexpr std::size_t UH = fmt::UNIVERSAL_HEADER_BYTES;
 constexpr std::size_t UH_START = 16, UH_END = 24, UH_SESSION_NAME = 308, UH_NAME_BYTES = 256;
-
-/// A session name that is a portable file name: no folder, no control
-/// character (a NUL would cut the name short), none of the characters or
-/// device names Windows cannot use, no trailing dot or space. Throws
-/// std::invalid_argument naming the problem. rename_session (#72, second
-/// part) uses the same rule.
-void check_portable_name(const std::string& name) {
-  if (name.empty()) throw std::invalid_argument("the new name is empty");
-  if (name == "." || name == "..")
-    throw std::invalid_argument("the new name cannot be '" + name + "'");
-  for (const unsigned char c : name) {
-    if (c < 0x20 || c == 0x7f)
-      throw std::invalid_argument("the new name contains a control character");
-    if (std::string("/\\:*?\"<>|").find(static_cast<char>(c)) != std::string::npos)
-      throw std::invalid_argument(std::string("the new name contains '") + static_cast<char>(c) +
-                                  "', which is not allowed in file names everywhere");
-  }
-  if (name.back() == '.' || name.back() == ' ')
-    throw std::invalid_argument("the new name ends in a dot or a space");
-  std::string upper;
-  for (const char c : name.substr(0, name.find('.')))
-    upper += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-  static const std::set<std::string> reserved = {"CON", "PRN", "AUX", "NUL"};
-  if (reserved.count(upper) ||
-      ((upper.rfind("COM", 0) == 0 || upper.rfind("LPT", 0) == 0) && upper.size() == 4 &&
-       upper[3] >= '1' && upper[3] <= '9'))
-    throw std::invalid_argument("the new name is a reserved device name on Windows");
-}
 
 }  // namespace
 
@@ -106,24 +79,13 @@ NameDrift name_drift(const std::string& path, const Control& ctl) {
     if (ext == ".ridx") index_files.push_back(stem);
   }
   // Every file's universal header: 1024 bytes each.
-  std::function<void(const std::string&)> walk = [&](const std::string& rel) {
-    for (const auto& e : src->list_dir(rel)) {
-      const std::string p = rel.empty() ? e.name : rel + "/" + e.name;
-      if (e.is_dir) {
-        walk(p);
-        continue;
-      }
-      const auto ext = e.name.size() > 5 ? e.name.substr(e.name.size() - 5) : std::string();
-      if (ext != ".tmet" && ext != ".tidx" && ext != ".tdat" && ext != ".rdat" && ext != ".ridx")
-        continue;
-      ctl.check();
-      if (src->file_size(p) < UH) continue;
-      const auto uh = src->read_range(p, 0, UH);
-      ++d.files_read;
-      ++d.stored_names[byteio::read_string(uh, UH_SESSION_NAME, UH_NAME_BYTES)];
-    }
-  };
-  walk("");
+  for (const auto& p : detail::header_files(*src)) {
+    ctl.check();
+    if (src->file_size(p) < UH) continue;
+    const auto uh = src->read_range(p, 0, UH);
+    ++d.files_read;
+    ++d.stored_names[byteio::read_string(uh, UH_SESSION_NAME, UH_NAME_BYTES)];
+  }
   d.consistent = d.stored_names.size() <= 1 &&
                  (d.stored_names.empty() || d.stored_names.begin()->first == d.folder) &&
                  std::all_of(d.record_files.begin(), d.record_files.end(),

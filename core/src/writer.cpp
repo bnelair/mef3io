@@ -50,12 +50,7 @@ std::vector<ui1> read_whole_file(const std::string& path) {
   return buf;
 }
 
-void finish_stream(std::ofstream& f, const std::string& path) {
-  f.flush();
-  if (!f) throw IoError("write failed (disk full?): " + path);
-  f.close();
-  if (!f) throw IoError("close failed, data may not have reached disk: " + path);
-}
+using detail::finish_stream;
 
 // File-identity and durability helpers are shared with the validator's repair
 // path (durability.hpp): the append writes the SAMPLES, so it must be at

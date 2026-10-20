@@ -1003,8 +1003,40 @@ control char — a NUL once dropped the .mefd.tar suffix —, none of
 `<archive>.tmp` (archive_session's temp) or `.partial` is beside it.
 time_range takes min/max over BOTH files read (segments numbered against
 time are still handled; a middle segment earlier than both is not seen).
-name_drift's `consistent` includes the session .ridx name. rename_session (journal, marker, undo) is #72 part 2
-and must reuse no_replace.hpp.
+name_drift's `consistent` includes the session .ridx name.
+RENAME (#72 part 2, `core/src/rename.cpp`; rules in for_agents/INVARIANTS.md
+§15): `rename_session` / `fix_name_drift` change the folder, the root
+`<name>.rdat/.ridx`, every UH session_name and s2 session_description where it
+EQUALS the old name; provenance op 7 `rename`. Journal (backup_dir, default
+`<session>.repair-backup`, found again via every `*.repair-backup` beside the
+session because the folder may have moved) -> marker `.mef3io-operation` ->
+changes -> marker removed -> journal removed. The next call rolls an
+interrupted one back, then does its own work. Marker without journal refuses
+every write (`detail::refuse_if_mid_operation`; SessionWriter also checks on
+each write call and refuses if its folder vanished, so an open Writer cannot
+recreate a renamed session at the old path). Reader warns
+`SessionOperationWarning`. `rename_session` refuses a drifted session
+(fix_name_drift first) and same name; `fix_name_drift` never renames the
+folder. Undo = `RenameReport.undo()` (logical, `descriptions=` restricts to
+what changed). `durability.hpp` now also holds `finish_stream`,
+`write_all_atomic` (were duplicated in writer/validate; `flush=false` for
+batching) and `flush_files` (ONE syncfs per file system on Linux, else per
+file + folder). PERFORMANCE RULE: never flush per header — backups go into
+ONE `<id>.backup` blob (sizes in the journal) with one fsync, patches are
+written unflushed and flushed in one batch before the names move; per-file
+fsync made a 600-segment rename 35.7 s, batched 0.8 s. ROLLBACK IS
+FIELD-WISE: a file is restored byte-exact only when it differs from its
+backup in nothing but CRCs/name/provenance/description; otherwise only the
+name and description bytes go back (s2 is AES-ECB and the description is
+block-aligned, so its ciphertext is copied without a password) — a byte
+restore would erase an append made meanwhile. A marker whose journal
+describes ANOTHER folder (a copy made mid-operation) is refused, never
+rolled back. Folder names are taken from the DISK entry (case-insensitive
+volumes) and converted as UTF-8 (`u8`/`str` helpers; path::string() is ANSI
+on Windows — repo-wide gap elsewhere). Known gap: a Writer appending DURING
+a rename can race it (needs a cross-process write lock, filed as an issue). Not done: NFD length
+check on HFS+ (the file system refuses at the folder step, which rolls back),
+per-segment end time/entry counts in the report (`files` has size+mtime).
 COVERAGE runs ONLY on a release (user decision 2026-10-19, never per-push):
 `scripts/coverage.sh` (atomic gcov counters: the decoder's threads otherwise
 race into negative hits) → gcovr for core/src + core/include (both suites

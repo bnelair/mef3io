@@ -187,6 +187,13 @@ def _busy(templates, tmp_path):
     return _fresh(templates, tmp_path), tmp_path / "busy.mefd", {}
 
 
+def _mid_operation(templates, tmp_path):
+    # A rename interrupted right after its marker was placed (#72).
+    src = _fresh(templates, tmp_path)
+    (src / ".mef3io-operation").write_text("mef3io-operation 1\ntool mef3io\noperation rename\nid 0\n")
+    return src, tmp_path / "S001.mefd", {}
+
+
 def _exists(templates, tmp_path):
     (tmp_path / "S001.mefd").mkdir()
     return _fresh(templates, tmp_path), tmp_path / "S001.mefd", {}
@@ -238,6 +245,7 @@ CASES = {
     "dst inside src": ("dst-inside-src", _inside),
     "dst not .mefd": ("dst-not-mefd", lambda t, p: _plain(t, p, dst="noext")),
     "partial in the way": ("partial-exists", _busy),
+    "source mid-rename": ("source-mid-operation", _mid_operation),
     "rename=False, other name": ("rename-name-mismatch",
                                  lambda t, p: _plain(t, p, dst="other.mefd", rename=False)),
     "rename=False keeps the name": ("name-contains-identity",

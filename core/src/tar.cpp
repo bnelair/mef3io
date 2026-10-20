@@ -1,5 +1,6 @@
 // mef3io — uncompressed tar session archives: TOC parsing, random-access
 // source, and deterministic ustar creation.
+#include "operation_marker.hpp"
 #include "mef3io/tar.hpp"
 
 #include <algorithm>
@@ -401,6 +402,8 @@ std::string archive_session(const std::string& session_dir, const std::string& t
   if (!fs::is_directory(src)) throw IoError("session path is not a directory: " + session_dir);
   if (!path_has_suffix(src.string(), ".mefd"))
     throw IoError("session directory must end with .mefd: " + session_dir);
+  // A session mid-rename (#72) would be packed half-renamed, marker and all.
+  detail::refuse_if_mid_operation(src.string());
   if (!tar_path.empty() && !path_has_suffix(tar_path, ".mefd.tar"))
     throw IoError("session archive must end with .mefd.tar: " + tar_path);
 
