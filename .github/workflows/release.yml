@@ -79,10 +79,19 @@ jobs:
     needs: [wheels, sdist]
     runs-on: ubuntu-latest
     steps:
+      # Only the distributions: wheels and the sdist. Downloading every
+      # artifact of the run also picked up the coverage report's .tar.gz
+      # whenever the coverage job finished first, and twine rejects it as an
+      # sdist without PKG-INFO (it stopped the 1.5.1 publish).
       - uses: actions/download-artifact@v4
         with:
+          pattern: "wheels-*"
           path: dist
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
