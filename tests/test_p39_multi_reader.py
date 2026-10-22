@@ -366,7 +366,10 @@ def test_metadata_agreeing_fields_kept_differing_fields_none_with_a_warning(tmp_
 # paths
 # ---------------------------------------------------------------------------
 
-def test_paths_argument(tmp_path):
+def test_paths_argument(tmp_path, monkeypatch):
+    # Relative paths are taken from tmp_path: on Windows CI the checkout and
+    # the temporary folder sit on different drives, where no relative path exists.
+    monkeypatch.chdir(tmp_path)
     a = _write(tmp_path / "a.mefd", [(0, 10, False)], rate=256.0)
     b = _write(tmp_path / "b.mefd", [(20 * SECOND, 10, False)], rate=256.0)
     ref = _quiet(mef3io.MultiReader, [str(a), str(b)]).read("A")
