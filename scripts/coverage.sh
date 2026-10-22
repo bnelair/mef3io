@@ -62,7 +62,11 @@ PY_PCT="$(python3 -m coverage report --format=total)"
 # 4. The C++ core, from both builds' counters.
 mkdir -p "$OUT/core"
 # (Third-party code built alongside — Catch2, nanobind — is not measured.)
+# The RED decoder's inner loops really run billions of times over the suite (8.3e9 hits on
+# one line in 1.6.0), past gcovr's "suspicious" default of 2^32; the counters are atomic, so
+# the count is real, not the gcov overflow bug that check exists for.
 python3 -m gcovr --root . --filter 'core/src/' --filter 'core/include/' \
+  --gcov-suspicious-hits-threshold 1000000000000 \
   --exclude 'core/tests/' --exclude-directories '.*/_deps/.*' \
   --exclude-directories '.*/nanobind-static.dir/.*' \
   --html-details "$OUT/core/index.html" --html-title "mef3io C++ core" \
