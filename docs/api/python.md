@@ -7,6 +7,10 @@ The native API:
 
 ::: mef3io.Reader
 
+::: mef3io.MultiReader
+
+::: mef3io.MultiReaderDifferenceWarning
+
 ::: mef3io.Writer
 
 ::: mef3io.archive_session

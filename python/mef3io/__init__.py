@@ -1,7 +1,8 @@
 """mef3io — read, write, validate and de-identify MEF 3.0 recordings.
 
 The work is done by the compiled C++ core (the ``_mef3io`` extension); the
-pure-Python backend is a stub. Start with :class:`Reader`, :class:`Writer`,
+pure-Python backend is a stub. Start with :class:`Reader` (or
+:class:`MultiReader` for several recordings read as one), :class:`Writer`,
 :func:`inspect` and :func:`anonymize_session`; the guide is at
 https://bnelair.github.io/mef3io/python/.
 """
@@ -68,6 +69,7 @@ from ._reader import (  # noqa: E402
     SessionOperationWarning,
     UnreadableSegmentWarning,
 )
+from ._multi import MultiReader, MultiReaderDifferenceWarning  # noqa: E402
 from ._warnings import MefWarning  # noqa: E402
 from ._writer import Writer, password_interop_issue  # noqa: E402
 from .metadata import Acquisition, Metadata, Subject  # noqa: E402
@@ -101,7 +103,7 @@ else:  # pragma: no cover - only without the extension
     MefError = FormatError = CrcError = PasswordError = IoError = WriteConflictError = RuntimeError
 
 __all__ = [
-    "Reader", "Writer", "Metadata", "Subject", "Acquisition",
+    "Reader", "MultiReader", "Writer", "Metadata", "Subject", "Acquisition",
     "MefReader", "MefWriter", "archive_session", "extract_session",
     "password_interop_issue",
     "anonymize_session", "AnonymizeReport", "VerifyReport",
@@ -123,6 +125,7 @@ __all__ = [
     "SessionDeclarationWarning",
     "UnreadableSegmentWarning",
     "SessionOperationWarning",
+    "MultiReaderDifferenceWarning",
     "MefError", "FormatError", "CrcError", "PasswordError", "IoError",
     "WriteConflictError",
     "CancelToken", "Cancelled",
