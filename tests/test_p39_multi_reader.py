@@ -41,8 +41,9 @@ def _quiet(fn, *a, **kw):
 def _write(path, pieces, *, rate, channels=("A", "B"), subject="Jane", precision=0,
            description="stay", notes=()):
     """`pieces`: (start in us from START, seconds, new_segment) per write, every channel."""
+    # description=None: the writer's default (the session's own name).
     meta = mef3io.Metadata(subject=mef3io.Subject(name_1=subject, id="P-1"),
-                           acquisition=mef3io.Acquisition(session_description=description))
+                           acquisition=mef3io.Acquisition(session_description=description or ""))
     rng = np.random.default_rng(abs(hash((str(path), rate))) % 2**32)
     with mef3io.Writer(str(path), overwrite=True, metadata=meta) as w:
         for t, secs, new in pieces:
@@ -527,3 +528,130 @@ def test_legacy_mef_tools_parts(tmp_path):
         assert len(x) == round((r.info("ch1")["end_time"] - START) * 256 / 1e6)
         assert len(r.declaration_issues) == len(_quiet(mef3io.Reader, str(paths[0]))
                                                 .declaration_issues) * 2
+
+
+# ---------------------------------------------------------------------------
+# review round 1
+# ---------------------------------------------------------------------------
+
+def _halve_first_index_count(path, ch="A"):
+    """The .tidx copy of the first block's sample count halved (the RED header
+    keeps the real one): a file whose two copies disagree (test_p19)."""
+    import glob
+
+    tidx = Path(sorted(glob.glob(f"{path}/{ch}.timd/*.segd/*.tidx"))[0])
+    raw = bytearray(tidx.read_bytes())
+    off = 1024 + 24
+    n = int.from_bytes(raw[off:off + 4], "little")
+    raw[off:off + 4] = (n // 2).to_bytes(4, "little")
+    tidx.write_bytes(bytes(raw))
+
+
+def _caught(fn):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = fn()
+    return out, [w for w in caught if issubclass(w.category, mef3io.BlockCopyWarning)]
+
+
+def test_read_never_warns_about_block_copies_read_raw_does_like_reader(tmp_path):
+    a = _write(tmp_path / "a.mefd", [(0, 10, False)], rate=256.0)
+    b = _write(tmp_path / "b.mefd", [(20 * SECOND, 10, False)], rate=256.0)
+    _halve_first_index_count(a)
+    with _quiet(mef3io.Reader, str(a)) as one, _quiet(mef3io.MultiReader, [a, b]) as r:
+        assert _caught(lambda: one.read("A"))[1] == []
+        assert _caught(lambda: r.read("A"))[1] == []
+        raw1, w1 = _caught(lambda: one.read_raw("A"))
+        raw2, w2 = _caught(lambda: r.read_raw("A"))
+        assert len(w1) == 1 and len(w2) == 1
+        assert w2[0].message.path == str(a) and w2[0].filename == __file__
+        assert raw2["block_copy_mismatches"] == raw1["block_copy_mismatches"]
+
+
+def test_default_session_descriptions_are_not_a_difference(tmp_path):
+    days = [_write(tmp_path / f"2020-01-0{i + 1}.mefd", [(i * 20 * SECOND, 10, False)],
+                   rate=256.0, description=None) for i in range(3)]
+    with _quiet(mef3io.Reader, str(days[0])) as one:
+        assert one.metadata.acquisition.session_description == "2020-01-01"  # the default
+    tar = mef3io.archive_session(str(days[2]), str(tmp_path / "renamed.mefd.tar"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with mef3io.MultiReader(days) as r, mef3io.MultiReader(days[:2] + [tar]) as rt:
+            for x in (r, rt):
+                assert x.metadata.acquisition.session_description is None
+                assert x.info("A")["session_description"] is None
+                assert x.metadata.subject.name_1 == "Jane"
+        with mef3io.MultiReader(days[:1]) as single:  # one recording keeps its own
+            assert single.metadata.acquisition.session_description == "2020-01-01"
+    # A real description with defaults beside it: that description.
+    real = _write(tmp_path / "2020-01-02.mefd", [(20 * SECOND, 10, False)], rate=256.0,
+                  description="night 1")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with mef3io.MultiReader([days[0], real, days[2]]) as r:
+            assert r.metadata.acquisition.session_description == "night 1"
+            assert r.info("B")["session_description"] == "night 1"
+    # Two real descriptions that differ: None and the warning.
+    other = _write(tmp_path / "2020-01-03.mefd", [(40 * SECOND, 10, False)], rate=256.0,
+                   description="night 2")
+    with pytest.warns(mef3io.MultiReaderDifferenceWarning) as rec:
+        r = mef3io.MultiReader([days[0], real, other])
+    assert rec[0].message.details == ("session_description",)
+    assert "night" not in str(rec[0].message)
+    with r:
+        assert r.metadata.acquisition.session_description is None
+
+
+def test_a_warning_raised_as_an_error_closes_every_recording(tmp_path, monkeypatch):
+    import mef3io._multi as multi
+
+    made = []
+
+    class Tracking(mef3io.Reader):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            made.append(self)
+
+    monkeypatch.setattr(multi, "Reader", Tracking)
+    a = _write(tmp_path / "a.mefd", [(0, 10, False)], rate=256.0, subject="Jane")
+    b = _write(tmp_path / "b.mefd", [(20 * SECOND, 10, False)], rate=256.0, subject="Janet")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(mef3io.MultiReaderDifferenceWarning):
+            mef3io.MultiReader([a, b])
+    assert len(made) == 2 and all(r._closed for r in made)
+
+
+def test_errors_raised_by_multireader_read_like_readers(tmp_path):
+    a = _write(tmp_path / "a.mefd", [(0, 10, False)], rate=256.0)
+    b = _write(tmp_path / "b.mefd", [(20 * SECOND, 10, False)], rate=256.0)
+    one, r = _quiet(mef3io.Reader, str(a)), _quiet(mef3io.MultiReader, [a, b])
+
+    def error(fn):
+        with pytest.raises(Exception) as e:
+            fn()
+        return type(e.value), str(e.value)
+
+    for args in [("A", 99, None), ("A", 99, "session"), ("A", 99, "channel"),
+                 ("A", 99, "bogus"), ("X", None, None), (None, 1, None)]:
+        assert error(lambda: r.records(*args)) == error(lambda: one.records(*args)), args
+    for call in ("info", "segments", "toc", "read", "read_raw", "block_envelope"):
+        assert error(lambda: getattr(r, call)("X")) == error(lambda: getattr(one, call)("X"))
+    one.close()
+    r.close()
+    for call in ("read", "read_raw", "toc", "segments", "block_envelope"):
+        assert error(lambda: getattr(r, call)("A")) == error(lambda: getattr(one, call)("A"))
+    assert error(r.records) == error(one.records)
+
+
+def test_patient_fields_are_one_rule_in_info_and_metadata(tmp_path):
+    # B is only in the first recording; the patient differs in the second.
+    a = _write(tmp_path / "a.mefd", [(0, 10, False)], rate=256.0, channels=("A", "B"),
+               subject="Jane")
+    b = _write(tmp_path / "b.mefd", [(20 * SECOND, 10, False)], rate=256.0, channels=("A",),
+               subject="Janet")
+    with _quiet(mef3io.MultiReader, [a, b]) as r:
+        assert r.info("B")["subject_name_1"] is None
+        assert r.info("A")["subject_name_1"] is None
+        assert r.metadata.subject.name_1 is None
+        assert r.info("B")["subject_id"] == r.metadata.subject.id == "P-1"

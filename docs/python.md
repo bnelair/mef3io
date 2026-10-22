@@ -532,13 +532,21 @@ warn_declarations=True, strict=True)`
   `channels` is every recording's, sorted; a channel a recording lacks is a
   gap over its time. `info()` gives the earliest start, the latest end and the
   summed sample and segment counts; any other field is the value the
-  recordings agree on, or `None` where they differ. `metadata` is a
-  `mef3io.Metadata` built the same way (patient fields and session
-  description over every recording). A difference raises one
+  recordings agree on, or `None` where they differ. The patient fields and
+  the session description are combined over every recording (also those
+  without the channel), so `info()` and `metadata` agree; `metadata` is a
+  `mef3io.Metadata` built the same way. A difference raises one
   `MultiReaderDifferenceWarning` on open naming the fields, never their
   values; each recording's own values are in `r.metadata_by_source` (and
   `r.paths` lists the recordings in time order). Different patient names or
   IDs can mean the recordings are not the same patient's.
+- **Session descriptions.** mef3io and the legacy stack store the session's
+  name there by default, so day files named by date would always differ. A
+  description equal to its own recording's name therefore counts as unset:
+  real descriptions that agree give that value, only defaults give `None`
+  (a single recording keeps its own), and no warning is raised for them.
+  `merge_sessions` keeps the first source's description, so for this one
+  field `metadata` is not what a merged session gives.
 - `segments()` numbers every recording's segments from 0 in time order, as a
   merged session does; `path` is the real folder, so it says which recording.
   `toc()`, `block_envelope()` and `records()` combine every recording's in

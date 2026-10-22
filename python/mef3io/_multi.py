@@ -24,13 +24,12 @@ import numpy as np
 
 from ._cancel import CancelToken, Cancelled, _hooks
 from ._reader import Reader, _flush
-from ._warnings import MefWarning, emit as _emit
+from ._warnings import MefWarning, emit as _emit, identity_of as _identity_of
 
 __all__ = ["MultiReader", "MultiReaderDifferenceWarning"]
 
-# info() keys combined by rule rather than by agreement.
-_SPAN_KEYS = ("start_time", "end_time", "number_of_samples", "n_segments", "name",
-              "section3_available")
+# info() keys that describe the session, not the channel: combined over EVERY
+# recording (also those without the channel), so info() and metadata agree.
 _SESSION_WIDE = ("subject_name_1", "subject_name_2", "subject_id", "recording_location",
                  "gmt_offset", "session_description")
 
@@ -114,6 +113,27 @@ def _agree(values: list):
         if v != first or type(v) is not type(first):
             return None
     return first
+
+
+def _session_name(path: str) -> str:
+    base = os.path.basename(os.fspath(path).rstrip("/\\"))
+    for suffix in (".mefd.tar", ".mefd"):
+        if base.lower().endswith(suffix):
+            return base[: -len(suffix)]
+    return base
+
+
+def _is_default_description(description, path: str, reader) -> bool:
+    """True for an unset session description or the writer's default: the
+    recording's own session name (the folder or archive name without its
+    suffix, or, for a renamed archive, the folder inside it)."""
+    if description is None or description == "":
+        return True
+    names = {_session_name(path)}
+    for item in _identity_of(reader._impl):
+        if item:
+            names.add(_session_name(str(item).partition("::")[2] or str(item)))
+    return description in names
 
 
 def _threads_total(n_threads: int) -> int:
@@ -200,15 +220,24 @@ class MultiReader:
       recording does not have reads as a gap over that recording's time.
     * :meth:`info`: ``start_time`` the earliest, ``end_time`` the latest,
       ``number_of_samples`` and ``n_segments`` the sums,
-      ``section3_available`` only if every recording has it. Every other
-      field is the value the recordings holding the channel agree on, or
-      ``None`` when they differ (a :class:`MultiReaderDifferenceWarning`
-      names such fields once, on open).
-    * :attr:`metadata`: a :class:`mef3io.Metadata`, the patient fields and
-      the session description combined over every recording, the rest from
-      :meth:`info` of the first channel (as :class:`Reader` does). A field the
-      recordings disagree on is ``None``. Each recording's own values:
-      :attr:`metadata_by_source`.
+      ``section3_available`` only if every recording has it. The patient
+      fields (``subject_*``, ``recording_location``, ``gmt_offset``) and
+      ``session_description`` are combined over EVERY recording, also those
+      without the channel, so :meth:`info` and :attr:`metadata` always
+      agree. Every other field is the value the recordings holding the
+      channel agree on. A field they disagree on is ``None`` (a
+      :class:`MultiReaderDifferenceWarning` names such fields once, on
+      open). A session description equal to its own recording's name
+      (what mef3io and the legacy stack write by default) counts as unset:
+      day files named by date do not "disagree" on it, and when every
+      recording has only the default it is ``None`` (one recording keeps
+      its own). :func:`merge_sessions` keeps the FIRST source's
+      description, so for this one field ``metadata`` is not what a merged
+      session gives.
+    * :attr:`metadata`: a :class:`mef3io.Metadata` with those same combined
+      patient fields and session description, the rest from :meth:`info` of
+      the first channel (as :class:`Reader` does). Each recording's own
+      values: :attr:`metadata_by_source`.
     * :meth:`segments`: every recording's segments in time order, numbered
       from 0 like the segments of a merged session; ``path`` is the segment's
       real folder. ``start_sample`` counts the samples stored before it.
@@ -242,7 +271,8 @@ class MultiReader:
       recording touched, plus 5 for the combined counts, beside the float64
       result.
     * ``progress(done, total)``: ``total`` can grow while the recordings
-      start reading.
+      start reading (each part knows its size only when it starts); ``done``
+      never goes back.
 
     Calls on one MultiReader may overlap across threads, as on a
     :class:`Reader` (with the same limits; see the Python guide).
@@ -310,16 +340,20 @@ class MultiReader:
                 r.close()
             raise
 
-        for r in self._readers:
-            _flush(r._open_warnings, stacklevel=2)
-            r._open_warnings = []
-        if self._differing:
-            _emit(MultiReaderDifferenceWarning,
-                  f"the {len(self._readers)} recordings differ in "
-                  f"{', '.join(self._differing)}; MultiReader.info and .metadata give None "
-                  "for these fields (each recording's own values: "
-                  "MultiReader.metadata_by_source, or open it with mef3io.Reader)",
-                  path=self._paths[0], details=self._differing, stacklevel=2)
+        try:  # a warning raised as an error (-W error) must not leave them open
+            for r in self._readers:
+                pending, r._open_warnings = r._open_warnings, []
+                _flush(pending, stacklevel=2)
+            if self._differing:
+                _emit(MultiReaderDifferenceWarning,
+                      f"the {len(self._readers)} recordings differ in "
+                      f"{', '.join(self._differing)}; MultiReader.info and .metadata give None "
+                      "for these fields (each recording's own values: "
+                      "MultiReader.metadata_by_source, or open it with mef3io.Reader)",
+                      path=self._paths[0], details=self._differing, stacklevel=2)
+        except BaseException:
+            self.close()
+            raise
 
     # ---- open-time combination and checks ---------------------------------
 
@@ -331,6 +365,7 @@ class MultiReader:
         self._holders = {ch: holders[ch] for ch in sorted(holders)}
 
         differing: set = set()
+        self._session_wide = self._combine_session_wide(differing)
         self._infos = {}
         for ch, ks in self._holders.items():
             infos = [self._readers[k].info(ch) for k in ks]
@@ -351,6 +386,8 @@ class MultiReader:
                     combined[key] = sum(vals)
                 elif key == "section3_available":
                     combined[key] = all(vals)
+                elif key in self._session_wide:
+                    combined[key] = self._session_wide[key]  # one rule: every recording
                 else:
                     combined[key] = _agree(vals)
                     if combined[key] is None and any(v is not None for v in vals):
@@ -359,16 +396,53 @@ class MultiReader:
             self._check_overlap(ch, ks, infos)
 
         self._metadata_by_source = {p: r.metadata for p, r in zip(self._paths, self._readers)}
-        sources = list(self._metadata_by_source.values())
-        for name, get in (("subject_name_1", lambda m: m.subject.name_1),
-                          ("subject_name_2", lambda m: m.subject.name_2),
-                          ("subject_id", lambda m: m.subject.id),
-                          ("recording_location", lambda m: m.subject.recording_location),
-                          ("gmt_offset", lambda m: m.subject.gmt_offset),
-                          ("session_description", lambda m: m.acquisition.session_description)):
-            if _agree([get(m) for m in sources]) is None:
-                differing.add(name)
         self._differing = tuple(sorted(differing))
+
+    def _combine_session_wide(self, differing: set) -> dict:
+        """The patient fields and the session description over EVERY recording.
+
+        Each recording's values come from its first channel, as
+        :attr:`Reader.metadata` takes them. A session description equal to
+        its own recording's name is the writer's default (mef3io and the
+        legacy stack both write the session name there), so it is left out
+        of the comparison: day files named after their dates must not
+        "disagree" on it. Real descriptions that agree give that value;
+        none (only defaults) gives ``None``, except for a single recording,
+        which keeps its own value as a Reader does.
+        """
+        per = []
+        for path, r in zip(self._paths, self._readers):
+            chans = r.channels
+            per.append((path, r, r.info(chans[0]) if chans else {}))
+        # As Reader.metadata: subject fields only with level-2 access, here
+        # to every recording.
+        self._section3_everywhere = all(info.get("section3_available") for _, _, info in per
+                                        if info)
+        out = {}
+        for key in _SESSION_WIDE:
+            if key == "session_description":
+                continue
+            vals = [info.get(key) for _, _, info in per if info]
+            if not vals:
+                continue
+            out[key] = _agree(vals)
+            if out[key] is None and any(v is not None for v in vals):
+                differing.add(key)
+        descriptions, real = [], []
+        for path, r, info in per:
+            if not info:
+                continue
+            d = info.get("session_description")
+            descriptions.append(d)
+            if not _is_default_description(d, path, r):
+                real.append(d)
+        if len(descriptions) == 1:
+            out["session_description"] = descriptions[0]
+        elif descriptions:
+            out["session_description"] = _agree(real) if real else None
+            if real and out["session_description"] is None:
+                differing.add("session_description")
+        return out
 
     def _check_overlap(self, ch: str, ks: list, infos: list) -> None:
         """Refuse two recordings holding samples of ``ch`` at the same time.
@@ -472,8 +546,9 @@ class MultiReader:
     def _check_open(self) -> None:
         if self._closed:
             raise ValueError(
-                "this MultiReader is closed; open a new one "
-                "(close() releases the recordings' file handles)"
+                "this Reader is closed; open a new one "
+                "(close() releases the backend's file handles, so reusing it "
+                "would silently reopen the session)"
             )
 
     @property
@@ -491,9 +566,11 @@ class MultiReader:
 
         Same keys as :meth:`Reader.info`. ``start_time`` is the earliest,
         ``end_time`` the latest, ``number_of_samples`` and ``n_segments`` the
-        sums, ``section3_available`` true only if every recording has it; any
-        other field is the value the recordings agree on, or ``None`` where
-        they differ.
+        sums, ``section3_available`` true only if every recording has it. The
+        patient fields and ``session_description`` are combined over every
+        recording (as :attr:`metadata`); any other field is the value the
+        recordings holding the channel agree on. A field they disagree on is
+        ``None``. See the class notes for the session-description rule.
         """
         if channel not in self._infos:
             return self._readers[0].info(channel)  # Reader's own error
@@ -504,10 +581,13 @@ class MultiReader:
         """Session metadata as a :class:`mef3io.Metadata`, combined over every recording.
 
         The subject fields and the session description: the value every
-        recording holds, or ``None`` where they differ. The other acquisition
+        recording holds, or ``None`` where they differ (a description equal
+        to its own recording's name is the default and does not count; see
+        the class notes). The other acquisition
         fields come from :meth:`info` of the first channel, as on
         :class:`Reader` (so ``None`` where the recordings holding it differ).
-        Subject fields are empty unless opened with a level-2 password.
+        Subject fields are empty unless every recording was opened with
+        level-2 access.
         """
         from .metadata import Acquisition, Metadata, Subject
 
@@ -515,19 +595,16 @@ class MultiReader:
         if not chans:
             return Metadata()
         info = self._infos[chans[0]]
-        sources = list(self._metadata_by_source.values())
-
-        def session_wide(get):
-            return _agree([get(m) for m in sources])
+        wide = self._session_wide
 
         subj = Subject()
-        if info.get("section3_available"):
+        if self._section3_everywhere:
             subj = Subject(
-                name_1=session_wide(lambda m: m.subject.name_1),
-                name_2=session_wide(lambda m: m.subject.name_2),
-                id=session_wide(lambda m: m.subject.id),
-                recording_location=session_wide(lambda m: m.subject.recording_location),
-                gmt_offset=session_wide(lambda m: m.subject.gmt_offset),
+                name_1=wide.get("subject_name_1"),
+                name_2=wide.get("subject_name_2"),
+                id=wide.get("subject_id"),
+                recording_location=wide.get("recording_location"),
+                gmt_offset=wide.get("gmt_offset"),
             )
         base = Metadata.from_info(info).acquisition
 
@@ -535,7 +612,7 @@ class MultiReader:
             return None if info.get(key, 0) is None else value
 
         acq = Acquisition(
-            session_description=session_wide(lambda m: m.acquisition.session_description),
+            session_description=wide.get("session_description"),
             channel_description=field("channel_description", base.channel_description),
             reference_description=field("reference_description", base.reference_description),
             acquisition_channel_number=field("acquisition_channel_number",
@@ -706,7 +783,8 @@ class MultiReader:
         reports the sum over them.
         """
         fs, t0, n, touched, results = self._gather(channel, t0, t1, n_threads, cancel, progress)
-        self._flush_results(results)
+        # Reader.read never warns (its block-copy detail is read_raw's): the
+        # warnings collected with each part are dropped here, not emitted.
         ufs = self._ufacts(channel, touched)
         same = len(set(ufs)) <= 1
         samples, valid, owner = self._assemble(channel, fs, t0, n, touched, results,
@@ -822,6 +900,7 @@ class MultiReader:
         segment's own folder (so it says which recording); ``start_sample``
         counts the samples stored before it.
         """
+        self._check_open()  # also when the map is cached: Reader raises after close()
         if channel not in self._holders:
             return self._readers[0].segments(channel)  # Reader's own error
         return [dict(s) for s in self._segment_map(channel)[1]]
@@ -905,7 +984,12 @@ class MultiReader:
             mapping, segs = self._segment_map(channel)
             where = {v: key for key, v in mapping.items()}.get(segment)
             if where is None:
-                raise IndexError(f"no segment {segment} in channel {channel}")
+                if level not in (None, "segment", "all"):
+                    # Reader checks the level first: let a recording raise it.
+                    k0 = self._holders[channel][0]
+                    any_local = self._readers[k0].segments(channel)[0]["segment"]
+                    self._readers[k0]._records(channel, any_local, level, [])
+                raise IndexError(f"no such segment: {channel} segment {segment}")
             k, local = where
             got = [(k, rec) for rec in self._readers[k]._records(channel, local, level, pending)]
         elif segment is not None:

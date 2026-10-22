@@ -962,7 +962,13 @@ round). Slots two recordings both fill (touching within half a sample) go to
 the block that STARTS later (merged segments are time-ordered, later wins),
 from block_envelope around those slots only. Combined values: agree -> value,
 differ -> None + ONE `MultiReaderDifferenceWarning` naming fields only
-(never the first file's value). Refused on open (ValueError): rate differs,
+(never the first file's value). Patient fields + session_description are
+combined over EVERY recording (info and metadata share `_session_wide`); a
+session_description equal to its own recording's name is the writer default
+and is ignored (else day files warn on every open, and -W error breaks the
+constructor). read() DROPS the parts' collected BlockCopyWarnings (Reader.read
+never emits one); read_raw emits them. Errors MultiReader raises itself use
+Reader's exact text. Refused on open (ValueError): rate differs,
 overlapping data (merge's rule: spans first, block_envelope only where spans
 meet, half-sample tolerance). Different ufact: read scales each recording by
 its own, read_raw refuses. Sub-readers are opened with the private
