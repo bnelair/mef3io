@@ -14,6 +14,10 @@ example:
 Every time and every sample is copied as stored, and the sources are never
 changed.
 
+To read several recordings as one **without** writing a merged copy, use
+[`MultiReader`](python.md#several-recordings-read-as-one): its reads equal a
+`Reader`'s over the merged session.
+
 ```python
 import mef3io
 

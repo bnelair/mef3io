@@ -163,19 +163,18 @@ def _legacy_password_warning_text(what: str) -> str:
     )
 
 
-def _warn_legacy_password(impl, path: str, stacklevel: int) -> None:
+def _warn_legacy_password(impl, path: str, pending: list) -> None:
     fn = getattr(impl, "legacy_password_channels", None)
     channels = list(fn()) if fn is not None else []
     if channels:
         shown = ", ".join(channels[:3]) + (", ..." if len(channels) > 3 else "")
-        _emit(LegacyPasswordWarning,
-              _legacy_password_warning_text(f"{len(channels)} channel(s) ({shown})"),
-              path=path, details=channels, stacklevel=stacklevel + 1,
-              also=_identity_of(impl))
+        pending.append((LegacyPasswordWarning,
+                        _legacy_password_warning_text(f"{len(channels)} channel(s) ({shown})"),
+                        dict(path=path, details=channels, also=_identity_of(impl))))
 
 
 @contextlib.contextmanager
-def _warning_on_legacy_records(impl, path: str, stacklevel: int):
+def _warning_on_legacy_records(impl, path: str, pending: list):
     """Warn about record files a records() call opened via the old mapping."""
     # finally: a strict call can read an old-keyed file and then fail on the
     # next one. The list is cumulative and deduplicated, so a file not
@@ -186,10 +185,9 @@ def _warning_on_legacy_records(impl, path: str, stacklevel: int):
     finally:
         added = impl.legacy_password_record_files()[before:]
         if added:
-            _emit(LegacyPasswordWarning,
-                  _legacy_password_warning_text(f"{len(added)} record file(s)"),
-                  path=path, details=added, stacklevel=stacklevel,
-                  also=_identity_of(impl))
+            pending.append((LegacyPasswordWarning,
+                            _legacy_password_warning_text(f"{len(added)} record file(s)"),
+                            dict(path=path, details=added, also=_identity_of(impl))))
 
 
 def _unreadable_warning_text(problems: list) -> str:
@@ -243,6 +241,17 @@ def _declaration_warning_text(issues: list) -> str:
         "Run mef3io.Validator(path).validate() for detail, or "
         "python -m mef3io repair <path> --check <check-id> to fix the file."
     )
+
+
+def _flush(pending: list, stacklevel: int) -> None:
+    """Emit warnings collected as ``(category, message, kwargs)``.
+
+    ``stacklevel`` counts from the caller of this function, as for
+    ``warnings.warn``. Collecting first lets :class:`MultiReader` emit a
+    sub-Reader's warnings at its own caller, from the calling thread.
+    """
+    for category, message, kw in pending:
+        _emit(category, message, stacklevel=stacklevel + 1, **kw)
 
 
 class Reader:
@@ -306,7 +315,13 @@ class Reader:
         cache=None,
         warn_declarations: bool = True,
         strict: bool = True,
+        *,
+        _defer_warnings: bool = False,
     ):
+        # _defer_warnings (private, for MultiReader): keep the open's warnings
+        # in self._open_warnings instead of emitting them, so the caller can
+        # emit them itself, at ITS caller and from the calling thread.
+        pending: list = []
         self._path = str(path)
         self._password = password or ""
         self._backend_name = backend
@@ -388,31 +403,35 @@ class Reader:
         # Never from a cache snapshot: encrypted sessions are never cached, so
         # an encrypted session always has its backend built here.
         if self._impl is not None:
-            _warn_legacy_password(self._impl, self._path, stacklevel=2)
+            _warn_legacy_password(self._impl, self._path, pending)
 
         if not self._strict:
             problems = self.problems  # from the cache snapshot on a warm open
             if problems:
-                _emit(UnreadableSegmentWarning, _unreadable_warning_text(problems),
-                      path=self._path, details=problems, stacklevel=2,
-                      also=_identity_of(self._impl))
+                pending.append((UnreadableSegmentWarning, _unreadable_warning_text(problems),
+                                dict(path=self._path, details=problems,
+                                     also=_identity_of(self._impl))))
 
         from . import _mef3io as _ext  # noqa: PLC0415 - one stat, never cached
 
         marker = _ext.operation_marker(self._path)
         if marker is not None:
-            _emit(SessionOperationWarning,
+            pending.append((SessionOperationWarning,
                   f"the session is in the middle of an operation ({marker['operation']}, "
                   f"started by {marker['tool']}) that was interrupted or is still running: "
                   "reads are unaffected, writes are refused until it is finished or rolled "
                   "back (run the same operation again)",
-                  path=self._path, details=[marker], stacklevel=2)
+                  dict(path=self._path, details=[marker])))
 
         if warn_declarations and self._declaration_issues:
-            _emit(SessionDeclarationWarning,
-                  _declaration_warning_text(self._declaration_issues),
-                  path=self._path, details=self._declaration_issues, stacklevel=2,
-                  also=_identity_of(self._impl))
+            pending.append((SessionDeclarationWarning,
+                            _declaration_warning_text(self._declaration_issues),
+                            dict(path=self._path, details=self._declaration_issues,
+                                 also=_identity_of(self._impl))))
+        if _defer_warnings:
+            self._open_warnings = pending
+        else:
+            _flush(pending, stacklevel=2)
 
     def _password_protected(self) -> bool:
         # Fail closed: a backend that cannot say is treated as encrypted, so
@@ -663,8 +682,14 @@ class Reader:
             FILE is inconsistent — the header copy was used, which is what
             meflib and pymef do, so the read still matches theirs.
         """
+        pending: list = []
+        out = self._read_raw(channel, t0, t1, n_threads, _hooks(cancel, progress), pending)
+        _flush(pending, stacklevel=2)
+        return out
+
+    def _read_raw(self, channel, t0, t1, n_threads, hooks: dict, pending: list) -> dict:
+        # read_raw with its warning collected into `pending` (see _flush).
         impl = self._ensure_impl()
-        hooks = _hooks(cancel, progress)
         if hooks and self._backend_name != "cpp":
             raise NotImplementedError("cancel=/progress= need the C++ backend")
         if n_threads is None:
@@ -673,9 +698,9 @@ class Reader:
             out = impl.read_raw(channel, t0, t1, int(n_threads), **hooks)
         mismatches = out.get("block_copy_mismatches") or []
         if mismatches:
-            _emit(BlockCopyWarning, _block_copy_warning_text(mismatches),
-                  path=self._path, details=mismatches, stacklevel=2,
-                  also=_identity_of(impl))
+            pending.append((BlockCopyWarning, _block_copy_warning_text(mismatches),
+                            dict(path=self._path, details=mismatches,
+                                 also=_identity_of(impl))))
         return out
 
     def segments(self, channel: str) -> list[dict]:
@@ -825,19 +850,27 @@ class Reader:
         IndexError
             Unknown channel or segment number.
         """
+        pending: list = []
+        try:
+            return self._records(channel, segment, level, pending)
+        finally:
+            _flush(pending, stacklevel=2)
+
+    def _records(self, channel, segment, level, pending: list) -> list:
+        # records() with its warnings collected into `pending` (see _flush);
+        # they are delivered even when the call raises.
         impl = self._ensure_impl()
         before = len(impl.problems())
-        with _warning_on_legacy_records(impl, self._path, stacklevel=4):
+        with _warning_on_legacy_records(impl, self._path, pending):
             out = impl.records(channel, segment, level)
         added = impl.problems()[before:]
         if added:
             # Lenient only (strict raises): a record file that could not be
             # read was skipped. Say so — a missing annotation is otherwise
             # indistinguishable from one that was never written.
-            _emit(UnreadableSegmentWarning,
-                  f"{len(added)} record file(s) could not be read and were "
-                  f"SKIPPED. First: {added[0]['segment']} — {added[0]['reason']}. "
-                  "Full list in Reader.problems. Open with strict=True to fail instead.",
-                  path=self._path, details=added, stacklevel=2,
-                  also=_identity_of(impl))
+            pending.append((UnreadableSegmentWarning,
+                            f"{len(added)} record file(s) could not be read and were "
+                            f"SKIPPED. First: {added[0]['segment']} — {added[0]['reason']}. "
+                            "Full list in Reader.problems. Open with strict=True to fail instead.",
+                            dict(path=self._path, details=added, also=_identity_of(impl))))
         return out

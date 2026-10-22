@@ -495,6 +495,75 @@ because `inspect` never opens a `.tdat`.
     `inspect` is available in Python and C++ (`mef3io/inspect.hpp`,
     `inspect_session`), not in MATLAB or the C ABI.
 
+## Several recordings read as one
+
+Many recorders start a new session every day, so one patient's stay is a
+folder of `.mefd` sessions. `mef3io.MultiReader` reads them as ONE recording,
+without writing anything:
+
+```python
+days = sorted(Path("/data/patient7").glob("*.mefd"))   # any order: sorted by time
+with mef3io.MultiReader(days) as r:
+    x = r.read("Fp1", t0, t0 + 3_600_000_000)          # an hour across midnight
+```
+
+It is a drop-in for `Reader`: the same methods and properties, with the same
+arguments, return types, dict keys and dtypes, so code written for a `Reader`
+works unchanged. Only the first argument differs (a list of sessions, folders
+or `.mefd.tar` archives, mixed as you like), and `n_threads` is the budget for
+the whole call: a read touching several recordings reads them at once.
+
+What a read returns is exactly what `Reader` returns for the same window of
+the same recordings merged on disk with [`merge_sessions`](merge.md): the
+same length, the same values, NaN in the same places. Each recording is read
+on the window's own sampling grid, so nothing is rounded twice, also at rates
+whose period is not a whole number of microseconds.
+
+`MultiReader(paths, password="", backend="cpp", n_threads=0, cache=None,
+warn_declarations=True, strict=True)`
+
+- **Refused on open** (`ValueError`): a channel with different sampling rates
+  in different recordings; two recordings holding samples of the same channel
+  at the same time. The overlap rule is `merge_sessions`': compared on the
+  recorded blocks, and up to half a sample is recorder rounding. Recordings
+  that take turns are fine. A single path (not in a list) is a `TypeError`,
+  an empty list or the same session twice a `ValueError`.
+- **Values are combined over every recording, never taken from one.**
+  `channels` is every recording's, sorted; a channel a recording lacks is a
+  gap over its time. `info()` gives the earliest start, the latest end and the
+  summed sample and segment counts; any other field is the value the
+  recordings agree on, or `None` where they differ. `metadata` is a
+  `mef3io.Metadata` built the same way (patient fields and session
+  description over every recording). A difference raises one
+  `MultiReaderDifferenceWarning` on open naming the fields, never their
+  values; each recording's own values are in `r.metadata_by_source` (and
+  `r.paths` lists the recordings in time order). Different patient names or
+  IDs can mean the recordings are not the same patient's.
+- `segments()` numbers every recording's segments from 0 in time order, as a
+  merged session does; `path` is the real folder, so it says which recording.
+  `toc()`, `block_envelope()` and `records()` combine every recording's in
+  time order, and `records(channel, segment=k)` uses the same numbering.
+  `problems` and `declaration_issues` list every recording's.
+- Each recording's own warnings (declarations, unreadable segments, ...) are
+  emitted once, on open, with `w.message.path` naming that recording.
+- `cache=` takes `"auto"` or one cache path per recording.
+
+Where it cannot be the same as a merged session:
+
+- A channel stored with **different units-conversion factors** in different
+  recordings: `read()` scales each recording's samples by its own factor;
+  `read_raw()` refuses a window that touches recordings with different
+  factors (one factor cannot describe those counts), and `info()` gives
+  `None` for the factor.
+- Recordings that take turns keep their own segments: `merge_sessions`
+  splits a segment around the other recording's data, a MultiReader does
+  not, so `segments()` and `n_segments` can be smaller.
+- Memory: each recording a read touches is read from the window's start (that
+  keeps the grid exact), so a recording late in a long window also holds
+  int32 counts and a validity byte for the part of the window before it:
+  about 5 bytes per sample for each recording the window touches, plus 5 for
+  the combined counts, beside the float64 result.
+
 ## Ordering and naming many sessions
 
 `mef3io.time_range(path)` gives a session's first and last sample time
@@ -507,6 +576,9 @@ paths = sorted(Path("incoming").glob("*.mefd"))
 ranges = {p: mef3io.time_range(p) for p in paths}
 by_time = sorted(paths, key=lambda p: ranges[p].start_uutc)
 ```
+
+To read them as one recording, see
+[Several recordings read as one](#several-recordings-read-as-one).
 
 `offset_known` is `False` when the times cannot be shown as absolute (an
 encrypted session opened without the password that unlocks its time offset,

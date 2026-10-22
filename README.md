@@ -157,6 +157,8 @@ pages such as
   different amplifiers. Overlapping data is refused before anything is
   written, and the result is checked against every source. See
   [Merging recordings](https://bnelair.github.io/mef3io/merge/).
+  To read several recordings as one without writing anything,
+  `mef3io.MultiReader([...])` is a drop-in for `Reader` (Python).
 - **Renaming without breaking anything.** A session's name is stored in the
   folder, the session-level annotation files and every file's header.
   `mef3io.rename_session` changes all of them as one operation that a crash

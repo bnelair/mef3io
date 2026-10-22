@@ -409,7 +409,7 @@ population; `ChannelInfo` carries the fields on read. C ABI
 `mef3io_writer_set_metadata` + MEX `writer_set_metadata`; MATLAB
 `Writer(Metadata=struct)` / `Reader.metadata`. Subject fields are L2-gated.
 
-`python/mef3io/`: `Reader`, `Writer` (incl. `write_annotations`), `compat`
+`python/mef3io/`: `Reader`, `MultiReader` (`_multi`), `Writer` (incl. `write_annotations`), `compat`
 (mef_tools.io drop-in; `MefReader`/`MefWriter` are also re-exported at the top
 level — `from mef3io import MefReader, MefWriter` — via lazy `__getattr__`),
 `cache` (opt-in warm start), `anonymize` (de-identified copy, `check`,
@@ -946,6 +946,31 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   docs/release_notes/unreleased.md between releases and are renamed to
   X.Y.Z.md then. Keep mef3io brand-neutral; brainmaze-mef3-server should
   depend on it (see docs/design.md).
+
+MultiReader (`python/mef3io/_multi.py`, Python only, no C++): several
+recordings read as ONE without merging on disk. A DROP-IN for `Reader`: every
+public member, same signatures (test-pinned), same return types/keys/dtypes —
+extra info lives ONLY in members Reader lacks (`paths`, `metadata_by_source`).
+CONTRACT (test_p39): `read`/`read_raw` == a Reader over the same parts merged
+with `merge_sessions`, sample for sample, and a battery of every Reader call
+on the merged session == the same on a MultiReader over its parts. How it
+stays exact: every touched recording is read with the SAME t0 as the outer
+window (any other t0 re-rounds the grid at 256 Hz / 1000/3 Hz), with t1
+shortened to its end + 2 samples (re-read with the full t1 if its last slot
+is valid = clipped); n uses C's llround (halves AWAY from zero, not Python's
+round). Slots two recordings both fill (touching within half a sample) go to
+the block that STARTS later (merged segments are time-ordered, later wins),
+from block_envelope around those slots only. Combined values: agree -> value,
+differ -> None + ONE `MultiReaderDifferenceWarning` naming fields only
+(never the first file's value). Refused on open (ValueError): rate differs,
+overlapping data (merge's rule: spans first, block_envelope only where spans
+meet, half-sample tolerance). Different ufact: read scales each recording by
+its own, read_raw refuses. Sub-readers are opened with the private
+`Reader(_defer_warnings=True)` and their warnings re-emitted by the
+MultiReader at ITS caller; Reader's `_read_raw`/`_records` collect warnings
+into a `pending` list for the same reason (`_flush` emits them).
+`segments()` renumbers from 0 in time order (records(segment=) and
+declaration_issues use that numbering; problems keep the folder number).
 
 Per-segment isolation (#12): a Session/Reader opened `strict=False` CONTAINS a
 segment-level failure instead of letting it fail the whole session — the

@@ -24,6 +24,7 @@ from ._writer import (
 from ._reader import (
     SessionDeclarationWarning,
     _declaration_warning_text,
+    _flush,
     _warn_legacy_password,
     _warning_on_legacy_records,
 )
@@ -67,7 +68,9 @@ class MefReader:
                   also=_identity_of(self._r))
         # Only sessions an older mef3io wrote can trigger it (mef_tools always
         # used meflib's mapping), so it costs a legacy user nothing.
-        _warn_legacy_password(self._r, str(session_path), stacklevel=2)
+        pending: list = []
+        _warn_legacy_password(self._r, str(session_path), pending)
+        _flush(pending, stacklevel=2)
         self.bi = [self._basic_info(ch) for ch in self._r.channels]
 
     def _basic_info(self, channel: str) -> dict:
@@ -162,14 +165,18 @@ class MefReader:
         """
         # The warning sits OUTSIDE the try: under -W error it must propagate,
         # not be mistaken for a failed read and swallowed.
-        with _warning_on_legacy_records(self._r, self._path_str, stacklevel=4):
-            try:
-                if channel is None:
-                    return self._r.records()
-                return self._r.records(channel, level="channel")
-            except Exception:
-                print("WARNING: read of annotations record failed, no annotations returned")
-                return None
+        pending: list = []
+        try:
+            with _warning_on_legacy_records(self._r, self._path_str, pending):
+                try:
+                    if channel is None:
+                        return self._r.records()
+                    return self._r.records(channel, level="channel")
+                except Exception:
+                    print("WARNING: read of annotations record failed, no annotations returned")
+                    return None
+        finally:
+            _flush(pending, stacklevel=2)
 
     def close(self):
         self._r = None
