@@ -50,6 +50,7 @@ from test_p29_anonymize import (
     T_POS,
     _edit_record,
     _legacy,
+    PROBES,
     _named_session,
     _plant_uh,
     _rename_segment,
@@ -186,6 +187,13 @@ def _glued(templates, tmp_path):
             w.write(ch, _signal(2560, 1), START, FS, precision=3)
         w.write_annotations([{"type": "Note", "time": START + SECOND, "text": "a3a3 artefact"}])
     return src, tmp_path / "S001.mefd", {"exclude_channels": ["a3"], "text": "keep"}
+
+
+def _glued_by_callback(templates, tmp_path):
+    """A text callback's output cannot be known before copying: one that
+    glues a left-out channel's name into a word is met by verify alone."""
+    src, dst, kw = _glued(templates, tmp_path)
+    return src, dst, {**kw, "text": lambda value, info: "a3a3 artefact"}
 
 
 def _inside(templates, tmp_path):
@@ -327,6 +335,26 @@ CASES = {
     "two folders, one number": ("segment-number-duplicate", _mutated(_duplicate_segment)),
     "record index names no record": ("record-index-mismatch", _mutated(_move_an_index_entry)),
     "a non-UTF-8 folder name": ("segment-folder-unnumbered", _mutated(_non_utf8_segment_folder)),
+    # --- #143: a kept channel's name, decided before anything is written --
+    "a channel named after the patient": (
+        "channel-name-identity", _named("S001.mefd", channels=("Jane_C3", "C4"),
+                                        subject=mef3io.Subject(name_1="Jane"))),
+    "#143: a channel named the patient's surname": (
+        "channel-name-identity", _named("S001.mefd", channels=("Fz", "Roe"), subject=mef3io.Subject(
+            name_1="Jane", name_2="Roe", id="PT12345"))),
+    "a channel with the name glued to digits": (
+        "channel-name-identity", _named("S001.mefd", channels=("Roe1", "C4"))),
+    "a channel holding a 4+-letter name": (
+        "channel-name-identity", _named("S001.mefd", channels=("JaneC3", "C4"))),
+    "a channel holding the ID": (
+        "channel-name-identity", _named("S001.mefd", channels=("C3", "x_PT12345"),
+                                        subject=mef3io.Subject(id="PT12345"))),
+    "a channel named after the location": (
+        "channel-name-identity", _named("S001.mefd", channels=("Olomouc1", "C4"),
+                                        subject=mef3io.Subject(recording_location="Olomouc"))),
+    "a channel named after the session": (
+        "channel-name-identity", _named("S001.mefd", channels=("night7", "C4"),
+                                        subject=mef3io.Subject(), folder="night7.mefd")),
     "a body time the shift takes below 0": (
         "shift-not-positive",
         _mutated(_record_file_header_before_the_shift, shift=-(START - DAY // 2))),
@@ -336,9 +364,7 @@ CASES = {
 COPY_CASES = {
     "a damaged data block": ("block-crc", _mutated(_flip("ch3.timd/*/*.tdat", 1024 + 400))),
     "data file cut short": ("data-damaged", _mutated(_truncate("ch3.timd/*/*.tdat", -100))),
-    "a channel named after the patient": (
-        "verify-failed", _named("S001.mefd", channels=("Jane_C3", "C4"),
-                                subject=mef3io.Subject(name_1="Jane"))),
+    "a text callback leaves a left-out channel's name": ("verify-failed", _glued_by_callback),
 }
 
 
@@ -512,6 +538,116 @@ def test_check_lists_every_refusal_not_just_the_first(templates, tmp_path):
     assert set(rep.codes[3:]) == {"record-locked"}, rep.summary()
     blocker = rep.refusals[1]
     assert blocker.inspect_code == "locked" and blocker.error == "WriteConflictError"
+
+
+# (#143) Channel-name overlaps the copy's check only NOTES: the pre-flight must
+# let them through in both modes, and the copy must then pass with the note.
+NOTE_ONLY_CHANNELS = {
+    **{k: v for k, v in PROBES.items()},
+    "a 2-letter name inside a channel": ("p.mefd", ("JoC3", "C4"), mef3io.Subject(name_1="Jo")),
+    "a location word vs EEG1": ("p.mefd", ("EEG1", "EEG2"),
+                                mef3io.Subject(recording_location="EEG Lab")),
+    "ID 12 vs channel LAH-12": ("p.mefd", ("LAH-12", "RAH-1"), mef3io.Subject(id="12")),
+}
+
+
+@pytest.mark.parametrize("shifted", [True, False], ids=["shift", "keep-times"])
+@pytest.mark.parametrize("probe", list(NOTE_ONLY_CHANNELS))
+def test_channel_name_notes_pass_the_check(tmp_path, probe, shifted):
+    folder, channels, subject = NOTE_ONLY_CHANNELS[probe]
+    src = _named_session(tmp_path / folder, channels, subject)
+    args = (src, tmp_path / "S001.mefd") + ((SHIFT,) if shifted else ())
+    rep = _quiet(mef3io.anonymize.check, *args)
+    assert rep.ok, rep.summary()
+    out = _quiet(mef3io.anonymize_session, *args)
+    assert out.verification.ok, out.verification.summary()
+    if probe != "a location word vs EEG1":  # location words are not searched in channel names
+        assert out.verification.notes, "the overlap must still be reported"
+
+
+@pytest.mark.parametrize("shifted", [True, False], ids=["shift", "keep-times"])
+def test_channel_name_identity_names_the_channel_and_is_left_out(tmp_path, shifted):
+    """#143's reproduction: refused up front, with the channel in details;
+    leaving the channel out makes the copy."""
+    src = _named_session(tmp_path / "s.mefd", ("Fz", "Roe"),
+                         mef3io.Subject(name_1="Jane", name_2="Roe", id="PT12345"))
+    sh = (SHIFT,) if shifted else ()
+    rep = _quiet(mef3io.anonymize.check, src, tmp_path / "out.mefd", *sh, pseudonym="S1")
+    assert rep.codes == ("channel-name-identity",), rep.summary()
+    r = rep.refusals[0]
+    assert (r.channel, r.field, r.error) == ("Roe", "channels", "WriteConflictError")
+    assert "PT12345" not in r.message and "Jane" not in r.message
+    out = _quiet(mef3io.anonymize_session, src, tmp_path / "out.mefd", *sh, pseudonym="S1",
+                 exclude_channels=["Roe"])
+    assert out.verification.ok, out.verification.summary()
+
+
+def test_verify_still_refuses_a_channel_named_after_the_patient(tmp_path):
+    """verify keeps its own check (#143 moved only the decision up front): a
+    copy holding such a channel, made from a source without the subject, is
+    refused against the source that has it."""
+    plain = _named_session(tmp_path / "a" / "p.mefd", ("Jane_C3", "C4"), mef3io.Subject())
+    named = _named_session(tmp_path / "b" / "p.mefd", ("Jane_C3", "C4"),
+                           mef3io.Subject(name_1="Jane"))
+    _quiet(mef3io.anonymize_session, plain, tmp_path / "S001.mefd", SHIFT)
+    rep = _quiet(mef3io.anonymize.verify, named, tmp_path / "S001.mefd", SHIFT)
+    assert not rep.ok
+    fields = {(p.field, p.message) for p in rep.problems}
+    assert ("path", "contains a subject name or ID") in fields
+    assert ("universal header channel_name", "contains a subject name or ID") in fields
+
+
+def _multi_segment(path, channels, subject, n_segments=3):
+    with mef3io.Writer(str(path), overwrite=True,
+                       metadata=mef3io.Metadata(subject=subject)) as w:
+        for k in range(n_segments):
+            for i, ch in enumerate(channels):
+                w.write(ch, _signal(2560, i), START + k * 60 * SECOND, FS, precision=3,
+                        new_segment=k > 0)
+    return Path(path)
+
+
+@pytest.mark.parametrize("shifted", [True, False], ids=["shift", "keep-times"])
+@pytest.mark.parametrize("cut", [False, True], ids=["whole", "cut-in-segment-0"])
+def test_segment_numbers_are_not_matched_against_the_id(tmp_path, shifted, cut):
+    """The segment number in "<ch>-000001.segd" is mef3io's own counter, not
+    source text: subject ID "PT0001" (digit run "0001") must not refuse a
+    multi-segment session, neither up front nor in verify; a cut inside
+    segment 0 likewise. A channel name holding the ID still is refused."""
+    src = _multi_segment(tmp_path / "s.mefd", ("Fz", "Cz"), mef3io.Subject(id="PT0001"))
+    kw = {"time_range": (START + SECOND, START + 5 * SECOND)} if cut else {}
+    args = (src, tmp_path / "S001.mefd") + ((SHIFT,) if shifted else ())
+    rep = _quiet(mef3io.anonymize.check, *args, **kw)
+    assert rep.ok, rep.summary()
+    out = _quiet(mef3io.anonymize_session, *args, **kw)
+    assert out.verification.ok, out.verification.summary()
+    assert any(p.name.endswith("-000001.segd")
+               for p in (tmp_path / "S001.mefd").rglob("*.segd")) != cut
+    bad = _multi_segment(tmp_path / "b" / "s.mefd", ("Fz", "Cz_0001"),
+                         mef3io.Subject(id="PT0001"))
+    rep = _quiet(mef3io.anonymize.check, bad, tmp_path / "S002.mefd",
+                 *((SHIFT,) if shifted else ()), **kw)
+    assert rep.codes == ("channel-name-identity",), rep.summary()
+    assert rep.refusals[0].channel == "Cz_0001"
+
+
+def test_channel_name_identity_does_not_concern_a_transform(tmp_path):
+    src = _named_session(tmp_path / "s.mefd", ("Fz", "Roe"),
+                         mef3io.Subject(name_1="Jane", name_2="Roe"))
+    assert _quiet(mef3io.transform.check, src, tmp_path / "t.mefd").ok
+    rep = _quiet(mef3io.transform.transform_session, src, tmp_path / "t.mefd")
+    assert rep.verification.ok, rep.verification.summary()
+
+
+def test_redact_text_refuses_a_channel_named_after_the_patient(tmp_path):
+    """It refuses whatever the copy would (#114): this copy cannot be made."""
+    src = _named_session(tmp_path / "s.mefd", ("Fz", "Roe"),
+                         mef3io.Subject(name_1="Jane", name_2="Roe"))
+    with pytest.raises(mef3io.WriteConflictError) as exc:
+        mef3io.anonymize.redact_text(src, tmp_path / "S1.mefd", ["Jane slept"])
+    assert exc.value.code == "channel-name-identity"
+    assert mef3io.anonymize.redact_text(src, tmp_path / "S1.mefd", ["Jane slept"],
+                                        exclude_channels=["Roe"]) == [" slept"]
 
 
 def test_a_clean_check_and_the_shift_left_open(templates, tmp_path):

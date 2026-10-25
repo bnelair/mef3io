@@ -196,7 +196,12 @@ answered. Rules:
   "Muller" that the scan finds for "Müller" and the copy is refused for
   nothing (#115). Their matching rules stay separate. What the rewrite still
   cannot remove is refused before writing (`text-unremovable`), never
-  discovered after a long copy.
+  discovered after a long copy. So is a kept channel whose name the
+  channel-name rule refuses (`channel-name-identity`, #143): the pre-flight
+  calls verify's `Scanner::channel`/`Scanner::path` on the names the copy
+  writes (one-way: the Verifier never gets the pre-flight's selection).
+  `Scanner::path` never matches the segment number of `<ch>-NNNNNN`: it is
+  mef3io's counter, checked on its own (subject ID "PT0001" vs "-000001").
 - Rewrite every text field whole, and zero every region another writer may
   fill; never "leave it if unchanged".
 - Every new field the copy carries needs a planted-leak test in

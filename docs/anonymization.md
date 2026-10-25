@@ -200,7 +200,12 @@ Nothing is written when:
 - the session has something `inspect` marks as blocking: video channels,
   unreadable or incomplete segments, parts the password does not open;
 - a data block or annotation fails its checksum: damaged data is never
-  re-sealed into a copy that would then look intact.
+  re-sealed into a copy that would then look intact;
+- a kept channel's name holds the patient's name or ID, the recording
+  location or the original session name in a form the copy's check would
+  stop (the channel-name rule in
+  [How the copy is checked](#how-the-copy-is-checked)): channel names are
+  kept as they are, so leave such a channel out with `exclude_channels=`.
 
 With a shift, also when:
 
@@ -349,6 +354,7 @@ with a shift; a copy that keeps the times never meets them.
 | `record-index-mismatch` | `FormatError` | check | An annotation index does not match its annotation file. |
 | `id-number-time` | `WriteConflictError` | check | *(shift only)* An `Epoc` or `Curs` ID number holds a time inside the recording, which the copy would carry. |
 | `text-unremovable` | `WriteConflictError` | check | Text the copy keeps (`text="keep"`, or kept descriptions) holds a removed name in a form the removal does not take out, such as a left-out channel's name glued into a longer word; the copy's check would refuse it. The message names the field, never the text. Drop the text, or clear the descriptions, for this copy. |
+| `channel-name-identity` | `WriteConflictError` | check | A kept channel's name holds the patient's name or ID, the recording location or the original session name in a form the copy's check refuses (the channel-name rule in [How the copy is checked](#how-the-copy-is-checked)): the copy keeps channel names, and its folders and files are named after them. `details["channel"]` names it, and so does the message: since the channel's name is what holds the identity, the refusal can identify the patient, so a log of refusals is not de-identified. Leave the channel out with `exclude_channels`. |
 | `block-crc` | `CrcError` | copy | A data block fails its checksum; damaged data is never re-sealed. |
 | `data-damaged` | `FormatError` | copy | A data block runs past its file, or the index and data disagree. |
 | `verify-failed` | `WriteConflictError` | copy | The copy failed its verification (see below); it was removed. |
@@ -465,7 +471,11 @@ It follows two rules:
   looser ("12" in "LAH12", "P3" as the electrode P3) is a note. This rule
   is strict on purpose: a subject named "Ann" stops a copy with a channel
   called "ANN1", and the way out is to leave that channel out with
-  `exclude_channels=`. The
+  `exclude_channels=`. Since channel names are known before copying, `check`
+  and `anonymize_session` apply this rule to the kept channels' names (and
+  the folder and file names the copy will make from them) up front, and
+  refuse with `channel-name-identity` before anything is written; the
+  verification still applies it to what the copy holds. The
   **original session name** follows only the first of these rules, because
   recorders often name sessions after the montage: "eeg" in a channel
   "EEG1" is a note.
@@ -495,7 +505,11 @@ are also compared with the source's *stored* values (the time of day). A
 negative shift that lands the copy within a few days of 1 January 1970 can therefore
 be refused although nothing leaked; choose a later date.
 
-The report never repeats a name it found, so it can be logged.
+The report never repeats a value it searched for on its own. It does give
+locations: folder and file names inside the copy, and the channels they
+belong to. A kept channel's name can itself identify the patient (which is
+why such a copy is refused, `channel-name-identity`), so treat a report of a
+refused copy as identifiable when you log it.
 
 ### What it does not do
 

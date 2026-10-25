@@ -92,6 +92,7 @@ REFUSAL_CODES: Dict[str, Tuple[str, str]] = {
     "id-number-time": ("WriteConflictError", "check"),
     "time-overflow": ("FormatError", "defensive"),
     "text-unremovable": ("WriteConflictError", "check"),
+    "channel-name-identity": ("WriteConflictError", "check"),
 }
 
 #: ``text(value, info) -> str | None`` for ``text=`` callables. ``info`` is a
@@ -766,8 +767,8 @@ def redact_text(
     What the copy itself would refuse, raised as :func:`anonymize_session`
     raises it (its ``.code``): a source that cannot be read or is locked
     (``source-missing``, ``password-required``, ``password-level1-only``),
-    an unknown channel, a destination or pseudonym holding the patient's
-    identity, and so on. Only refusals that do not decide the redaction are
+    an unknown channel, a destination, pseudonym or kept channel name holding
+    the patient's identity (``channel-name-identity``), and so on. Only refusals that do not decide the redaction are
     ignored: the destination already existing (``dst-exists``,
     ``partial-exists``) and text the removal cannot take out
     (``text-unremovable``, which is what :func:`check` reports).
