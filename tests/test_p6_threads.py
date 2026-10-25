@@ -49,10 +49,11 @@ def test_decode_deterministic_across_threads(tmp_path):
     data = _signal()
     path = str(tmp_path / "s.mefd")
     _write(path, 0, data)
-    r = m.Reader(path, "")
-    base = np.asarray(r.read_raw("ch1", n_threads=1)["samples"])
+    r = m.Reader(path, "", 1)
+    base = np.asarray(r.read_raw("ch1")["samples"])
     for threads in (2, 4, 8, 0):
-        got = np.asarray(r.read_raw("ch1", n_threads=threads)["samples"])
+        r.set_threads(threads)
+        got = np.asarray(r.read_raw("ch1")["samples"])
         assert np.array_equal(got, base)
 
 
@@ -125,12 +126,13 @@ def _shift_block_times(path, shifts_samples):
 
 
 def _assert_thread_invariant(path, threads=(2, 3, 4, 8, 16, 0), repeats=3):
-    r = m.Reader(path, "")
-    base = r.read_raw("ch1", n_threads=1)
+    r = m.Reader(path, "", 1)
+    base = r.read_raw("ch1")
     samples, valid = np.asarray(base["samples"]), np.asarray(base["valid"])
     for t in threads:
+        r.set_threads(t)
         for _ in range(repeats):  # a race need not show on the first read
-            got = r.read_raw("ch1", n_threads=t)
+            got = r.read_raw("ch1")
             assert np.array_equal(np.asarray(got["samples"]), samples), t
             assert np.array_equal(np.asarray(got["valid"]), valid), t
 
@@ -187,7 +189,7 @@ def test_decode_when_a_later_block_swallows_an_earlier_one(tmp_path):
     _shift_block_times(path, [0 if i % 2 == 0 else -span for i in range(len(lens))])
 
     quant = np.round(data * 100).astype(np.int64)
-    got = np.asarray(m.Reader(path, "").read_raw("ch1", n_threads=1)["samples"]).astype(np.int64)
+    got = np.asarray(m.Reader(path, "", 1).read_raw("ch1")["samples"]).astype(np.int64)
     for i in range(1, len(lens), 2):  # each swallowed block's range
         lo = (i - 1) * span
         assert np.array_equal(got[lo:lo + span], quant[i * span:(i + 1) * span]), i

@@ -181,8 +181,10 @@ class Writer:
         byte size is a 32-bit field); more raises ``ValueError`` before
         anything is created, as does a rate whose derived block exceeds it.
     n_threads : int, optional
-        Worker threads for RED encoding (``0`` = all cores, ``1`` = serial).
-        Output is byte-identical regardless of thread count.
+        How many threads this Writer may use (RED encoding): ``0`` (default)
+        = automatic, ``1`` = no extra threads. Output is byte-identical
+        regardless of thread count. Changeable later through
+        :attr:`n_threads`. See [the threads guide](https://bnelair.github.io/mef3io/threads/).
     metadata : mef3io.Metadata or dict, optional
         Session-wide subject/acquisition metadata written to every channel.
         Also settable later via :meth:`set_metadata` (before writing).
@@ -254,7 +256,10 @@ class Writer:
             self._impl.set_units(units)
         if block_length is not None:
             self._impl.set_block_length(int(block_length))
-        self._impl.set_threads(int(n_threads))
+        from ._reader import _check_threads
+
+        self._n_threads = _check_threads(n_threads)
+        self._impl.set_threads(self._n_threads)
         self._impl.set_durable(durability == "full")
         self._durability = durability
         if metadata is not None:
@@ -272,6 +277,24 @@ class Writer:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+    @property
+    def n_threads(self) -> int:
+        """How many threads this Writer may use (``0`` = automatic).
+
+        Settable at any time; applies from the next write. See [the
+        threads guide](https://bnelair.github.io/mef3io/threads/).
+        """
+        return self._n_threads
+
+    @n_threads.setter
+    def n_threads(self, value: int) -> None:
+        from ._reader import _check_threads
+
+        value = _check_threads(value)
+        if self._impl is not None:  # a closed Writer just remembers it
+            self._impl.set_threads(value)
+        self._n_threads = value
 
     def close(self) -> None:
         """Finalize and release the writer. Called automatically on

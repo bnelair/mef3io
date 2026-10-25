@@ -210,14 +210,22 @@ ABI shim (later) converts to codes. Bindings map to Python exceptions.
 
 ### 4.6 Threading
 
-- No persistent thread pool: each parallel step calls `parallel_for`
-  (`parallel.hpp`) with `n_threads` (0 = hardware concurrency, 1 = serial;
-  set on the Reader/Writer, per-call override on reads).
+- ONE thread rule ([Threads](threads.md)): an object's `n_threads` is how
+  many threads it may use for everything it does; 0 = automatic, decided only
+  by `resolve_threads` (`parallel.hpp`: hardware concurrency for CPU work, at
+  least 8 for file access), 1 = no extra threads. Settable at runtime
+  (atomic; the next call uses it). No per-call override (removed in 2.0); a
+  MultiReader splits its total privately (`Reader::read_raw_split`).
+- No persistent thread pool: each parallel step calls `parallel_for`.
 - Parallel units: RED block decode and encode — independent blocks, disjoint
-  output slices ⇒ deterministic, race-free. Opening a session (the tree scan
-  and every `.tmet`) is serial.
-- Concurrent calls on one Reader from user threads are safe. The Reader is
-  NOT immutable after open: it caches block indices (with LRU eviction) and,
+  output slices ⇒ deterministic, race-free — and the open's metadata pass
+  (channel listings, segment file checks, every `.tmet` read + parse), run
+  with `parallel_try_each` and assembled in order, so the result, the strict
+  error and the lenient `problems()` are those of a serial open (the first
+  failure in listing order, never the first in time).
+- Concurrent calls on one Reader from user threads are safe. The metadata
+  parsed at open is immutable afterwards and read without a lock. The Reader
+  is otherwise NOT immutable after open: it caches block indices (with LRU eviction) and,
   in lenient mode, records problems as it meets them. That state is locked,
   and each call pins the index it is reading, so another thread's eviction
   never frees it (`core/tests/test_concurrency.cpp`, also under TSan). The

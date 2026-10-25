@@ -237,13 +237,15 @@ TEST_CASE("an open scales linearly in segments, directory and tar", "[open-calls
   // tar open O(segments x members) with the same request count. Timed, so
   // the bounds are loose: the per-segment cost must not grow much from S to
   // 32S, and a tar must open about as fast as the same session on disk (that
-  // bug made it ~3-6x slower at 3200 segments; it is ~1.0-1.2x).
+  // bug made it ~3-6x slower at 3200 segments; it is ~1.0-1.2x). ONE thread:
+  // this pins the cost per request, and a parallel open would hide it behind
+  // the tar index scan, which is serial (each header gives the next offset).
   struct Cost { double dir, tar; };
   auto per_segment = [](int segments) {
     const auto path = write_session("mef3io_open_scale.mefd", 1, segments);
     const auto tar = archive_session(path, "", true);
-    Cost c{best_of_3([&] { Session s(path); }) / segments,
-           best_of_3([&] { Session s(tar); }) / segments};
+    Cost c{best_of_3([&] { Session s(path, "", true, 1); }) / segments,
+           best_of_3([&] { Session s(tar, "", true, 1); }) / segments};
     fsys::remove(tar);
     fsys::remove_all(path);
     return c;

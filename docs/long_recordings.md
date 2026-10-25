@@ -225,10 +225,11 @@ w.write_int32(ch, block, ufact, t, fs, new_segment=start_of_new_day)
 
 ## Threads
 
-`Writer(..., n_threads=N)` and `Reader(..., n_threads=N)` control the RED
-encode/decode pool: `0` uses every core, `1` is single-threaded. Output is
-**byte-identical regardless of thread count**, so threading is purely a speed
-knob. Use `n_threads=1` when comparing against meflib or pymef, which are
+`Writer(..., n_threads=N)` and `Reader(..., n_threads=N)` set how many
+threads each may use (RED encoding; the open and RED decoding): `0` =
+automatic, `1` = no extra threads, changeable later through the `n_threads`
+property ([Threads](threads.md)). Output is **byte-identical regardless of
+thread count**, so threading is purely a speed knob. Use `n_threads=1` when comparing against meflib or pymef, which are
 single-threaded — the benchmark defaults to it for the append scenario for
 exactly that reason.
 

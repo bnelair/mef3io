@@ -76,7 +76,13 @@ const char* mef3io_last_error(void);
 
 /* `mefd_path` is a .mefd session directory or an uncompressed tar archive of
  * one (e.g. name.mefd.tar, from mef3io_archive_session) — tar sessions are
- * read in place, without extraction. */
+ * read in place, without extraction.
+ *
+ * `n_threads` is how many threads the reader may use for everything it does
+ * (opening, file access, decoding, decrypting): 0 = automatic, 1 = no extra
+ * threads. Results never depend on it; negative = MEF3IO_ERR_ARGUMENT
+ * (since 2.0; before, negative meant automatic). See
+ * mef3io_reader_set_threads. */
 int mef3io_reader_open(const char* mefd_path, const char* password, int n_threads,
                        mef3io_reader** out);
 /* As above, but `strict` 0 CONTAINS a segment-level failure instead of failing
@@ -91,6 +97,12 @@ int mef3io_reader_open(const char* mefd_path, const char* password, int n_thread
 int mef3io_reader_open_ex(const char* mefd_path, const char* password, int n_threads,
                           int strict, mef3io_reader** out);
 void mef3io_reader_close(mef3io_reader* r);
+/* Change the reader's thread count (same meaning as at open; negative =
+ * MEF3IO_ERR_ARGUMENT). Takes effect on the next call; calls in flight keep
+ * theirs. Safe while other threads read. */
+int mef3io_reader_set_threads(mef3io_reader* r, int n_threads);
+/* The thread count as set (0 = automatic). */
+int mef3io_reader_threads(mef3io_reader* r, int* out);
 
 typedef struct {
   char channel[256];      /* "" for a session-level record file */
@@ -403,7 +415,12 @@ void mef3io_writer_close(mef3io_writer* w);
 int mef3io_writer_set_units(mef3io_writer* w, const char* units);
 int mef3io_writer_set_metadata(mef3io_writer* w, const mef3io_metadata* md);
 int mef3io_writer_set_block_length(mef3io_writer* w, int64_t samples_per_block);
+/* How many threads the writer may use (encoding): 0 = automatic, 1 = no extra
+ * threads, negative = MEF3IO_ERR_ARGUMENT (since 2.0); output is
+ * byte-identical whatever the count. Next write on. */
 int mef3io_writer_set_threads(mef3io_writer* w, int n_threads);
+/* The thread count as set (0 = automatic). */
+int mef3io_writer_threads(mef3io_writer* w, int* out);
 /* Flush appends to stable storage. 0 (the DEFAULT) does not: these files are
  * built by appending for days to months, so the append is the hot path, and
  * the barriers cost ~2.5x on it. An unclean shutdown can then leave the index

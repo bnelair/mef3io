@@ -189,7 +189,7 @@ TEST_CASE("A cancelled read throws and an uncancelled one is unchanged") {
   Control ctl;
   ctl.cancel = &unused;
   ctl.progress = calls.fn();
-  const auto hooked = r.read_raw("a", std::nullopt, std::nullopt, Reader::kUseDefaultThreads, ctl);
+  const auto hooked = r.read_raw("a", std::nullopt, std::nullopt, ctl);
   CHECK(hooked.samples == plain.samples);
   CHECK(hooked.valid == plain.valid);
   calls.check_complete();
@@ -200,7 +200,8 @@ TEST_CASE("A cancelled read throws and an uncancelled one is unchanged") {
   stop.progress = [&](std::uint64_t d, std::uint64_t t) {
     if (d > t / 4) token.cancel();
   };
-  CHECK_THROWS_AS(r.read("a", std::nullopt, std::nullopt, 1, stop), Cancelled);
+  r.set_threads(1);
+  CHECK_THROWS_AS(r.read("a", std::nullopt, std::nullopt, stop), Cancelled);
   // Strict or not, the session is untouched and reads in full afterwards.
   CHECK(r.read_raw("a").samples == plain.samples);
   fsys::remove_all(dir);

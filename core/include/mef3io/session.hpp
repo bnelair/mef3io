@@ -1,7 +1,9 @@
 // mef3io — session/channel/segment tree and low-level indexed reads.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
+#include <exception>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -14,6 +16,7 @@
 #include "mef3io/control.hpp"
 #include "mef3io/headers.hpp"
 #include "mef3io/metadata.hpp"
+#include "mef3io/parallel.hpp"
 #include "mef3io/records.hpp"
 #include "mef3io/source.hpp"
 #include "mef3io/types.hpp"
@@ -35,13 +38,26 @@ struct SegmentReader {
   std::string tidx_path;
   std::string tdat_path;
   int segment_number = 0;
-  std::optional<TimeSeriesMetadata> metadata;      // loaded at open (state_mu_)
+  /// Loaded by the open and IMMUTABLE afterwards, so later calls read it
+  /// without a lock (#110). Empty only for a segment that failed to load, and
+  /// such a segment is marked failed (load_error) before the open returns.
+  std::optional<TimeSeriesMetadata> metadata;
   /// The block index, loaded lazily (whole file) and shared: a call holds its
   /// own reference (a PIN) for as long as it reads it, so evicting it from the
   /// cache (another thread's trim) never frees bytes in use. Guarded by
   /// Session::index_mu_.
   std::shared_ptr<const std::vector<ui1>> tidx;
   std::uint64_t index_last_used = 0;                // for cache eviction (index_mu_)
+  /// The time span the CACHED block index (`tidx`) covers, learnt when a
+  /// read walks it and DROPPED WITH IT on eviction, so it is never older than
+  /// what a walk would read: a windowed read skips walking a cached index
+  /// that holds nothing in the window, and nothing else. No .tmet time is ever
+  /// used to skip (#146: a stale or late start/end silently lost samples).
+  /// `span_open` = an entry has no usable count, so the span is unbounded.
+  /// Guarded by Session::index_mu_.
+  bool span_known = false;
+  bool span_open = false;
+  si8 span_lo = 0, span_hi = 0;
   /// Why this segment could not be read, in lenient mode. Empty means fine.
   /// Set once: a segment that failed is not retried on every later call.
   /// Guarded by Session::state_mu_.
@@ -215,12 +231,29 @@ class Session {
   ///                 reach an analysis unnoticed. false contains the failure to
   ///                 the segment, leaves its span reading back as a gap, and
   ///                 records it in problems().
-  Session(const std::string& mefd_path, std::string password = "", bool strict = true);
-  /// Open a session through an existing source (e.g. a decorator that counts
-  /// or delays requests, as the open-cost tests do). No naming check: the
-  /// source decides what it serves.
+  /// @param n_threads  how many threads this object may use (docs/threads.md):
+  ///                 0 = automatic (resolve_threads), 1 = no extra threads.
+  ///                 The open lists channel folders, checks segment files and
+  ///                 reads + parses every .tmet on that many threads; its
+  ///                 result, its error (strict) and problems() (lenient) do
+  ///                 not depend on the count.
+  Session(const std::string& mefd_path, std::string password = "", bool strict = true,
+          int n_threads = 0);
+  /// INTERNAL / TESTING — not part of the supported API. Opens a session
+  /// through an existing source (a decorator that counts or delays requests,
+  /// as the open-cost tests do). It skips the session NAMING rule (`.mefd` /
+  /// `.mefd.tar`) that every public path enforces, because the source decides
+  /// what it serves; use the path constructor in applications. The source must
+  /// be safe for concurrent calls.
   Session(std::shared_ptr<const SessionSource> source, std::string password = "",
-          bool strict = true);
+          bool strict = true, int n_threads = 0);
+
+  /// Thread count for the NEXT call (0 = automatic, 1 = no extra threads);
+  /// calls in flight keep theirs. Safe while other threads read.
+  /// @throws std::invalid_argument for a negative count.
+  void set_threads(int n) { n_threads_.store(check_threads(n), std::memory_order_relaxed); }
+  /// The thread count as set (0 = automatic), not resolved.
+  int threads() const { return n_threads_.load(std::memory_order_relaxed); }
 
   /// Segments that failed to load, in lenient mode. Always empty when strict.
   /// A copy: lenient reads on other threads may append while you look.
@@ -291,7 +324,10 @@ class Session {
   /// Cap on cached block indices, in bytes (default 256 MB). 0 = unlimited.
   /// Lowering it trades re-reads for resident memory; the indices are read
   /// sequentially, so a re-read is cheap next to decoding.
-  void set_index_cache_bytes(std::size_t n) { index_budget_ = n; }
+  /// Safe while other threads read: takes effect at the next trim.
+  void set_index_cache_bytes(std::size_t n) {
+    index_budget_.store(n, std::memory_order_relaxed);
+  }
   std::size_t index_cache_bytes() const;
 
   /// Which record levels read_records returns.
@@ -334,10 +370,13 @@ class Session {
   };
 
   std::uint64_t index_tick_ = 0;
-  std::size_t index_budget_ = 256u * 1024u * 1024u;
+  std::atomic<std::size_t> index_budget_{256u * 1024u * 1024u};
+  std::atomic<int> n_threads_{0};
 
   void discover();
-  void load_channel_basic_info(const std::string& name, Channel& ch);
+  /// `errors[k]` is what loading segment k's metadata threw (null = loaded).
+  void load_channel_basic_info(const std::string& name, Channel& ch,
+                               const std::exception_ptr* errors);
   /// The offset every readable segment of `channel` (or of the whole session
   /// when null) agrees on; nullopt, with `why` set, when they disagree.
   std::optional<si8> agreed_rto(const std::string* channel, std::string& why);
@@ -348,7 +387,9 @@ class Session {
   void read_record_file(std::vector<Record>& out, const std::string& rdat_path,
                         std::optional<si8> rto, const std::string& why, RecordLevel level,
                         const std::string& channel, int segment);
-  TimeSeriesMetadata& segment_metadata(SegmentReader& seg);
+  /// The segment's metadata, loaded at open. Lock-free: it never changes
+  /// after the open (#110). Only for a segment that did not fail.
+  const TimeSeriesMetadata& segment_metadata(const SegmentReader& seg) const;
   /// Run `fn` for one segment, containing its failure when lenient.
   ///
   /// Returns false when the segment is unusable — already known bad, or `fn`
@@ -383,6 +424,13 @@ class Session {
   /// The segment's block index, PINNED: the returned reference keeps the bytes
   /// alive even if another thread evicts them from the cache meanwhile.
   std::shared_ptr<const std::vector<ui1>> segment_index(SegmentReader& seg);
+  /// Whether `seg`'s CACHED index certainly holds no block overlapping
+  /// [lo, hi) (its learnt span; false when not cached or not learnt).
+  bool skip_segment(const SegmentReader& seg, si8 lo, si8 hi) const;
+  /// Record the span of `pin` if it is still the cached index and none is
+  /// known yet.
+  void learn_span(SegmentReader& seg, const std::shared_ptr<const std::vector<ui1>>& pin,
+                  std::size_t n_entries, si8 rto, sf8 fs);
   /// Drop the least recently used block indices until the cache fits its
   /// budget.
   ///

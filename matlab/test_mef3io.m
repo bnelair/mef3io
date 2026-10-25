@@ -49,6 +49,13 @@ assert(all(isnan(y(1001:1250))) && all(isnan(y(n + (1001:1250)))));
 ok = ~isnan(x);
 assert(max(abs(y(ok) - round(x(ok), 3))) < 1e-9);      % quantized round trip
 
+% One thread count per object, changeable later; results never depend on it.
+assert(r.threads() == 0);                              % automatic by default
+r.setThreads(1);
+assert(r.threads() == 1);
+assert(isequaln(r.read('ch1'), y));
+r.setThreads(0);
+
 yw = r.read('ch1', start + int64(1e6), start + int64(2e6));
 assert(numel(yw) == fs);
 

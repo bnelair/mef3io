@@ -16,10 +16,13 @@ operations, de-identified copies (`anonymize_session` +
 `anonymize.check`/`verify`, #70/#111) and modified copies (`transform_session`
 + `transform.check`/`verify`, #73) implemented — all Python + C++ only, not
 MATLAB. Reads/toc/segments/records on one Reader/Session may overlap across
-threads (#79; GIL released on open and every long call); Python-side limits
-until #110 are in for_agents/INVARIANTS.md §12. Python (pytest) + standalone C++ Catch2 suites.
-Wheel builds via `python -m build`. Parallel decode/encode, byte-deterministic
-across threads.
+threads (#79; GIL released on open and every long call; the Python races of
+#110 fixed, rules in for_agents/INVARIANTS.md §12). ONE thread rule
+(docs/threads.md): `n_threads` per object covers open, file access, decode,
+encode; settable at runtime; no per-call count (2.0). Parallel open (#141),
+decode, encode, all byte-/result-deterministic across thread counts.
+Python (pytest) + standalone C++ Catch2 suites.
+Wheel builds via `python -m build`.
 
 ## Build & test (use the active conda env for everything)
 
@@ -51,7 +54,13 @@ abstraction: DirectorySource/TarSource; `read_head` = one bounded read), `tar` (
 archives: TarIndex/TarSource/`archive_session`), `reader` (gridding, NaN fill,
 scaling, parallel decode), `records` (read+write), `writer` (segment writer),
 `session_writer` (precision inference, quantization, NaN splitting, segments),
-`parallel.hpp`, `anonymize.hpp` (`anonymize_session` + `verify_anonymized`,
+`parallel.hpp` (the thread rule: `resolve_threads(n, Work::Cpu|Io)` is the
+ONLY place "automatic" is decided — hardware concurrency, >= 8 for file
+access; `check_threads` rejects negatives at every public entry;
+`parallel_for` degrades when a thread cannot start (never std::terminate;
+`detail::thread_start_hook` is the TEST hook that counts/fails starts);
+`parallel_try_each` = every item runs, per-item exception, for work whose
+error must be the serial one), `anonymize.hpp` (`anonymize_session` + `verify_anonymized`,
 #70; see below) and `transform.hpp` (`transform_session` + `check_transform`
 + `verify_transform`, #73, and the types EVERY copy shares: `CopyOptions`,
 `CopyRefusal`/`CopyError` = `AnonymizeRefusal`/`AnonymizeError` aliases,
@@ -549,8 +558,10 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   ANOTHER THREAD's call on the same Session — never frees bytes in use. It
   used to hand out a raw span, and 4 threads reading one Session with a tiny
   budget crashed ("double free or corruption"). Cache state is under
-  `index_mu_`; problems/failed segments/legacy record files/metadata under
+  `index_mu_`; problems/failed segments/legacy record files under
   `state_mu_`; never held across file I/O or a decode, never both at once.
+  Segment METADATA is loaded by the open and IMMUTABLE afterwards:
+  `segment_metadata` is const and lock-free (#110); never add a lazy load.
   Pinned by core/tests/test_concurrency.cpp (TSan recipe in its header) and
   tests/test_p31. (g) Benchmark the real shape with
   `benchmarks/long_session_benchmark.py` (24 h x 16 ch @ 512 Hz, 10-min
@@ -610,6 +621,24 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   (test_p17, with a positive control). The real gain for #141 is step 2: the
   metadata pass in parallel with n_threads (latency hiding), then a
   multi-channel read.
+- **The open is PARALLEL but must behave SERIALLY** (#141). `discover_layout`
+  (session_layout.hpp; inspect calls it with 1 thread) lists channel folders,
+  then checks every segment's files, then the records-only `.rdat`, each pass
+  on the object's threads (`Work::Io`); `Session::discover` then reads +
+  parses every `.tmet` the same way and builds the ChannelInfos SERIALLY,
+  rethrowing each segment's stored load error inside `with_segment` in
+  segment order. Every pass uses `parallel_try_each` and assembles in listing
+  order, so strict raises the failure a serial walk meets first (never the
+  first in time) and lenient `problems()` keeps the serial order. Request
+  counts are identical at any thread count (the #142 pins hold). Sources must
+  be safe for concurrent calls: DirectorySource opens a stream per call,
+  TarSource's tables are read-only after its ctor (its member index scan is
+  serial — each header gives the next offset — and is now most of a parallel
+  tar open). The "open scales linearly" timing pin runs with 1 thread on
+  purpose. Measured (CountingSource, 20 ms/request): 209 ch x 10 seg 173 s ->
+  10.9 s on 16 threads (docs/benchmarks.md). The `shared_ptr<const
+  SessionSource>` constructors of Session/Reader are INTERNAL (tests): they
+  skip the naming rule, so applications use the path constructors.
 - **The MAIN use case is a session appended to for DAYS TO MONTHS** (5-20 min
   blocks per channel). Two consequences, both load-bearing. (1) An append must
   be O(NEW data), never O(total blocks) — section 2 describes ALL of a segment's
@@ -723,8 +752,22 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   instead (decrypt → edit → re-encrypt when the section is encrypted), which is
   what the validator's repair path already did.
 - **`block_envelope` (Session/Reader, viewers)** reads ONLY `.tidx` (rchar-
-  pinned in test_p38) and skips segments outside the window by their .tmet
-  UH times before touching their index. Per-block min/max are the INDEX
+  pinned in test_p38). Skipping (`Session::skip_segment`, shared with
+  collect_blocks; #110 item 3: repeated 1-s reads of 2400 segments 4.7 ms ->
+  0.2-0.28 ms) has ONE rule: the learnt span of the CACHED index
+  (`learn_span`: every entry's [start, start + n/fs) by the walks' own
+  expressions, unbounded if any count is 0/NO_ENTRY; stored only if that pin
+  is still the cached index; DROPPED in trim_index_cache with the index;
+  under index_mu_) misses the window — exactly the test every entry of the
+  cached index would fail, so the result equals walking it, and nothing is
+  read either way. NO METADATA TIME IS EVER USED TO SKIP (correctness over
+  speed, maintainer 2026-10-25): a .tmet END is stale after an interrupted
+  append + new segment, = last block's start for some writers, the caller's
+  end_uutc from mef_tools; a .tmet START can be late (any sign convention);
+  a span outliving its index hid an append forever. #146 review rounds 1-2
+  lost samples on every one; test_p42 + test_parallel_open.cpp pin them. A
+  cold windowed read therefore walks every index once, as before.
+  Per-block min/max are the INDEX
   copies (raw counts, scaled by the channel ufact like read()); RED_NAN ->
   NaN. Times come from the index entries, not the RED headers (reading those
   would mean touching .tdat); read() places by the header copy, which agrees
@@ -1094,6 +1137,15 @@ MultiReader at ITS caller; Reader's `_read_raw`/`_records` collect warnings
 into a `pending` list for the same reason (`_flush` emits them).
 `segments()` renumbers from 0 in time order (records(segment=) and
 declaration_issues use that numbering; problems keep the folder number).
+THREADS: `n_threads` is a TOTAL budget (resolved by the core's
+`resolve_threads`, never by Python): the open runs min(n, budget_io) opens at
+once with budget_io // workers threads each; a read gives each touched
+recording budget // touched through the PRIVATE `Reader._read_raw(_split=)`
+-> binding keyword `_n_threads` -> C++ `Reader::read_raw_split`; a read
+inside one recording gets the whole budget. Setting `n_threads` re-splits
+(sub-readers' counts updated). The private per-call path exists ONLY for
+this: never re-expose a public per-call count (test_p42 pins signatures and
+that the budget is never exceeded on open or read).
 
 Per-segment isolation (#12): a Session/Reader opened `strict=False` CONTAINS a
 segment-level failure instead of letting it fail the whole session — the

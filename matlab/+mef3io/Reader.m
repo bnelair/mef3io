@@ -18,6 +18,11 @@ classdef Reader < handle
     %   blocks = r.toc('ch1')                   % block-level table of contents
     %   anns = r.records('ch1')                 % annotations ([] -> session level)
     %   p = r.problems()                        % segments skipped (lenient only)
+    %   r.setThreads(4); n = r.threads()        % thread count (0 = automatic)
+    %
+    % nThreads is how many threads the Reader may use for everything it does
+    % (opening, file access, decoding, decrypting): 0 = automatic (default),
+    % 1 = no extra threads. Results never depend on it. See the threads guide.
     %
     % STRICT is the default: one unreadable segment fails the whole session,
     % because a skipped segment's samples come back as NaN and nothing in the
@@ -86,6 +91,25 @@ classdef Reader < handle
                 mef3io_mex('reader_close', obj.h);
                 obj.h = 0;
             end
+        end
+
+        function setThreads(obj, n)
+            %SETTHREADS Change how many threads this Reader may use.
+            %   r.setThreads(n)   % 0 = automatic, 1 = no extra threads
+            %
+            % Takes effect on the next call; calls already running keep
+            % theirs. Mirrors setting Python's Reader.n_threads.
+            arguments
+                obj
+                n (1, 1) double {mustBeInteger, mustBeNonnegative}
+            end
+            mef3io_mex('reader_set_threads', obj.h, n);
+        end
+
+        function n = threads(obj)
+            %THREADS The Reader's thread count as set (0 = automatic).
+            %   n = r.threads()   % mirrors Python's Reader.n_threads
+            n = mef3io_mex('reader_threads', obj.h);
         end
 
         function c = channels(obj)

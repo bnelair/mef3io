@@ -3,6 +3,7 @@
 // path, NaN = discontinuity splitting, block layout, and segment management.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -11,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "mef3io/parallel.hpp"
 #include "mef3io/records.hpp"
 #include "mef3io/types.hpp"
 #include "mef3io/writer.hpp"  // SessionMetadata, SegmentSpec
@@ -100,7 +102,14 @@ class SessionWriter {
     block_length_override_ = n;
   }
   void set_units(const std::string& u) { units_ = u; }
-  void set_threads(int n) { n_threads_ = n; }
+  /// How many threads this writer may use (encoding; docs/threads.md): 0 =
+  /// automatic, 1 = no extra threads. Output is byte-identical whatever the
+  /// count. Takes effect on the next write; atomic, so setting it from another
+  /// thread is not a data race (a Writer is still not shared-safe otherwise).
+  /// @throws std::invalid_argument for a negative count.
+  void set_threads(int n) { n_threads_.store(check_threads(n), std::memory_order_relaxed); }
+  /// The thread count as set (0 = automatic).
+  int threads() const { return n_threads_.load(std::memory_order_relaxed); }
 
   /// Flush appends to stable storage. **Default false.**
   ///
@@ -207,7 +216,7 @@ class SessionWriter {
   std::string units_ = "uV";
   SessionMetadata metadata_;
   si8 block_length_override_ = 0;
-  int n_threads_ = 0;
+  std::atomic<int> n_threads_{0};
   bool durable_ = false;
   std::map<std::string, ChannelState> channels_;
 };
