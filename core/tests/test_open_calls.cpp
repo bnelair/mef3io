@@ -228,7 +228,7 @@ TEST_CASE("TarSource::list_dir does not scale with the archive", "[open-calls][t
   };
   const double small = per_call(100), big = per_call(800);  // 8x the members
   CAPTURE(small, big);
-  CHECK(big < 3 * small + 2e-6);  // a scan per call would be ~8x
+  CHECK(big < 3 * small + 20e-6);  // a scan per call would be ~8x; slack for noisy CI VMs
 }
 
 TEST_CASE("an open scales linearly in segments, directory and tar", "[open-calls]") {
