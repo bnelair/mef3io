@@ -78,8 +78,22 @@ std::string get_string(const mxArray* a, const char* what) {
   return out;
 }
 
+// Sparse and complex arrays are refused wherever a buffer or a scalar is read
+// (#83): mxGetDoubles/mxGetLogicals on a SPARSE array return its nonzero
+// values only, so treating the result as dense read past it (crash) or
+// stored the wrong mask; a complex scalar would silently lose its imaginary
+// part. The +mef3io classes pass full() arrays; this guards direct calls.
+// Buffers only: scalars go through get_scalar, which accepts sparse.
+void require_dense_real(const mxArray* a, const char* what) {
+  if (mxIsSparse(a)) fail("%s must be a full (non-sparse) array; use full()", what);
+  if (mxIsComplex(a)) fail("%s must be real, not complex", what);
+}
+
+// A sparse SCALAR is fine (mxGetScalar reads it correctly, and S(i,j) of a
+// sparse matrix is one); only buffers need require_dense_real.
 double get_scalar(const mxArray* a, const char* what) {
   if (!mxIsNumeric(a) || mxGetNumberOfElements(a) != 1) fail("expected a numeric scalar for %s", what);
+  if (mxIsComplex(a)) fail("%s must be real, not complex", what);
   return mxGetScalar(a);
 }
 
@@ -711,6 +725,11 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     check(mef3io_writer_set_metadata(w, &md));
     return;
   }
+  if (cmd == "check_block_length") {  // before writer_open (Writer.m), #83
+    need_args(nrhs, 2, "check_block_length");
+    check(mef3io_check_block_length(get_int64(prhs[1], "block_length")));
+    return;
+  }
   if (cmd == "writer_set_block_length") {
     need_args(nrhs, 3, "writer_set_block_length");
     check(mef3io_writer_set_block_length(get_writer(prhs[1]),
@@ -732,7 +751,8 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     std::string ch = get_string(prhs[2], "channel");
     mef3io_write_summary sum{};
     if (is_float) {
-      if (!mxIsDouble(prhs[3]) || mxIsComplex(prhs[3])) fail("data must be a real double vector");
+      if (!mxIsDouble(prhs[3])) fail("data must be a real double vector");
+      require_dense_real(prhs[3], "data");
       std::int64_t n = static_cast<std::int64_t>(mxGetNumberOfElements(prhs[3]));
       std::int64_t start = get_time(prhs[4], "start_uutc");
       double fs = get_scalar(prhs[5], "fs");
@@ -742,10 +762,12 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
                                       precision, new_segment, &sum));
     } else {
       if (!mxIsInt32(prhs[3])) fail("data must be an int32 vector");
+      require_dense_real(prhs[3], "data");
       std::int64_t n = static_cast<std::int64_t>(mxGetNumberOfElements(prhs[3]));
       const std::uint8_t* valid = nullptr;
       std::vector<std::uint8_t> valid_copy;
       if (!mxIsEmpty(prhs[4])) {
+        require_dense_real(prhs[4], "valid mask");
         if (mxGetNumberOfElements(prhs[4]) != static_cast<size_t>(n))
           fail("valid mask must match data length");
         if (mxIsLogical(prhs[4])) {

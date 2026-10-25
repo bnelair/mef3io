@@ -67,7 +67,8 @@ struct RecoveryReport {
 /// @param path      `.mefd` session directory. Tar archives are refused.
 /// @param apply     false (default) reports what it WOULD do and writes nothing.
 /// @param backup    copy each file to `<session>.recover-backup/` before writing.
-/// @param password  needed only to read encrypted metadata.
+/// @param password  needed only to read encrypted metadata (the offset and
+///                  rate, at a non-zero recording-time offset).
 ///
 /// @param ctl       optional hooks. Recovery SCANS every segment first and
 ///                  writes only afterwards. `ctl.cancel` is honoured
@@ -81,7 +82,16 @@ struct RecoveryReport {
 ///
 /// Declarations are NOT updated here — run `repair_session` afterwards, which
 /// is what the CLI does. Keeping the two apart means the dangerous operation
-/// stays small and the safe one stays reusable.
+/// stays small and the safe one stays reusable. ONE exception (#83): at a
+/// NON-ZERO recording-time offset, where every validator time check stands
+/// down, recovery corrects the segment's END TIME in the three universal
+/// headers (the .tmet one is what readers report) from the last block it
+/// kept: an end counts as stale only before that block's start (+ half a
+/// sample), or, with rebuilt blocks, before their end (- half a sample); it
+/// is never moved earlier, and only an end stored in the offset-applied
+/// (negated) form is rewritten (in that form), else a note. The .tmet header
+/// is backed up and stamped Recovery; a stale end alone makes a channel's
+/// last segment need recovery there.
 RecoveryReport recover_session(const std::string& path, bool apply = false, bool backup = true,
                                const std::string& password = "", const Control& ctl = {});
 

@@ -413,6 +413,7 @@ def test_snapshots_store_a_hash_of_the_session_path_not_the_path(tmp_path):
     (["ch-1.segd", "ch-².segd", "ch-12x.segd"], "ch-1.segd"),  # non-ASCII / junk -> -1
     (["ch-1.segd", "ch-99.SEGD"], "ch-1.segd"),              # case-sensitive suffix
     (["ch-1.segd", "ch-99999999999999999999.segd"], "ch-1.segd"),  # overflow -> -1
+    (["ch-.segd", "ch-0.segd"], "ch-0.segd"),                # "ch-" -> -1, not 0
 ])
 def test_last_segment_rule_matches_the_cpp_one(tmp_path, names, last):
     """Same cases as core/tests/test_last_segment.cpp: both sides must name
@@ -718,3 +719,97 @@ def test_a_marker_from_another_build_or_path_is_not_trusted(tmp_path):
     marker = C.build_marker(str(tmp_path / "other.mefd"))
     cache.write_text(json.dumps(marker))
     assert C.load_valid(cache, str(path)) is None
+
+
+# --- #82 follow-ups -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("stem,number", [
+    ("ch1-000000", 0), ("ch1-000123", 123), ("a-b-10", 10), ("ch-9", 9),
+    ("nodash", -1), ("ch-", -1), ("ch-12x", -1), ("ch-+5", -1), ("ch- 5", -1),
+    ("ch-99999999999999999999", -1),
+])
+def test_segment_number_matches_the_cpp_cases(stem, number):
+    """The cases of core/tests/test_last_segment.cpp, one for one."""
+    assert C._segment_number(stem) == number
+
+
+def test_the_auto_cache_file_name_holds_no_session_name(tmp_path):
+    """A session is often named after its subject, and the OS cache folder is
+    listable: the file name is the path hash only. Old ``<stem>-<hash>`` files
+    are not looked up any more (the next open rebuilds)."""
+    path = tmp_path / "Jane_Doe_MRN123.mefd"
+    got = C.auto_cache_path(str(path))
+    assert "Jane" not in got.name and "MRN123" not in got.name
+    import hashlib
+    key = hashlib.sha256(os.path.abspath(str(path)).encode()).hexdigest()[:16]
+    assert got.name == key + ".mef3cache"
+    assert got.parent == C._os_cache_dir()
+    assert C.auto_cache_path(str(tmp_path / "other.mefd")) != got
+
+
+def test_a_backend_that_cannot_say_counts_as_encrypted(tmp_path):
+    """Fail closed (M27): without password_protected() on the backend, the
+    Reader must treat the session as encrypted, so nothing is cached."""
+    path = _session(tmp_path)
+    r = mef3io.Reader(str(path))
+    real = r._impl
+    try:
+        r._impl = object()
+        assert r._password_protected() is True
+    finally:
+        r._impl = real
+    assert r._password_protected() is False   # the real backend: unencrypted
+
+
+def test_a_snapshot_is_not_served_for_an_identical_copy_elsewhere(tmp_path):
+    """M28: a byte-identical copy matches the whole signature; only the
+    session key tells the two apart, and it must."""
+    path = _session(tmp_path)
+    cache = _snapshot(tmp_path, path)
+    copy = tmp_path / "copy" / "s.mefd"
+    copy.parent.mkdir()
+    import shutil
+    shutil.copytree(path, copy)
+    assert C.signature(str(copy)) == C.signature(str(path)), "the copy must match the signature"
+    assert C.load_valid(cache, str(copy)) is None
+    assert C.load_valid(cache, str(path)) is not None
+
+
+def test_an_upper_case_timd_folder_is_not_a_channel(tmp_path):
+    """M37: like the C++ reader, ``.timd`` is matched case-sensitively."""
+    path = _session(tmp_path)
+    (path / "ch2.TIMD").mkdir()
+    lay = C.layout(str(path))
+    assert list(lay["channels"]) == ["ch1.timd"]
+    with mef3io.Reader(str(path)) as r:
+        assert r.channels == ["ch1"]
+
+
+def test_an_auto_open_deletes_the_old_named_snapshot(tmp_path, monkeypatch):
+    """Snapshots saved before 2.0.0 under ``<stem>-<hash16>.mef3cache`` carry
+    the session name; an auto open deletes exactly that file — and only if it
+    is one of ours (an unrelated file of that name is left alone)."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "xdg"))
+    monkeypatch.setattr(C, "_os_cache_dir", lambda: _mk(tmp_path / "xdg" / "mef3io"))
+    path = tmp_path / "Jane_Doe.mefd"
+    _write(path)
+    old = C._legacy_auto_cache_path(str(path))
+    assert old.name.startswith("Jane_Doe-") and old.name.endswith(".mef3cache")
+    neighbour = old.with_name("Jane_Doe-0000000000000000.mef3cache")  # another session's
+    for f in (old, neighbour):
+        f.write_text(json.dumps({"format": 4}))
+    mef3io.Reader(str(path), cache="auto").close()
+    assert not old.exists(), "the old-named snapshot must be gone"
+    assert neighbour.exists(), "only that exact name is touched"
+    assert C.auto_cache_path(str(path)).exists()
+    # Not ours (no "format" key): never deleted.
+    old.write_text("user notes")
+    mef3io.Reader(str(path), cache="auto").close()
+    assert old.read_text() == "user notes"
+
+
+def _mk(d):
+    d.mkdir(parents=True, exist_ok=True)
+    return d

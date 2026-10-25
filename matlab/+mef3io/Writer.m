@@ -43,6 +43,11 @@ classdef Writer < handle
                 opts.Durability (1, :) char {mustBeMember(opts.Durability, ...
                     {'fast', 'full'})} = 'fast'
             end
+            % Refused BEFORE writer_open, which with Overwrite=true removes
+            % the existing session (#83).
+            if opts.BlockLength > 0
+                mef3io_mex('check_block_length', opts.BlockLength);
+            end
             obj.h = mef3io_mex('writer_open', path, double(opts.Overwrite), ...
                                opts.Password1, opts.Password2);
             mef3io_mex('writer_set_durable', obj.h, double(strcmp(opts.Durability, 'full')));
@@ -108,6 +113,9 @@ classdef Writer < handle
                 opts.Precision (1, 1) double = -1
                 opts.NewSegment (1, 1) logical = false
             end
+            % full(): the MEX reads a dense buffer; a sparse array used to
+            % crash MATLAB there (#83).
+            data = full(data);
             before = obj.unreadableMetadata();
             try
                 s = mef3io_mex('writer_write', obj.h, channel, double(data(:)), ...
@@ -135,6 +143,7 @@ classdef Writer < handle
                 opts.Valid = []
                 opts.NewSegment (1, 1) logical = false
             end
+            data = full(data);   % a sparse array crashed the MEX (#83)
             if ~isinteger(data)
                 error('mef3io:type', ['writeInt32 stores counts verbatim and ' ...
                       'requires integer data (e.g. int32); got %s. Convert ' ...
@@ -144,7 +153,9 @@ classdef Writer < handle
                 error('mef3io:range', ['writeInt32: values exceed the int32 ' ...
                       'range and would be altered; rescale them or use write().']);
             end
-            if ~isempty(opts.Valid), opts.Valid = logical(opts.Valid(:)); end
+            % full(): a sparse mask was read as if dense and stored the
+            % wrong validity (#83).
+            if ~isempty(opts.Valid), opts.Valid = full(logical(opts.Valid(:))); end
             before = obj.unreadableMetadata();
             try
                 s = mef3io_mex('writer_write_int32', obj.h, channel, int32(data(:)), ...
@@ -160,8 +171,17 @@ classdef Writer < handle
             %WRITEANNOTATIONS Struct array with fields: time (required),
             %   type (default 'Note'), text, duration. Omit `channel` for
             %   session-level records. Replaces records at that level.
+            %   Text fields and the channel may be char or string ("...").
             if nargin < 3, channel = []; end
+            if isstring(channel), channel = char(channel); end
             if istable(records), records = table2struct(records); end
+            % string -> char: the MEX reads char arrays only (#83).
+            for f = intersect({'type', 'text'}, fieldnames(records))'
+                for i = 1:numel(records)
+                    v = records(i).(f{1});
+                    if isstring(v), records(i).(f{1}) = char(v); end
+                end
+            end
             before = obj.unreadableMetadata();
             try
                 mef3io_mex('writer_write_records', obj.h, channel, records);

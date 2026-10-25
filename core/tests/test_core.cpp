@@ -21,6 +21,7 @@
 #include "mef3io/session_writer.hpp"
 #include "mef3io/validate.hpp"
 #include "mef3io/version.hpp"
+#include "mef3io/writer.hpp"
 
 using namespace mef3io;
 
@@ -781,6 +782,82 @@ TEST_CASE("C ABI exposes durability and recovery for the MATLAB binding") {
   fsys::remove(tar);
 }
 
+
+TEST_CASE("every write path refuses an invalid rate, factor or block length first (#83)") {
+  namespace fsys = std::filesystem;
+  const double nan = std::nan(""), inf = HUGE_VAL;
+  const auto dir = fsys::temp_directory_path() / "mef3io_bad_args.mefd";
+  fsys::remove_all(dir);
+  std::vector<si4> a(100, 3);
+  const si8 start = 1577836800000000LL;
+
+  // The rule itself.
+  for (double fs : {0.0, -256.0, nan, inf, -inf})
+    REQUIRE_THROWS_AS(check_signal_parameters(fs, 1.0), std::invalid_argument);
+  for (double u : {0.0, nan, inf, -inf})
+    REQUIRE_THROWS_AS(check_signal_parameters(256.0, u), std::invalid_argument);
+  REQUIRE_NOTHROW(check_signal_parameters(256.0, -0.5));  // polarity inversion
+  REQUIRE_NOTHROW(check_signal_parameters(1e-3, 1e-12));
+  REQUIRE_NOTHROW(check_block_length(MAX_BLOCK_SAMPLES));
+  REQUIRE_NOTHROW(check_block_length(0));                 // = derive from fs
+  REQUIRE_THROWS_AS(check_block_length(MAX_BLOCK_SAMPLES + 1), std::invalid_argument);
+  // The worst case of the largest block still fits the ui4 size fields.
+  REQUIRE(5 * MAX_BLOCK_SAMPLES + 304 + 7 < static_cast<si8>(fmt::UI4_NO_ENTRY));
+
+  {
+    SessionWriter w(dir.string(), true);
+    for (double fs : {0.0, -256.0, nan, inf, 1e-300, 1e12}) {
+      REQUIRE_THROWS_AS(w.write_int32("ch1", a, 1.0, start, fs), std::invalid_argument);
+      std::vector<sf8> f(100, 1.0);
+      REQUIRE_THROWS_AS(w.write_float("ch1", f, start, fs), std::invalid_argument);
+    }
+    for (double u : {0.0, nan, inf})
+      REQUIRE_THROWS_AS(w.write_int32("ch1", a, u, start, 256.0), std::invalid_argument);
+    REQUIRE_THROWS_AS(w.set_block_length(MAX_BLOCK_SAMPLES + 1), std::invalid_argument);
+    REQUIRE_FALSE(fsys::exists(dir / "ch1.timd"));  // nothing was created
+    // A rate below 0.1 Hz derives a block of less than one sample: it must
+    // still advance (it used to loop forever).
+    REQUIRE(w.write_int32("slow", std::span<const si4>(a.data(), 3), 1.0, start, 0.01)
+                .samples_written == 3);
+    // An append with a bad argument is refused too, before the segment moves.
+    REQUIRE(w.write_int32("ch2", a, 1.0, start, 256.0).samples_written == 100);
+    const auto tdat = dir / "ch2.timd" / "ch2-000000.segd" / "ch2-000000.tdat";
+    const auto before = fsys::file_size(tdat);
+    REQUIRE_THROWS_AS(w.write_int32("ch2", a, 0.0, start + 1000000, 256.0),
+                      std::invalid_argument);
+    REQUIRE(fsys::file_size(tdat) == before);
+  }
+
+  // The C ABI reports it as an argument error.
+  mef3io_writer* w = nullptr;
+  REQUIRE(mef3io_writer_open(dir.string().c_str(), 1, "", "", &w) == 0);
+  REQUIRE(mef3io_writer_write_int32(w, "ch1", a.data(), nullptr, 100, 1.0, start, 0.0, 0,
+                                    nullptr) == MEF3IO_ERR_ARGUMENT);
+  REQUIRE(std::string(mef3io_last_error()).find("sampling frequency") != std::string::npos);
+  REQUIRE(mef3io_writer_write_int32(w, "ch1", a.data(), nullptr, 100, nan, start, 256.0, 0,
+                                    nullptr) == MEF3IO_ERR_ARGUMENT);
+  std::vector<double> f(100, 1.0);
+  REQUIRE(mef3io_writer_write_float(w, "ch1", f.data(), 100, start, nan, -1, 0, nullptr) ==
+          MEF3IO_ERR_ARGUMENT);
+  REQUIRE(mef3io_writer_set_block_length(w, MAX_BLOCK_SAMPLES + 1) == MEF3IO_ERR_ARGUMENT);
+  REQUIRE(mef3io_writer_write_int32(w, "keep", a.data(), nullptr, 100, 1.0, start, 256.0, 0,
+                                    nullptr) == 0);
+  mef3io_writer_close(w);
+  REQUIRE_FALSE(fsys::exists(dir / "ch1.timd"));
+
+  // The checks a caller runs BEFORE mef3io_writer_open, which with overwrite
+  // removes the existing session (the MATLAB Writer does exactly this).
+  REQUIRE(MEF3IO_MAX_BLOCK_SAMPLES == MAX_BLOCK_SAMPLES);
+  REQUIRE(mef3io_check_block_length(MEF3IO_MAX_BLOCK_SAMPLES) == 0);
+  REQUIRE(mef3io_check_block_length(0) == 0);
+  REQUIRE(mef3io_check_block_length(MEF3IO_MAX_BLOCK_SAMPLES + 1) == MEF3IO_ERR_ARGUMENT);
+  REQUIRE(std::string(mef3io_last_error()).find("block length") != std::string::npos);
+  REQUIRE(mef3io_check_signal_parameters(256.0, -0.5) == 0);
+  REQUIRE(mef3io_check_signal_parameters(0.0, 1.0) == MEF3IO_ERR_ARGUMENT);
+  REQUIRE(mef3io_check_signal_parameters(256.0, 0.0) == MEF3IO_ERR_ARGUMENT);
+  REQUIRE(fsys::exists(dir / "keep.timd"));  // a refused check touched nothing
+  fsys::remove_all(dir);
+}
 
 TEST_CASE("provenance region: frozen layout, bounds, saturation, foreign data",
           "[headers][provenance]") {

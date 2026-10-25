@@ -269,3 +269,220 @@ def test_recovery_reports_a_stale_universal_header_count(tmp_path):
         mef3io.repair_session(str(path), ids)
     assert mef3io.Validator(str(path)).validate().ok
     assert struct.unpack_from("<q", tdat.read_bytes(), 32)[0] == real
+
+
+# --- #83: the end time at a non-zero recording-time offset -------------------
+# At rto != 0 every validator time check stands down (writers disagree on the
+# sign convention there), so repair_session never fixed the end time recovery
+# left behind, and info() kept reporting the end from BEFORE the recovery.
+
+S3_RTO = 1024 + 1536 + 10752          # section 3, field 0 (si8)
+TMET_BYTES = 16384
+
+
+def _set_rto(path, rto):
+    """Give every .tmet this offset. The writer stored every time as -t, so
+    the session simply moves by rto — a consistent rto session."""
+    for tmet in Path(path).glob("*.timd/*.segd/*.tmet"):
+        raw = bytearray(tmet.read_bytes())
+        struct.pack_into("<q", raw, S3_RTO, rto)
+        struct.pack_into("<I", raw, 4, m.crc32(bytes(raw[UH:TMET_BYTES])))
+        struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH])))
+        tmet.write_bytes(bytes(raw))
+
+
+def _crashed_append(tmp_path, rto, lose_index=True):
+    """Six appends; the .tmet (and, with lose_index, the index) of the last
+    three never landed — what `durability="fast"` can leave after a crash."""
+    path = tmp_path / "s.mefd"
+    rng = np.random.default_rng(3)
+    n = 2000
+    with mef3io.Writer(str(path), durability="fast") as w:
+        for i in range(6):
+            w.write_int32("ch1", rng.integers(-9000, 9000, n, dtype=np.int32), 0.5,
+                          START + int(i * n / FS * 1e6), FS)
+            if i == 2:
+                tmet = next(path.glob("*.timd/*.segd/*.tmet"))
+                old_tmet = tmet.read_bytes()
+                tidx = next(path.glob("*.timd/*.segd/*.tidx"))
+                old_entries = _entries(tidx)
+    tmet.write_bytes(old_tmet)
+    if lose_index:
+        tidx.write_bytes(tidx.read_bytes()[: UH + old_entries * TSI])
+        _fix_index_header(tidx, old_entries)
+    if rto:
+        _set_rto(path, rto)
+    true_end = START + rto + int(6 * n / FS * 1e6)
+    return path, tmet, true_end
+
+
+def _recover_and_repair(path):
+    report = mef3io.recover_session(str(path), apply=True)
+    ids = mef3io.Validator(str(path)).validate().repairable_check_ids
+    if ids:
+        mef3io.repair_session(str(path), ids)
+    return report
+
+
+@pytest.mark.parametrize("lose_index", [True, False], ids=["index-lost", "only-tmet-lost"])
+def test_recovery_sets_the_end_time_at_a_nonzero_offset(tmp_path, lose_index):
+    rto = 1_000_000_000
+    path, tmet, true_end = _crashed_append(tmp_path, rto, lose_index)
+    with mef3io.Reader(str(path)) as r:
+        assert r.info("ch1")["end_time"] < true_end - 10_000_000, "the fixture must be stale"
+    before = tmet.read_bytes()
+    dry = mef3io.recover_session(str(path))
+    assert dry.segments and "end time" in dry.segments[0].action, dry.summary()
+    assert tmet.read_bytes() == before and not dry.applied, "a dry run must not write"
+
+    _recover_and_repair(path)
+    with mef3io.Reader(str(path)) as r:
+        info = r.info("ch1")
+        assert info["end_time"] == true_end
+        assert np.isfinite(r.read("ch1")).sum() == 6 * 2000
+        # The three universal headers agree, and the value is stored in the
+        # offset-applied form: rto - t, never the real date in plain.
+        seg = r.segments("ch1")[0]
+        assert "recovery" in seg["provenance"]["operations"]
+    seg_dir = tmet.parent
+    for f in (seg_dir / (seg_dir.stem + ext) for ext in (".tmet", ".tidx", ".tdat")):
+        stored = struct.unpack_from("<q", f.read_bytes(), 24)[0]
+        assert stored == rto - true_end, f.name
+    assert mef3io.Validator(str(path)).validate().ok
+    # Idempotent: a second pass finds nothing to do.
+    assert mef3io.recover_session(str(path)).nothing_to_do
+
+
+def test_at_offset_zero_recovery_leaves_the_metadata_to_repair(tmp_path):
+    """Negative control: at rto 0 the validator owns the times (its
+    segment-bounds repair fixes the end), so recovery does not touch .tmet,
+    and the end comes out the same either way."""
+    path, tmet, true_end = _crashed_append(tmp_path, 0)
+    before = tmet.read_bytes()
+    mef3io.recover_session(str(path), apply=True)
+    assert tmet.read_bytes() == before
+    ids = mef3io.Validator(str(path)).validate().repairable_check_ids
+    mef3io.repair_session(str(path), ids)
+    with mef3io.Reader(str(path)) as r:
+        assert r.info("ch1")["end_time"] == true_end
+
+
+def test_an_ambiguous_stored_convention_is_left_alone_with_a_note(tmp_path):
+    """A .tmet end time stored as a plain (positive) value at rto != 0 is
+    ambiguous (absolute, or a legacy positive delta?): never guessed."""
+    rto = 1_000_000_000
+    path, tmet, _ = _crashed_append(tmp_path, rto)
+    raw = bytearray(tmet.read_bytes())
+    stored_end = struct.unpack_from("<q", raw, 24)[0]
+    struct.pack_into("<q", raw, 24, -stored_end + rto)   # same instant, absolute form
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH])))
+    tmet.write_bytes(bytes(raw))
+    report = mef3io.recover_session(str(path), apply=True)
+    assert any("end time left as is" in n for n in report.notes), report.notes
+    assert struct.unpack_from("<q", tmet.read_bytes(), 24)[0] == -stored_end + rto
+    assert report.segments[0].blocks_recovered == 3, "the index is still recovered"
+
+
+@pytest.mark.parametrize("fs,seconds", [(499.7, 37.3), (256.0, 61.7), (511.3, 37.3),
+                                        (1000 / 3, 61.7)])
+def test_a_healthy_legacy_session_with_an_offset_needs_no_recovery(tmp_path, fs, seconds):
+    """Negative control (review of #145): mef_tools truncates its end time
+    (int64(start + n/fs*1e6)) and pymef rounds block times its own way, so the
+    stored end can be a few us off the computed one. That is an END
+    CONVENTION, not a stale end: nothing to do, nothing written. (On the first
+    version of the fix, (256, 61.7) and (511.3, 37.3) were reported stale.)"""
+    pytest.importorskip("pymef", reason="legacy oracle not installed")
+    mef_tools = pytest.importorskip("mef_tools.io", reason="legacy oracle not installed")
+    path = tmp_path / "legacy.mefd"
+    x = np.random.default_rng(0).normal(0, 50, int(seconds * fs))
+    w = mef_tools.MefWriter(str(path), overwrite=True)
+    w.record_offset = 1_000_000_000
+    w.write_data(x, "ch1", START, fs, precision=2)
+    del w
+    before = {p: p.read_bytes() for p in path.rglob("*") if p.is_file()}
+    dry = mef3io.recover_session(str(path))
+    assert dry.nothing_to_do, dry.summary()
+    assert not dry.notes, dry.notes
+    done = mef3io.recover_session(str(path), apply=True)
+    assert not done.segments
+    assert {p: p.read_bytes() for p in path.rglob("*") if p.is_file()} == before
+
+
+def _uh_end(f):
+    return struct.unpack_from("<q", Path(f).read_bytes(), 24)[0]
+
+
+def _seg_files(tmet):
+    d = tmet.parent
+    return [d / (d.stem + ext) for ext in (".tmet", ".tidx", ".tdat")]
+
+
+def test_an_end_time_fix_alone_keeps_the_data_crc(tmp_path):
+    """Only the .tmet was lost: the .tdat body did not change, so its stored
+    body CRC (valid, over tens of GB in real files) must stay."""
+    rto = 1_000_000_000
+    path, tmet, true_end = _crashed_append(tmp_path, rto, lose_index=False)
+    tdat = _seg_files(tmet)[2]
+    crc_before = tdat.read_bytes()[4:8]
+    assert crc_before != b"\xff\xff\xff\xff"
+    report = mef3io.recover_session(str(path), apply=True)
+    assert report.segments and report.segments[0].blocks_recovered == 0
+    assert tdat.read_bytes()[4:8] == crc_before
+    assert _uh_end(tmet) == rto - true_end
+
+
+def test_an_end_is_never_moved_earlier(tmp_path):
+    """Index ahead of data at a non-zero offset: entries are dropped, but the
+    end times are left where they were (a later end only widens the range a
+    reader seeks; an earlier one hides samples)."""
+    rto = 1_000_000_000
+    path, tidx, tdat = _session(tmp_path)
+    _set_rto(path, rto)
+    tmet = tidx.with_suffix(".tmet")
+    ends = [_uh_end(f) for f in _seg_files(tmet)]
+    raw = tdat.read_bytes()
+    tdat.write_bytes(raw[: len(raw) // 2])
+    report = mef3io.recover_session(str(path), apply=True)
+    assert report.segments[0].blocks_dropped > 0
+    assert [_uh_end(f) for f in _seg_files(tmet)] == ends
+
+
+def test_a_plain_stored_end_keeps_its_convention(tmp_path):
+    """A .tidx whose end is stored plain (as older writers did) next to a
+    negated .tmet: the plain one is left with a note, never rewritten into
+    the other convention; the .tmet is still fixed."""
+    rto = 1_000_000_000
+    path, tmet, true_end = _crashed_append(tmp_path, rto)
+    tidx = _seg_files(tmet)[1]
+    raw = bytearray(tidx.read_bytes())
+    stale_plain = START + rto + 1_000_000           # far before the data's end
+    struct.pack_into("<q", raw, 24, stale_plain)
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH])))
+    tidx.write_bytes(bytes(raw))
+    report = mef3io.recover_session(str(path), apply=True)
+    assert any(".tidx end time is not stored in the offset-applied" in n for n in report.notes)
+    assert _uh_end(tidx) == stale_plain
+    assert _uh_end(tmet) == rto - true_end
+
+
+def test_only_the_last_segment_metadata_is_read_on_a_healthy_session(tmp_path):
+    """#7 of the review: recovery reads no .tmet of a segment it does not
+    write, except the 1 KB header of each channel's last one. Pinned by
+    making every earlier .tmet unreadable."""
+    import os
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root reads anything")
+    path = tmp_path / "s.mefd"
+    x = np.arange(2560, dtype=np.int32)
+    with mef3io.Writer(str(path)) as w:
+        for i in range(4):
+            w.write_int32("ch1", x, 0.5, START + i * 20_000_000, FS, new_segment=True)
+    tmets = sorted(path.glob("ch1.timd/*.segd/*.tmet"))
+    try:
+        for t in tmets[:-1]:
+            t.chmod(0)
+        report = mef3io.recover_session(str(path))
+        assert report.nothing_to_do and not report.notes, (report.summary(), report.notes)
+    finally:
+        for t in tmets:
+            t.chmod(0o644)
