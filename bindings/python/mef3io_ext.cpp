@@ -1,5 +1,6 @@
 // mef3io — nanobind bindings. Fleshed out per phase; P0 exposes just enough
 // (crc + version) to prove the toolchain end to end.
+#include <limits>
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/map.h>
@@ -772,7 +773,7 @@ NB_MODULE(_mef3io, m) {
       "Make each segment's block index and data agree after an interrupted "
       "write. Dry run unless apply=True.");
 
-  // --- anonymize (#70): a de-identified copy, every time shifted ---
+  // --- anonymize (#70): a de-identified copy; times kept, or shifted ---
   m.def(
       "check_anonymize",
       [](const std::string& src, const std::string& dst, std::optional<std::int64_t> shift_us,
@@ -784,7 +785,7 @@ NB_MODULE(_mef3io, m) {
          const mef3io::CancelToken* cancel) {
         PyHooks hooks(cancel, nb::none());
         mef3io::AnonymizeOptions o;
-        o.shift_us = shift_us.value_or(0);
+        o.shift_us = shift_us;  // none = the copy keeps every time
         o.pseudonym = pseudonym;
         o.clear_subject = clear_subject;
         o.clear_location = clear_location;
@@ -799,7 +800,7 @@ NB_MODULE(_mef3io, m) {
         set_copy_options(o, rename, password, output_password_1, output_password_2,
                          std::move(channels), std::move(exclude_channels), time_range, exact);
         mef3io::AnonymizeCheck c = hooks.run([&](const mef3io::Control& ctl) {
-          return mef3io::check_anonymize(src, dst, o, ctl, shift_us.has_value());
+          return mef3io::check_anonymize(src, dst, o, ctl);
         });
         nb::dict out = check_dict(c);
         out["pseudonym"] = c.pseudonym;
@@ -818,7 +819,7 @@ NB_MODULE(_mef3io, m) {
       "(see mef3io.anonymize.check).");
   m.def(
       "anonymize_session",
-      [](const std::string& src, const std::string& dst, std::int64_t shift_us,
+      [](const std::string& src, const std::string& dst, std::optional<std::int64_t> shift_us,
          const std::string& pseudonym, bool clear_subject, bool clear_location,
          bool clear_descriptions, const std::string& text, nb::object text_fn, bool rename,
          const std::string& password, const std::string& output_password_1,
@@ -852,7 +853,9 @@ NB_MODULE(_mef3io, m) {
               info["level"] = mef3io::record_level_name(f.level);
               info["channel"] = f.channel;
               info["segment"] = f.segment;
-              info["time"] = f.time;
+              // NO_ENTRY: not known (an offset its segments disagree on).
+              if (f.time == std::numeric_limits<std::int64_t>::min()) info["time"] = nb::none();
+              else info["time"] = f.time;
               // Record text is bytes from a file and need not be valid UTF-8:
               // decode with surrogateescape so every byte survives, and
               // encode the result back the same way.
@@ -885,7 +888,7 @@ NB_MODULE(_mef3io, m) {
         });
         nb::dict out = copy_report_dict(r);
         out["pseudonym"] = r.pseudonym;
-        out["shift_us"] = r.shift_us;
+        out["shift_us"] = opt_or_none(r.shift_us);
         out["source_recording_time_offset"] = r.source_recording_time_offset;
         // The re-identification key (see AnonymizeReport): to the caller only.
         out["source_start_us"] = opt_or_none(r.source_start_us);
@@ -899,7 +902,8 @@ NB_MODULE(_mef3io, m) {
         out["record_bodies_cleared"] = r.record_bodies_cleared;
         return out;
       },
-      nb::arg("src"), nb::arg("dst"), nb::arg("shift_us"), nb::arg("pseudonym") = "",
+      nb::arg("src"), nb::arg("dst"), nb::arg("shift_us").none() = nb::none(),
+      nb::arg("pseudonym") = "",
       nb::arg("clear_subject") = true, nb::arg("clear_location") = true,
       nb::arg("clear_descriptions") = true, nb::arg("text") = "drop",
       nb::arg("text_fn") = nb::none(), nb::arg("rename") = true, nb::arg("password") = "",
@@ -947,7 +951,7 @@ NB_MODULE(_mef3io, m) {
       "The text anonymize_session would keep (see mef3io.anonymize.redact_text).");
   m.def(
       "verify_anonymized",
-      [](const std::string& src, const std::string& dst, std::int64_t shift_us,
+      [](const std::string& src, const std::string& dst, std::optional<std::int64_t> shift_us,
          const std::string& password, const std::string& output_password, bool clear_subject,
          bool clear_location, bool clear_descriptions, std::optional<std::pair<std::int64_t, std::int64_t>> time_range, bool exact,
          const mef3io::CancelToken* cancel, nb::object progress) {
@@ -965,7 +969,8 @@ NB_MODULE(_mef3io, m) {
         });
         return verify_report_dict(r);
       },
-      nb::arg("src"), nb::arg("dst"), nb::arg("shift_us"), nb::arg("password") = "",
+      nb::arg("src"), nb::arg("dst"), nb::arg("shift_us").none() = nb::none(),
+      nb::arg("password") = "",
       nb::arg("output_password") = "", nb::arg("clear_subject") = true,
       nb::arg("clear_location") = true, nb::arg("clear_descriptions") = true,
       nb::arg("time_range").none() = nb::none(), nb::arg("exact") = true,

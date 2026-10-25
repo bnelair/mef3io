@@ -50,6 +50,7 @@ def test_anonymize_example_runs_clean():
     assert "refused: name-contains-identity" in out
     assert "verification: passed" in out
     assert "copy starts: 2000-01-01T09:00:00+00:00" in out
+    assert "4. copy without a shift: S002.mefd - times kept" in out
     assert "the source is unchanged; done" in out
     # The planted overlap (the ID "42" inside the kept channel LAH42) is a note.
     assert "note: LAH42.timd" in out and "notes: 2" in out

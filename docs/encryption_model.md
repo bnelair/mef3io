@@ -268,8 +268,8 @@ gate the signal itself: the samples are readable without any password (see
   fallback, and the warning announces every use of it. A re-keyed copy makes it
   readable everywhere: `mef3io.anonymize_session(...,
   output_password=(level1, level2))` re-encrypts every file with meflib's
-  mapping. It is not a pure re-key: the copy is de-identified and every time
-  is shifted, by at least the recording's span + 1 day
+  mapping. It is not a pure re-key: the copy is de-identified (and, with a
+  shift, every time is moved by at least the recording's span + 1 day)
   ([De-identification](anonymization.md)). A pure re-key is `transform_session`
   ([Modified copies](transform.md)). New files are
   never written with the old rule. Appending to an old segment keeps that

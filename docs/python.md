@@ -689,10 +689,12 @@ inside it, extract, rename and archive again.
 
 ## De-identified copies
 
-`mef3io.anonymize_session(src, dst, shift_us)` writes a copy of a session
-that can be shared: every time moved by `shift_us`, the subject's identity,
-the session name, descriptions and (by default) annotation text removed,
-and the samples copied byte for byte. The original is never changed.
+`mef3io.anonymize_session(src, dst, shift_us=None)` writes a copy of a
+session that can be shared: the subject's identity, the session name,
+descriptions and (by default) annotation text removed, and the samples
+copied byte for byte. **Without `shift_us` the copy keeps every date and
+time exactly**, so it still shows when the recording was made; with
+`shift_us` every time is moved by it. The original is never changed.
 `mef3io.anonymize.check` runs the same checks first without writing
 anything, and every copy is verified against its source before it gets its
 final name.
@@ -700,6 +702,7 @@ final name.
 ```python
 start = mef3io.inspect("patient.mefd").start_time
 shift = mef3io.anonymize.reference_shift(start, "2000-01-01")   # copy starts on that date
+# (leave the shift out to keep the real dates and times)
 
 rep = mef3io.anonymize.check("patient.mefd", "S001.mefd", shift, exclude_channels=["ECG"])
 if not rep.ok:

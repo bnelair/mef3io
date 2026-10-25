@@ -9,7 +9,10 @@ channel, then:
 2. makes the copy, leaving the ECG channel out and moving every date so the
    recording starts on 1 January 2000 (dates in the copy then read as "days
    since the start of the study", with the time of day kept);
-3. prints the copy's verification and its notes, and reads the copy back.
+3. prints the copy's verification and its notes, and reads the copy back;
+4. makes a second copy WITHOUT a shift (the default), which keeps the real
+   dates and times: identity removed, but the copy still shows when the
+   recording was made.
 
 The original recording is never changed. Nothing here prints the original
 times: they, together with the shift, are what would give the real dates
@@ -93,6 +96,19 @@ with mef3io.Reader(dst) as r:
     print("copy subject:", r.metadata.subject)
     print("copy annotations:", [(rec["type"], rec.get("text", "")) for rec in r.records("Fp1")])
     assert "ECG" not in r.channels and first.date() == dt.date(2000, 1, 1)
+
+# ------------------------------------------- 4. the default: times kept
+# Without a shift the copy keeps every date and time exactly. Its identity is
+# removed as above, but it STILL SHOWS WHEN THE RECORDING WAS MADE; give a
+# shift whenever the dates must not be shared. (Its times are compared here,
+# never printed.)
+kept = mef3io.anonymize_session(src, str(tmp / "S002.mefd"), exclude_channels=["ECG"])
+print("\n4. copy without a shift:", Path(kept.destination).name,
+      "- times kept" if kept.shift_us is None else "- shifted")
+with mef3io.Reader(src) as a, mef3io.Reader(kept.destination) as b:
+    assert b.info("Fp1")["start_time"] == a.info("Fp1")["start_time"]
+    assert b.metadata.subject.name_2 == ""
+assert mef3io.anonymize.verify(src, kept.destination).ok
 
 # The source is unchanged.
 with mef3io.Reader(src) as r:

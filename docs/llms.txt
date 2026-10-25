@@ -1,6 +1,6 @@
 # mef3io
 
-> mef3io reads and writes MEF 3.0 (Multiscale Electrophysiology Format) recordings from Python, MATLAB and C++, with one C++ core behind all three. MEF 3.0 is a compressed, optionally encrypted format for long electrophysiology recordings (mainly EEG, intracranial EEG and ECG; any regularly sampled signal fits). Files mef3io writes open in meflib, pymef and mef_tools, and theirs open in mef3io. It also makes de-identified copies of a session for sharing (every date moved, identity removed, samples unchanged).
+> mef3io reads and writes MEF 3.0 (Multiscale Electrophysiology Format) recordings from Python, MATLAB and C++, with one C++ core behind all three. MEF 3.0 is a compressed, optionally encrypted format for long electrophysiology recordings (mainly EEG, intracranial EEG and ECG; any regularly sampled signal fits). Files mef3io writes open in meflib, pymef and mef_tools, and theirs open in mef3io. It also makes de-identified copies of a session for sharing (identity removed, samples unchanged; real dates kept by default, or every date moved by a shift).
 
 Install: `pip install mef3io` (Python 3.10+, numpy only). MATLAB: the mef3io-matlab zip on each GitHub release. C++: add `core/` to a CMake project. Times are microseconds since the Unix epoch (uUTC). Gaps read back as NaN. `from mef3io import MefReader, MefWriter` replaces the legacy mef_tools API. Reads and opening release the Python GIL, and reads on one Reader can run from several threads at once (limits: docs Python guide, Parallelism). Apache-2.0.
 

@@ -130,14 +130,16 @@ pages such as
   reading any samples, and long reads and operations can report progress and
   be cancelled from another thread (Python and C++).
 - **Sharing recordings without identifying the patient.**
-  `mef3io.anonymize_session` writes a de-identified copy of a session: every
-  date and time moved by the same amount (so events still line up with the
-  signal), names, ID, location, descriptions and annotation text removed,
-  and the samples copied unchanged. Channels can be left out, and the copy
+  `mef3io.anonymize_session` writes a de-identified copy of a session:
+  names, ID, location, descriptions and annotation text removed, and the
+  samples copied unchanged. By default it keeps the real dates and times;
+  with a shift, every date and time is moved by the same amount (so events
+  still line up with the signal). Channels can be left out, and the copy
   can be unencrypted or protected with new passwords.
   `mef3io.anonymize.check` reports everything that would stop a copy before
   anything is written, and every copy is verified against its source (no
-  original date or name left anywhere) before it is saved. The original is
+  original name left anywhere, and with a shift no original date) before it
+  is saved. The original is
   never changed. Python and C++; see
   [De-identification](https://bnelair.github.io/mef3io/anonymization/).
 - **Programs that stay responsive.** Opening, reading and writing release
@@ -215,7 +217,8 @@ Changes in every version, and what an upgrade asks of you, are listed in the
   recording date (the date stays in every metadata file, in plain text unless
   the session is encrypted). mef3io never creates such sessions; it reads and
   extends existing ones. To share a recording, make a de-identified copy with
-  `mef3io.anonymize_session` (Python and C++, not MATLAB). It keeps channel
+  `mef3io.anonymize_session` (Python and C++, not MATLAB), with a shift to
+  hide the dates. It keeps channel
   names and does not change the signal itself, and with annotation text kept
   it removes only the names it knows — see
   [De-identification](https://bnelair.github.io/mef3io/anonymization/).

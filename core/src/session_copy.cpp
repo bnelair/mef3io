@@ -2,8 +2,10 @@
 // anonymize_session / verify_anonymized (#70, anonymize.hpp) and
 // transform_session / verify_transform (#73, transform.hpp). ONE engine: the
 // pre-flight, the copy pass, the verification and the publish are shared; the
-// rules decide what changes. `Rules::anonymize()` = shift every time, remove
-// identity, clear the regions other writers fill, unlink the copy; otherwise
+// rules decide what changes. `Rules::anonymize()` = remove identity, clear
+// the regions other writers fill, unlink the copy, and either keep every time
+// as stored (the default, `Rules::keep_times()`: the transform's verbatim
+// time path) or shift every time (`Rules::shifting()`); otherwise
 // (a transform) every time, region and record body is copied verbatim and
 // only the channels, passwords, name and edited metadata differ.
 //
@@ -231,11 +233,17 @@ struct Shifter {
 
 /// Which copy this is. `anon` set: anonymize_session's rules. Unset: a
 /// transform (times, regions and record bodies verbatim; `edits` applied).
+/// An anonymized copy either SHIFTS every time (`anon->shift_us` set) or
+/// KEEPS every time as stored (unset, the default): the same verbatim time
+/// path as a transform, with the source's recording-time offset kept so the
+/// stored times read back to the same instants.
 struct Rules {
   const CopyOptions* copy = nullptr;
   const AnonymizeOptions* anon = nullptr;
   const MetadataEdits* edits = nullptr;  ///< transform only (may be empty)
   bool anonymize() const { return anon != nullptr; }
+  bool shifting() const { return anon != nullptr && anon->shift_us.has_value(); }
+  bool keep_times() const { return anon != nullptr && !anon->shift_us.has_value(); }
 };
 
 // ---------------------------------------------------------------------------
@@ -1014,6 +1022,20 @@ bool record_in_window(const RawRecord& r, si8 rto, si8 t0, si8 t1) {
   return false;
 }
 
+/// A record whose placement in time depends on the offset: a time stored
+/// negated (offset applied). Non-negative times are absolute whatever it is.
+bool record_offset_dependent(const RawRecord& r) {
+  if (!is_sentinel(r.time, false) && r.time < 0) return true;
+  if (layout_of(r) && (r.type == "Seiz" || r.type == "Epoc")) {
+    const std::size_t a = r.type == "Seiz" ? 0 : 8;
+    for (std::size_t off : {a, a + 8}) {
+      const si8 v = read<si8>(r.body, off);
+      if (!is_sentinel(v, true) && v < 0) return true;
+    }
+  }
+  return false;
+}
+
 /// How far before t0 a block of this segment can start and still reach it:
 /// its longest declared block plus a second; an hour when the declaration
 /// is unset (a foreign writer's), so nothing is missed, only more is read.
@@ -1144,9 +1166,10 @@ class Copier {
 
   std::vector<std::string> written;  // every output file, for the flush
 
-  /// A stored time as the copy writes it: shifted (anonymize) or verbatim.
+  /// A stored time as the copy writes it: shifted (anonymize with a shift)
+  /// or verbatim (a transform, or anonymize keeping the times).
   si8 time(si8 s, const std::string& what, bool body = false) const {
-    return rules_.anonymize() ? sh_(s, what, body) : s;
+    return rules_.shifting() ? sh_(s, what, body) : s;
   }
 
   /// Patch a universal header in place (any file type). Counts, maximum
@@ -1243,7 +1266,10 @@ class Copier {
     auto s3 = b.subspan(S3, S3_BYTES);
     auto s1 = b.subspan(S1, S1_BYTES);
     if (rules_.anonymize()) {
-      if (t.rto != sh_.rto)
+      // Shifting reads every time against ONE offset; keeping them copies
+      // each segment's times and offset as stored, so a disagreement does
+      // not concern it.
+      if (rules_.shifting() && t.rto != sh_.rto)
         refuse(RefusalKind::WriteConflict, "rto-disputed",
                "segments disagree on the recording-time offset (" + src_.describe(rel) +
                    " differs from the rest of the session), so there is no single right way to read their times",
@@ -1260,8 +1286,12 @@ class Copier {
       write_string(s2, S2_UNITS, S2_UNITS_BYTES,
                    red_->apply(read_string(s2, S2_UNITS, S2_UNITS_BYTES)));
       std::fill(s2.begin() + S2_REGIONS, s2.end(), ui1{0});
-      // Section 3: time-zone fields SET, identity cleared.
-      write<si8>(s3, S3_RTO, 0);
+      // Section 3: time-zone fields SET, identity cleared. The offset is 0
+      // in a shifted copy (its times are absolute); a copy that keeps the
+      // times keeps it, since its stored times are read against it. GMT
+      // offset and DST can say where the recording was made and change no
+      // time a reader returns (uUTC), so they are cleared in both.
+      if (rules_.shifting()) write<si8>(s3, S3_RTO, 0);
       write<si8>(s3, S3_DST_START, fmt::UUTC_NO_ENTRY);
       write<si8>(s3, S3_DST_END, fmt::UUTC_NO_ENTRY);
       write<si4>(s3, S3_GMT, 0);
@@ -1441,8 +1471,8 @@ class Copier {
         end_t = sample_time(t, read<ui4>(cb.block, 32), seg_fs_);
       }
       if (rules_.anonymize()) {
-        write<si8>(cb.block, 40, sh_(read<si8>(cb.block, 40), what + " start time"));
-        write<si8>(cb.entry, 8, sh_(read<si8>(cb.entry, 8), "index entry " + what));
+        write<si8>(cb.block, 40, time(read<si8>(cb.block, 40), what + " start time"));
+        write<si8>(cb.entry, 8, time(read<si8>(cb.entry, 8), "index entry " + what));
         // Regions meflib leaves to writers, zero in everything it writes:
         // index entry protected (40, 4 B), RED-protected (45, 3 B) and
         // discretionary (48, 8 B); block header protected (5, 3 B) and
@@ -1513,7 +1543,7 @@ class Copier {
   /// A cut's edge block: samples [k0, k1) decoded and re-encoded with the
   /// existing RED encoder, at the source's encryption level with the copy's
   /// keys (or plain when the copy has none), its time in the source's
-  /// storage convention (shifted when anonymizing).
+  /// storage convention (shifted when anonymizing with a shift).
   void trim_block(detail::CopyBlock& cb, si8 stored, si8 t, std::size_t k0, std::size_t k1,
                   const std::string& what, const std::string& channel) {
     const ui1 flags = read<ui1>(cb.block, 4);
@@ -1565,20 +1595,37 @@ class Copier {
                                          int segment,
                                          const std::function<bool(si8)>& keep = {}) {
     const std::string where = src_.describe(rdat_rel);
+    // The offset this file's times are read with, as the Reader reads them.
+    const std::optional<si8> lrto = level == RecordLevel::Segment ? std::optional<si8>(seg_rto_)
+                                    : level_rto_ ? level_rto_(channel)
+                                                 : std::optional<si8>(sh_.rto);
+    const si8 rto = lrto.value_or(sh_.rto);  // only absolute times use it when unset
     std::vector<OutRecord> out;
     for (std::size_t i = 0; i < f.records.size(); ++i) {
       const RawRecord& r = f.records[i];
-      if (window_ && !record_in_window(r, sh_.rto, window_->first, window_->second)) {
+      if (!lrto && (window_ || keep) && record_offset_dependent(r))
+        refuse(RefusalKind::WriteConflict, "time-range-offset-disputed",
+               "record " + std::to_string(i) + " of " + where +
+                   " stores its time against a recording-time offset its segments disagree on "
+                   "(or that cannot be read), so whether it lies in time_range is unknown",
+               channel, "time_range");
+      if (window_ && !record_in_window(r, rto, window_->first, window_->second)) {
         ++rep_.records_outside_window;
         continue;
       }
-      if (keep && !keep(is_sentinel(r.time, false) ? r.time : to_user_time(r.time, sh_.rto)))
+      if (keep && !keep(is_sentinel(r.time, false) ? r.time : to_user_time(r.time, rto)))
         continue;
       const std::string what = "record " + std::to_string(i) + " (" + r.type + ") of " + where;
       const si8 t = time(r.time, what + " time");
       std::vector<ui1> body;
       if (rules_.anonymize()) {
-        RecordTextField tf{r.type, "", level, channel, segment, to_user_time(t, 0)};
+        // Its time in the copy; unknown (NO_ENTRY) for a time stored
+        // against an offset its segments disagree on.
+        const bool unknown = !lrto && !rules_.shifting() && record_offset_dependent(r);
+        RecordTextField tf{r.type, "", level, channel, segment,
+                           unknown              ? fmt::UUTC_NO_ENTRY
+                           : is_sentinel(t, false) ? t
+                                                   : to_user_time(t, rules_.shifting() ? 0 : rto)};
         body = rewrite_body(r, tf, what);
       } else {
         body = kept_body(r);
@@ -1590,7 +1637,7 @@ class Copier {
         std::copy(e.begin(), e.end(), body.begin());
       }
       OutRecord o;
-      o.sort_time = is_sentinel(r.time, false) ? r.time : to_user_time(r.time, sh_.rto);
+      o.sort_time = is_sentinel(r.time, false) ? r.time : to_user_time(r.time, rto);
       o.bytes.assign(RHDR, 0);
       std::copy(r.type_bytes.begin(), r.type_bytes.end(), o.bytes.begin() + 4);
       write<ui1>(o.bytes, 9, r.vmaj);
@@ -1670,6 +1717,14 @@ class Copier {
   /// The source this copier reads.
   const SessionSource& source() const { return src_; }
 
+  /// How a channel's (`channel` non-empty) or the session's record file is
+  /// read: the offset its segments agree on, nullopt when they do not (see
+  /// level_rto_of). Unset: the session's offset (`sh_.rto`). A segment's own
+  /// record file always uses that segment's offset.
+  void set_level_rto(std::function<std::optional<si8>(const std::string&)> f) {
+    level_rto_ = std::move(f);
+  }
+
  private:
   /// The field holds nothing after its terminator (an edit to the same value
   /// leaves such a field alone; anything hidden there is rewritten away).
@@ -1709,7 +1764,7 @@ class Copier {
       return b;
     }
     for (std::size_t off : lay->times)
-      write<si8>(b, off, sh_(read<si8>(b, off), what + " body time", true));
+      write<si8>(b, off, time(read<si8>(b, off), what + " body time", true));
     for (const auto& slot : lay->text) {
       tf.field = slot.name;
       write_string(b, slot.offset, slot.bytes,
@@ -1739,8 +1794,8 @@ class Copier {
       if (now != name) ++arep_->record_text_fields_changed;
       write_string(e, 0, SEIZ_CHANNEL_NAME, now);
       for (std::size_t off : {SEIZ_CH_ONSET, SEIZ_CH_OFFSET})
-        write<si8>(e, off, sh_(read<si8>(e, off), what + " channel " + std::to_string(c) + " time",
-                               true));
+        write<si8>(e, off, time(read<si8>(e, off), what + " channel " + std::to_string(c) + " time",
+                                true));
       out.insert(out.end(), e.begin(), e.end());
       ++kept;
     }
@@ -1751,6 +1806,7 @@ class Copier {
   const SessionSource& src_;
   Rules rules_;
   const Shifter& sh_;
+  std::function<std::optional<si8>(const std::string&)> level_rto_;
   const Redactor* red_;  // anonymize only
   std::string name_, pseudonym_;
   std::set<std::string> excluded_;  // channel_key()s
@@ -1798,6 +1854,11 @@ struct SourcePlan {
   detail::SessionLayout layout;
   std::vector<std::string> all_channels;  // data + record-only, sorted
   si8 rto = 0;
+  /// The offset status inspect reports ("none", "applied", "disputed", ...).
+  std::string rto_status = "none";
+  /// Each segment's own offset (by source .tmet path), read only when the
+  /// segments disagree ("disputed"); otherwise every segment has `rto`.
+  std::map<std::string, si8> segment_rtos;
   si8 first = 0, last = 0;
   bool has_times = false;
   std::set<std::string> session_names;    // folder stem + every stored session_name
@@ -1807,6 +1868,31 @@ struct SourcePlan {
   std::set<std::string> id_values;
   std::set<Uuid> uuids;
 };
+
+/// The offset a segment's times are stored against (its own section 3).
+si8 segment_rto_of(const SourcePlan& p, const std::string& tmet) {
+  const auto it = p.segment_rtos.find(tmet);
+  return it == p.segment_rtos.end() ? p.rto : it->second;
+}
+
+/// The offset a channel's (`channel` set) or the session's record file is
+/// read with: the one all of its segments agree on, as the Reader resolves
+/// it (Session::agreed_rto; a channel without segments takes the session's).
+/// nullopt = there is none: they disagree, or the offset is not known.
+std::optional<si8> level_rto_of(const SourcePlan& p, const std::string* channel) {
+  if (p.rto_status == "none" || p.rto_status == "applied") return p.rto;
+  if (p.rto_status != "disputed" || !channel) return std::nullopt;
+  std::optional<si8> agreed;
+  for (const auto& c : p.layout.channels) {
+    if (c.name != *channel) continue;
+    for (const auto& seg : c.segments) {
+      const si8 r = segment_rto_of(p, seg.tmet);
+      if (agreed && *agreed != r) return std::nullopt;
+      agreed = r;
+    }
+  }
+  return agreed ? agreed : level_rto_of(p, nullptr);
+}
 
 /// The source's recording range +- (1 day - 1 us), plain or negated. For a
 /// field that is not a stored time (an ID), only this window applies: an
@@ -1871,6 +1957,14 @@ SourcePlan plan_source(const SessionSource& src, const std::string& path,
                        p.all_channels.end());
   const auto& to = p.summary.time_offset;
   p.rto = (to.status == "applied" && to.value) ? *to.value : 0;
+  p.rto_status = to.status;
+  if (to.status == "disputed")  // each segment's own offset (metadata reads only)
+    for (const auto& c : p.layout.channels)
+      for (const auto& seg : c.segments) {
+        ctl.check();
+        p.segment_rtos[seg.tmet] =
+            segment_rto(load_time_series_metadata(src.read_all(seg.tmet), password));
+      }
   if (p.summary.first_time && p.summary.last_time) {
     p.has_times = true;
     p.first = *p.summary.first_time;
@@ -1966,14 +2060,16 @@ Scanner build_scanner(const SourcePlan& p, const std::string& new_name, bool cle
 class Verifier {
  public:
   /// `edits` set = a transform's verification (times, regions and bodies
-  /// must equal the source's; only the edits may differ); unset = anonymize.
-  Verifier(const SessionSource& src, const SessionSource& dst, const SourcePlan& plan, si8 shift,
-           const VerifyOptions& o, const MetadataEdits* edits, const Control& ctl,
-           std::function<void(std::uint64_t)> progress, VerifyReport& rep)
+  /// must equal the source's; only the edits may differ); unset = anonymize,
+  /// with every time `shift` away, or (`shift` unset) every time kept.
+  Verifier(const SessionSource& src, const SessionSource& dst, const SourcePlan& plan,
+           std::optional<si8> shift, const VerifyOptions& o, const MetadataEdits* edits,
+           const Control& ctl, std::function<void(std::uint64_t)> progress, VerifyReport& rep)
       : src_(src), dst_(dst), plan_(plan), o_(o), edits_(edits), ctl_(ctl),
         progress_(std::move(progress)), rep_(rep) {
+    keep_times_ = !edits && !shift;
     sh_.rto = plan.rto;
-    sh_.shift = shift;
+    sh_.shift = shift.value_or(0);
     // The leak window: the original range, widened by just under a day on
     // each side. A shift that passed the floor puts every copied time outside
     // it, so a value inside can only be one the rewrite missed.
@@ -2013,6 +2109,11 @@ class Verifier {
     ++rep_.times_checked;
     if (transform()) {  // copied verbatim
       if (dst_v != src_v) problem(loc, field, "differs from the source's (a transform copies every time as stored)");
+      return;
+    }
+    if (keep_times_) {  // kept: as stored, so also as read (the offset is kept too)
+      if (dst_v != src_v)
+        problem(loc, field, "differs from the source's (the copy keeps every time as stored)");
       return;
     }
     if (!(body && is_sentinel(dst_v, true)) && in_window(dst_v))
@@ -2116,7 +2217,10 @@ class Verifier {
       return;
     }
     if (cut_segment_) {  // a cut segment's span: only the leak scan applies
+      // (kept times: the span of what the segment holds, which the
+      // validator checks against its blocks, as for a transform)
       for (std::size_t off : {UH_START, UH_END}) {
+        if (keep_times_) break;
         ++rep_.times_checked;
         if (in_window(read<si8>(d, off)))
           leak(loc, "universal header time", "holds a time inside the source's recording range");
@@ -2244,6 +2348,8 @@ class Verifier {
     collect_source_uuids(std::span<const ui1>(s.bytes).first(UH));
     std::span<const ui1> sb(s.bytes), db(d.bytes);
     seg_rto_ = s.rto;
+    dst_seg_rto_ = d.rto;
+    dst_tmet_uh_.assign(d.bytes.begin(), d.bytes.begin() + UH);
     {
       const auto m = fmt::TimeSeriesMetadataSection2::parse(sb.subspan(S2, S2_BYTES));
       seg_fs_ = m.sampling_frequency;
@@ -2260,8 +2366,13 @@ class Verifier {
     }
     const auto ds2 = db.subspan(S2, S2_BYTES), ss2 = sb.subspan(S2, S2_BYTES);
     const auto ds3 = db.subspan(S3, S3_BYTES);
-    // Time-zone fields: SET values, not shifted.
-    if (read<si8>(ds3, S3_RTO) != 0) {
+    // Time-zone fields: SET values, not shifted. The offset: 0 in a shifted
+    // copy, the source segment's own in one that keeps the times.
+    if (keep_times_) {
+      if (read<si8>(ds3, S3_RTO) != s.rto)
+        problem(drel, "recording_time_offset",
+                "is not the source's (a copy that keeps the times keeps it)");
+    } else if (read<si8>(ds3, S3_RTO) != 0) {
       if (in_window(read<si8>(ds3, S3_RTO)))
         leak(drel, "recording_time_offset", "holds a date from the source's range");
       problem(drel, "recording_time_offset", "is not 0");
@@ -2523,6 +2634,7 @@ class Verifier {
 
     // The source's blocks around the window, in order, in bounded batches.
     const auto se = src_.read_range(s.tidx, UH + f * ENTRY, (l - f) * ENTRY);
+    std::optional<si8> span_first, span_end;  // user uUTC, as the source places them
     std::size_t j = 0;  // the copy's next block
     ui4 dmax = 0;
     std::size_t i = 0;
@@ -2550,6 +2662,10 @@ class Verifier {
         const auto [a, e] = window_slice(ts, ns_b, seg_fs_, t0, t1);
         if (a >= e) continue;  // nothing of this block is in the window
         const bool whole = !exact || (a == 0 && e == ns_b);
+        // The span the copy's segment holds, from the source block's header
+        // (the same rule the copy uses), checked against its headers below.
+        if (!span_first) span_first = sample_time(ts, whole ? 0 : a, seg_fs_);
+        span_end = sample_time(ts, whole ? ns_b : e, seg_fs_);
         load_until(j);
         if (broken) break;
         const std::string loc = d.tdat + " block " + std::to_string(j);
@@ -2596,6 +2712,24 @@ class Verifier {
       load_until(nd);  // the rest, for the CRC
     }
     if (broken) return;
+    // Every universal header of the segment (.tmet, .tidx, .tdat) spans
+    // exactly what it holds: its first kept sample to just past its last,
+    // in the copy's own offset and (when shifting) moved by the shift. The
+    // validator cannot be left this: its time checks stand down at rto != 0.
+    if (span_first) {
+      const si8 moved = (transform() || keep_times_) ? 0 : sh_.shift;
+      const std::pair<std::span<const ui1>, const std::string*> uhs[] = {
+          {dst_tmet_uh_, &d.tmet}, {duh_x, &d.tidx}, {duh_d, &d.tdat}};
+      for (const auto& [uh, where] : uhs) {
+        if (uh.size() < UH) continue;
+        rep_.times_checked += 2;
+        const si8 a = read<si8>(uh, UH_START), b = read<si8>(uh, UH_END);
+        if (is_sentinel(a, false) || to_user_time(a, dst_seg_rto_) != *span_first + moved)
+          problem(*where, "universal header start_time", "is not the first sample the segment holds");
+        if (is_sentinel(b, false) || to_user_time(b, dst_seg_rto_) != *span_end + moved)
+          problem(*where, "universal header end_time", "is not the end of what the segment holds");
+      }
+    }
     if (dexpect != dtdat) problem(d.tdat, "data file", "holds bytes no index entry describes");
     if (read<ui4>(duh_x, 4) != dcrc_x) problem(d.tidx, "body CRC", "does not verify");
     if (read<ui4>(duh_d, 4) != dcrc_d) problem(d.tdat, "body CRC", "does not verify");
@@ -2675,9 +2809,13 @@ class Verifier {
       problem(loc, "RED payload", "is not byte-identical to the source's");
   }
 
+  /// `rto`: the offset the source file's times are read with (null = the
+  /// session's); pointing at nullopt = its segments disagree, so a time
+  /// stored against it cannot be placed in a cut.
   void check_records(const std::string& srel, const std::string& drel,
                      const std::set<std::string>& excluded,
-                     const std::function<bool(si8)>& keep_time = {}) {
+                     const std::function<bool(si8)>& keep_time = {},
+                     const std::optional<si8>* rto = nullptr) {
     ctl_.check();
     RawRecordFile s = read_record_file(src_, srel, o_.password);
     RawRecordFile d;
@@ -2701,13 +2839,23 @@ class Verifier {
       check_counts(d.uh, n, largest, drel);
       if (d.has_ridx) check_counts(d.ridx_uh, n, static_cast<si8>(RIDX), ridx_of(drel));
     }
-    // A cut keeps the records in its window (the same rule as the copy).
+    // A cut keeps the records in its window (the same rule as the copy),
+    // each placed with the offset ITS file is read with.
+    const std::optional<si8> lrto = rto ? *rto : std::optional<si8>(sh_.rto);
+    const si8 r_rto = lrto.value_or(sh_.rto);
     std::vector<std::size_t> keep;
     for (std::size_t i = 0; i < s.records.size(); ++i) {
       const RawRecord& r = s.records[i];
-      if (o_.time_range && !record_in_window(r, sh_.rto, o_.time_range->first, o_.time_range->second))
+      if ((o_.time_range || keep_time) && !lrto && record_offset_dependent(r)) {
+        problem(drel, "records",
+                "a source record's time is stored against a recording-time offset its "
+                "segments disagree on (or that cannot be read), so whether a cut keeps it is "
+                "unknown");
+        return;
+      }
+      if (o_.time_range && !record_in_window(r, r_rto, o_.time_range->first, o_.time_range->second))
         continue;
-      if (keep_time && !keep_time(is_sentinel(r.time, false) ? r.time : to_user_time(r.time, sh_.rto)))
+      if (keep_time && !keep_time(is_sentinel(r.time, false) ? r.time : to_user_time(r.time, r_rto)))
         continue;
       keep.push_back(i);
     }
@@ -2837,8 +2985,9 @@ class Verifier {
       time_field(read<si8>(a.body, off), read<si8>(b.body, off), loc,
                  "record body time at " + std::to_string(off), true);
     // Epoc / Curs id_number (+0) is an si8 a recorder may fill with a time.
-    // It is copied as is; a value in the recording range is reported.
-    if (a.type == "Epoc" || a.type == "Curs") {
+    // It is copied as is; a value in the recording range is reported (when
+    // shifting: a copy that keeps the times shows the dates anyway).
+    if (!keep_times_ && (a.type == "Epoc" || a.type == "Curs")) {
       ++rep_.times_checked;
       if (in_absolute_window(read<si8>(b.body, 0)))
         leak(loc, "record id_number", "holds a value inside the source's recording range");
@@ -2888,11 +3037,14 @@ class Verifier {
   const SourcePlan& plan_;
   const VerifyOptions& o_;
   const MetadataEdits* edits_;  // set = a transform
+  bool keep_times_ = false;     // anonymize without a shift: every time kept
   std::map<Uuid, Uuid> level_map_;  // transform: source level UUID -> the copy's
   // A cut (#103): set while a segment of the copy is checked.
   bool cut_segment_ = false;
   bool merge_ = false;
   si8 seg_rto_ = 0;  // the source segment's
+  si8 dst_seg_rto_ = 0;              // the copy segment's (check_tmet)
+  std::vector<ui1> dst_tmet_uh_;     // the copy segment's .tmet header (check_tmet)
   sf8 seg_fs_ = 0;
   si8 seg_reach_us_ = 0;
   const Control& ctl_;
@@ -2915,9 +3067,11 @@ std::string finding_key(const Finding& f) {
 /// `edits` set = verify a transform (MetadataEdits it was made with); unset =
 /// verify an anonymized copy (shift, VerifyOptions' clear flags).
 VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
-                         const SourcePlan& plan, const std::string& dst_path, si8 shift,
+                         const SourcePlan& plan, const std::string& dst_path,
+                         std::optional<si8> shift,
                          const VerifyOptions& o, const MetadataEdits* edits, const Control& ctl,
-                         std::function<void(std::uint64_t)> progress) {
+                         std::function<void(std::uint64_t)> progress,
+                         const std::vector<std::string>* left_out_without_samples = nullptr) {
   VerifyReport rep;
   const auto dsrc = open_session_source(dst_path);
   const SessionSource& dst = *dsrc;
@@ -2968,10 +3122,11 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
   }
 
   // The shift floor, re-checked: below it the leak window cannot tell a
-  // leak from a legitimately shifted time.
-  if (!edits && plan.has_times) {
+  // leak from a legitimately shifted time. (No shift: the times are kept,
+  // and every one is compared with the source's instead.)
+  if (!edits && shift && plan.has_times) {
     const si8 span = saturating_add(plan.last, -plan.first);
-    const si8 mag = shift == INT64_MIN ? INT64_MAX : (shift < 0 ? -shift : shift);
+    const si8 mag = *shift == INT64_MIN ? INT64_MAX : (*shift < 0 ? -*shift : *shift);
     if (mag < saturating_add(span, DAY_US))
       v.problem(dst_path, "shift", "|shift| is below the session's time span plus one day");
   }
@@ -3040,6 +3195,73 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
       v.problem(s.path, "validator", "could not check a segment of the copy: " + s.reason);
   }
 
+  // A cut: the offsets the SOURCE's files are read with, from its own
+  // metadata (not the plan's), and which source channels hold samples in
+  // the window (each segment by its own offset, each block by its header).
+  std::map<std::string, si8> src_seg_rto;
+  auto seg_rto = [&](const std::string& tmet) {
+    auto it = src_seg_rto.find(tmet);
+    if (it == src_seg_rto.end())
+      it = src_seg_rto
+               .emplace(tmet, segment_rto(load_time_series_metadata(src.read_all(tmet),
+                                                                    o.password)))
+               .first;
+    return it->second;
+  };
+  std::function<std::optional<si8>(const std::string*)> level_rto =
+      [&](const std::string* channel) -> std::optional<si8> {
+    std::optional<si8> agreed;
+    for (const auto& c : plan.layout.channels) {
+      if (channel && c.name != *channel) continue;
+      for (const auto& x : c.segments) {
+        const si8 r = seg_rto(x.tmet);
+        if (agreed && *agreed != r) return std::nullopt;
+        agreed = r;
+      }
+    }
+    if (channel && !agreed) return level_rto(nullptr);  // no segments: the session's
+    return agreed.value_or(0);
+  };
+  auto has_samples_in_window = [&](const detail::LayoutChannel& c) {
+    const auto [t0, t1] = *o.time_range;
+    for (const auto& x : c.segments) {
+      ctl.check();
+      const TmetImage t = open_tmet(src, x.tmet, o.password);
+      const auto m = fmt::TimeSeriesMetadataSection2::parse(
+          std::span<const ui1>(t.bytes).subspan(S2, S2_BYTES));
+      if (!(m.sampling_frequency > 0)) continue;
+      const auto [f, l] = window_entries(src, x.tidx, t.rto, t0, t1, longest_block_us(m));
+      if (f >= l) continue;
+      const auto es = src.read_range(x.tidx, UH + f * ENTRY, (l - f) * ENTRY);
+      const auto tdat_bytes = src.file_size(x.tdat);
+      for (std::size_t i = 0; i < l - f; ++i) {
+        const auto off = static_cast<std::uint64_t>(read<si8>(es, i * ENTRY));
+        if (off + fmt::RED_BLOCK_HEADER_BYTES > tdat_bytes) continue;
+        const auto h = src.read_range(x.tdat, off, fmt::RED_BLOCK_HEADER_BYTES);
+        const auto [a, b] = window_slice(to_user_time(read<si8>(h, 40), t.rto),
+                                         read<ui4>(h, 32), m.sampling_frequency, t0, t1);
+        if (a < b) return true;
+      }
+    }
+    return false;
+  };
+  if (o.time_range) {
+    std::set<std::string> claimed;
+    if (left_out_without_samples)
+      claimed.insert(left_out_without_samples->begin(), left_out_without_samples->end());
+    for (const auto& c : plan.layout.channels) {
+      if (dch.count(c.name)) continue;
+      if (left_out_without_samples && !claimed.count(c.name)) continue;  // excluded on request
+      if (!has_samples_in_window(c)) continue;
+      if (left_out_without_samples)
+        v.problem(c.name, "channel",
+                  "was left out as having no samples in time_range, but the source has samples "
+                  "there");
+      else
+        v.note(c.name, "channel", "has samples in time_range but is not in the copy (excluded?)");
+    }
+  }
+
   // Segments.
   std::map<std::string, const detail::LayoutChannel*> schan;
   for (const auto& c : plan.layout.channels) schan[c.name] = &c;
@@ -3078,7 +3300,8 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
         for (; next < sc.segments.size(); ++next) {
           const si8 rto = segment_rto(
               load_time_series_metadata(src.read_all(sc.segments[next].tmet), o.password));
-          const si8 t = edits ? to_user_time(stored, rto) : to_user_time(stored, 0) - shift;
+          const si8 t = (edits || !shift) ? to_user_time(stored, rto)
+                                          : to_user_time(stored, 0) - *shift;
           if (t >= spans[next].first && t < spans[next].second) {
             ss = sc.segments.begin() + static_cast<std::ptrdiff_t>(next++);
             break;
@@ -3096,8 +3319,10 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
       v.check_segment_data(*ss, ds);
       ++rep.segments;
       const bool s_rec = src.exists(ss->rdat()), d_rec = dst.exists(ds.rdat());
-      if (s_rec && d_rec) v.check_records(ss->rdat(), ds.rdat(), excluded_keys);
-      else if (s_rec != d_rec && !(cut && s_rec))  // a cut may keep none of its records
+      if (s_rec && d_rec) {
+        const std::optional<si8> r = cut ? std::optional<si8>(seg_rto(ss->tmet)) : std::nullopt;
+        v.check_records(ss->rdat(), ds.rdat(), excluded_keys, {}, cut ? &r : nullptr);
+      } else if (s_rec != d_rec && !(cut && s_rec))  // a cut may keep none of its records
         v.problem(ds.dir(), "segment records", "present in only one of source and copy");
       v.set_cut_segment(false);
     }
@@ -3106,8 +3331,12 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
   for (const auto& c : dch) {
     const std::string rel = c + ".timd/" + c + ".rdat";
     const bool s_rec = src.exists(rel), d_rec = dst.exists(rel);
-    if (s_rec && d_rec) v.check_records(rel, rel, excluded_keys);
-    else if (s_rec != d_rec) v.problem(rel, "channel records", "present in only one of source and copy");
+    if (s_rec && d_rec) {
+      const std::optional<si8> r = o.time_range ? level_rto(&c) : std::nullopt;
+      v.check_records(rel, rel, excluded_keys, {}, o.time_range ? &r : nullptr);
+    } else if (s_rec != d_rec) {
+      v.problem(rel, "channel records", "present in only one of source and copy");
+    }
   }
   {
     std::string amb_s, amb_d;
@@ -3116,7 +3345,8 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
     if (!s_rel.empty() && !d_rel.empty()) {
       if (d_rel != dname + ".rdat")
         v.problem(d_rel, "session records", "are not named after the copy's session");
-      v.check_records(s_rel, d_rel, excluded_keys);
+      const std::optional<si8> r = o.time_range ? level_rto(nullptr) : std::nullopt;
+      v.check_records(s_rel, d_rel, excluded_keys, {}, o.time_range ? &r : nullptr);
     } else if (s_rel.empty() != d_rel.empty() || !amb_d.empty()) {
       v.problem(dst_path, "session records", "present in only one of source and copy");
     }
@@ -3181,14 +3411,18 @@ Redactor copy_redactor(const SourcePlan& plan, const AnonymizeOptions& an, const
 /// `collect`: false = throw the first refusal (anonymize_session /
 /// transform_session), true = record every refusal and go on with the checks
 /// that do not depend on a failed one (check_anonymize / check_transform).
-/// Reads metadata only, never a `.tdat`. The anonymization checks (shift,
-/// identity in the new names, the offset convention, times hidden in record
-/// ids) run only under anonymize's rules; a transform copies every time as
-/// stored, so none of them applies to it.
+/// Reads metadata only, never a `.tdat`. The anonymization checks (identity
+/// in the new names) run only under anonymize's rules; the time checks (the
+/// shift, the offset convention, times hidden in record ids) only when it
+/// SHIFTS. A transform, and an anonymized copy that keeps the times, copy
+/// every time as stored, so none of those applies to them.
+/// `check_shift` false (redact_text): the shift's own size and sign are not
+/// checked; the shifting rules still apply when a shift is given.
 Preflight preflight(const std::string& src_path, const std::string& dst_path, const Rules& rules,
                     const Control& ctl, bool collect, bool check_shift) {
   const CopyOptions& o = *rules.copy;
   const AnonymizeOptions* an = rules.anon;
+  const bool shifting = rules.shifting();
   Preflight pf;
   auto add = [&](RefusalKind kind, std::string code, std::string message,
                  std::string channel = {}, std::string field = {}) {
@@ -3212,8 +3446,10 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
   ctl.check();
 
   // ---- options -----------------------------------------------------------
-  if (an && check_shift && an->shift_us == 0)
-    add(RefusalKind::InvalidArgument, "shift-zero", "shift_us must not be 0", {}, "shift_us");
+  if (shifting && check_shift && *an->shift_us == 0)
+    add(RefusalKind::InvalidArgument, "shift-zero",
+        "shift_us must not be 0 (leave the shift out to keep every time as it is)", {},
+        "shift_us");
   const bool selection_conflict = !o.channels.empty() && !o.exclude_channels.empty();
   if (selection_conflict)
     add(RefusalKind::InvalidArgument, "channel-selection-conflict",
@@ -3300,15 +3536,16 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
             (an ? "anonymizing" : "copying") + " needs the level-2 password",
         {}, "password");
   {
-    // A transform copies every time as stored, so how the offset convention
-    // reads them does not concern it; everything else (parts it could not
-    // copy whole) does.
+    // A transform (and an anonymized copy that keeps the times) copies every
+    // time as stored, with the offset it is read against, so how the offset
+    // convention reads them does not concern it; everything else (parts it
+    // could not copy whole) does.
     static const std::set<std::string> time_only = {
         "time-offset-disputed", "ambiguous-time-convention", "offset-assumed-zero",
         "times-unresolved"};
     std::vector<CopyRefusal> blockers;
     for (const auto& w : plan.summary.warnings)
-      if (w.blocks_anonymize && (an || !time_only.count(w.code)))
+      if (w.blocks_anonymize && (shifting || !time_only.count(w.code)))
         blockers.push_back(CopyRefusal{blocker_code(w.code), scrub_times(plan, w.message),
                                        RefusalKind::WriteConflict, {}, {}, w.code});
     if (!blockers.empty() && !collect) {
@@ -3321,9 +3558,17 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
     }
     for (auto& b : blockers) pf.refusals.push_back(std::move(b));
   }
-  if (an && plan.rto != 0)
+  if (shifting && plan.rto != 0)
     pf.notes.push_back("the source used meflib's recording-time offset; its times were read as "
                        "true UTC and the copy has recording_time_offset = 0");
+  else if (an && plan.rto_status == "disputed")
+    pf.notes.push_back("the source's segments disagree on meflib's recording-time offset; the "
+                       "copy keeps each segment's own with every time as stored, so it reads the "
+                       "same times (the report's source_recording_time_offset is 0: there is no "
+                       "single one)");
+  else if (an && plan.rto != 0)
+    pf.notes.push_back("the source used meflib's recording-time offset; the copy keeps it with "
+                       "every time as stored, so it reads the same times");
 
   // ---- channel selection -------------------------------------------------
   {
@@ -3374,11 +3619,12 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
           try {
             const auto uh = src.read_range(seg.tmet, 0, UH);
             const si8 a = read<si8>(uh, UH_START), b = read<si8>(uh, UH_END);
-            // A first look with the session's offset (a day's margin), the
-            // segment's own for the ones that may overlap.
+            // A first look with the segment's own offset (a day's margin;
+            // the session's may differ from it when segments disagree).
+            const si8 r = segment_rto_of(plan, seg.tmet);
             if (!is_sentinel(a, false) && !is_sentinel(b, false) &&
-                !(to_user_time(a, plan.rto) < saturating_add(t1, DAY_US) &&
-                  to_user_time(b, plan.rto) > saturating_add(t0, -DAY_US)))
+                !(to_user_time(a, r) < saturating_add(t1, DAY_US) &&
+                  to_user_time(b, r) > saturating_add(t0, -DAY_US)))
               continue;
             const TmetImage t = open_tmet(src, seg.tmet, o.password);
             const auto m = fmt::TimeSeriesMetadataSection2::parse(
@@ -3447,8 +3693,8 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
 
   // ---- the shift ---------------------------------------------------------
   bool first_time_refused = false;
-  if (an && check_shift && an->shift_us != 0 && plan.has_times) {
-    const si8 shift_us = an->shift_us;
+  if (shifting && check_shift && *an->shift_us != 0 && plan.has_times) {
+    const si8 shift_us = *an->shift_us;
     const si8 span = saturating_add(plan.last, -plan.first);
     const si8 mag =
         shift_us == INT64_MIN ? INT64_MAX : (shift_us < 0 ? -shift_us : shift_us);
@@ -3537,11 +3783,12 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
   // offset, moved to 0 or below, out of range) is refused here first. Only
   // the .tidx/.tdat headers and block times are left to the copy pass. After
   // the first such refusal the rest are skipped (one per cause is enough).
-  // A transform writes times as stored: nothing to check.
-  const Shifter sh{plan.rto, an && check_shift ? an->shift_us : 0};
+  // A transform, and a copy that keeps the times, write times as stored:
+  // nothing to check.
+  const Shifter sh{plan.rto, shifting && check_shift ? *an->shift_us : 0};
   bool time_refused = first_time_refused;  // that refusal covers the rest
   auto shift_time = [&](si8 v, const std::string& what, bool body, const std::string& channel) {
-    if (!an || time_refused) return;
+    if (!shifting || time_refused) return;
     try {
       (void)sh(v, what, body);
     } catch (...) {
@@ -3553,14 +3800,18 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
   // number is the .tmet header's (@48); the folder name must agree. A folder
   // whose suffix is not a number, or names another segment, is refused:
   // which one is right is unknown. (1024 bytes per segment.)
-  std::vector<std::pair<std::string, std::string>> record_files;  // (rel, channel)
+  struct RecordFileRef {
+    std::string rel, channel;
+    bool segment_level = false;
+  };
+  std::vector<RecordFileRef> record_files;
   std::vector<KeptText> kept_texts;  // anonymize, text kept: checked at the end
   for (const auto& c : plan.layout.channels) {
     if (!pf.kept.count(c.name)) continue;
     std::set<int> numbers;
     for (const auto& seg : c.segments) {
       ctl.check();
-      if (src.exists(seg.rdat())) record_files.emplace_back(seg.rdat(), c.name);
+      if (src.exists(seg.rdat())) record_files.push_back({seg.rdat(), c.name, true});
       const std::string folder = leaf(seg.dir());
       const std::string fstem = folder.substr(0, folder.size() - 5);
       const auto dash = fstem.rfind('-');
@@ -3603,14 +3854,14 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
   }
   for (const auto& ch : pf.kept) {
     const std::string crec = ch + ".timd/" + ch + ".rdat";
-    if (src.exists(crec)) record_files.emplace_back(crec, ch);
+    if (src.exists(crec)) record_files.push_back({crec, ch, false});
   }
-  if (!pf.session_records.empty()) record_files.emplace_back(pf.session_records, "");
+  if (!pf.session_records.empty()) record_files.push_back({pf.session_records, "", false});
   // Record files: read (and CRC-checked) as the copy pass reads them, each
   // index entry matched to its record by offset, and an Epoc/Curs id_number
   // holding a time inside the recording range refused: it is copied as is,
   // so the copy would carry the date. Small files; inspect reads them too.
-  for (const auto& [rel, channel] : record_files) {
+  for (const auto& [rel, channel, segment_level] : record_files) {
     ctl.check();
     RawRecordFile f;
     try {
@@ -3621,6 +3872,25 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
       continue;
     }
     const std::string where = src.describe(rel);
+    // A cut decides per record whether it lies in the window, which needs
+    // the offset the file's times are stored against: the segment's own, or
+    // the one all segments of its channel (or session) agree on. Without
+    // one, a time stored against it (negated) cannot be placed: refused, as
+    // the Reader refuses to read such a file.
+    if (o.time_range && !segment_level &&
+        !level_rto_of(plan, channel.empty() ? nullptr : &channel))
+      for (std::size_t i = 0; i < f.records.size(); ++i)
+        if (record_offset_dependent(f.records[i])) {
+          add(RefusalKind::WriteConflict, "time-range-offset-disputed",
+              "record " + std::to_string(i) + " of " + where +
+                  " stores its time against a recording-time offset " +
+                  (plan.rto_status == "disputed"
+                       ? std::string("its segments disagree on")
+                       : std::string("that cannot be read")) +
+                  ", so whether it lies in time_range is unknown; copy it without time_range",
+              channel, "time_range");
+          break;
+        }
     for (const auto* uh : {&f.uh, &f.ridx_uh}) {
       if (uh->size() < UH) continue;  // no index file
       shift_time(read<si8>(*uh, UH_START), "record file " + where + " start time", false, channel);
@@ -3664,7 +3934,7 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
             "record index of " + where + " has no entry for record " + std::to_string(i) +
                 "; which time is right is unknown",
             channel);
-      if (an && (r.type == "Epoc" || r.type == "Curs") && layout_of(r) &&
+      if (shifting && (r.type == "Epoc" || r.type == "Curs") && layout_of(r) &&
           in_absolute_window(plan, read<si8>(r.body, 0)))
         add(RefusalKind::WriteConflict, "id-number-time",
             "record " + std::to_string(i) + " (" + r.type + ") of " + where +
@@ -3735,7 +4005,8 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
 
 /// verify_anonymized / verify_transform: plan the source, then verify_impl
 /// with its own progress over both sessions.
-VerifyReport verify_standalone(const std::string& src, const std::string& dst, si8 shift_us,
+VerifyReport verify_standalone(const std::string& src, const std::string& dst,
+                               std::optional<si8> shift_us,
                                const VerifyOptions& options, const MetadataEdits* edits,
                                const Control& ctl) {
   const auto source = open_session_source(src);
@@ -3758,8 +4029,9 @@ VerifyReport verify_standalone(const std::string& src, const std::string& dst, s
 
 // ---------------------------------------------------------------------------
 
-VerifyReport verify_anonymized(const std::string& src, const std::string& dst, si8 shift_us,
-                               const VerifyOptions& options, const Control& ctl) {
+VerifyReport verify_anonymized(const std::string& src, const std::string& dst,
+                               std::optional<si8> shift_us, const VerifyOptions& options,
+                               const Control& ctl) {
   return verify_standalone(src, dst, shift_us, options, nullptr, ctl);
 }
 
@@ -3794,10 +4066,9 @@ CopyCheck check_of(Preflight& pf) {
 }  // namespace
 
 AnonymizeCheck check_anonymize(const std::string& src, const std::string& dst,
-                               const AnonymizeOptions& options, const Control& ctl,
-                               bool check_shift) {
+                               const AnonymizeOptions& options, const Control& ctl) {
   Preflight pf = preflight(src, dst, Rules{&options, &options, nullptr}, ctl, /*collect=*/true,
-                           check_shift);
+                           /*check_shift=*/true);
   AnonymizeCheck c;
   c.pseudonym = pf.pseudonym;
   static_cast<CopyCheck&>(c) = check_of(pf);
@@ -3869,7 +4140,7 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
   const std::string& new_name = pf.new_name;
   const std::string& pseudonym = pf.pseudonym;
 
-  Shifter sh{plan.rto, an ? an->shift_us : 0};
+  Shifter sh{plan.rto, rules.shifting() ? *an->shift_us : 0};
   std::optional<Redactor> red;
   if (an) {
     red = copy_redactor(plan, *an, pf);
@@ -3915,6 +4186,9 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
     fs::create_directories(root);
     Copier cp(src, rules, sh, red ? &*red : nullptr, new_name, pseudonym, excluded, kept, out,
               ctl, on_bytes, rep, arep, trep);
+    cp.set_level_rto([&plan](const std::string& ch) {
+      return level_rto_of(plan, ch.empty() ? nullptr : &ch);
+    });
 
     std::set<std::string> handled;  // source-relative paths copied
     std::map<std::string, const detail::LayoutChannel*> data;
@@ -3990,8 +4264,10 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
       vo.clear_location = an->clear_location;
       vo.clear_descriptions = an->clear_descriptions;
     }
-    rep.verification = verify_impl(src_path, src, plan, root.string(), an ? an->shift_us : 0, vo,
-                                   an ? nullptr : rules.edits, ctl, on_bytes);
+    rep.verification = verify_impl(src_path, src, plan, root.string(),
+                                   an ? an->shift_us : std::optional<si8>(0), vo,
+                                   an ? nullptr : rules.edits, ctl, on_bytes,
+                                   &pf.without_samples);
     // verify alone cannot tell a dropped channel from an excluded one; here
     // the selection is known.
     if (rep.verification.channels != rep.channels_kept) {

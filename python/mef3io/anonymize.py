@@ -1,8 +1,10 @@
 """De-identified copies of a session (#70).
 
-:func:`anonymize_session` writes a **copy** of a session with every time
-shifted by one constant and the patient's identity removed; the original is
-never modified. :func:`check` runs every check it makes before writing,
+:func:`anonymize_session` writes a **copy** of a session with the patient's
+identity removed; the original is never modified. By default the copy keeps
+every time exactly, so it still shows **when** the recording was made (real
+dates and times); pass ``shift_us`` to move every time by one constant
+instead. :func:`check` runs every check it makes before writing,
 without writing. :func:`verify` checks a copy against its source.
 
 Every refusal carries a stable ``code`` (see :data:`REFUSAL_CODES` and
@@ -109,11 +111,14 @@ class AnonymizeReport:
     session_name, pseudonym : str
         The copy's session name (its folder's stem) and the value written to
         every ``anonymized_name``.
-    shift_us : int
-        The shift applied to every time, in microseconds.
+    shift_us : int or None
+        The shift applied to every time, in microseconds; ``None`` when the
+        copy keeps every time as it was.
     source_recording_time_offset : int
         The source's recording-time offset (meflib's deprecated date
-        masking); the copy always has 0.
+        masking). A shifted copy has 0; a copy that keeps the times keeps it
+        (each segment its own). 0 when the source's segments disagree on it:
+        there is no single one (``notes`` says so).
     channels_kept, channels_excluded : tuple of str
     channels_without_samples : tuple of str
         A cut: channels left out because they have no sample in the window
@@ -151,7 +156,8 @@ class AnonymizeReport:
     -----
     ``source_start_us``, ``source_end_us`` and ``source_channel_times`` are
     the **re-identification key**: with ``shift_us`` they give the real dates
-    back. They are returned to the caller, in memory, and nowhere else:
+    back (a copy that keeps the times shows them anyway, but they are handled
+    the same way). They are returned to the caller, in memory, and nowhere else:
     mef3io never writes them into the copy (the copy's leak scan refuses it
     if any appears), never logs them and never puts them in a warning or a
     message. They are left out of ``repr()``, :meth:`summary`, :meth:`to_dict`
@@ -167,7 +173,7 @@ class AnonymizeReport:
     destination: str
     session_name: str
     pseudonym: str
-    shift_us: int
+    shift_us: Optional[int]
     source_recording_time_offset: int
     channels_kept: Tuple[str, ...]
     channels_excluded: Tuple[str, ...]
@@ -250,8 +256,11 @@ class AnonymizeReport:
         lines = [
             f"wrote {self.destination}: {len(self.channels_kept)} channel(s), "
             f"{self.segments} segment(s), {self.blocks} block(s), {self.records} record(s)",
-            f"  every time shifted by {self.shift_us} us "
-            f"({self.shift_us / DAY_US:+.4f} days); time-zone fields set, identity removed",
+            (f"  every time shifted by {self.shift_us} us "
+             f"({self.shift_us / DAY_US:+.4f} days); time-zone fields set, identity removed"
+             if self.shift_us is not None else
+             "  every time kept as recorded (the copy shows the real dates); "
+             "GMT offset and DST cleared, identity removed"),
         ]
         if self.channels_excluded:
             lines.append(f"  channels left out: {', '.join(self.channels_excluded)}")
@@ -316,7 +325,7 @@ def _arguments(refusals: _Refusals, *, channels, exclude_channels, output_passwo
 def anonymize_session(
     src,
     dst,
-    shift_us: int,
+    shift_us: Optional[int] = None,
     *,
     pseudonym: Optional[str] = None,
     clear: Iterable[str] = _CLEAR_CHOICES,
@@ -331,7 +340,7 @@ def anonymize_session(
     progress: Optional[Callable[[int, int], object]] = None,
     cancel: Optional[CancelToken] = None,
 ) -> AnonymizeReport:
-    """Write a de-identified copy of a session: every time shifted, identity removed.
+    """Write a de-identified copy of a session: identity removed, times kept or shifted.
 
     The source is never modified. The copy is built next to ``dst`` in
     ``<dst>.partial/``, checked with :func:`verify`, and only then moved to
@@ -344,12 +353,18 @@ def anonymize_session(
     and the regions other programs may fill are cleared, so the samples are
     bit-identical.
 
-    **What changes.** Every time moves by ``shift_us``, each stored in the
-    sign convention it came in: universal-header start/end in every file,
-    block-index entries, data-block headers, record headers, record-index
-    entries and the times inside ``Seiz``, ``Epoc`` and ``Curs`` records. The
-    time-zone fields are SET, not shifted: ``recording_time_offset = 0``,
-    ``GMT_offset = 0``, DST start/end = "no entry". Identity: subject names,
+    **Times.** By default (``shift_us=None``) every time is KEPT exactly as
+    the source stores it, and so is its recording-time offset: the copy reads
+    back the same times (and dates) as the source. **The copy still shows
+    when the recording was made.** Pass ``shift_us`` (see
+    :func:`reference_shift`) to hide the dates: every time then moves by
+    ``shift_us``, each stored in the sign convention it came in:
+    universal-header start/end in every file, block-index entries, data-block
+    headers, record headers, record-index entries and the times inside
+    ``Seiz``, ``Epoc`` and ``Curs`` records; the copy's
+    ``recording_time_offset`` is 0. In both modes ``GMT_offset = 0`` and DST
+    start/end = "no entry" (they can say where the recording was made, and
+    no time mef3io returns depends on them). Identity: subject names,
     ID and recording location are cleared (``clear=``); the session name is
     replaced in every header, in the session-level record files' names and in
     the descriptions; ``anonymized_name`` is set to ``pseudonym``; every UUID
@@ -359,12 +374,13 @@ def anonymize_session(
 
     **What is refused** (nothing is written): a destination that exists or
     lies inside the source; a session ``inspect`` marks as blocking (video
-    channels, unreadable or incomplete segments, a disputed or ambiguous
-    recording-time offset, parts the password does not open); a stored time
-    at or before a non-zero recording-time offset; a shift that is zero,
-    smaller in magnitude than the session's time span plus one day, or that
-    would take any time to 0 or below; damaged data (a failing block or record
-    CRC is never re-sealed).
+    channels, unreadable or incomplete segments, parts the password does not
+    open); damaged data (a failing block or record CRC is never re-sealed).
+    When shifting, also: a disputed or ambiguous recording-time offset, a
+    stored time at or before a non-zero recording-time offset, an
+    ``Epoc``/``Curs`` ``id_number`` holding a time of the recording, and a
+    shift that is zero, smaller in magnitude than the session's time span plus
+    one day, or that would take any time to 0 or below.
 
     Parameters
     ----------
@@ -374,10 +390,13 @@ def anonymize_session(
     dst : str or path-like
         The copy, a new ``.mefd`` directory. Its stem becomes the session
         name.
-    shift_us : int
-        Microseconds added to every time. :func:`reference_shift` computes one
-        from a chosen new date. Must satisfy ``abs(shift_us) >= span + 1 day``
-        so that no copied time can fall inside the original range.
+    shift_us : int, optional
+        ``None`` (default): keep every time; the copy shows the real dates.
+        An int: microseconds added to every time. :func:`reference_shift`
+        computes one from a chosen new date. Must satisfy
+        ``abs(shift_us) >= span + 1 day`` so that no copied time can fall
+        inside the original range (``0`` is refused: leave it out to keep the
+        times).
     pseudonym : str, optional
         Written to ``anonymized_name`` in every file. Default: the copy's
         session name. The pseudonym and the copy's name must not contain the
@@ -392,7 +411,7 @@ def anonymize_session(
     text : {"drop", "keep"} or callable, optional
         Record free text (Note/SyLg/EDFA text, Seiz markers and annotation,
         Epoc type and text, Curs name, CSti and ESti strings). ``"drop"``
-        (default) clears it; the records themselves, their types and shifted
+        (default) clears it; the records themselves, their types and (shifted)
         times are kept. ``"keep"`` keeps it, with only the names mef3io knows
         removed (the old session name, cleared subject and location values,
         excluded channel names). Names shorter than 4 characters and numbers
@@ -405,7 +424,9 @@ def anonymize_session(
         with ``errors="surrogateescape"`` and encoded back the same way, so
         every byte survives a callable that returns it unchanged. Python only.
         ``info`` is a dict with ``record_type``, ``field``, ``level``,
-        ``channel``, ``segment`` and ``time`` (shifted, uUTC). Names in a
+        ``channel``, ``segment`` and ``time`` (the time in the copy, uUTC;
+        ``None`` when it cannot be known: without a shift, a time stored
+        against a recording-time offset the file's segments disagree on). Names in a
         seizure's channel list that are not a kept channel's exact name are
         cleared with ``"drop"`` and redacted otherwise.
     rename : bool, optional
@@ -430,7 +451,7 @@ def anonymize_session(
         name is redacted from kept text.
     time_range : (int, int), optional
         Cut: keep only the samples whose time lies in ``[start, end)``, uUTC
-        as the SOURCE holds it (before the shift); annotations are kept when
+        as the SOURCE holds it (before any shift); annotations are kept when
         their time lies in it (a ``Seiz`` or ``Epoc`` record also when its
         span overlaps it). See :func:`mef3io.transform_session`.
     exact : bool, optional
@@ -449,7 +470,7 @@ def anonymize_session(
     Raises
     ------
     ValueError
-        A bad argument: the shift (zero, below the floor, into times <= 0), an
+        A bad argument: a given shift (zero, below the floor, into times <= 0), an
         unknown channel, both ``channels`` and ``exclude_channels``, a
         selection that leaves no channel, an unknown ``clear=`` entry, an
         unpaired output password, ``rename=False`` with a differently named
@@ -477,8 +498,16 @@ def anonymize_session(
 
     Examples
     --------
+    Keep the times (the copy shows the real dates):
+
+    >>> rep = mef3io.anonymize_session("patient.mefd", "S001.mefd")
+    >>> rep.shift_us is None
+    True
+
+    Hide the dates by moving the recording to another day:
+
     >>> shift = mef3io.anonymize.reference_shift(start_us, "2000-01-03", tz="Europe/Prague")
-    >>> rep = mef3io.anonymize_session("patient.mefd", "S001.mefd", shift)
+    >>> rep = mef3io.anonymize_session("patient.mefd", "S002.mefd", shift)
     >>> rep.verification.ok
     True
     """
@@ -489,7 +518,7 @@ def anonymize_session(
     text_mode = a.pop("text_mode")
     raw = _backend().anonymize_session(
         *_fspaths(src, dst),
-        int(shift_us),
+        None if shift_us is None else int(shift_us),
         pseudonym=pseudonym or "",
         text=text_mode,
         rename=bool(rename),
@@ -530,22 +559,27 @@ def check(
     1 KB metadata header and the kept channels' record files. It never reads
     the data (``.tdat``) files. The GIL is released while it runs.
 
-    What it checks, in order: the options (shift zero, both ``channels`` and
+    ``shift_us`` decides WHICH copy is checked, exactly as for
+    :func:`anonymize_session`: ``None`` (default) the copy that keeps every
+    time, an int the shifted copy. The checks that concern only a shift
+    (marked below) are made only with one.
+
+    What it checks, in order: the options (shift zero*, both ``channels`` and
     ``exclude_channels``, output passwords); the destination (exists, a
     leftover ``<dst>.partial``, not ``.mefd``, inside the source); the source
     (opens, password grants level 2, nothing :func:`mef3io.inspect` marks as
-    blocking, including the recording-time-offset refusals); the channel
-    selection; the shift (floor, times above 0); the copy's name and
+    blocking, including* the recording-time-offset refusals); the channel
+    selection; the shift* (floor, times above 0); the copy's name and
     pseudonym (identity, length, ``rename=False``); segment numbering; record
     files (readable, index matches, an ``Epoc``/``Curs`` ``id_number``
-    holding a time inside the recording).
+    holding a time inside the recording*). (* only with a shift.)
 
     What it cannot decide (codes marked ``"copy"`` in :data:`REFUSAL_CODES`):
     a data block failing its CRC or running past its file (``block-crc``,
     ``data-damaged``), and the final verification of the copy
-    (``verify-failed``), which needs the copy. Every time in the metadata
-    headers and the record files is put through the copy's own shifting
-    rule up front (``time-before-rto``, ``shift-not-positive``,
+    (``verify-failed``), which needs the copy. With a shift, every time in
+    the metadata headers and the record files is put through the copy's own
+    shifting rule up front (``time-before-rto``, ``shift-not-positive``,
     ``time-overflow``); only a time in a block index or data file header, or
     a block's own time, is met by the copy pass alone, with the same code.
 
@@ -558,8 +592,9 @@ def check(
     src, dst
         As for :func:`anonymize_session`.
     shift_us : int, optional
-        The shift to check. ``None`` skips the shift checks (for a shift not
-        chosen yet).
+        The shift of the copy to check; ``None`` (default) checks the copy
+        that keeps every time (as :func:`anonymize_session` without a shift
+        makes it), to which no shift check applies.
     pseudonym, clear, text, rename, password, output_password, channels, exclude_channels, time_range, exact
         As for :func:`anonymize_session`. A ``text`` callable is never called.
     cancel : CancelToken, optional
@@ -607,7 +642,7 @@ def check(
 def verify(
     src,
     dst,
-    shift_us: int,
+    shift_us: Optional[int] = None,
     *,
     password: str = "",
     output_password: Union[None, str, Sequence[str]] = None,
@@ -630,14 +665,19 @@ def verify(
     * every data block's compressed payload and its 256-byte statistics
       table (compared decrypted) are byte-identical to the source's, so the
       samples are too, with nothing decoded;
-    * every time differs from the source's by exactly ``shift_us``, in the
-      same sign convention, and the time-zone fields hold their set values
-      (offset 0, GMT offset 0, DST "no entry");
+    * with ``shift_us=None`` (a copy that keeps the times) every time —
+      universal-header start/end, block-index entries, data-block headers,
+      record headers, record index, the times inside records — equals the
+      source's as stored (so also as read), and so does each segment's
+      recording-time offset; with a shift, every time differs from the
+      source's by exactly ``shift_us``, in the same sign convention, and the
+      offset is 0. In both, GMT offset 0 and DST "no entry";
     * the records match in count, order and type;
-    * a **field-wise** leak scan finds nothing: every time field (universal
-      headers, section 3, block index, data-block headers, record headers,
-      record index, Seiz/Epoc/Curs body times) is checked against the
-      source's recording range, plain or negated, widened by a day; every
+    * a **field-wise** leak scan finds nothing: with a shift, every time
+      field (universal headers, section 3, block index, data-block headers,
+      record headers, record index, Seiz/Epoc/Curs body times) is checked
+      against the source's recording range, plain or negated, widened by a
+      day; every
       text field (session and anonymized names, descriptions, subject fields,
       record text) is checked for the names the copy must not carry; no
       source UUID is reused. Sizes, counts and sample values are never read as
@@ -648,8 +688,9 @@ def verify(
     ----------
     src, dst : str or path-like
         The source session and the copy.
-    shift_us : int
-        The shift the copy was made with.
+    shift_us : int, optional
+        The shift the copy was made with; ``None`` (default) for a copy that
+        keeps every time.
     password : str, optional
         Opens an encrypted source (level 2).
     output_password : str or (str, str), optional
@@ -667,7 +708,7 @@ def verify(
     """
     raw = _backend().verify_anonymized(
         *_fspaths(src, dst),
-        int(shift_us),
+        None if shift_us is None else int(shift_us),
         password=password or "",
         output_password=_copy_output_password(output_password),
         **_clear_flags(clear),
@@ -819,13 +860,16 @@ def reference_shift(
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m mef3io anonymize",
-        description="Write a de-identified copy of a session: every time shifted by one "
-        "constant, identity removed. The source is never modified.",
+        description="Write a de-identified copy of a session: identity removed. Every time is "
+        "KEPT by default, so the copy still shows when the recording was made; --shift-us or "
+        "--reference-date moves every time by one constant instead. The source is never "
+        "modified.",
     )
     p.add_argument("src", help="the session (.mefd directory or .mefd.tar archive)")
     p.add_argument("dst", help="the copy, a new .mefd directory (its name becomes the session name)")
-    how = p.add_mutually_exclusive_group(required=True)
-    how.add_argument("--shift-us", type=int, help="shift every time by this many microseconds")
+    how = p.add_mutually_exclusive_group()
+    how.add_argument("--shift-us", type=int,
+                     help="shift every time by this many microseconds (default: keep every time)")
     how.add_argument(
         "--reference-date",
         help="move the session's start to this date (YYYY-MM-DD); keeps the UTC time of day, "

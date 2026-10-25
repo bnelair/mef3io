@@ -1,8 +1,8 @@
 // mef3io — anonymize_session / verify_anonymized (#70), core level. The
 // Python suite (tests/test_p29_anonymize.py) covers records, encryption,
 // legacy and offset sessions and the planted leaks; this pins the C++ API on
-// its own: shifted times, identical samples, the provenance stamp, the
-// refusals and "a cancel leaves nothing".
+// its own: kept times (the default) and shifted times, identical samples,
+// the provenance stamp, the refusals and "a cancel leaves nothing".
 #include <catch2/catch_test_macros.hpp>
 #include <filesystem>
 #include <fstream>
@@ -68,13 +68,13 @@ TEST_CASE("anonymize_session: times shifted, samples identical, provenance 6") {
 
   Session s1(src), s2(dst);
   for (const auto& ch : s1.channels()) {
-    CHECK(s2.channel_info(ch).start_time == s1.channel_info(ch).start_time + o.shift_us);
+    CHECK(s2.channel_info(ch).start_time == s1.channel_info(ch).start_time + *o.shift_us);
     CHECK(s2.channel_info(ch).recording_time_offset == 0);
     const auto r1 = s1.read_runs(ch), r2 = s2.read_runs(ch);
     REQUIRE(r1.size() == r2.size());
     for (std::size_t i = 0; i < r1.size(); ++i) {
       CHECK(r2[i].samples == r1[i].samples);
-      CHECK(r2[i].start_uutc == r1[i].start_uutc + o.shift_us);
+      CHECK(r2[i].start_uutc == r1[i].start_uutc + *o.shift_us);
     }
     for (const auto& seg : s2.segment_map(ch)) {
       REQUIRE(seg.provenance.present);
@@ -90,7 +90,38 @@ TEST_CASE("anonymize_session: times shifted, samples identical, provenance 6") {
   }
   // verify() standalone agrees, and catches a wrong shift.
   CHECK(verify_anonymized(src, dst, o.shift_us).ok);
-  CHECK_FALSE(verify_anonymized(src, dst, o.shift_us + 1).ok);
+  CHECK_FALSE(verify_anonymized(src, dst, *o.shift_us + 1).ok);
+  CHECK_FALSE(verify_anonymized(src, dst, std::nullopt).ok);  // not a copy that keeps the times
+}
+
+TEST_CASE("anonymize_session without a shift keeps every time (the default)") {
+  const auto dir = fresh("mef3io_anon_keep");
+  const std::string src = write_session(dir);
+  const std::string dst = (dir / "K01.mefd").string();
+  AnonymizeOptions o;  // no shift_us
+  REQUIRE_FALSE(o.shift_us.has_value());
+  CHECK(check_anonymize(src, dst, o).ok);
+  const AnonymizeReport rep = anonymize_session(src, dst, o);
+  REQUIRE(rep.verification.ok);
+  CHECK_FALSE(rep.shift_us.has_value());
+  CHECK(rep.verification.times_checked > 10);
+  Session s1(src), s2(dst);
+  for (const auto& ch : s1.channels()) {
+    CHECK(s2.channel_info(ch).start_time == s1.channel_info(ch).start_time);
+    CHECK(s2.channel_info(ch).end_time == s1.channel_info(ch).end_time);
+    const auto r1 = s1.read_runs(ch), r2 = s2.read_runs(ch);
+    REQUIRE(r1.size() == r2.size());
+    for (std::size_t i = 0; i < r1.size(); ++i) {
+      CHECK(r2[i].samples == r1[i].samples);
+      CHECK(r2[i].start_uutc == r1[i].start_uutc);
+    }
+    for (const auto& seg : s2.segment_map(ch)) {
+      REQUIRE(seg.provenance.present);
+      CHECK(seg.provenance.last_operation == 6);
+    }
+  }
+  CHECK(verify_anonymized(src, dst, std::nullopt).ok);
+  CHECK_FALSE(verify_anonymized(src, dst, 1000 * DAY).ok);  // not shifted
 }
 
 TEST_CASE("anonymize_session refuses, and leaves nothing behind") {
@@ -165,9 +196,11 @@ TEST_CASE("refusal codes ride on the usual exception types; check_anonymize agre
   CHECK(std::string(refusal_kind_name(c.refusals[0].kind)) == "IoError");
   CHECK(code_of<IoError>([&] { anonymize_session(src, (dir / "B.mefd").string(), o); }) ==
         "dst-exists");
-  // the shift left open; nothing written either way
+  // no shift: the copy that keeps the times, to which no shift check
+  // applies; nothing written either way
   o.exclude_channels = {};
-  CHECK(check_anonymize(src, dst, o, {}, /*check_shift=*/false).ok);
+  o.shift_us.reset();
+  CHECK(check_anonymize(src, dst, o).ok);
   CHECK_FALSE(fsys::exists(dst));
   CHECK_FALSE(fsys::exists(dst + ".partial"));
 
