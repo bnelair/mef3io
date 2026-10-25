@@ -293,8 +293,9 @@ class MefWriter:
     def mef_block_len(self, value):
         # Falsy (None/0) means "derive from fs": normalize so get_mefblock_len
         # applies the legacy formula instead of returning a literal 0.
-        self._mef_block_len = int(value) if value else None
+        # set_block_length first: a refused value (#83) must not be kept.
         self._w.set_block_length(int(value) if value else 0)
+        self._mef_block_len = int(value) if value else None
 
     def get_mefblock_len(self, fs: float) -> int:
         """Block length that will be used for data at ``fs`` (legacy formula)."""

@@ -784,3 +784,32 @@ def test_an_upper_case_timd_folder_is_not_a_channel(tmp_path):
     assert list(lay["channels"]) == ["ch1.timd"]
     with mef3io.Reader(str(path)) as r:
         assert r.channels == ["ch1"]
+
+
+def test_an_auto_open_deletes_the_old_named_snapshot(tmp_path, monkeypatch):
+    """Snapshots saved before 2.0.0 under ``<stem>-<hash16>.mef3cache`` carry
+    the session name; an auto open deletes exactly that file — and only if it
+    is one of ours (an unrelated file of that name is left alone)."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "xdg"))
+    monkeypatch.setattr(C, "_os_cache_dir", lambda: _mk(tmp_path / "xdg" / "mef3io"))
+    path = tmp_path / "Jane_Doe.mefd"
+    _write(path)
+    old = C._legacy_auto_cache_path(str(path))
+    assert old.name.startswith("Jane_Doe-") and old.name.endswith(".mef3cache")
+    neighbour = old.with_name("Jane_Doe-0000000000000000.mef3cache")  # another session's
+    for f in (old, neighbour):
+        f.write_text(json.dumps({"format": 4}))
+    mef3io.Reader(str(path), cache="auto").close()
+    assert not old.exists(), "the old-named snapshot must be gone"
+    assert neighbour.exists(), "only that exact name is touched"
+    assert C.auto_cache_path(str(path)).exists()
+    # Not ours (no "format" key): never deleted.
+    old.write_text("user notes")
+    mef3io.Reader(str(path), cache="auto").close()
+    assert old.read_text() == "user notes"
+
+
+def _mk(d):
+    d.mkdir(parents=True, exist_ok=True)
+    return d

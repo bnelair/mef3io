@@ -93,7 +93,7 @@ block_length=None, n_threads=0, metadata=None, durability="fast")`
   [Long recordings](long_recordings.md).
 - `block_length` overrides the RED block size (default: `fs` samples for
   fs ≥ 5000, else `10*fs`, at least 1). A block can hold at most
-  858 993 397 samples (`mef3io._mef3io.MAX_BLOCK_SAMPLES`: its byte size is a
+  858 993 396 samples (`mef3io._mef3io.MAX_BLOCK_SAMPLES`: its byte size is a
   32-bit field and the worst case is 5 bytes per sample); a longer one, or a
   rate whose default block would be longer, raises `ValueError` before
   anything is created. `n_threads=0` uses all cores.

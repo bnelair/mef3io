@@ -179,11 +179,29 @@ def _os_cache_dir() -> Path:
 def auto_cache_path(session_path: str) -> Path:
     """``<hash16>.mef3cache`` in the OS cache directory. The hash ONLY: a
     session is often named after its subject, and the file name is visible
-    to anyone who can list that directory (#82). Snapshots saved by earlier
-    versions under ``<session stem>-<hash16>.mef3cache`` are no longer looked
-    up — the next ``cache="auto"`` open builds a new one."""
+    to anyone who can list that directory (#82). A snapshot saved by an
+    earlier version under ``<session stem>-<hash16>.mef3cache`` is deleted
+    by the next ``cache="auto"`` open of that session, which builds a new
+    one under this name."""
     key = hashlib.sha256(os.path.abspath(session_path).encode()).hexdigest()[:16]
     return _os_cache_dir() / f"{key}.mef3cache"
+
+
+def _legacy_auto_cache_path(session_path: str) -> Path:
+    """Where mef3io before 2.0.0 put the auto snapshot: the session stem in
+    the name. Only ever looked at to delete it (#82)."""
+    key = hashlib.sha256(os.path.abspath(session_path).encode()).hexdigest()[:16]
+    return _os_cache_dir() / f"{Path(session_path).stem}-{key}.mef3cache"
+
+
+def _discard_legacy_auto_cache(session_path: str) -> None:
+    """Delete this session's pre-2.0 auto snapshot, which carries the session
+    name in its file name. That exact name only — no listing — and only if it
+    is one of ours (discard_if_ours). One failed open when there is none."""
+    try:
+        discard_if_ours(_legacy_auto_cache_path(session_path))
+    except OSError:
+        pass
 
 
 def resolve_cache_path(session_path: str, cache) -> Optional[Path]:
@@ -191,6 +209,7 @@ def resolve_cache_path(session_path: str, cache) -> Optional[Path]:
     if cache is None or cache is False:
         return None
     if cache == "auto" or cache is True:
+        _discard_legacy_auto_cache(session_path)
         return auto_cache_path(session_path)
     return Path(cache)
 

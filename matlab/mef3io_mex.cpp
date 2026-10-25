@@ -83,14 +83,17 @@ std::string get_string(const mxArray* a, const char* what) {
 // values only, so treating the result as dense read past it (crash) or
 // stored the wrong mask; a complex scalar would silently lose its imaginary
 // part. The +mef3io classes pass full() arrays; this guards direct calls.
+// Buffers only: scalars go through get_scalar, which accepts sparse.
 void require_dense_real(const mxArray* a, const char* what) {
   if (mxIsSparse(a)) fail("%s must be a full (non-sparse) array; use full()", what);
   if (mxIsComplex(a)) fail("%s must be real, not complex", what);
 }
 
+// A sparse SCALAR is fine (mxGetScalar reads it correctly, and S(i,j) of a
+// sparse matrix is one); only buffers need require_dense_real.
 double get_scalar(const mxArray* a, const char* what) {
   if (!mxIsNumeric(a) || mxGetNumberOfElements(a) != 1) fail("expected a numeric scalar for %s", what);
-  require_dense_real(a, what);
+  if (mxIsComplex(a)) fail("%s must be real, not complex", what);
   return mxGetScalar(a);
 }
 
@@ -720,6 +723,11 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     const mxArray* fg = mxGetField(s, 0, "gmt_offset");
     if (fg && !mxIsEmpty(fg)) md.gmt_offset = static_cast<std::int32_t>(get_int(fg, "gmt_offset"));
     check(mef3io_writer_set_metadata(w, &md));
+    return;
+  }
+  if (cmd == "check_block_length") {  // before writer_open (Writer.m), #83
+    need_args(nrhs, 2, "check_block_length");
+    check(mef3io_check_block_length(get_int64(prhs[1], "block_length")));
     return;
   }
   if (cmd == "writer_set_block_length") {

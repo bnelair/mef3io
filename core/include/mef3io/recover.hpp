@@ -84,12 +84,14 @@ struct RecoveryReport {
 /// is what the CLI does. Keeping the two apart means the dangerous operation
 /// stays small and the safe one stays reusable. ONE exception (#83): at a
 /// NON-ZERO recording-time offset, where every validator time check stands
-/// down, recovery sets the segment's END TIME in all three universal headers
-/// (the .tmet one is what readers report) from the last block it kept — only
-/// when that block's time and the .tmet end are both in the offset-applied
-/// (negated) form, else it adds a note and leaves them. The .tmet header is
-/// backed up and stamped Recovery; a stale end alone makes a segment need
-/// recovery there.
+/// down, recovery corrects the segment's END TIME in the three universal
+/// headers (the .tmet one is what readers report) from the last block it
+/// kept: an end counts as stale only before that block's start (+ half a
+/// sample), or, with rebuilt blocks, before their end (- half a sample); it
+/// is never moved earlier, and only an end stored in the offset-applied
+/// (negated) form is rewritten (in that form), else a note. The .tmet header
+/// is backed up and stamped Recovery; a stale end alone makes a channel's
+/// last segment need recovery there.
 RecoveryReport recover_session(const std::string& path, bool apply = false, bool backup = true,
                                const std::string& password = "", const Control& ctl = {});
 

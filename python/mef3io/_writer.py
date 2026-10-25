@@ -177,7 +177,7 @@ class Writer:
     block_length : int or None, optional
         RED block size in samples. ``None`` (default) derives it from ``fs``
         (``fs`` samples for ``fs`` >= 5000, else ``10*fs``, at least 1).
-        At most ``mef3io._mef3io.MAX_BLOCK_SAMPLES`` (858 993 397: a block's
+        At most ``mef3io._mef3io.MAX_BLOCK_SAMPLES`` (858 993 396: a block's
         byte size is a 32-bit field); more raises ``ValueError`` before
         anything is created, as does a rate whose derived block exceeds it.
     n_threads : int, optional

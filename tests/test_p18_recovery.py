@@ -381,3 +381,108 @@ def test_an_ambiguous_stored_convention_is_left_alone_with_a_note(tmp_path):
     assert any("end time left as is" in n for n in report.notes), report.notes
     assert struct.unpack_from("<q", tmet.read_bytes(), 24)[0] == -stored_end + rto
     assert report.segments[0].blocks_recovered == 3, "the index is still recovered"
+
+
+@pytest.mark.parametrize("fs,seconds", [(499.7, 37.3), (256.0, 61.7), (511.3, 37.3),
+                                        (1000 / 3, 61.7)])
+def test_a_healthy_legacy_session_with_an_offset_needs_no_recovery(tmp_path, fs, seconds):
+    """Negative control (review of #145): mef_tools truncates its end time
+    (int64(start + n/fs*1e6)) and pymef rounds block times its own way, so the
+    stored end can be a few us off the computed one. That is an END
+    CONVENTION, not a stale end: nothing to do, nothing written. (On the first
+    version of the fix, (256, 61.7) and (511.3, 37.3) were reported stale.)"""
+    pytest.importorskip("pymef", reason="legacy oracle not installed")
+    mef_tools = pytest.importorskip("mef_tools.io", reason="legacy oracle not installed")
+    path = tmp_path / "legacy.mefd"
+    x = np.random.default_rng(0).normal(0, 50, int(seconds * fs))
+    w = mef_tools.MefWriter(str(path), overwrite=True)
+    w.record_offset = 1_000_000_000
+    w.write_data(x, "ch1", START, fs, precision=2)
+    del w
+    before = {p: p.read_bytes() for p in path.rglob("*") if p.is_file()}
+    dry = mef3io.recover_session(str(path))
+    assert dry.nothing_to_do, dry.summary()
+    assert not dry.notes, dry.notes
+    done = mef3io.recover_session(str(path), apply=True)
+    assert not done.segments
+    assert {p: p.read_bytes() for p in path.rglob("*") if p.is_file()} == before
+
+
+def _uh_end(f):
+    return struct.unpack_from("<q", Path(f).read_bytes(), 24)[0]
+
+
+def _seg_files(tmet):
+    d = tmet.parent
+    return [d / (d.stem + ext) for ext in (".tmet", ".tidx", ".tdat")]
+
+
+def test_an_end_time_fix_alone_keeps_the_data_crc(tmp_path):
+    """Only the .tmet was lost: the .tdat body did not change, so its stored
+    body CRC (valid, over tens of GB in real files) must stay."""
+    rto = 1_000_000_000
+    path, tmet, true_end = _crashed_append(tmp_path, rto, lose_index=False)
+    tdat = _seg_files(tmet)[2]
+    crc_before = tdat.read_bytes()[4:8]
+    assert crc_before != b"\xff\xff\xff\xff"
+    report = mef3io.recover_session(str(path), apply=True)
+    assert report.segments and report.segments[0].blocks_recovered == 0
+    assert tdat.read_bytes()[4:8] == crc_before
+    assert _uh_end(tmet) == rto - true_end
+
+
+def test_an_end_is_never_moved_earlier(tmp_path):
+    """Index ahead of data at a non-zero offset: entries are dropped, but the
+    end times are left where they were (a later end only widens the range a
+    reader seeks; an earlier one hides samples)."""
+    rto = 1_000_000_000
+    path, tidx, tdat = _session(tmp_path)
+    _set_rto(path, rto)
+    tmet = tidx.with_suffix(".tmet")
+    ends = [_uh_end(f) for f in _seg_files(tmet)]
+    raw = tdat.read_bytes()
+    tdat.write_bytes(raw[: len(raw) // 2])
+    report = mef3io.recover_session(str(path), apply=True)
+    assert report.segments[0].blocks_dropped > 0
+    assert [_uh_end(f) for f in _seg_files(tmet)] == ends
+
+
+def test_a_plain_stored_end_keeps_its_convention(tmp_path):
+    """A .tidx whose end is stored plain (as older writers did) next to a
+    negated .tmet: the plain one is left with a note, never rewritten into
+    the other convention; the .tmet is still fixed."""
+    rto = 1_000_000_000
+    path, tmet, true_end = _crashed_append(tmp_path, rto)
+    tidx = _seg_files(tmet)[1]
+    raw = bytearray(tidx.read_bytes())
+    stale_plain = START + rto + 1_000_000           # far before the data's end
+    struct.pack_into("<q", raw, 24, stale_plain)
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH])))
+    tidx.write_bytes(bytes(raw))
+    report = mef3io.recover_session(str(path), apply=True)
+    assert any(".tidx end time is not stored in the offset-applied" in n for n in report.notes)
+    assert _uh_end(tidx) == stale_plain
+    assert _uh_end(tmet) == rto - true_end
+
+
+def test_only_the_last_segment_metadata_is_read_on_a_healthy_session(tmp_path):
+    """#7 of the review: recovery reads no .tmet of a segment it does not
+    write, except the 1 KB header of each channel's last one. Pinned by
+    making every earlier .tmet unreadable."""
+    import os
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root reads anything")
+    path = tmp_path / "s.mefd"
+    x = np.arange(2560, dtype=np.int32)
+    with mef3io.Writer(str(path)) as w:
+        for i in range(4):
+            w.write_int32("ch1", x, 0.5, START + i * 20_000_000, FS, new_segment=True)
+    tmets = sorted(path.glob("ch1.timd/*.segd/*.tmet"))
+    try:
+        for t in tmets[:-1]:
+            t.chmod(0)
+        report = mef3io.recover_session(str(path))
+        assert report.nothing_to_do and not report.notes, (report.summary(), report.notes)
+    finally:
+        for t in tmets:
+            t.chmod(0o644)

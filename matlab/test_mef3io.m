@@ -374,5 +374,21 @@ assert(numel(spAnns) == 1 && strcmp(spAnns(1).text, 'string text'), ...
        'string annotation text must be written');
 delete(r);
 
+% A refused block length must not cost the existing session: the check runs
+% BEFORE writer_open, which with Overwrite=true removes it (#83 review).
+gotError = false;
+try
+    mef3io.Writer(badPath, Overwrite=true, BlockLength=1e9);
+catch
+    gotError = true;
+end
+assert(gotError, 'a block length above the cap must be refused');
+assert(exist(fullfile(badPath, 'sp.timd'), 'dir') == 7, ...
+       'the existing session must survive a refused Writer');
+% Sparse SCALARS are valid arguments (S(i,j) of a sparse matrix is one).
+w = mef3io.Writer(badPath);
+w.write('spscalar', x(1:300), start, sparse(fs), Precision=3);
+delete(w);
+
 fprintf('test_mef3io: all assertions passed (%s)\n', sessionDir);
 end

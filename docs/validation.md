@@ -346,15 +346,32 @@ touches only the index and the data, and the follow-up `repair_session` fixes
 the start and end times in the three universal headers. In a session with a
 non-zero recording-time offset (meflib's date-masking), every time check
 stands down, because writers disagree on how times are stored there. Recovery
-then sets the end time itself, from the last block it kept: in `.tmet` (which
-is where `info()` reads it), `.tidx` and `.tdat`, stored in the offset-applied
-form (offset − time), never the real date. It does this only when the last
-block's time and the `.tmet` end time are both stored in that form; otherwise
-it leaves the end time alone and says why in `report.notes`. The `.tmet` header
-goes to the backup first. A segment whose blocks are all in place but whose end
-time is stale (the `.tmet` update lost in a crash) also counts as needing
-recovery there. Reading the offset and the rate can need the session's
-password (`password=`).
+then corrects the end time itself, from the last block it kept, in `.tmet`
+(which is where `info()` reads it), `.tidx` and `.tdat`. The rules:
+
+- An end time counts as stale only if it lies before the last block's start
+  (plus half a sample), or, when recovery rebuilt blocks, before the end of
+  the last rebuilt block (minus half a sample). Times are compared as real
+  times, so the rule does not depend on how an end was rounded: writers store
+  the end exclusive, inclusive, truncated or rounded, and none of those is
+  "stale".
+- An end time is **never moved earlier**.
+- Each header keeps its own form: only an end stored in the offset-applied
+  form (offset − time) is rewritten, in that form, never as the real date. An
+  end stored plain is left alone, and `report.notes` says so.
+
+The `.tmet` header goes to the backup first. A channel's last segment whose
+blocks are all in place but whose `.tmet` end is stale (its update lost in a
+crash) also counts as needing recovery there. To find that case cheaply,
+recovery reads one 1 KB header per channel (the last segment's `.tmet`), and
+the whole record only where the three files' end times disagree or the
+segment needs recovery anyway. Reading the offset and the rate can need the
+session's password (`password=`).
+
+A fix that only touches headers (end time, entry count, dropped index
+entries) keeps the `.tdat`'s stored checksum. It is reset to "not computed"
+only when the data file was truncated, blocks were rebuilt past what it
+covered, or the `.tdat` header predates the last append.
 
 ### Reading the report
 

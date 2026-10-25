@@ -840,8 +840,22 @@ TEST_CASE("every write path refuses an invalid rate, factor or block length firs
   REQUIRE(mef3io_writer_write_float(w, "ch1", f.data(), 100, start, nan, -1, 0, nullptr) ==
           MEF3IO_ERR_ARGUMENT);
   REQUIRE(mef3io_writer_set_block_length(w, MAX_BLOCK_SAMPLES + 1) == MEF3IO_ERR_ARGUMENT);
+  REQUIRE(mef3io_writer_write_int32(w, "keep", a.data(), nullptr, 100, 1.0, start, 256.0, 0,
+                                    nullptr) == 0);
   mef3io_writer_close(w);
   REQUIRE_FALSE(fsys::exists(dir / "ch1.timd"));
+
+  // The checks a caller runs BEFORE mef3io_writer_open, which with overwrite
+  // removes the existing session (the MATLAB Writer does exactly this).
+  REQUIRE(MEF3IO_MAX_BLOCK_SAMPLES == MAX_BLOCK_SAMPLES);
+  REQUIRE(mef3io_check_block_length(MEF3IO_MAX_BLOCK_SAMPLES) == 0);
+  REQUIRE(mef3io_check_block_length(0) == 0);
+  REQUIRE(mef3io_check_block_length(MEF3IO_MAX_BLOCK_SAMPLES + 1) == MEF3IO_ERR_ARGUMENT);
+  REQUIRE(std::string(mef3io_last_error()).find("block length") != std::string::npos);
+  REQUIRE(mef3io_check_signal_parameters(256.0, -0.5) == 0);
+  REQUIRE(mef3io_check_signal_parameters(0.0, 1.0) == MEF3IO_ERR_ARGUMENT);
+  REQUIRE(mef3io_check_signal_parameters(256.0, 0.0) == MEF3IO_ERR_ARGUMENT);
+  REQUIRE(fsys::exists(dir / "keep.timd"));  // a refused check touched nothing
   fsys::remove_all(dir);
 }
 

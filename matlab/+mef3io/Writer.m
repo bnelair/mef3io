@@ -43,6 +43,11 @@ classdef Writer < handle
                 opts.Durability (1, :) char {mustBeMember(opts.Durability, ...
                     {'fast', 'full'})} = 'fast'
             end
+            % Refused BEFORE writer_open, which with Overwrite=true removes
+            % the existing session (#83).
+            if opts.BlockLength > 0
+                mef3io_mex('check_block_length', opts.BlockLength);
+            end
             obj.h = mef3io_mex('writer_open', path, double(opts.Overwrite), ...
                                opts.Password1, opts.Password2);
             mef3io_mex('writer_set_durable', obj.h, double(strcmp(opts.Durability, 'full')));

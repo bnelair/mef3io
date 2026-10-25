@@ -1,4 +1,4 @@
-"""P40: the writer refuses arguments it cannot store, BEFORE anything is
+"""P41: the writer refuses arguments it cannot store, BEFORE anything is
 written, and accepts the unusual-but-valid ones (#83).
 
 - A sampling frequency of 0, a negative one, NaN or infinity used to hang the
@@ -233,12 +233,15 @@ def test_an_append_extends_an_unpadded_foreign_segment_in_place(tmp_path):
 
 def test_the_unpadded_append_matches_the_padded_one_byte_for_byte(tmp_path):
     """Negative control for the folder lookup: the same append through the
-    padded and the un-padded name must write the same bytes."""
+    padded and the un-padded name must write the same bytes — data, index and
+    the metadata the append re-derives after reading the segment back
+    (everything past the universal header, which holds file UUIDs and the
+    segment's own name)."""
     x = np.arange(5120, dtype=np.int32) % 300
-    padded = tmp_path / "a.mefd"
+    padded = tmp_path / "a" / "s.mefd"      # same session name in both
     with mef3io.Writer(str(padded)) as w:
         w.write_int32("ch1", x[:2560], 0.5, START, FS)
-    unpadded = tmp_path / "b.mefd"
+    unpadded = tmp_path / "b" / "s.mefd"
     shutil.copytree(padded, unpadded)
     _unpad(unpadded)
     for p in (padded, unpadded):
@@ -250,4 +253,18 @@ def test_the_unpadded_append_matches_the_padded_one_byte_for_byte(tmp_path):
         return {f.suffix: f.read_bytes()[1024:] for f in seg.iterdir()}
 
     a, b = data(padded), data(unpadded)
-    assert a[".tdat"] == b[".tdat"] and a[".tidx"] == b[".tidx"]
+    assert set(a) == set(b) == {".tdat", ".tidx", ".tmet"}
+    for suffix in (".tdat", ".tidx", ".tmet"):
+        assert a[suffix] == b[suffix], suffix
+
+
+def test_the_compat_writer_keeps_no_refused_block_length(tmp_path):
+    """Review of #145, finding 5: the legacy-style setter must not remember a
+    value the writer refused."""
+    from mef3io import MefWriter
+    w = MefWriter(str(tmp_path / "c.mefd"), overwrite=True)
+    w.mef_block_len = 1000
+    with pytest.raises(ValueError, match="block length"):
+        w.mef_block_len = m.MAX_BLOCK_SAMPLES + 1
+    assert w.mef_block_len == 1000
+    assert w.get_mefblock_len(FS) == 1000

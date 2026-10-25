@@ -275,8 +275,9 @@ storage; lazy open + mmap indices already fix the pathological local case).
     `%LOCALAPPDATA%`), file `<hash16>.mef3cache`, named by a hash of the
     absolute session path ONLY (since 2.0.0; earlier versions prefixed the
     session folder's stem, which put a name that is often the subject's in
-    a file name; those old files are no longer looked up and the next
-    `cache="auto"` open builds a new one). Works with read-only sessions.
+    a file name; the next `cache="auto"` open of that session deletes its
+    old-named file, exactly that name and only if it is a mef3io snapshot,
+    and builds a new one). Works with read-only sessions.
   - `cache=<path>` / explicit persistent: user-requested dump file (e.g. next
     to the `.mefd`). **Never discovered or used unless explicitly passed** —
     a foreign/stale cache file inside a session dir cannot surprise a
