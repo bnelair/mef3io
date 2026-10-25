@@ -138,6 +138,34 @@ new identifiers, other programs' private data cleared, provenance
   upgrading deletes that session's old-named snapshot (exactly that file, and
   only if it is a mef3io snapshot) and builds a new one.
 
+## Smaller files for data from an amplifier: `precision="step"` (#81)
+
+`Writer.write(..., precision="step")` (also `MefWriter.write_data`) finds the
+data's own quantization step, such as an amplifier's 0.195 µV per count, and
+stores the original counts with that step as the conversion factor. One hour
+at 512 Hz of 16-bit counts × 0.195: 1.52 MB instead of 6.03 MB with the
+default path, the same as `write_int32` of the counts. Opt-in; the default is
+unchanged.
+
+- The step is estimated from a fixed-size sample (about 10 ms on 50 million
+  samples) and every value is checked during the conversion the write makes
+  anyway: a value stored on its step reads back exactly when the data was
+  `counts * step`, and within float64 rounding otherwise. The whole write was
+  faster than the default one in our measurements (10 million samples:
+  0.36 s against 0.57 s).
+- Data not on one step (filtered, resampled, noise), or whose counts would not
+  fit int32, is written with the default path, with a new
+  `StepFallbackWarning`.
+- A channel keeps one conversion factor: appends and new segments with
+  `"step"` use the channel's factor, exactly when the data fits it and
+  rounded to it otherwise (with the warning).
+- The write summary has three new keys for every write:
+  `units_conversion_factor`, `quantization` (`"step"`, `"decimal"`,
+  `"factor"` or `"int32"`) and `step_fallback`. C++:
+  `SessionWriter::write_float` takes a `Precision` (an `int` still works;
+  `Precision::detect_step()` for the step), `WriteSummary` gains the same
+  fields, plus `detect_step` / `quantize_to_step`. Not in the C ABI or MATLAB.
+
 ## Fixed
 
 - **Appending to a segment folder whose number is not zero-padded**

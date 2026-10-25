@@ -443,6 +443,40 @@ block times but not universal-header times. Docs: `docs/validation.md`. Tests:
 `tests/test_p13_validate.py` (asserts every repairable check has a corruption
 case, so a new one cannot ship untested) + a Catch2 case.
 
+Precision step (#81, `core/src/quantize_step.cpp`, `SessionWriter::write_float`
+with `Precision::detect_step()`, Python `precision="step"`, also
+`MefWriter.write_data`; NOT C ABI/MATLAB): OPT-IN, the default
+(infer_precision) is unchanged. `detect_step` ESTIMATES from a BOUNDED sample
+(first 65,536 + 16 windows of 2,048; only an all-0/NaN sample scans on):
+ascending unique |v|, real Euclid (coarse tol 1e-6 step) + least-squares refit
+at power-of-two indices, then SNAPPED (shortest decimal 1..17 digits, then
+max|v|/k_max and its float64 neighbours) to the candidate reproducing every
+sampled value bitwise. `quantize_to_step` DECIDES: one pass (the conversion
+pass, no second read), every value must satisfy
+`|x - double(k)*step| <= 64 eps |x|` (the reader's own product) and |k| <=
+INT32_MAX (INT32_MIN = RED_NAN), else false. Fresh channel failing either ->
+the default path for that write (byte-identical to a default write's
+counts), `step_fallback` reason + Python `StepFallbackWarning`. A CHANNEL
+KEEPS ONE FACTOR: the reader scales a whole channel by its FIRST segment's
+factor (session.cpp load_channel_basic_info) — a new segment with another
+factor reads back silently mis-scaled (PRE-EXISTING for the default path with
+new_segment=True and a different precision; not fixed here) — so "step" on a
+channel with segments (append OR new_segment) uses the channel's factor:
+exact if the data fits, else rounded to it (decimal factor = exactly the
+default path; other factor = round(x/u), `quantization="factor"`, refused
+before writing if a count leaves int32). The default `precision=-1` append
+onto a non-decimal factor still raises WriteConflictError (unchanged).
+WriteSummary gained `units_conversion_factor`, `quantization`
+(Counts/Decimal/Step/Factor), `step_fallback`; the Python dict the same keys.
+`Precision` is implicitly constructible from int so every
+`write_float(..., 3)` caller compiles. Tests: tests/test_p43_write_step.py
+(exactness, fallbacks incl. an off-step value OUTSIDE the sample and int32
+overflow, appends, size within 5% of write_int32, detection on 50 M < 0.25 s,
+step write <= 1.10x default / worst-case fallback <= 1.60x, pymef/mef_tools
+oracle), core/tests/test_write_step.cpp. Gotcha for tests: a filter with
+short-decimal or dyadic taps keeps data on a finer grid (found, stored
+exactly) — use irrational taps to force a fallback.
+
 Session metadata (subject/acquisition): `mef3io.Metadata`/`Subject`/
 `Acquisition` dataclasses (`python/mef3io/metadata.py`), settable via
 `Writer(metadata=)` / `set_metadata`, read via `Reader.metadata`. Threaded

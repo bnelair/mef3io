@@ -472,12 +472,77 @@ WriteSummary SessionWriter::write_int32(const std::string& channel, std::span<co
                                         std::span<const ui1> valid, bool new_segment) {
   check_signal_parameters(fs, ufact);
   std::vector<si4> buf(samples.begin(), samples.end());
-  return write_blocks(channel, buf, valid, ufact, start_uutc, fs, new_segment);
+  WriteSummary s = write_blocks(channel, buf, valid, ufact, start_uutc, fs, new_segment);
+  s.quantization = Quantization::Counts;
+  return s;
 }
 
 WriteSummary SessionWriter::write_float(const std::string& channel, std::span<const sf8> data,
-                                        si8 start_uutc, sf8 fs, int precision, bool new_segment) {
+                                        si8 start_uutc, sf8 fs, Precision precision_arg,
+                                        bool new_segment) {
   check_signal_parameters(fs, 1.0);  // the factor is checked once it is known
+  int precision = precision_arg.digits;
+  std::string step_fallback;
+  if (precision_arg.step) {
+    // #81, opt-in: the data's own step as the factor. Everything below is
+    // decided before write_blocks, so a refused write leaves the tree as is.
+    std::vector<si4> counts;
+    std::vector<ui1> valid;
+    auto it = channels_.find(channel);
+    if (it != channels_.end() && it->second.n_segments > 0) {
+      // A channel's factor is fixed once it has segments: the reader scales
+      // the WHOLE channel by one factor, so neither an append nor a new
+      // segment may change it. Data on it is stored exactly; other data is
+      // rounded to it (below) — the default append rule, generalised.
+      hydrate(channel, it->second);
+      const sf8 u = it->second.units_conversion_factor;
+      std::string why;
+      if (quantize_to_step(data, u, counts, valid, &why)) {
+        WriteSummary s = write_blocks(channel, counts, valid, u, start_uutc, fs, new_segment);
+        s.quantization = Quantization::Step;
+        return s;
+      }
+      step_fallback = "not a whole multiple of the channel's conversion factor (" + why +
+                      "); rounded to it, as a channel keeps one factor";
+      // (A foreign writer's factor can be negative, a polarity inversion.)
+      const int p = u > 0.0 ? static_cast<int>(std::llround(-std::log10(u))) : 0;
+      if (u > 0.0 && std::abs(std::pow(10.0, -p) - u) <= 1e-12 * u) {
+        precision = p;  // a decimal factor: exactly the default path
+      } else {
+        check_signal_parameters(fs, u);
+        valid.assign(data.size(), 0);
+        counts.assign(data.size(), 0);
+        for (std::size_t i = 0; i < data.size(); ++i) {
+          if (std::isnan(data[i])) continue;
+          const sf8 q = std::round(data[i] / u);
+          if (!(std::abs(q) <= 2147483647.0))
+            throw std::invalid_argument(
+                "the value at index " + std::to_string(i) + " needs a count beyond int32 at " +
+                "channel " + channel + "'s conversion factor; nothing was written");
+          counts[i] = static_cast<si4>(q);
+          valid[i] = 1;
+        }
+        WriteSummary s = write_blocks(channel, counts, valid, u, start_uutc, fs, new_segment);
+        s.quantization = Quantization::Factor;
+        s.step_fallback = step_fallback;
+        return s;
+      }
+    } else {
+      const StepEstimate est = detect_step(data);
+      std::string why = est.reason;
+      if (est.step && quantize_to_step(data, *est.step, counts, valid, &why)) {
+        WriteSummary s =
+            write_blocks(channel, counts, valid, *est.step, start_uutc, fs, new_segment);
+        s.quantization = Quantization::Step;
+        return s;
+      }
+      // Nothing but 0 and NaN (no reason given): any factor stores that
+      // exactly, so the default path is no fallback.
+      if (!why.empty())
+        step_fallback = why + "; stored with the default (inferred power-of-ten) precision";
+      precision = -1;
+    }
+  }
   if (precision < 0) {
     // In-segment appends must keep the segment's conversion factor, so reuse
     // its precision instead of re-inferring (which could differ and conflict).
@@ -494,7 +559,10 @@ WriteSummary SessionWriter::write_float(const std::string& channel, std::span<co
   auto samples = quantize_to_int32(data, precision);
   std::vector<ui1> valid(data.size());
   for (std::size_t i = 0; i < data.size(); ++i) valid[i] = std::isnan(data[i]) ? 0 : 1;
-  return write_blocks(channel, samples, valid, ufact, start_uutc, fs, new_segment);
+  WriteSummary s = write_blocks(channel, samples, valid, ufact, start_uutc, fs, new_segment);
+  s.quantization = Quantization::Decimal;
+  s.step_fallback = std::move(step_fallback);
+  return s;
 }
 
 WriteSummary SessionWriter::write_blocks(const std::string& channel,
@@ -541,6 +609,7 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   }
 
   WriteSummary summary;
+  summary.units_conversion_factor = ufact;
   summary.gaps_skipped = static_cast<si8>(runs.size()) > 0 ? static_cast<si8>(runs.size()) - 1 : 0;
   if (runs.empty()) {
     // All-NaN / no valid data: no-op on disk, but report it explicitly.

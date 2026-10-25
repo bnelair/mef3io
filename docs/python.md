@@ -116,7 +116,68 @@ discontinuity gaps that read back as NaN. Values are quantized to int32
 counts as `round(data * 10**precision)` with the conversion factor
 `10**-precision` kept in metadata; `precision=-1` infers it from the data
 (and on appends reuses the segment's stored precision so appends can never
-conflict).
+conflict). `precision="step"` stores the data on its own quantization step
+instead (below).
+
+#### `precision="step"`: the smallest files for data from an amplifier
+
+Data that came from an analog-to-digital converter is `counts * step`: an
+amplifier with 0.195 µV per count produces only multiples of 0.195. The
+default path cannot see that and stores powers of ten: at precision 3 every
+sample is `counts * 195`, so the differences between neighbouring samples
+are 195 times larger than they need to be, and RED, which stores those
+differences, needs far more bytes for them. With `precision="step"` the
+writer finds the step and stores the original counts with the step as the
+conversion factor:
+
+```python
+s = w.write("ch1", data, start_uutc, fs=512.0, precision="step")
+s["quantization"], s["units_conversion_factor"]   # ('step', 0.195)
+```
+
+Measured on one hour at 512 Hz of 16-bit counts × 0.195 µV: the default
+path writes 6.03 MB and `"step"` 1.52 MB, the same as `write_int32` of the
+original counts with factor 0.195. The default path stays the default;
+`"step"` is opt-in.
+
+How it works, and what it guarantees:
+
+- **The step is estimated from a fixed-size sample** (the first 65,536
+  values and 16 windows of 2,048 spread through the rest; NaN ignored), so
+  finding it costs the same on any length: about 10 ms on 50 million
+  samples. The estimate is snapped to the step's own float64 value, so
+  `0.195`, `0.1`, `1e-3/3` or a binary step like `10e6 / 2**24` is stored as
+  that exact number.
+- **Every value is checked while it is converted** (the conversion pass
+  every write makes anyway, not a second read). A value stored this way
+  reads back as `count * step`, which is exactly the value written when the
+  data was computed as `counts * step` in float64; in every other case it
+  is within float64 rounding (at most 64 × 2⁻⁵² relative). There is no third
+  case: data that is not a whole multiple of one step is not stored on a
+  step.
+- **Data that is not on a step falls back to the default path** for that
+  write, with a `StepFallbackWarning`: filtered or resampled data, noise,
+  an infinite value, or a step whose counts would not fit in int32. The
+  file is then what a default write produces. A filter whose coefficients
+  are short decimals or powers of two can keep data on a finer step; that
+  step is then found and the data is stored exactly — losslessly, but not
+  always smaller than the default.
+- **A channel keeps one conversion factor.** The reader scales a whole
+  channel by the factor of its first segment, so once a channel has data
+  (an append, or `new_segment=True`), `"step"` stores new data on the
+  channel's factor: exactly when the data is a whole multiple of it, and
+  otherwise rounded to it (`quantization` is `"decimal"` for a power-of-ten
+  factor, `"factor"` for any other), with a `StepFallbackWarning`. Keep
+  passing `precision="step"` when appending to a channel written that way:
+  the default `precision=-1` reuses only power-of-ten factors and refuses an
+  append to a factor like 0.195 with `WriteConflictError`.
+
+The returned summary says what happened: `quantization` is `"step"`
+(stored exactly on the factor), `"decimal"` (rounded to `10**-precision`)
+or `"factor"`, and `step_fallback` is `None` or the reason the step was not
+used. `MefWriter.write_data(..., precision="step")` does the same; Python
+and C++ only (`Precision::detect_step()` in `SessionWriter::write_float`),
+not the C ABI or MATLAB.
 
 The first write to a channel creates segment 0; later writes **append
 in-segment** (extending the existing files, like the legacy writer);
@@ -128,7 +189,8 @@ segment numbers (`ch1-5.segd`) can be appended to; new segments are always
 named `<channel>-NNNNNN`.
 
 Returns a summary dict: `samples_written`, `blocks`, `gaps_skipped`,
-`segment`.
+`segment`, `units_conversion_factor`, `quantization`, `step_fallback`
+(see above; `write_int32` reports `quantization="int32"`).
 
 ### `write_int32(channel, data, ufact, start_uutc, fs, valid=None, new_segment=False)`
 

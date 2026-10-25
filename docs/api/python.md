@@ -188,6 +188,8 @@ see [Warnings carry the path as data](../python.md#warnings-carry-the-path-as-da
 
 ::: mef3io.PasswordInteropWarning
 
+::: mef3io.StepFallbackWarning
+
 ## Metadata objects
 
 ::: mef3io.Metadata
