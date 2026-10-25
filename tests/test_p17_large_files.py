@@ -30,6 +30,7 @@ pytestmark = pytest.mark.skipif(
 
 START = 1577836800000000
 FS = 256.0
+METADATA_FILE_BYTES = 16384  # fixed .tmet record: 1024 B header + 15360 B sections
 
 
 def _rchar() -> int:
@@ -286,3 +287,71 @@ def test_block_time_arithmetic_is_not_done_in_32_bits(tmp_path):
 
     runs = m.Session(str(path), "").read_runs("ch1", t0, t0 + int(10e6))
     assert sum(len(x["samples"]) for x in runs) > 0, "read_runs excluded the block"
+
+
+def _write_segments(path, segments, channels=("ch1", "ch2")):
+    w = mef3io.Writer(str(path), durability="fast")
+    block = np.arange(256, dtype=np.int32)
+    for ch in channels:
+        for s in range(segments):
+            w.write_int32(ch, block, 1.0, START + s * 2_000_000, FS, new_segment=s > 0)
+    w.close()
+
+
+def test_opening_reads_each_tmet_record_not_its_padding(tmp_path):
+    """#141: a .tmet is read with ONE bounded request of METADATA_FILE_BYTES.
+
+    Foreign writers append bytes past the fixed-length record. Reading the
+    file whole cost a size probe per segment (a round trip on a network
+    share) and pulled the padding in; the bounded read does neither."""
+    path = tmp_path / "padded.mefd"
+    segments, pad = 10, 1 << 20
+    _write_segments(path, segments)
+    tmets = sorted(Path(path).rglob("*.tmet"))
+    assert len(tmets) == 2 * segments
+    for t in tmets:
+        with open(t, "ab") as f:
+            f.write(b"\x7e" * pad)
+    before = _rchar()
+    r = mef3io.Reader(str(path))
+    read_bytes = _rchar() - before
+    assert r.info("ch1")["number_of_samples"] == 256 * segments
+    record = len(tmets) * METADATA_FILE_BYTES
+    assert read_bytes < record + pad // 2, (read_bytes, record)
+
+
+class _PyFsCalls:
+    """Counts the file-system calls made from Python (the C++ side is pinned
+    by core/tests/test_open_calls.cpp)."""
+
+    def __init__(self, monkeypatch):
+        import builtins
+        import io
+        import os
+
+        self.n = 0
+        for mod, name in ((builtins, "open"), (io, "open"), (os, "open"), (os, "scandir"),
+                          (os, "stat"), (os, "lstat"), (os, "listdir")):
+            orig = getattr(mod, name)
+
+            def wrapped(*a, _orig=orig, **k):
+                self.n += 1
+                return _orig(*a, **k)
+
+            monkeypatch.setattr(mod, name, wrapped)
+
+
+def test_the_python_side_of_an_open_is_not_per_segment(tmp_path, monkeypatch):
+    """#141: Reader.__init__ (no cache=) adds no per-segment or per-channel
+    file-system call on top of the C++ open."""
+    counts = {}
+    for segments in (1, 12):
+        path = tmp_path / f"s{segments}.mefd"
+        _write_segments(path, segments, channels=tuple(f"ch{i}" for i in range(6)))
+        monkeypatch.undo()
+        calls = _PyFsCalls(monkeypatch)
+        r = mef3io.Reader(str(path))
+        [r.info(c) for c in r.channels]
+        counts[segments] = calls.n
+        monkeypatch.undo()
+    assert counts[1] == counts[12], counts

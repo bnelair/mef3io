@@ -56,6 +56,7 @@ class TarSource : public SessionSource {
   bool exists(const std::string& rel) const override;
   std::uint64_t file_size(const std::string& rel) const override;
   std::vector<ui1> read_all(const std::string& rel) const override;
+  std::vector<ui1> read_head(const std::string& rel, std::size_t max_bytes) const override;
   std::vector<ui1> read_range(const std::string& rel, std::size_t offset,
                               std::size_t length) const override;
   std::string describe(const std::string& rel) const override;

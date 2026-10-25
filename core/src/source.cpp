@@ -22,8 +22,10 @@ std::string DirectorySource::join(const std::string& rel) const {
 
 std::vector<SourceDirEntry> DirectorySource::list_dir(const std::string& rel) const {
   std::vector<SourceDirEntry> out;
+  // is_directory()/is_symlink() come from the listing itself where the OS
+  // provides the type (d_type, FindFirstFile), so no per-entry stat.
   for (const auto& entry : fs::directory_iterator(join(rel)))
-    out.push_back({entry.path().filename().string(), entry.is_directory()});
+    out.push_back({entry.path().filename().string(), entry.is_directory(), entry.is_symlink()});
   return out;
 }
 
@@ -41,6 +43,19 @@ std::vector<ui1> DirectorySource::read_all(const std::string& rel) const {
   f.seekg(0);
   std::vector<ui1> buf(static_cast<std::size_t>(size));
   if (!f.read(reinterpret_cast<char*>(buf.data()), size)) throw IoError("short read: " + path);
+  return buf;
+}
+
+std::vector<ui1> DirectorySource::read_head(const std::string& rel, std::size_t max_bytes) const {
+  // Open + one read: no seek to the end for the size (read_all's tellg), so
+  // the fixed-length .tmet costs one request whatever padding follows it.
+  const std::string path = join(rel);
+  std::ifstream f(path, std::ios::binary);
+  if (!f) throw IoError("cannot open file: " + path);
+  std::vector<ui1> buf(max_bytes);
+  f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(max_bytes));
+  if (f.bad()) throw IoError("read failed: " + path);
+  buf.resize(static_cast<std::size_t>(f.gcount()));  // short file: what it has
   return buf;
 }
 

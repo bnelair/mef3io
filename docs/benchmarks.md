@@ -199,6 +199,34 @@ and read by both stacks.
 Both readers return identical arrays with matching NaN positions on both
 writers' files.
 
+## Opening over a slow file system
+
+On a network share every file-system request is a round trip (around
+110 ms over SMB in one report), and opening a session is a sequence of
+small requests: a listing per folder and a read of each segment's
+metadata file. Opening now makes exactly one listing per folder (session,
+channel, segment) and one bounded read per segment, and no per-file
+existence check or size probe on a complete session. A C++ test pins
+those counts.
+
+Requests per open, counted at the library's file-access layer, and the open
+time with a fixed delay added to each request (2026-10-25):
+
+| session | requests before / after | 20 ms per request, before / after |
+|---|---|---|
+| 64 channels x 1 segment | 321 / 193 | 6.5 s / 3.9 s |
+| 64 channels x 10 segments | 2,625 / 1,345 | 53.0 s / 27.3 s |
+| 209 channels x 1 segment | 1,046 / 628 | 21.1 s / 12.7 s |
+| 209 channels x 10 segments | 8,570 / 4,390 | 173.0 s / 89.1 s |
+
+That model counts a folder listing as one request. An operating system
+turns a listing into several (open, read the entries, close), so the saving
+at the file-system level is smaller. A pass-through FUSE file system with
+2 ms added to every kernel request opened 209 channels x 10 segments in
+43.7 s before and 38.6 s after (-12%), with about the same number of kernel
+requests. Most of the remaining time is requests made one after another,
+which later work addresses by making them in parallel.
+
 ## Reproducing
 
 ```bash
@@ -208,6 +236,8 @@ python benchmarks/compression_test.py
 python benchmarks/long_session_benchmark.py --with-mef-tools
 python benchmarks/access_modes_benchmark.py
 python benchmarks/mef_benchmark.py
+# open cost per request (C++ test suite, hidden case)
+build-core/mef3io_tests "[.open-bench]"
 ```
 
 `pip install "mef3io[bench]"` installs everything these need.

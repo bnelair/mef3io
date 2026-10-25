@@ -286,6 +286,11 @@ std::vector<ui1> TarSource::read_all(const std::string& rel) const {
   return read_range(rel, 0, static_cast<std::size_t>(member(rel).size));
 }
 
+std::vector<ui1> TarSource::read_head(const std::string& rel, std::size_t max_bytes) const {
+  const auto size = static_cast<std::size_t>(member(rel).size);
+  return read_range(rel, 0, std::min(size, max_bytes));
+}
+
 std::vector<ui1> TarSource::read_range(const std::string& rel, std::size_t offset,
                                        std::size_t length) const {
   const TarMember& m = member(rel);

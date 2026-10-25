@@ -47,7 +47,7 @@ TimeSeriesIndex, RedBlockHeader — parse/serialize by explicit offset),
 `validate` (check registry + targeted repair; see below),
 `session` (lazy .mefd/.timd/.segd tree, indexed reads, `collect_blocks`; ALL
 read-path file access funnels through `source`), `source` (SessionSource
-abstraction: DirectorySource/TarSource), `tar` (uncompressed .mefd.tar session
+abstraction: DirectorySource/TarSource; `read_head` = one bounded read), `tar` (uncompressed .mefd.tar session
 archives: TarIndex/TarSource/`archive_session`), `reader` (gridding, NaN fill,
 scaling, parallel decode), `records` (read+write), `writer` (segment writer),
 `session_writer` (precision inference, quantization, NaN splitting, segments),
@@ -530,6 +530,35 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   too, and add a case to `tests/test_p31_gil_release.py`, which measures the
   main thread's longest stall (best of 3; skips a call under 40 ms) while a
   worker runs the call on a 2400-segment channel.
+- **COUNT REQUESTS ON THE OPEN PATH, not just bytes (#141).** On an SMB
+  share every file-system request is a ~110 ms round trip and the open is
+  serial, so a 209-channel session took 11-24 s to open. The open now costs
+  exactly `1 + channels + segments` listings (root, each `.timd`, each
+  `.segd`) plus ONE `read_head(tmet, METADATA_FILE_BYTES)` per segment, and
+  ZERO exists()/file_size()/read_all() on a complete session —
+  `core/tests/test_open_calls.cpp` pins it through `CountingSource`
+  (core/tests/counting_source.hpp: counts by kind, optional fixed delay per
+  request; `Session`/`Reader` take a `shared_ptr<const SessionSource>` for
+  it). `discover_layout` answers "does this file exist" from the `.segd`
+  listing (`FolderListing`); a name the listing does not show, or shows as a
+  symlink (may dangle), is confirmed with exists(), and a `.segd` that cannot
+  be listed falls back to exists() per name — so the answers, the
+  incomplete-segment report and problems() are EXACTLY what the old
+  three-exists()-per-segment walk gave (the test keeps that walk as a
+  reference and compares). A `.timd` that cannot be listed still throws.
+  `SessionSource::read_head` = first min(size, n) bytes in one request (a
+  short file comes back short, so the loader's ">= METADATA_FILE_BYTES"
+  check fails with the same message; padding past the record is never read
+  — rchar-pinned in test_p17). The Python `Reader.__init__` adds no
+  per-segment call (test_p17 counts os/open calls at 1 vs 12 segments).
+  MEASURED CAVEAT: the decorator counts a listing as ONE request, but the OS
+  makes it opendir + readdir + close; a pass-through FUSE with 2 ms per
+  kernel request showed about the SAME kernel-request count before/after
+  (209 ch x 10 seg: 43.7 s -> 38.6 s, -12%) — d_type must come with the
+  listing or is_directory()/is_symlink() stat every entry. The big win is
+  the next step (parallel metadata pass with n_threads; then multi-channel
+  read), not more call shaving. Never add a per-segment request to the open
+  without counting it.
 - **The MAIN use case is a session appended to for DAYS TO MONTHS** (5-20 min
   blocks per channel). Two consequences, both load-bearing. (1) An append must
   be O(NEW data), never O(total blocks) — section 2 describes ALL of a segment's
