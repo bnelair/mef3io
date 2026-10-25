@@ -7,6 +7,7 @@ classdef Writer < handle
     %   w.write('ch1', x, t3, fs, NewSegment=true);     % force a new segment
     %   w.writeInt32('ch1', counts, ufact, startUutc, fs);
     %   w.writeAnnotations(struct('time', {t}, 'text', {'note'}), 'ch1');
+    %   w.setThreads(4); n = w.threads();               % encode threads (0 = automatic)
     %   delete(w)                                       % or let it go out of scope
     %
     % Durability: these files are built by appending for days to months, so
@@ -93,6 +94,25 @@ classdef Writer < handle
                 mef3io_mex('writer_close', obj.h);
                 obj.h = 0;
             end
+        end
+
+        function setThreads(obj, n)
+            %SETTHREADS Change how many threads this Writer may use (encoding).
+            %   w.setThreads(n)   % 0 = automatic, 1 = no extra threads
+            %
+            % Applies from the next write; output is byte-identical whatever
+            % the count. Mirrors setting Python's Writer.n_threads.
+            arguments
+                obj
+                n (1, 1) double {mustBeInteger, mustBeNonnegative}
+            end
+            mef3io_mex('writer_set_threads', obj.h, n);
+        end
+
+        function n = threads(obj)
+            %THREADS The Writer's thread count as set (0 = automatic).
+            %   n = w.threads()   % mirrors Python's Writer.n_threads
+            n = mef3io_mex('writer_threads', obj.h);
         end
 
         function s = write(obj, channel, data, startUutc, fs, opts)

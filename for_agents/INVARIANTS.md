@@ -210,20 +210,41 @@ answered. Rules:
   re-identification key: in memory only, left out of `repr`, `summary()`,
   `to_dict()` (unless asked) and pickles.
 
-## 12. Calls on one Reader can overlap
+## 12. Calls on one Reader can overlap; ONE thread count per object
 
 The bindings release the GIL on open and on every long call, so several
 threads may call one `Reader`/`Session` at once: reads, toc, segments and
-records. NOT yet safe in Python (#110): `Reader._ensure_impl` with `cache=` is
-an unlocked check-then-set (5 warm Readers x 8 threads built 39 backends);
-`close()` racing a first read can reopen the session; `records()` warning
-dedup diffs the cumulative problems list, so concurrent calls can double-warn;
-the C++ setters (`set_threads`, `set_index_cache_bytes`) are unsynchronised.
-The docs say exactly this — do not widen the claim before #110 lands. A
-Writer is not shared-safe. A new long call must release
-the GIL too (and get a `tests/test_p31_gil_release.py` case); any state it
-mutates must be locked; core globals must be `constexpr` or immutable (the AES
-inverse S-box used to be filled lazily, a data race).
+records. #110 made the Python side safe too: `Reader._ensure_impl` and
+`close()` share one lock (one backend per warm Reader; a close racing the
+first build stays closed), and record warnings are announced once per Reader
+(`_Announced`), never by diffing the cumulative problem list per call. The
+C++ setters (`set_threads`, `set_index_cache_bytes`) are atomics. Metadata
+loaded at open is IMMUTABLE afterwards and read without a lock
+(`segment_metadata` is const); never add a lazy load back. A Writer is not
+shared-safe. A new long call must release the GIL too (and get a
+`tests/test_p31_gil_release.py` case); any state it mutates must be locked;
+core globals must be `constexpr` or immutable (the AES inverse S-box used to
+be filled lazily, a data race).
+
+THREAD RULE (docs/threads.md, documented ONCE there): an object's
+`n_threads` is how many threads it may use for everything (open, file
+access, decode, decrypt, encode); 0 = automatic, decided ONLY by
+`resolve_threads` in parallel.hpp (Python asks `_mef3io.resolve_threads`;
+never re-derive it), 1 = no extra threads; settable at runtime, next call on.
+NO per-call count in any public API (removed in 2.0). MultiReader's budget is
+a TOTAL split between recordings; the per-call share goes through the
+PRIVATE `Reader._read_raw(_split=)` -> binding `_n_threads` ->
+`Reader::read_raw_split`. Never expose it publicly (pinned by
+tests/test_p40_threads.py, which also checks the budget is never exceeded).
+
+THE PARALLEL OPEN must behave like a serial one: `discover_layout` and
+`Session::discover` run their passes with `parallel_try_each` (every item
+runs, each one's exception kept) and assemble IN ORDER, rethrowing the first
+failure a serial walk would meet. Strict raises that, lenient records
+problems() in the serial order. Never use `parallel_for`'s "first error in
+time" for work whose error is user-visible. Pinned at 1/2/8/32 threads, dir
+and tar, damaged + incomplete segments, with a scrambling source
+(core/tests/test_parallel_open.cpp, tests/test_p40_threads.py).
 
 ## 13. No private product name in public text
 

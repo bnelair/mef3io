@@ -281,7 +281,9 @@ def read_window(spec: dict, reader, ch: int, a: int, b: int, t0: int, t1: int,
         arr = reader.get_data(channel_name(ch), t0, t1)
         arr = np.asarray(arr)
     elif backend == "mef3io":
-        arr = np.asarray(reader.read(channel_name(ch), t0, t1, n_threads=n_threads))
+        if n_threads is not None and reader.n_threads != n_threads:
+            reader.n_threads = n_threads  # one count per Reader (no per-call override)
+        arr = np.asarray(reader.read(channel_name(ch), t0, t1))
     elif backend == "nwb_zarr":
         arr = np.asarray(reader["es"].data[a:b, ch])
     else:

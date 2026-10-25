@@ -196,7 +196,6 @@ def _battery(r):
         i = r.info(ch)
         for t0, t1 in [(None, None), (i["start_time"] + 3 * SECOND, i["end_time"] - 3 * SECOND)]:
             out[("read", ch, t0, t1)] = r.read(ch, t0, t1)
-            out[("read1", ch, t0, t1)] = r.read(ch, t0, t1, 1)
             out[("raw", ch, t0, t1)] = r.read_raw(ch, t0, t1)
             out[("env", ch, t0, t1)] = r.block_envelope(ch, t0, t1)
     out["records"] = r.records()
@@ -415,8 +414,9 @@ def test_thread_budget_and_concurrent_calls_give_identical_results(tmp_path):
     with _quiet(mef3io.MultiReader, parts, n_threads=1) as serial:
         want = serial.read("A")
     with _quiet(mef3io.MultiReader, parts) as r:
-        for n in (None, 0, 1, 2, 7):
-            np.testing.assert_array_equal(r.read("A", n_threads=n), want)
+        for n in (0, 1, 2, 7):
+            r.n_threads = n  # re-split from the next call
+            np.testing.assert_array_equal(r.read("A"), want)
         out, errors = [], []
 
         def worker():

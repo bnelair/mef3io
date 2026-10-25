@@ -143,9 +143,10 @@ pages such as
 - **Programs that stay responsive.** Opening, reading and writing release
   Python's GIL, so a GUI or server keeps running while a session opens or
   decodes on a worker thread. Reads on one `Reader` can run from several
-  threads at once (a `Writer` is not for sharing); see
-  [Parallelism](https://bnelair.github.io/mef3io/python/#parallelism) for the
-  limits.
+  threads at once (a `Writer` is not for sharing). One `n_threads` count per
+  object covers opening, file access and decoding, so a session on a network
+  share opens in parallel; see
+  [Threads](https://bnelair.github.io/mef3io/threads/).
 - **Copies with only what you need.** `mef3io.transform_session` writes a
   copy with chosen channels, new passwords (or none), a new name and edited
   subject details or descriptions, and can keep only a time window

@@ -23,7 +23,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from ._cancel import CancelToken, Cancelled, _hooks
-from ._reader import Reader, _flush
+from ._reader import Reader, _check_threads, _flush
 from ._warnings import MefWarning, emit as _emit, identity_of as _identity_of
 
 __all__ = ["MultiReader", "MultiReaderDifferenceWarning"]
@@ -136,8 +136,21 @@ def _is_default_description(description, path: str, reader) -> bool:
     return description in names
 
 
-def _threads_total(n_threads: int) -> int:
-    return n_threads if n_threads and n_threads > 0 else (os.cpu_count() or 1)
+def _resolve(n_threads: int, io: bool = False) -> int:
+    """The core's ONE resolver of "automatic" (parallel.hpp), never re-derived."""
+    from . import _mef3io  # noqa: PLC0415
+
+    return int(_mef3io.resolve_threads(int(n_threads), io))
+
+
+def _split(budget: int, parts: int) -> tuple:
+    """``(workers, per_worker)``: ``parts`` items on ``budget`` threads in total.
+
+    ``workers * per_worker <= budget`` always: a MultiReader's pools never
+    multiply (``n_threads`` is the TOTAL, see the threads guide).
+    """
+    workers = max(1, min(parts, budget))
+    return workers, max(1, budget // workers)
 
 
 def _run(fn, items: list, workers: int) -> list:
@@ -170,8 +183,8 @@ class MultiReader:
     A drop-in for :class:`mef3io.Reader`: the same methods and properties,
     with the same arguments, return types, dict keys and dtypes. The only
     differences are the first argument (a sequence of sessions) and that
-    ``n_threads`` is the budget for the whole call, shared between the
-    recordings a read touches and the decode threads of each.
+    ``n_threads`` is the total for the whole MultiReader, shared between the
+    recordings it opens or reads at once (never multiplied by them).
 
     What a read returns is exactly what :class:`Reader` returns for the same
     window of the same recordings merged with :func:`mef3io.merge_sessions`:
@@ -193,9 +206,14 @@ class MultiReader:
     backend, warn_declarations, strict : optional
         Passed to every :class:`Reader`.
     n_threads : int, optional
-        Total thread budget (``0``, the default, = all cores). A read that
-        touches several recordings reads them at once, splitting the budget
-        between them. Results do not depend on it.
+        How many threads this MultiReader may use IN TOTAL, for everything it
+        does (``0``, the default, = automatic; ``1`` = no extra threads). It
+        is split, never multiplied: the open shares it between the
+        recordings it opens at once, and a read that touches several
+        recordings reads them at once, each with its share; a read inside
+        one recording gets all of it. Changeable later through
+        :attr:`n_threads` (re-split from the next call). Results do not
+        depend on it. See [the threads guide](https://bnelair.github.io/mef3io/threads/).
     cache : None, "auto" or sequence, optional
         ``None`` (default) or ``"auto"`` as for :class:`Reader`, applied to
         every recording; or one cache path per recording, in the order of
@@ -296,14 +314,18 @@ class MultiReader:
     ):
         given = _paths_argument(paths)
         caches = _cache_argument(cache, len(given))
-        self._n_threads = n_threads
+        self._n_threads = _check_threads(n_threads)
         self._closed = False
         self._lock = threading.Lock()
         self._segment_maps: dict = {}
         self._declaration_issues_global = None
 
+        # The open shares the budget (resolved for file access) between the
+        # recordings opened at once; each Reader's own open pool gets its share.
+        workers, per_open = self._open_split(len(given))
+
         def open_one(i):
-            return Reader(given[i], password, backend, n_threads, caches[i],
+            return Reader(given[i], password, backend, per_open, caches[i],
                           warn_declarations, strict, _defer_warnings=True)
 
         opened: list = [None] * len(given)
@@ -311,7 +333,6 @@ class MultiReader:
         if len(given) == 1:
             opened[0] = open_one(0)
         else:
-            workers = min(len(given), _threads_total(n_threads), 16)
             with ThreadPoolExecutor(max_workers=workers) as ex:
                 futures = [ex.submit(open_one, i) for i in range(len(given))]
             for i, f in enumerate(futures):
@@ -642,7 +663,7 @@ class MultiReader:
             touched.append(k)
         return fs, t0, t1, n, period, touched
 
-    def _gather(self, channel, t0, t1, n_threads, cancel, progress):
+    def _gather(self, channel, t0, t1, cancel, progress):
         """Read ``[t0, t1)`` from every recording it touches, on the window's grid.
 
         Returns ``(fs, t0, n, touched, results)``: results[j] is recording
@@ -654,11 +675,10 @@ class MultiReader:
         self._check_open()
         _hooks(cancel, progress)  # validate the arguments as Reader does
         fs, t0, t1, n, period, touched = self._window(channel, t0, t1)
-        budget = _threads_total(self._n_threads if n_threads is None else n_threads)
-        workers = min(len(touched), budget) or 1
-        per_read = max(1, budget // workers)
-        if len(touched) == 1:
-            per_read = n_threads  # exactly the Reader call
+        # ONE budget for the call, split between the recordings it touches
+        # (each part's count is passed per call, privately: Reader._read_raw's
+        # _split). A read inside one recording gets all of it.
+        workers, per_read = _split(_resolve(self._n_threads), len(touched))
 
         internal = None
         if cancel is None and len(touched) > 1:
@@ -689,13 +709,13 @@ class MultiReader:
             limit = t1 if j == len(touched) - 1 else min(t1, int(math.ceil(end + 2 * period)) + 1)
             pending: list = []
             try:
-                out = r._read_raw(channel, t0, limit, per_read, hooks_for(j), pending)
+                out = r._read_raw(channel, t0, limit, hooks_for(j), pending, _split=per_read)
                 v = out["valid"]
                 if limit < t1 and len(v) and v[-1]:
                     # Data reached the shortened window's end: the header end
                     # time understated it. Read the full window.
                     pending = []
-                    out = r._read_raw(channel, t0, t1, per_read, hooks_for(j), pending)
+                    out = r._read_raw(channel, t0, t1, hooks_for(j), pending, _split=per_read)
             except BaseException:
                 if internal is not None:
                     internal.cancel()
@@ -768,7 +788,6 @@ class MultiReader:
         channel: str,
         t0: Optional[int] = None,
         t1: Optional[int] = None,
-        n_threads: Optional[int] = None,
         *,
         cancel: Optional["CancelToken"] = None,
         progress: Optional[Callable[[int, int], object]] = None,
@@ -778,11 +797,11 @@ class MultiReader:
         As :meth:`Reader.read`, and equal to it on the same recordings merged
         with :func:`mef3io.merge_sessions`. Time a recording does not cover
         (or a channel it does not have) is NaN. Each recording's samples are
-        scaled by its own units-conversion factor. ``n_threads`` is the total
-        for the call; ``cancel`` stops every recording's read; ``progress``
-        reports the sum over them.
+        scaled by its own units-conversion factor. The read shares
+        :attr:`n_threads` between the recordings it touches; ``cancel`` stops
+        every recording's read; ``progress`` reports the sum over them.
         """
-        fs, t0, n, touched, results = self._gather(channel, t0, t1, n_threads, cancel, progress)
+        fs, t0, n, touched, results = self._gather(channel, t0, t1, cancel, progress)
         # Reader.read never warns (its block-copy detail is read_raw's): the
         # warnings collected with each part are dropped here, not emitted.
         ufs = self._ufacts(channel, touched)
@@ -809,7 +828,6 @@ class MultiReader:
         channel: str,
         t0: Optional[int] = None,
         t1: Optional[int] = None,
-        n_threads: Optional[int] = None,
         *,
         cancel: Optional["CancelToken"] = None,
         progress: Optional[Callable[[int, int], object]] = None,
@@ -838,7 +856,7 @@ class MultiReader:
                 "so their counts cannot share one; use read(), or read_raw() each "
                 "recording's part"
             )
-        fs, t0, n, touched, results = self._gather(channel, t0, t1, n_threads, cancel, progress)
+        fs, t0, n, touched, results = self._gather(channel, t0, t1, cancel, progress)
         self._flush_results(results)
         if ufs:
             uf = ufs[0]
@@ -861,7 +879,33 @@ class MultiReader:
     # ---- maps --------------------------------------------------------------
 
     def _workers(self) -> int:
-        return min(_threads_total(self._n_threads), 16)
+        # Metadata calls fanned out over the recordings (each runs no pool of
+        # its own): the budget resolved for file access.
+        return _resolve(self._n_threads, io=True)
+
+    def _open_split(self, parts: int) -> tuple:
+        return _split(_resolve(self._n_threads, io=True), parts)
+
+    @property
+    def n_threads(self) -> int:
+        """How many threads this MultiReader may use in total (``0`` = automatic).
+
+        Settable at any time: re-split between the recordings from the next
+        call (calls already running keep theirs). See
+        [the threads guide](https://bnelair.github.io/mef3io/threads/).
+        """
+        return self._n_threads
+
+    @n_threads.setter
+    def n_threads(self, value: int) -> None:
+        value = _check_threads(value)
+        with self._lock:
+            self._n_threads = value
+            # A recording whose backend is built later (cache=) opens with its
+            # share of the new budget.
+            _, per_open = self._open_split(len(self._readers))
+            for r in self._readers:
+                r.n_threads = per_open
 
     def _segment_map(self, channel: str):
         """``({(k, folder number): number in segments()}, segments list)``, cached."""

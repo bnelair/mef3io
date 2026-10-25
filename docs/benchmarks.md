@@ -228,6 +228,48 @@ system that re-checks attributes on a seek to the end saves one request per
 segment. The large gain for slow shares comes from making the requests in
 parallel.
 
+### The open on several threads
+
+The open now makes those requests on the Reader's threads (`n_threads`; see
+[Threads](threads.md)): the channel listings, the segment file checks, and
+the read and parse of every metadata file. The number of requests is the same
+at every thread count, and so is the result. Measured through the test
+suite's counting source, which adds a fixed delay to every library request
+(2026-10-25, 12-thread Linux workstation, local disk underneath):
+
+| delay per request | session | requests | 1 thread | 4 threads | 16 threads |
+|---|---|---|---|---|---|
+| 5 ms | 64 ch x 1 seg | 321 | 1.66 s | 0.42 s | 0.11 s |
+| 5 ms | 64 ch x 10 seg | 2,625 | 13.53 s | 3.38 s | 0.86 s |
+| 5 ms | 209 ch x 1 seg | 1,046 | 5.44 s | 1.38 s | 0.37 s |
+| 5 ms | 209 ch x 10 seg | 8,570 | 44.94 s | 11.24 s | 2.84 s |
+| 20 ms | 64 ch x 1 seg | 321 | 6.51 s | 1.67 s | 0.46 s |
+| 20 ms | 64 ch x 10 seg | 2,625 | 53.28 s | 13.33 s | 3.39 s |
+| 20 ms | 209 ch x 1 seg | 1,046 | 21.21 s | 5.41 s | 1.44 s |
+| 20 ms | 209 ch x 10 seg | 8,570 | 173.02 s | 43.29 s | 10.89 s |
+
+The speed-up is close to the thread count (3.9-4.0x on 4 threads, 14-16x on
+16), because the delay, not the CPU, is what the open waits on. A real share
+answers several requests at once only up to its own limit, so a real speed-up
+can be smaller. The automatic count (`n_threads=0`) uses at least 8 threads for
+this pass, also on a machine with fewer cores.
+
+On a local disk with 16 threads (same machine), a 1-channel x 3,200-segment directory opens
+in about 9 µs per segment instead of 95 µs. A `.mefd.tar` archive opens in
+about 33 µs per segment instead of 130 µs. There the archive's member index,
+which is read one header after another when the archive is opened, takes most
+of the remaining time.
+
+### Reads skip segments outside the window
+
+A windowed read used to load and walk the block index of every segment of
+the channel, even for a one-second window. It now skips the segments whose
+metadata places them outside the window first. It is conservative: only on
+plausible header times, with a second of margin, and never by the end time of
+the channel's last segment, which an interrupted append can leave stale.
+1 channel x 2,400 segments, 3,000 one-second reads, 1 thread: **3.9 ms per
+read before, 0.24 ms after** (16x).
+
 ## Reproducing
 
 ```bash
@@ -237,8 +279,9 @@ python benchmarks/compression_test.py
 python benchmarks/long_session_benchmark.py --with-mef-tools
 python benchmarks/access_modes_benchmark.py
 python benchmarks/mef_benchmark.py
-# open cost with a delay per library request (C++ test suite, hidden case)
+# open cost with a delay per library request (C++ test suite, hidden cases)
 build-core/mef3io_tests "[.open-bench]"
+build-core/mef3io_tests "[.open-bench-threads]"   # the thread-count table
 ```
 
 `pip install "mef3io[bench]"` installs everything these need.

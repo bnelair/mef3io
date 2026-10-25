@@ -295,8 +295,7 @@ int mef3io_reader_read_ex(mef3io_reader* r, const char* channel, int64_t t0, int
     return fail_argument("NULL argument");
   return guarded([&] {
     const mef3io::Control ctl = make_control(cancel, progress, user_data);
-    std::vector<mef3io::sf8> v = r->impl.read(channel, opt_time(t0), opt_time(t1),
-                                              mef3io::Reader::kUseDefaultThreads, ctl);
+    std::vector<mef3io::sf8> v = r->impl.read(channel, opt_time(t0), opt_time(t1), ctl);
     if (static_cast<int64_t>(v.size()) > buf_len)
       throw std::out_of_range("buffer too small: need " + std::to_string(v.size()));
     std::copy(v.begin(), v.end(), buf);
@@ -319,8 +318,7 @@ int mef3io_reader_read_raw_ex(mef3io_reader* r, const char* channel, int64_t t0,
     return fail_argument("NULL argument");
   return guarded([&] {
     const mef3io::Control ctl = make_control(cancel, progress, user_data);
-    mef3io::RawData d = r->impl.read_raw(channel, opt_time(t0), opt_time(t1),
-                                         mef3io::Reader::kUseDefaultThreads, ctl);
+    mef3io::RawData d = r->impl.read_raw(channel, opt_time(t0), opt_time(t1), ctl);
     if (static_cast<int64_t>(d.samples.size()) > buf_len)
       throw std::out_of_range("buffer too small: need " + std::to_string(d.samples.size()));
     std::copy(d.samples.begin(), d.samples.end(), samples);
@@ -681,9 +679,24 @@ int mef3io_writer_set_block_length(mef3io_writer* w, int64_t samples_per_block) 
   return guarded([&] { w->impl.set_block_length(samples_per_block); });
 }
 
+int mef3io_reader_set_threads(mef3io_reader* r, int n_threads) {
+  if (!r) return fail_argument("NULL argument");
+  return guarded([&] { r->impl.set_threads(n_threads); });
+}
+
+int mef3io_reader_threads(mef3io_reader* r, int* out) {
+  if (!r || !out) return fail_argument("NULL argument");
+  return guarded([&] { *out = r->impl.threads(); });
+}
+
 int mef3io_writer_set_threads(mef3io_writer* w, int n_threads) {
   if (!w) return fail_argument("NULL argument");
   return guarded([&] { w->impl.set_threads(n_threads); });
+}
+
+int mef3io_writer_threads(mef3io_writer* w, int* out) {
+  if (!w || !out) return fail_argument("NULL argument");
+  return guarded([&] { *out = w->impl.threads(); });
 }
 
 static void copy_summary(const mef3io::WriteSummary& s, mef3io_write_summary* out) {

@@ -36,7 +36,11 @@ class Reader {
   /// Open a session.
   /// @param mefd_path  path to the `.mefd` session directory.
   /// @param password   level-1 or level-2 password; empty if unencrypted.
-  /// @param n_threads  RED decode threads: 0 = hardware concurrency, 1 = serial.
+  /// @param n_threads  how many threads this Reader may use for everything it
+  ///                   does — opening, file access, decoding, decrypting
+  ///                   (docs/threads.md): 0 = automatic (the default), 1 = no
+  ///                   extra threads. Results never depend on it. Changeable
+  ///                   later with set_threads(); the open uses this value.
   /// @param strict  true (the default) lets a segment-level failure fail the
   ///                 whole session. false contains it: the segment is skipped,
   ///                 its time span reads back as a gap like any other missing
@@ -45,11 +49,11 @@ class Reader {
   ///                 corrupt scaling reaches an analysis unnoticed.
   Reader(const std::string& mefd_path, std::string password = "", int n_threads = 0,
          bool strict = true)
-      : session_(mefd_path, std::move(password), strict), n_threads_(n_threads) {}
+      : session_(mefd_path, std::move(password), strict, n_threads) {}
   /// Open through an existing source (see the matching Session constructor).
   Reader(std::shared_ptr<const SessionSource> source, std::string password = "",
          int n_threads = 0, bool strict = true)
-      : session_(std::move(source), std::move(password), strict), n_threads_(n_threads) {}
+      : session_(std::move(source), std::move(password), strict, n_threads) {}
 
   /// Segments that could not be read. Always empty in strict mode, where such
   /// a segment throws instead. Non-empty means parts of this session read back
@@ -60,10 +64,12 @@ class Reader {
     return session_.legacy_password_record_files();
   }
 
-  /// Set the default decode thread count (0 = all cores, 1 = serial).
-  void set_threads(int n) { n_threads_ = n; }
-  /// Current default decode thread count.
-  int threads() const { return n_threads_; }
+  /// Change the thread count (0 = automatic, 1 = no extra threads). Takes
+  /// effect on the NEXT call; calls in flight keep the count they started
+  /// with. Safe while other threads use this Reader.
+  void set_threads(int n) { session_.set_threads(n); }
+  /// The thread count as set (0 = automatic), not resolved.
+  int threads() const { return session_.threads(); }
 
   /// Channel names present in the session.
   const std::vector<std::string>& channels() const { return session_.channels(); }
@@ -84,7 +90,6 @@ class Reader {
   /// @param channel    channel name.
   /// @param t0,t1      half-open uUTC window; defaults span the whole channel.
   ///                   Returned length is `round((t1 - t0) * fs / 1e6)`.
-  /// @param n_threads  per-call thread override (kUseDefaultThreads = default).
   /// @param ctl        optional hooks. `ctl.cancel` is checked before each
   ///                   segment is fetched and before each block is decoded; a
   ///                   cancelled read throws Cancelled and returns no partial
@@ -95,18 +100,20 @@ class Reader {
   ///                   progress counts decoding only.
   /// @returns samples, a validity mask (0 in gaps), and scaling metadata.
   RawData read_raw(const std::string& channel, std::optional<si8> t0 = std::nullopt,
-                   std::optional<si8> t1 = std::nullopt, int n_threads = kUseDefaultThreads,
-                   const Control& ctl = {});
+                   std::optional<si8> t1 = std::nullopt, const Control& ctl = {});
 
   /// Read `[t0, t1)` as float64 (`= counts * units_conversion_factor`), with
   /// discontinuity gaps filled with NaN. Parameters as in read_raw().
   std::vector<sf8> read(const std::string& channel, std::optional<si8> t0 = std::nullopt,
-                        std::optional<si8> t1 = std::nullopt, int n_threads = kUseDefaultThreads,
-                        const Control& ctl = {});
+                        std::optional<si8> t1 = std::nullopt, const Control& ctl = {});
 
-  /// Sentinel for the per-call @c n_threads argument meaning "use the reader
-  /// default".
-  static constexpr int kUseDefaultThreads = -1000000;
+  /// INTERNAL — not part of the public API (Python's MultiReader only).
+  /// read_raw() with this call's decode thread count given explicitly instead
+  /// of the Reader's. A MultiReader splits ONE budget between the recordings a
+  /// read touches, so each part's count is per call. Do not expose it: the
+  /// public rule is one count per object (docs/threads.md).
+  RawData read_raw_split(const std::string& channel, std::optional<si8> t0,
+                         std::optional<si8> t1, int n_threads, const Control& ctl = {});
 
   /// Block-level table of contents for @p channel (per-RED-block start time,
   /// sample counts, extrema, discontinuity flags) — for seeking and viewers.
@@ -142,8 +149,7 @@ class Reader {
   Session& session() { return session_; }
 
  private:
-  Session session_;
-  int n_threads_ = 0;
+  Session session_;  // holds the thread count too (one atomic, one place)
 };
 
 }  // namespace mef3io

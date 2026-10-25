@@ -555,7 +555,7 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   if (append) {
     // fs / conversion-factor / start-time conflicts are validated against the
     // on-disk metadata inside append_time_series_segment.
-    append_time_series_segment(seg_dir, spec, blocks, n_threads_, &written_difference_bytes,
+    append_time_series_segment(seg_dir, spec, blocks, n_threads_.load(), &written_difference_bytes,
                                &st.index_cache);
   } else {
     // Everything that can refuse runs BEFORE a directory exists: a refused
@@ -568,7 +568,7 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
     const bool created_segd = !fs::exists(seg_dir);
     fs::create_directories(seg_dir);
     try {
-      write_time_series_segment(seg_dir, spec, blocks, n_threads_, &written_difference_bytes);
+      write_time_series_segment(seg_dir, spec, blocks, n_threads_.load(), &written_difference_bytes);
     } catch (...) {
       std::error_code ec;
       if (created_timd)

@@ -90,11 +90,21 @@ def _assert_releases(make_call, runs=3):
         "it holds the GIL")
 
 
+# The open runs on the object's threads now (#141), and on this fixture an
+# AUTOMATIC open is too fast to tell a stall apart (it skipped). So each
+# constructor is measured with a fixed count: 1 (serial) for every
+# constructor, and 2 for the parallel path: the calling thread waits for (and
+# works in) the pool without the GIL either way.
 @pytest.mark.parametrize("open_", [
-    pytest.param(lambda p: mef3io.Reader(p), id="mef3io.Reader"),
-    pytest.param(lambda p: mef3io.Reader(p, strict=False), id="mef3io.Reader-lenient"),
-    pytest.param(lambda p: m.Reader(p), id="_mef3io.Reader"),
-    pytest.param(lambda p: m.Session(p), id="_mef3io.Session"),
+    pytest.param(lambda p: mef3io.Reader(p, n_threads=1), id="mef3io.Reader"),
+    pytest.param(lambda p: mef3io.Reader(p, strict=False, n_threads=1),
+                 id="mef3io.Reader-lenient"),
+    pytest.param(lambda p: m.Reader(p, "", 1), id="_mef3io.Reader"),
+    pytest.param(lambda p: m.Session(p, "", True, 1), id="_mef3io.Session"),
+    pytest.param(lambda p: mef3io.Reader(p, n_threads=2), id="mef3io.Reader-2-threads"),
+    pytest.param(lambda p: m.Reader(p, "", 2), id="_mef3io.Reader-2-threads"),
+    pytest.param(lambda p: m.Session(p, "", False, 2), id="_mef3io.Session-lenient-2-threads"),
+    pytest.param(lambda p: mef3io.MultiReader([p], n_threads=2), id="mef3io.MultiReader"),
 ])
 def test_an_open_does_not_hold_the_gil(many_segments, open_):
     open_(many_segments)  # warm the page cache: measure parsing, not the disk

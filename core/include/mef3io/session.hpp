@@ -1,7 +1,9 @@
 // mef3io — session/channel/segment tree and low-level indexed reads.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
+#include <exception>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -35,7 +37,10 @@ struct SegmentReader {
   std::string tidx_path;
   std::string tdat_path;
   int segment_number = 0;
-  std::optional<TimeSeriesMetadata> metadata;      // loaded at open (state_mu_)
+  /// Loaded by the open and IMMUTABLE afterwards, so later calls read it
+  /// without a lock (#110). Empty only for a segment that failed to load, and
+  /// such a segment is marked failed (load_error) before the open returns.
+  std::optional<TimeSeriesMetadata> metadata;
   /// The block index, loaded lazily (whole file) and shared: a call holds its
   /// own reference (a PIN) for as long as it reads it, so evicting it from the
   /// cache (another thread's trim) never frees bytes in use. Guarded by
@@ -215,12 +220,26 @@ class Session {
   ///                 reach an analysis unnoticed. false contains the failure to
   ///                 the segment, leaves its span reading back as a gap, and
   ///                 records it in problems().
-  Session(const std::string& mefd_path, std::string password = "", bool strict = true);
+  /// @param n_threads  how many threads this object may use (docs/threads.md):
+  ///                 0 = automatic (resolve_threads), 1 = no extra threads.
+  ///                 The open lists channel folders, checks segment files and
+  ///                 reads + parses every .tmet on that many threads; its
+  ///                 result, its error (strict) and problems() (lenient) do
+  ///                 not depend on the count.
+  Session(const std::string& mefd_path, std::string password = "", bool strict = true,
+          int n_threads = 0);
   /// Open a session through an existing source (e.g. a decorator that counts
   /// or delays requests, as the open-cost tests do). No naming check: the
-  /// source decides what it serves.
+  /// source decides what it serves. The source must be safe for concurrent
+  /// calls (every SessionSource is).
   Session(std::shared_ptr<const SessionSource> source, std::string password = "",
-          bool strict = true);
+          bool strict = true, int n_threads = 0);
+
+  /// Thread count for the NEXT call (0 = automatic, 1 = no extra threads);
+  /// calls in flight keep theirs. Safe while other threads read.
+  void set_threads(int n) { n_threads_.store(n, std::memory_order_relaxed); }
+  /// The thread count as set (0 = automatic), not resolved.
+  int threads() const { return n_threads_.load(std::memory_order_relaxed); }
 
   /// Segments that failed to load, in lenient mode. Always empty when strict.
   /// A copy: lenient reads on other threads may append while you look.
@@ -291,7 +310,10 @@ class Session {
   /// Cap on cached block indices, in bytes (default 256 MB). 0 = unlimited.
   /// Lowering it trades re-reads for resident memory; the indices are read
   /// sequentially, so a re-read is cheap next to decoding.
-  void set_index_cache_bytes(std::size_t n) { index_budget_ = n; }
+  /// Safe while other threads read: takes effect at the next trim.
+  void set_index_cache_bytes(std::size_t n) {
+    index_budget_.store(n, std::memory_order_relaxed);
+  }
   std::size_t index_cache_bytes() const;
 
   /// Which record levels read_records returns.
@@ -334,10 +356,13 @@ class Session {
   };
 
   std::uint64_t index_tick_ = 0;
-  std::size_t index_budget_ = 256u * 1024u * 1024u;
+  std::atomic<std::size_t> index_budget_{256u * 1024u * 1024u};
+  std::atomic<int> n_threads_{0};
 
   void discover();
-  void load_channel_basic_info(const std::string& name, Channel& ch);
+  /// `errors[k]` is what loading segment k's metadata threw (null = loaded).
+  void load_channel_basic_info(const std::string& name, Channel& ch,
+                               const std::exception_ptr* errors);
   /// The offset every readable segment of `channel` (or of the whole session
   /// when null) agrees on; nullopt, with `why` set, when they disagree.
   std::optional<si8> agreed_rto(const std::string* channel, std::string& why);
@@ -348,7 +373,9 @@ class Session {
   void read_record_file(std::vector<Record>& out, const std::string& rdat_path,
                         std::optional<si8> rto, const std::string& why, RecordLevel level,
                         const std::string& channel, int segment);
-  TimeSeriesMetadata& segment_metadata(SegmentReader& seg);
+  /// The segment's metadata, loaded at open. Lock-free: it never changes
+  /// after the open (#110). Only for a segment that did not fail.
+  const TimeSeriesMetadata& segment_metadata(const SegmentReader& seg) const;
   /// Run `fn` for one segment, containing its failure when lenient.
   ///
   /// Returns false when the segment is unusable — already known bad, or `fn`

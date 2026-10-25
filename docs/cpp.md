@@ -51,9 +51,19 @@ auto recs = r.records("ch1");     // ch1's channel- + segment-level annotations
 the `Session` under it) may run from several threads at once. Each call
 holds its own reference to the block index it reads, and the shared mutable
 state is locked (`core/tests/test_concurrency.cpp`). Configure
-`set_threads` (and `set_index_cache_bytes`) before sharing: the setters are
-not synchronised yet ([#110](https://github.com/bnelair/mef3io/issues/110)).
+`set_threads` and `set_index_cache_bytes` are atomic and may be called while
+other threads read; a change applies from the next call. The metadata
+parsed at open is immutable afterwards, so calls read it without a lock.
 A `SessionWriter` is not for sharing.
+
+The `n_threads` given to `Reader` (or `Session`) is how many threads the
+object may use for everything: the open (channel listings, segment file
+checks, every `.tmet` read and parse) and decoding. `0` = automatic
+(`mef3io::resolve_threads` in `parallel.hpp`: hardware concurrency for CPU
+work, at least 8 for file access), `1` = no extra threads. The open's result,
+its strict-mode error and `problems()` are the same at every count. There is
+no per-call count: `read`/`read_raw` take `(channel, t0, t1, ctl)`. See
+[Threads](threads.md).
 
 `Reader` wraps `mef3io::Session` (`session.hpp`), which exposes the lower
 level: lazy `.mefd/.timd/.segd` traversal, `read_runs` (decoded contiguous

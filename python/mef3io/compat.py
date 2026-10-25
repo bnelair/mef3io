@@ -26,6 +26,7 @@ from ._reader import (
     _declaration_warning_text,
     _flush,
     _warn_legacy_password,
+    _Announced,
     _warning_on_legacy_records,
 )
 from ._warnings import emit as _emit, identity_of as _identity_of
@@ -51,6 +52,7 @@ class MefReader:
         warn_declarations: bool = True,
     ):
         self._r = _mef3io.Reader(str(session_path), password2 or "")
+        self._announced = _Announced()
         self._path_str = str(session_path)
         # The legacy drop-in is exactly the entry point people with legacy-
         # written sessions use, so it must carry the same open-time warning as
@@ -167,7 +169,7 @@ class MefReader:
         # not be mistaken for a failed read and swallowed.
         pending: list = []
         try:
-            with _warning_on_legacy_records(self._r, self._path_str, pending):
+            with _warning_on_legacy_records(self._announced, self._r, self._path_str, pending):
                 try:
                     if channel is None:
                         return self._r.records()
