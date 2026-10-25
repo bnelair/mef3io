@@ -199,6 +199,35 @@ and read by both stacks.
 Both readers return identical arrays with matching NaN positions on both
 writers' files.
 
+## Opening over a slow file system
+
+On a network share every file-system request is a round trip (around
+110 ms over SMB in one report), and opening a session makes its requests one
+after another: a listing of the session and of each channel folder, three
+existence checks per segment, and a read of each segment's metadata file.
+
+Counting the library's own requests is not the same as counting round trips.
+Replacing the three existence checks with one listing of each segment folder
+halves the library's count, but a listing is several system calls (open,
+read the entries, close), where an existence check is one. Measured, it
+increased the system calls by about 10%, slowed a local open by 10-20%, and
+gained only 12% on a pass-through FUSE file system with 2 ms added per
+request. It was not kept.
+
+What was kept is reading each metadata file with one bounded read of its
+fixed size. 209 channels x 10 segments, 2026-10-25:
+
+| | before | after |
+|---|---|---|
+| system calls per open (local disk, strace) | 20,454 | 14,184 |
+| FUSE, 2 ms per request, attributes cached 1 s: kernel requests / time | 17,826 / 43.8-48.0 s | 17,822 / 43.4-43.8 s |
+| FUSE, 2 ms per request, no attribute caching: kernel requests / time | 47,255 / 115.1-116.5 s | 45,165 / 108.8-110.9 s |
+
+The local saving is the three seeks per segment that sized the file. A file
+system that re-checks attributes on a seek to the end saves one request per
+segment. The large gain for slow shares comes from making the requests in
+parallel.
+
 ## Reproducing
 
 ```bash
@@ -208,6 +237,8 @@ python benchmarks/compression_test.py
 python benchmarks/long_session_benchmark.py --with-mef-tools
 python benchmarks/access_modes_benchmark.py
 python benchmarks/mef_benchmark.py
+# open cost with a delay per library request (C++ test suite, hidden case)
+build-core/mef3io_tests "[.open-bench]"
 ```
 
 `pip install "mef3io[bench]"` installs everything these need.

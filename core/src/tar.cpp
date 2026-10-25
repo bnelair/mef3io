@@ -247,27 +247,37 @@ TarSource::TarSource(const std::string& tar_path) : tar_path_(tar_path) {
   for (const auto& [p, m] : files_)
     for (auto slash = p.find('/'); slash != std::string::npos; slash = p.find('/', slash + 1))
       dirs_.insert(p.substr(0, slash));
+
+  // Immediate children per directory, sorted by leaf name (std::map), a
+  // directory winning over a file of the same name: what list_dir returned
+  // when it scanned dirs_ then files_ on every call.
+  std::map<std::string, std::map<std::string, bool>> kids;
+  auto parent_of = [](const std::string& p) {
+    const auto slash = p.rfind('/');
+    return slash == std::string::npos ? std::make_pair(std::string(), p)
+                                      : std::make_pair(p.substr(0, slash), p.substr(slash + 1));
+  };
+  for (const auto& d : dirs_) {
+    if (d.empty()) continue;
+    auto [parent, leaf] = parent_of(d);
+    if (!leaf.empty()) kids[parent][leaf] = true;
+  }
+  for (const auto& [p, m] : files_) {
+    auto [parent, leaf] = parent_of(p);
+    if (!leaf.empty()) kids[parent].emplace(leaf, false);
+  }
+  for (auto& [dir, entries] : kids) {
+    auto& out = children_[dir];
+    out.reserve(entries.size());
+    for (const auto& [name, is_dir] : entries) out.push_back({name, is_dir});
+  }
 }
 
 std::vector<SourceDirEntry> TarSource::list_dir(const std::string& rel) const {
   if (!rel.empty() && dirs_.find(rel) == dirs_.end())
     throw IoError("no such directory in archive: " + describe(rel));
-  const std::string prefix = rel.empty() ? std::string() : rel + "/";
-  std::map<std::string, bool> children;  // leaf name -> is_dir
-  for (const auto& d : dirs_) {
-    if (d.empty() || d.compare(0, prefix.size(), prefix) != 0) continue;
-    const std::string leaf = d.substr(prefix.size());
-    if (!leaf.empty() && leaf.find('/') == std::string::npos) children[leaf] = true;
-  }
-  for (const auto& [p, m] : files_) {
-    if (p.compare(0, prefix.size(), prefix) != 0) continue;
-    const std::string leaf = p.substr(prefix.size());
-    if (!leaf.empty() && leaf.find('/') == std::string::npos) children.emplace(leaf, false);
-  }
-  std::vector<SourceDirEntry> out;
-  out.reserve(children.size());
-  for (const auto& [name, is_dir] : children) out.push_back({name, is_dir});
-  return out;
+  auto it = children_.find(rel);
+  return it == children_.end() ? std::vector<SourceDirEntry>{} : it->second;
 }
 
 bool TarSource::exists(const std::string& rel) const {
@@ -284,6 +294,11 @@ std::uint64_t TarSource::file_size(const std::string& rel) const { return member
 
 std::vector<ui1> TarSource::read_all(const std::string& rel) const {
   return read_range(rel, 0, static_cast<std::size_t>(member(rel).size));
+}
+
+std::vector<ui1> TarSource::read_head(const std::string& rel, std::size_t max_bytes) const {
+  const auto size = static_cast<std::size_t>(member(rel).size);
+  return read_range(rel, 0, std::min(size, max_bytes));
 }
 
 std::vector<ui1> TarSource::read_range(const std::string& rel, std::size_t offset,

@@ -216,6 +216,11 @@ class Session {
   ///                 the segment, leaves its span reading back as a gap, and
   ///                 records it in problems().
   Session(const std::string& mefd_path, std::string password = "", bool strict = true);
+  /// Open a session through an existing source (e.g. a decorator that counts
+  /// or delays requests, as the open-cost tests do). No naming check: the
+  /// source decides what it serves.
+  Session(std::shared_ptr<const SessionSource> source, std::string password = "",
+          bool strict = true);
 
   /// Segments that failed to load, in lenient mode. Always empty when strict.
   /// A copy: lenient reads on other threads may append while you look.
