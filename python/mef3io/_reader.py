@@ -276,6 +276,29 @@ def _flush(pending: list, stacklevel: int) -> None:
         _emit(category, message, stacklevel=stacklevel + 1, **kw)
 
 
+def _usable_factor(f) -> bool:
+    """A conversion factor that scales counts: finite and non-zero (#150)."""
+    return f != 0 and f == f and f not in (float("inf"), float("-inf"))
+
+
+def _unusable_factor_message(channel: str, f: float, alternative: str) -> str:
+    # Reader's text exactly (unusable_factor_message in session.cpp), so a
+    # MultiReader raises the same words.
+    value = "nan" if f != f else ("-inf" if f == float("-inf") else
+                                  "inf" if f == float("inf") else "0")
+    no_entry = ' (MEF\'s "no entry")' if f == 0 else ""
+    return (f"channel {channel}: samples in this window come from a segment that stores "
+            f"units_conversion_factor {value}{no_entry}, so they have no value in units; "
+            f"{alternative} returns the stored counts, and segments() lists each segment's "
+            "factor")
+
+
+def _format_error(message: str) -> Exception:
+    """A mef3io.FormatError (the extension's type, imported when needed)."""
+    from . import FormatError
+    return FormatError(message)
+
+
 def _check_threads(value) -> int:
     """An ``n_threads`` value: an int >= 0 (0 = automatic)."""
     if isinstance(value, bool):
@@ -624,7 +647,10 @@ class Reader:
         Returns
         -------
         dict
-            Keys: ``sampling_frequency`` (Hz), ``units_conversion_factor``,
+            Keys: ``sampling_frequency`` (Hz), ``units_conversion_factor``
+            (the factor every segment stores, ``None`` when the channel's
+            segments store different ones: :meth:`segments` lists each
+            segment's, and the reads scale each sample by its own),
             ``units_description``, ``start_time`` / ``end_time`` (uUTC),
             ``number_of_samples`` (stored samples — NaN gaps are not counted,
             so a gridded :meth:`read` usually returns more),
@@ -691,8 +717,16 @@ class Reader:
         -------
         numpy.ndarray
             1-D float64 array on the sampling grid. Discontinuity gaps are
-            filled with ``NaN``; values are scaled by the channel's
-            units-conversion factor.
+            filled with ``NaN``; each value is scaled by the units-conversion
+            factor of the segment it comes from (segments of one channel may
+            store different ones).
+
+        Raises
+        ------
+        mef3io.FormatError
+            A sample in the window comes from a segment whose factor cannot
+            scale: ``0`` (MEF's "no entry"), NaN or infinite. Nothing is
+            decoded; :meth:`read_raw` still returns the counts.
 
         See Also
         --------
@@ -732,8 +766,17 @@ class Reader:
             Keys: ``samples`` (int32 ``ndarray``, on the grid),
             ``valid`` (uint8 ``ndarray``; ``0`` marks gap samples with no
             data), ``start_uutc``, ``sampling_frequency``,
-            ``units_conversion_factor``. Physical units are
-            ``samples * units_conversion_factor`` where ``valid``.
+            ``units_conversion_factor``, ``units_conversion_factors``.
+            Physical units are ``samples * factor`` where ``valid``, with the
+            factor of the sample's own segment: ``units_conversion_factors``
+            lists the spans (dicts with ``start_index``, ``end_index`` —
+            half-open sample indices — and ``units_conversion_factor``), one
+            per run of valid samples sharing a factor, sorted, each from its
+            first valid sample to just past its last; one span for an
+            ordinary window, none when nothing in it is valid.
+            ``units_conversion_factor`` is that span's factor, ``None`` when
+            the window holds samples of segments with different factors, and
+            :meth:`info`'s value when nothing is valid.
             ``block_copy_mismatches`` (list of dict) lists any block whose
             `.tidx` entry disagreed with its RED block header, each with
             ``segment``, ``block_index``, ``index_start_uutc``,
@@ -786,7 +829,9 @@ class Reader:
             One dict per segment (sorted by segment number) with keys
             ``segment``, ``start_time`` / ``end_time`` (uUTC), ``start_sample``
             (channel-wide index of the first sample), ``number_of_samples``,
-            ``number_of_blocks``, the on-disk ``path``, and ``provenance``:
+            ``number_of_blocks``, ``units_conversion_factor`` (the
+            segment's own, as stored: ``0.0`` is MEF's "no entry"), the
+            on-disk ``path``, and ``provenance``:
             ``None`` for a file from another writer or from mef3io before 1.2,
             otherwise a dict with ``created_by`` / ``last_modified_by``
             (version strings, ``""`` if unknown), ``last_operation``,
@@ -821,7 +866,8 @@ class Reader:
             One row per block, in time order: ``start_uutc`` (int64, the first
             sample), ``end_uutc`` (int64, just past the last sample: start +
             samples / fs), ``min`` and ``max`` (float64, in the channel's
-            units, scaled like :meth:`read`). ``min``/``max`` are NaN where
+            units, scaled like :meth:`read`: each block by its own segment's
+            conversion factor). ``min``/``max`` are NaN where
             the writer left a block's extremes unset. Gaps in the recording
             are simply absent rows: compare ``end_uutc`` with the next
             ``start_uutc``.
@@ -834,6 +880,13 @@ class Reader:
         index; :meth:`read` places samples by each block's own header, which
         agrees on every consistent file (see :meth:`read_raw` for blocks
         whose two copies disagree).
+
+        Raises
+        ------
+        mef3io.FormatError
+            A block in the window comes from a segment whose conversion
+            factor cannot scale (as in :meth:`read`); :meth:`toc` returns the
+            counts.
         """
         return self._ensure_impl().block_envelope(channel, t0, t1)
 

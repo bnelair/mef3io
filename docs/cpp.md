@@ -32,10 +32,15 @@ const mef3io::ChannelInfo& ci = r.info("ch1");     // fs, ufact, times, counts,
                                                    // section-3 subject metadata
 
 // Float64 on the fs grid over [t0, t1) (defaults: whole channel);
-// gaps = NaN, values scaled by the conversion factor.
+// gaps = NaN, each value scaled by its own SEGMENT's conversion factor
+// (segments may store different ones; FormatError for a factor of 0 /
+// NaN / inf, which cannot scale).
 std::vector<double> x = r.read("ch1", t0, t1);
 
-// Or the raw form: int32 counts + validity mask (0 in gaps).
+// Or the raw form: int32 counts + validity mask (0 in gaps), and
+// raw.factor_spans: which factor applies to which samples. ci.units_conversion_factor
+// and raw.units_conversion_factor are std::optional: nullopt when the
+// segments (in the window) store different factors; segments() has each one's.
 mef3io::RawData raw = r.read_raw("ch1", t0, t1);
 
 auto segs = r.segments("ch1");    // per-segment map: what data is where
@@ -237,7 +242,14 @@ a `mef3io_progress_fn(done, total, user_data)` callback, and the `*_ex`
 variants `mef3io_reader_read_ex`, `mef3io_reader_read_raw_ex`,
 `mef3io_archive_session_ex`, `mef3io_extract_session_ex` and
 `mef3io_recover_session_ex` (the existing functions are unchanged). A
-cancelled call returns `MEF3IO_ERR_CANCELLED`. Validation, repair and
+cancelled call returns `MEF3IO_ERR_CANCELLED`.
+
+Conversion factors are stored per segment, and a channel's segments may
+differ: `mef3io_channel_info.units_conversion_factor` is then NaN,
+`mef3io_reader_segment_units_conversion_factor` gives each segment's,
+`mef3io_reader_read` scales each sample by its own segment's, and
+`mef3io_reader_read_raw_factors` returns the counts with the spans
+(`mef3io_factor_span`) saying which factor applies where. Validation, repair and
 `inspect_session` and de-identification have no C ABI functions, so MATLAB
 (built on the C ABI) has none of them either.
 

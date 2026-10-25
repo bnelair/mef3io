@@ -132,14 +132,12 @@ class MefReader:
         return out
 
     def get_data(self, channels, t_stamp1=None, t_stamp2=None):
+        # Reader.read scales each sample by its OWN segment's factor (#150);
+        # counts * ufact[0] was wrong for a channel whose segments differ
+        # (ufact is then [None]).
         if isinstance(channels, list):
-            data = self.get_raw_data(channels, t_stamp1, t_stamp2)
-            for i, ch in enumerate(channels):
-                uf = self.get_channel_info(ch)["ufact"][0]
-                data[i] = data[i] * uf
-            return data
-        raw = self.get_raw_data([channels], t_stamp1, t_stamp2)[0]
-        return raw * self.get_channel_info(channels)["ufact"][0]
+            return [self._r.read(ch, t_stamp1, t_stamp2) for ch in self._pick(channels)]
+        return self._r.read(self._pick([channels])[0], t_stamp1, t_stamp2)
 
     def block_envelope(self, channel: str, t_stamp1=None, t_stamp2=None) -> dict:
         """Per-block minimum and maximum from the block index alone.

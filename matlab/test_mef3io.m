@@ -397,5 +397,27 @@ w = mef3io.Writer(badPath);
 w.write('spscalar', x(1:300), start, sparse(fs), Precision=3);
 delete(w);
 
+% ---- per-segment conversion factors (#150) ---------------------------------
+% Each segment keeps its own factor; read scales each sample by its own,
+% info says NaN, readRaw lists where each factor applies (1-based, inclusive).
+mixPath = fullfile(sessionDir, 'matlab_factors.mefd');
+c = int32(mod(0:511, 50))' - 25;
+w = mef3io.Writer(mixPath, Overwrite=true);
+w.writeInt32('m', c, 0.01, start, fs);
+w.writeInt32('m', c, -0.5, start + int64(4e6), fs, NewSegment=true);
+delete(w);
+r = mef3io.Reader(mixPath);
+assert(isnan(r.info('m').units_conversion_factor));
+segs = r.segments('m');
+assert(segs(1).units_conversion_factor == 0.01 && segs(2).units_conversion_factor == -0.5);
+y = r.read('m');
+assert(isequal(y(1:512), double(c) * 0.01) && isequal(y(1025:1536), double(c) * -0.5));
+raw = r.readRaw('m');
+assert(isnan(raw.units_conversion_factor) && numel(raw.units_conversion_factors) == 2);
+assert(raw.units_conversion_factors(2).start_index == 1025 && ...
+       raw.units_conversion_factors(2).end_index == 1536 && ...
+       raw.units_conversion_factors(2).units_conversion_factor == -0.5);
+delete(r);
+
 fprintf('test_mef3io: all assertions passed (%s)\n', sessionDir);
 end

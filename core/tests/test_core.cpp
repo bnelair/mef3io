@@ -1012,3 +1012,97 @@ TEST_CASE("provenance region: frozen layout, bounds, saturation, foreign data",
                        r.begin() + pv::CREATED_BY_OFFSET));
   }
 }
+
+TEST_CASE("per-segment conversion factors: reads, spans and the C ABI (#150)") {
+  // Segments of one channel may store different factors (MEF keeps one per
+  // segment); every read scales a sample by ITS segment's.
+  namespace fsys = std::filesystem;
+  const auto dir = fsys::temp_directory_path() / "mef3io_segment_factors.mefd";
+  fsys::remove_all(dir);
+  const int64_t start = 1577836800000000LL;
+  const double fs = 256.0;
+  const std::vector<double> factors = {0.01, 0.195, -0.5};
+  std::vector<std::vector<si4>> counts(3, std::vector<si4>(512));
+  std::mt19937 rng(150);
+  std::uniform_int_distribution<si4> dist(-3000, 3000);
+  for (auto& c : counts)
+    for (auto& v : c) v = dist(rng);
+  // 2 s each; a 2 s gap before the second; the third touches the second.
+  const std::vector<int64_t> starts = {start, start + 4000000LL, start + 6000000LL};
+
+  mef3io_writer* w = nullptr;
+  REQUIRE(mef3io_writer_open(dir.string().c_str(), 1, "", "", &w) == 0);
+  for (std::size_t k = 0; k < 3; ++k)
+    REQUIRE(mef3io_writer_write_int32(w, "ch", counts[k].data(), nullptr, 512, factors[k],
+                                      starts[k], fs, k > 0 ? 1 : 0, nullptr) == 0);
+  mef3io_writer_close(w);
+
+  {
+    Reader r(dir.string());
+    REQUIRE_FALSE(r.info("ch").units_conversion_factor.has_value());
+    auto segs = r.segments("ch");
+    REQUIRE(segs.size() == 3);
+    for (std::size_t k = 0; k < 3; ++k) REQUIRE(segs[k].units_conversion_factor == factors[k]);
+
+    auto x = r.read("ch");
+    REQUIRE(x.size() == 2048);
+    const std::vector<std::size_t> at = {0, 1024, 1536};
+    for (std::size_t k = 0; k < 3; ++k)
+      for (std::size_t i = 0; i < 512; ++i)
+        REQUIRE(x[at[k] + i] == static_cast<double>(counts[k][i]) * factors[k]);
+    REQUIRE(std::isnan(x[600]));
+
+    auto raw = r.read_raw("ch");
+    REQUIRE_FALSE(raw.units_conversion_factor.has_value());
+    REQUIRE(raw.factor_spans.size() == 3);
+    for (std::size_t k = 0; k < 3; ++k) {
+      REQUIRE(raw.factor_spans[k].start_index == static_cast<si8>(at[k]));
+      REQUIRE(raw.factor_spans[k].end_index == static_cast<si8>(at[k] + 512));
+      REQUIRE(raw.factor_spans[k].units_conversion_factor == factors[k]);
+    }
+    auto one = r.read_raw("ch", start + 4000000LL, start + 5000000LL);
+    REQUIRE(one.units_conversion_factor == std::optional<double>(0.195));
+    REQUIRE(one.factor_spans.size() == 1);
+
+    auto env = r.block_envelope("ch");
+    for (std::size_t b = 0; b < env.minimum.size(); ++b) REQUIRE(env.minimum[b] <= env.maximum[b]);
+
+    auto runs = r.session().read_runs("ch");
+    REQUIRE(runs.size() == 3);
+    for (std::size_t k = 0; k < 3; ++k) REQUIRE(runs[k].units_conversion_factor == factors[k]);
+  }
+
+  // The C ABI: NaN for the channel, each segment's own, spans with the raw read.
+  mef3io_reader* r = nullptr;
+  REQUIRE(mef3io_reader_open(dir.string().c_str(), "", 1, &r) == 0);
+  mef3io_channel_info ci{};
+  REQUIRE(mef3io_reader_info(r, "ch", &ci) == 0);
+  REQUIRE(std::isnan(ci.units_conversion_factor));
+  for (int32_t k = 0; k < 3; ++k) {
+    double f = 0.0;
+    REQUIRE(mef3io_reader_segment_units_conversion_factor(r, "ch", k, &f) == 0);
+    REQUIRE(f == factors[static_cast<std::size_t>(k)]);
+  }
+  std::vector<int32_t> s(2048);
+  std::vector<uint8_t> v(2048);
+  int64_t n = 0, t0 = 0;
+  std::array<mef3io_factor_span, 3> spans{};
+  int32_t n_spans = 0;
+  // Too small a span buffer: refused, with the size it needs.
+  REQUIRE(mef3io_reader_read_raw_factors(r, "ch", INT64_MIN, INT64_MIN, s.data(), v.data(), 2048,
+                                         &n, &t0, spans.data(), 2, &n_spans, nullptr, nullptr,
+                                         nullptr) == MEF3IO_ERR_ARGUMENT);
+  REQUIRE(n_spans == 3);
+  REQUIRE(mef3io_reader_read_raw_factors(r, "ch", INT64_MIN, INT64_MIN, s.data(), v.data(), 2048,
+                                         &n, &t0, spans.data(), 3, &n_spans, nullptr, nullptr,
+                                         nullptr) == 0);
+  REQUIRE(n == 2048);
+  REQUIRE(spans[1].start_index == 1024);
+  REQUIRE(spans[1].end_index == 1536);
+  REQUIRE(spans[2].units_conversion_factor == -0.5);
+  std::vector<double> x(2048);
+  REQUIRE(mef3io_reader_read(r, "ch", INT64_MIN, INT64_MIN, x.data(), 2048, &n) == 0);
+  REQUIRE(x[1600] == static_cast<double>(counts[2][64]) * -0.5);
+  mef3io_reader_close(r);
+  fsys::remove_all(dir);
+}

@@ -13,6 +13,14 @@
 
 namespace mef3io {
 
+/// Output slots [start_index, end_index) whose valid samples all come from
+/// segments storing `units_conversion_factor` (#150). See RawData::factor_spans.
+struct FactorSpan {
+  si8 start_index = 0;
+  si8 end_index = 0;
+  sf8 units_conversion_factor = 1.0;
+};
+
 // Raw windowed read: int32 samples on a uniform grid with a validity mask
 // (0 = discontinuity gap, no data). `start_uutc` is the grid origin.
 struct RawData {
@@ -20,7 +28,19 @@ struct RawData {
   std::vector<ui1> valid;  // 1 where samples[i] is real data, 0 in gaps
   si8 start_uutc = 0;
   sf8 sampling_frequency = 0.0;
-  sf8 units_conversion_factor = 1.0;
+  /// The factor of every valid sample in the window when they all share one;
+  /// nullopt when the window holds samples of segments storing different
+  /// factors (then see factor_spans). A window without valid samples gives
+  /// the channel's (ChannelInfo::units_conversion_factor).
+  std::optional<sf8> units_conversion_factor = 1.0;
+  /// Where each factor applies (#150): units = samples[i] * the factor of the
+  /// span holding i. Canonical, so it depends on the samples only, never on
+  /// how they are split into segments or blocks: the valid slots in order,
+  /// grouped into maximal runs of one factor, each span running from its
+  /// first valid slot to just past its last (gaps inside it included, gaps
+  /// between spans of different factors excluded). Sorted, disjoint; one
+  /// span for an ordinary window, none when nothing in it is valid.
+  std::vector<FactorSpan> factor_spans;
   /// Blocks read here whose `.tidx` entry and RED block header disagree about
   /// start time or sample count. Empty for every well-formed session; a
   /// non-empty list means the file is internally inconsistent and the header
@@ -105,8 +125,12 @@ class Reader {
   RawData read_raw(const std::string& channel, std::optional<si8> t0 = std::nullopt,
                    std::optional<si8> t1 = std::nullopt, const Control& ctl = {});
 
-  /// Read `[t0, t1)` as float64 (`= counts * units_conversion_factor`), with
-  /// discontinuity gaps filled with NaN. Parameters as in read_raw().
+  /// Read `[t0, t1)` as float64 (`= counts * units_conversion_factor` of each
+  /// sample's OWN segment, #150), with discontinuity gaps filled with NaN.
+  /// Parameters as in read_raw().
+  /// @throws FormatError  a sample in the window comes from a segment whose
+  ///         factor cannot scale: 0 (MEF's "no entry"), NaN or infinite.
+  ///         Nothing is decoded then; read_raw() still returns the counts.
   std::vector<sf8> read(const std::string& channel, std::optional<si8> t0 = std::nullopt,
                         std::optional<si8> t1 = std::nullopt, const Control& ctl = {});
 
@@ -116,7 +140,9 @@ class Reader {
   /// read touches, so each part's count is per call. Do not expose it: the
   /// public rule is one count per object (docs/threads.md).
   RawData read_raw_split(const std::string& channel, std::optional<si8> t0,
-                         std::optional<si8> t1, int n_threads, const Control& ctl = {});
+                         std::optional<si8> t1, int n_threads, const Control& ctl = {}) {
+    return read_raw_impl(channel, t0, t1, n_threads, ctl, false);
+  }
 
   /// Block-level table of contents for @p channel (per-RED-block start time,
   /// sample counts, extrema, discontinuity flags) — for seeking and viewers.
@@ -126,7 +152,8 @@ class Reader {
 
   /// Min/max of each data block of @p channel overlapping [t0, t1), from the
   /// block index alone (nothing decoded): a fast envelope for viewers. Scaled
-  /// like read(); NaN where a writer left a block's extremes unset.
+  /// like read() (each block by its own segment's factor, refusing the same
+  /// unusable ones); NaN where a writer left a block's extremes unset.
   BlockEnvelope block_envelope(const std::string& channel, std::optional<si8> t0 = std::nullopt,
                                std::optional<si8> t1 = std::nullopt) {
     return session_.block_envelope(channel, t0, t1);
@@ -152,6 +179,12 @@ class Reader {
   Session& session() { return session_; }
 
  private:
+  /// `in_units`: refuse (before decoding) a window holding samples of a
+  /// segment whose factor cannot scale them — read()'s rule.
+  RawData read_raw_impl(const std::string& channel, std::optional<si8> t0,
+                        std::optional<si8> t1, int n_threads, const Control& ctl,
+                        bool in_units);
+
   Session session_;  // holds the thread count too (one atomic, one place)
 };
 

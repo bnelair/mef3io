@@ -109,7 +109,10 @@ everything it does (opening, file access, decoding): `0` = automatic, `1` =
 no extra threads; `r.setThreads(n)` changes it from the next call and
 `r.threads()` returns it ([Threads](threads.md)).
 
-`info` returns `sampling_frequency`, `units_conversion_factor`,
+`info` returns `sampling_frequency`, `units_conversion_factor` (NaN when the
+channel's segments store different factors: `segments` gives each segment's,
+`read` scales each sample by its own segment's, and `readRaw` lists the spans
+in `units_conversion_factors`, 1-based and inclusive),
 `units_description`, `start_time`/`end_time` (int64 uUTC),
 `number_of_samples` (stored samples; gaps not counted), `n_segments`,
 `section3_available` and the subject metadata fields (empty under a level-1

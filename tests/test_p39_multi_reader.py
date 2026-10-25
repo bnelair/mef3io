@@ -11,7 +11,7 @@ Pinned here:
 * the drop-in guarantee: the same battery of calls on a Reader over the
   merged recording and on a MultiReader over its parts gives the same types,
   keys and values;
-* refusals (rates, overlapping data), read_raw and units, combined info /
+* refusals (rates, overlapping data), read_raw and units (per-segment factors), combined info /
   metadata with the difference warning, paths handling, tar parts, threads,
   cancel/progress, sub-reader warnings, records.
 """
@@ -304,7 +304,7 @@ def test_a_failing_open_closes_the_others_and_raises(tmp_path):
 # read_raw and units
 # ---------------------------------------------------------------------------
 
-def test_read_raw_refuses_different_units_and_read_scales_each(tmp_path):
+def test_read_raw_lists_different_units_and_read_scales_each(tmp_path):
     a = _write(tmp_path / "a.mefd", [(0, 10, False)], rate=256.0, precision=0)
     b = _write(tmp_path / "b.mefd", [(20 * SECOND, 10, False)], rate=256.0, precision=2)
     with warnings.catch_warnings(record=True) as caught:
@@ -314,8 +314,13 @@ def test_read_raw_refuses_different_units_and_read_scales_each(tmp_path):
                and "units_conversion_factor" in w.message.details for w in caught)
     with r, _quiet(mef3io.Reader, str(a)) as ra, _quiet(mef3io.Reader, str(b)) as rb:
         assert r.info("A")["units_conversion_factor"] is None
-        with pytest.raises(ValueError, match="units-conversion factors"):
-            r.read_raw("A")
+        # Since #150 a Reader of the merged session lists where each factor
+        # applies, and so does the MultiReader (it used to refuse).
+        raw = r.read_raw("A")
+        assert raw["units_conversion_factor"] is None
+        assert raw["units_conversion_factors"] == [
+            {"start_index": 0, "end_index": 2560, "units_conversion_factor": 1.0},
+            {"start_index": 5120, "end_index": 7680, "units_conversion_factor": 0.01}]
         # Inside one recording, read_raw is that recording's.
         one = r.read_raw("A", START, START + 10 * SECOND)
         _same(one, ra.read_raw("A", START, START + 10 * SECOND))

@@ -186,6 +186,7 @@ void Session::load_channel_basic_info(const std::string& name, Channel& ch,
                                       const std::exception_ptr* errors) {
   ChannelInfo& info = ch.info;
   bool first = true;
+  sf8 first_factor = 1.0;
   int readable = 0;
   for (std::size_t k = 0; k < ch.segments.size(); ++k) {
     auto& seg = ch.segments[k];
@@ -202,6 +203,7 @@ void Session::load_channel_basic_info(const std::string& name, Channel& ch,
     if (first) {
       info.sampling_frequency = md.section2.sampling_frequency;
       info.units_conversion_factor = md.section2.units_conversion_factor;
+      first_factor = md.section2.units_conversion_factor;
       info.units_description = md.section2.units_description;
       info.recording_time_offset = rto;
       info.start_time = seg_start;
@@ -226,6 +228,10 @@ void Session::load_channel_basic_info(const std::string& name, Channel& ch,
     } else {
       info.start_time = std::min(info.start_time, seg_start);
       info.end_time = std::max(info.end_time, seg_end);
+      // Segments may store different factors (#150): the channel then has
+      // none of its own, as in meflib (meflib.c:5494, NO_ENTRY there).
+      if (!same_units_conversion_factor(first_factor, md.section2.units_conversion_factor))
+        info.units_conversion_factor.reset();
     }
     info.number_of_samples += md.section2.number_of_samples;
     if (md.universal_header.is_password_protected()) info.password_protected = true;
@@ -236,6 +242,20 @@ void Session::load_channel_basic_info(const std::string& name, Channel& ch,
   // Count what can actually be read: segment_map lists only these, and a count
   // that disagreed with it would make the map look truncated.
   info.n_segments = readable;
+}
+
+std::string unusable_factor_message(const std::string& channel, sf8 factor,
+                                    const std::string& alternative) {
+  // Spelled like Python's "{:g}" for the values that can get here, so
+  // MultiReader can raise the same text.
+  const std::string value = std::isnan(factor)  ? "nan"
+                            : std::isinf(factor) ? (factor < 0 ? "-inf" : "inf")
+                                                 : "0";
+  return "channel " + channel + ": samples in this window come from a segment that stores " +
+         "units_conversion_factor " + value +
+         (factor == 0.0 ? " (MEF's \"no entry\")" : "") +
+         ", so they have no value in units; " + alternative +
+         " returns the stored counts, and segments() lists each segment's factor";
 }
 
 const ChannelInfo& Session::channel_info(const std::string& name) const {
@@ -307,17 +327,20 @@ std::vector<DataRun> Session::read_runs(const std::string& channel, std::optiona
     const std::vector<ui1> tdat = source_->read_range(seg.tdat_path, range_begin,
                                                       range_end - range_begin);
 
+    const sf8 factor = md.section2.units_conversion_factor;
     for (const auto& e : hits) {
       std::span<const ui1> block(tdat.data() + (static_cast<std::size_t>(e.file_offset) -
                                                 range_begin),
                                  e.block_bytes);
       auto decoded = red::decode_block(block, keys);
 
-      // Start a new run on discontinuity or a sample-index gap.
+      // Start a new run on discontinuity, a sample-index gap, or a segment
+      // storing another conversion factor (#150: one factor per run).
       bool contiguous = current != nullptr && !decoded.discontinuity &&
-                        e.start_sample == expected_next_sample;
+                        e.start_sample == expected_next_sample &&
+                        same_units_conversion_factor(current->units_conversion_factor, factor);
       if (!contiguous) {
-        runs.push_back(DataRun{to_user_time(e.start_time, rto), e.start_sample, {}});
+        runs.push_back(DataRun{to_user_time(e.start_time, rto), e.start_sample, factor, {}});
         current = &runs.back();
       }
       current->samples.insert(current->samples.end(), decoded.samples.begin(),
@@ -545,7 +568,6 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
 
   BlockJobs out;
   out.sampling_frequency = ch.info.sampling_frequency;
-  out.units_conversion_factor = ch.info.units_conversion_factor;
   const si8 t0 = t0_opt.value_or(ch.info.start_time);
   const si8 t1 = t1_opt.value_or(ch.info.end_time + 1);
   const sf8 fs = ch.info.sampling_frequency;
@@ -645,6 +667,8 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
       job.block_bytes = e.block_bytes;
       job.index_start_uutc = to_user_time(e.start_time, rto);
       job.index_number_of_samples = e.number_of_samples;
+      job.units_conversion_factor = md.section2.units_conversion_factor;
+      job.segment_number = seg.segment_number;
       job.keys = keys;
 
       // The RED block header is the authority for WHERE this block's samples
@@ -764,6 +788,7 @@ std::vector<SegmentInfo> Session::segment_map(const std::string& channel) {
     si.start_sample = md.section2.start_sample;
     si.number_of_samples = md.section2.number_of_samples;
     si.number_of_blocks = md.section2.number_of_blocks;
+    si.units_conversion_factor = md.section2.units_conversion_factor;
     si.provenance = fmt::provenance::read(md.universal_header);
     out.push_back(std::move(si));
     }))
@@ -820,7 +845,6 @@ BlockEnvelope Session::block_envelope(const std::string& channel, std::optional<
   if (it == channels_.end()) throw std::out_of_range("no such channel: " + channel);
   Channel& ch = it->second;
   const sf8 fs = ch.info.sampling_frequency;
-  const sf8 uf = ch.info.units_conversion_factor;
   const sf8 nan = std::numeric_limits<sf8>::quiet_NaN();
   if (!(fs > 0) || !std::isfinite(fs))
     throw FormatError("channel " + channel + " has no valid sampling frequency");
@@ -828,11 +852,18 @@ BlockEnvelope Session::block_envelope(const std::string& channel, std::optional<
   const si8 hi = t1.value_or(std::numeric_limits<si8>::max());
 
   BlockEnvelope out;
+  // A factor that cannot scale (0 = NO_ENTRY, NaN, inf) is refused like
+  // read() refuses it -- but OUTSIDE with_segment: it is not a damaged
+  // segment, and containing it would mark the segment unreadable for reads
+  // of its counts too.
+  std::optional<sf8> unusable;
   for (auto& seg : ch.segments) {
     const std::size_t mark = out.start_uutc.size();
     if (!with_segment(channel, seg, [&] {
           auto& md = segment_metadata(seg);
           const si8 rto = segment_rto(md);
+          // Each block is scaled by ITS segment's factor (#150).
+          const sf8 uf = md.section2.units_conversion_factor;
           // A segment whose cached index holds nothing in the window is not
           // walked again (a day-long session has thousands of them).
           if (skip_segment(seg, lo, hi)) return;
@@ -850,6 +881,10 @@ BlockEnvelope Session::block_envelope(const std::string& channel, std::optional<
             const si8 b1 = b0 + static_cast<si8>(std::llround(
                                     static_cast<sf8>(e.number_of_samples) * 1e6 / fs));
             if (b1 <= lo || b0 >= hi) continue;
+            if (!usable_units_conversion_factor(uf)) {
+              unusable = uf;
+              return;
+            }
             out.start_uutc.push_back(b0);
             out.end_uutc.push_back(b1);
             const sf8 smin = e.minimum_sample_value == fmt::RED_NAN
@@ -869,8 +904,10 @@ BlockEnvelope Session::block_envelope(const std::string& channel, std::optional<
       out.minimum.resize(mark);
       out.maximum.resize(mark);
     }
+    if (unusable) break;
   }
   trim_index_cache();  // safe point: nothing holds a span into a cached index
+  if (unusable) throw FormatError(unusable_factor_message(channel, *unusable, "toc()"));
   return out;
 }
 

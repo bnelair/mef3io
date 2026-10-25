@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <new>
 #include <optional>
@@ -242,7 +243,9 @@ int mef3io_reader_info(mef3io_reader* r, const char* channel, mef3io_channel_inf
   return guarded([&] {
     const mef3io::ChannelInfo& ci = r->impl.info(channel);
     out->sampling_frequency = ci.sampling_frequency;
-    out->units_conversion_factor = ci.units_conversion_factor;
+    // NaN when the channel's segments store different factors (#150).
+    out->units_conversion_factor =
+        ci.units_conversion_factor.value_or(std::numeric_limits<double>::quiet_NaN());
     out->start_time = ci.start_time;
     out->end_time = ci.end_time;
     out->number_of_samples = ci.number_of_samples;
@@ -325,6 +328,47 @@ int mef3io_reader_read_raw_ex(mef3io_reader* r, const char* channel, int64_t t0,
     std::copy(d.valid.begin(), d.valid.end(), valid);
     *out_n = static_cast<int64_t>(d.samples.size());
     if (out_start_uutc) *out_start_uutc = d.start_uutc;
+  });
+}
+
+int mef3io_reader_read_raw_factors(mef3io_reader* r, const char* channel, int64_t t0,
+                                   int64_t t1, int32_t* samples, uint8_t* valid,
+                                   int64_t buf_len, int64_t* out_n, int64_t* out_start_uutc,
+                                   mef3io_factor_span* spans, int32_t spans_len,
+                                   int32_t* out_n_spans, const mef3io_cancel_token* cancel,
+                                   mef3io_progress_fn progress, void* user_data) {
+  if (!r || !channel || ((!samples || !valid) && buf_len > 0) || !out_n || !out_n_spans ||
+      (!spans && spans_len > 0) || spans_len < 0)
+    return fail_argument("NULL argument");
+  return guarded([&] {
+    const mef3io::Control ctl = make_control(cancel, progress, user_data);
+    mef3io::RawData d = r->impl.read_raw(channel, opt_time(t0), opt_time(t1), ctl);
+    if (static_cast<int64_t>(d.samples.size()) > buf_len)
+      throw std::out_of_range("buffer too small: need " + std::to_string(d.samples.size()));
+    // Set before the check, so a caller whose span buffer was too small
+    // learns the size it needs.
+    *out_n_spans = static_cast<int32_t>(d.factor_spans.size());
+    if (static_cast<int64_t>(d.factor_spans.size()) > spans_len)
+      throw std::out_of_range("span buffer too small: need " +
+                              std::to_string(d.factor_spans.size()));
+    std::copy(d.samples.begin(), d.samples.end(), samples);
+    std::copy(d.valid.begin(), d.valid.end(), valid);
+    for (std::size_t i = 0; i < d.factor_spans.size(); ++i)
+      spans[i] = mef3io_factor_span{d.factor_spans[i].start_index, d.factor_spans[i].end_index,
+                                    d.factor_spans[i].units_conversion_factor};
+    *out_n = static_cast<int64_t>(d.samples.size());
+    if (out_start_uutc) *out_start_uutc = d.start_uutc;
+  });
+}
+
+int mef3io_reader_segment_units_conversion_factor(mef3io_reader* r, const char* channel,
+                                                  int32_t index, double* out) {
+  if (!r || !channel || !out) return fail_argument("NULL argument");
+  return guarded([&] {
+    auto segs = r->impl.segments(channel);
+    if (index < 0 || static_cast<size_t>(index) >= segs.size())
+      throw std::out_of_range("segment index out of range");
+    *out = segs[static_cast<size_t>(index)].units_conversion_factor;
   });
 }
 
