@@ -218,6 +218,12 @@ Without a shift none of these apply: every time and each segment's
 recording-time offset are copied exactly as stored, so the copy reads back
 the same times as the source, whatever convention they were stored in.
 
+A cut (`time_range`) of a session whose segments disagree on the offset
+places each segment, and each annotation file, by the offset its own file
+is stored against. A channel- or session-level annotation file whose time
+depends on an offset its segments disagree on cannot be placed: the cut is
+refused (`time-range-offset-disputed`); copy without `time_range`.
+
 A session that uses meflib's recording-time offset **is** accepted. Without
 a shift the copy keeps the offset and the times as stored. With a shift,
 when the offset is unambiguous, its times are read as true UTC, moved, and
@@ -327,6 +333,7 @@ with a shift; a copy that keeps the times never meets them.
 | `no-channels-left` | `ValueError` | check | The selection leaves no channel. |
 | `time-range-invalid` | `ValueError` | check | `time_range` does not start before it ends. |
 | `time-range-empty` | `ValueError` | check | No channel of the copy has samples inside `time_range`. |
+| `time-range-offset-disputed` | `WriteConflictError` | check | A cut (`time_range`) of a session whose segments disagree on the recording-time offset: a channel- or session-level annotation file stores a time against that offset, so whether it lies in the window is unknown (the Reader refuses to read such a file too). Copy it without `time_range`. Each segment's data and its own annotations are placed by that segment's offset, so they are not affected. |
 | `shift-below-floor` | `ValueError` | check | *(shift only)* The shift is smaller than the recording's span plus one day. |
 | `shift-not-positive` | `ValueError` | check | *(shift only)* The shift moves a time to 1970 or before (a block index, data header or block time: only in the copy pass). |
 | `rename-name-mismatch` | `ValueError` | check | `rename=False` and the destination is not named after the source. |
@@ -402,7 +409,10 @@ It confirms that:
   shift: every time differs from the source's by exactly the shift, in the
   same stored form, and the offset is 0. In both, the GMT offset and
   daylight-saving fields hold their set values;
-- the annotations match in number, order and type;
+- the annotations match in number, order and type; a cut keeps exactly the
+  source's annotations in the window, each placed by its own file's offset;
+- a cut segment's file headers span exactly the samples it holds, and a
+  channel left out for having no samples in the window has none;
 - **no date leaked** (with a shift). Every time field, one field at a time,
   is compared with the source's recording dates (widened by a day, plain or
   negated), and so is the ID number of `Epoc` and `Curs` annotations, which a

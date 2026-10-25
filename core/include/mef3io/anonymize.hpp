@@ -53,7 +53,10 @@ struct RecordTextField {
   RecordLevel level = RecordLevel::Session;
   std::string channel;      ///< "" at session level
   int segment = -1;         ///< segment number at segment level, else -1
-  si8 time = 0;             ///< the record's time in the COPY (uUTC; shifted when shifting)
+  /// The record's time in the COPY (uUTC; shifted when shifting).
+  /// UUTC_NO_ENTRY when it cannot be known: a time stored against a
+  /// recording-time offset the file's segments disagree on (no shift only).
+  si8 time = 0;
 };
 
 /// Replace one non-empty record text field. Return the new text ("" clears).
@@ -127,7 +130,8 @@ struct AnonymizeReport : CopyReport {
   /// The shift applied; unset = the times were kept.
   std::optional<si8> shift_us;
   /// Read from the source. A shifted copy has 0; a copy that keeps the times
-  /// keeps the source's.
+  /// keeps the source's (each segment its own). 0 when the source's segments
+  /// disagree on it (there is no single one; a note says so).
   si8 source_recording_time_offset = 0;
   /// The SOURCE's first and last sample time (uUTC; empty without samples).
   /// THE RE-IDENTIFICATION KEY: with the shift they give the real dates back.

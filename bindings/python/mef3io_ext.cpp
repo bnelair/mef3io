@@ -1,5 +1,6 @@
 // mef3io — nanobind bindings. Fleshed out per phase; P0 exposes just enough
 // (crc + version) to prove the toolchain end to end.
+#include <limits>
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/map.h>
@@ -851,7 +852,9 @@ NB_MODULE(_mef3io, m) {
               info["level"] = mef3io::record_level_name(f.level);
               info["channel"] = f.channel;
               info["segment"] = f.segment;
-              info["time"] = f.time;
+              // NO_ENTRY: not known (an offset its segments disagree on).
+              if (f.time == std::numeric_limits<std::int64_t>::min()) info["time"] = nb::none();
+              else info["time"] = f.time;
               // Record text is bytes from a file and need not be valid UTF-8:
               // decode with surrogateescape so every byte survives, and
               // encode the result back the same way.

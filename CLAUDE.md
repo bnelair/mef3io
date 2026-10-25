@@ -83,7 +83,8 @@ t + i*1e6/fs (`sample_time`), a block keeps [i0, i1) (`window_slice`); fully
 outside = dropped (engine flags the next kept block), straddling + exact =
 `trim_block` decodes, slices and RE-ENCODES with red::encode_block (source's
 encryption level with the copy's keys, plain without passwords; time in the
-source's stored convention via `stored_like`, shifted when anonymizing) and
+source's stored convention via `stored_like`, shifted when anonymizing with a
+shift) and
 hands it to the engine as `CopyBlock::replacement` (the engine sets offset,
 block_bytes, CRC; requires `start_sample`). A segment's data is now copied
 BEFORE its .tmet (`copy_segment`), so section 2's derived fields
@@ -114,8 +115,25 @@ to exactly its window samples (check_trimmed_block) with the time
 stored_like + shift; leftover/missing/duplicated/reordered copy blocks fail;
 the source blocks just outside the range must hold nothing of the window.
 Copy segments are matched to source segments by TIME (each one's own rto).
-Cut UH times / other derived s2 fields are left to the validator (verify
-runs it), so a cut NEVER excuses validator findings more loosely than the
+OFFSETS IN A CUT (review of #144; transform had the bug too): everything is
+placed by the offset ITS file is stored against, never one session-wide
+value (plan.rto is 0 when segments disagree): the pre-flight's first look
+and window per segment (`segment_rto_of`; `SourcePlan::segment_rtos` read
+only when inspect says "disputed"), records per level (`level_rto_of` =
+Session::agreed_rto's rule: segment's own; channel/session = what all their
+segments agree on, a segment-less channel takes the session's) in the
+Copier (`set_level_rto`) and in verify (its OWN source-metadata reads, not
+the plan). A channel/session record file with an offset-dependent (negated)
+time and no agreed offset is refused under a cut:
+`time-range-offset-disputed` (shared code; the Reader refuses such files
+too). verify also re-checks every channel run_copy left out as "no samples
+in the window" against the source (each segment's own rto, block HEADERS),
+and a standalone verify with time_range NOTES a missing channel that has
+samples. A cut segment's UH start/end (.tmet/.tidx/.tdat) is checked by
+verify itself against the source blocks it matched in lockstep (first kept
+sample .. end of the last, + shift when shifting, read with the copy's own
+rto): the validator's time checks stand down at rto != 0. Other derived s2
+fields are left to the validator (verify runs it), so a cut NEVER excuses validator findings more loosely than the
 exact key (check|channel|segment|field|message): a source already failing
 e.g. times.recording-duration gets its cut refused (repair first). A
 check+channel key was tried and rejected in review: on legacy mef_tools
@@ -292,8 +310,10 @@ that test_p32 keeps equal: `REFUSAL_CODES` (python/mef3io/anonymize.py),
 the table in docs/anonymization.md (code, type, check|copy|defensive), and
 the cases in test_p32 (every non-defensive code must be reached, no
 defensive one may be). Copy-only: block-crc, data-damaged, verify-failed
-(and a time the Shifter refuses in a .tidx/.tdat UH or a block; every
-.tmet UH and record-file time goes through the SAME Shifter in preflight).
+(and a time the Shifter refuses in a .tidx/.tdat UH or a block; when
+shifting, every .tmet UH and record-file time goes through the SAME Shifter
+in preflight). The docs table's "(shift only)" markers = test_p32's
+SHIFT_ONLY + time-overflow (pinned in test_every_code_is_documented_and_reached).
 Messages NEVER carry a source time (or rto): built without them, and
 `scrub_times()` replaces any 10+-digit number in the source window in
 VerifyIssue text, inherited findings, inspect blocker and shared-code

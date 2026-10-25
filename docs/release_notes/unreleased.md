@@ -39,7 +39,29 @@ new identifiers, other programs' private data cleared, provenance
   each time and offset as stored, so a session with segments that disagree
   on the offset, or with times in the ambiguous legacy convention, can now
   be de-identified without a shift (its times read back exactly as the
-  source's). No refusal code was added or removed.
+  source's).
+- **Cuts under a disputed offset** (`time_range`, both `anonymize_session`
+  and `transform_session`): each segment, and each annotation file, is now
+  placed by the offset ITS file is stored against (a segment's own; for a
+  channel or the session, the one all their segments agree on, as the Reader
+  reads it). Before, a transform's cut read everything against one
+  session-wide offset (0 when segments disagree), which could leave out a
+  channel or an annotation inside the window while the copy still passed
+  verification. A channel- or session-level annotation file whose time
+  depends on an offset its segments disagree on cannot be placed and is
+  refused with the new shared code **`time-range-offset-disputed`** (copy it
+  without `time_range`).
+- **Verification of cuts** now checks every cut segment's header start and
+  end against the blocks it holds itself (the validator's time checks stand
+  down when a recording-time offset is set), and that every channel left out
+  for "no samples in the window" really has none. A standalone
+  `verify(..., time_range=)` notes a source channel with samples in the
+  window that the copy does not hold (it may have been excluded on purpose).
+- **Text callbacks** (`text=callable`) get `info["time"] = None` for a record
+  whose time cannot be known: without a shift, a time stored against an
+  offset the file's segments disagree on. `AnonymizeReport.
+  source_recording_time_offset` is 0 when the segments disagree (there is
+  no single one), and a note says so.
 
 ### Migration
 
@@ -59,3 +81,8 @@ new identifiers, other programs' private data cleared, provenance
   before).
 - `shift_us=0` is still refused (`shift-zero`); leave the shift out to keep
   the times.
+- **`anonymize.redact_text`** takes no shift, so it now follows the copy that
+  keeps the times: it no longer raises the shift-only refusals
+  (`rto-disputed`, `rto-unreadable`, `time-before-rto`) for such sources. A
+  caller that used it as a pre-check for a shifted copy should call
+  `anonymize.check(..., shift_us=...)` instead.

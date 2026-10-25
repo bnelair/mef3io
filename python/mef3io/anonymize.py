@@ -116,7 +116,9 @@ class AnonymizeReport:
         copy keeps every time as it was.
     source_recording_time_offset : int
         The source's recording-time offset (meflib's deprecated date
-        masking). A shifted copy has 0; a copy that keeps the times keeps it.
+        masking). A shifted copy has 0; a copy that keeps the times keeps it
+        (each segment its own). 0 when the source's segments disagree on it:
+        there is no single one (``notes`` says so).
     channels_kept, channels_excluded : tuple of str
     channels_without_samples : tuple of str
         A cut: channels left out because they have no sample in the window
@@ -422,7 +424,9 @@ def anonymize_session(
         with ``errors="surrogateescape"`` and encoded back the same way, so
         every byte survives a callable that returns it unchanged. Python only.
         ``info`` is a dict with ``record_type``, ``field``, ``level``,
-        ``channel``, ``segment`` and ``time`` (the time in the copy, uUTC). Names in a
+        ``channel``, ``segment`` and ``time`` (the time in the copy, uUTC;
+        ``None`` when it cannot be known: without a shift, a time stored
+        against a recording-time offset the file's segments disagree on). Names in a
         seizure's channel list that are not a kept channel's exact name are
         cleared with ``"drop"`` and redacted otherwise.
     rename : bool, optional

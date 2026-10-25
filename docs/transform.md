@@ -109,6 +109,11 @@ rep = mef3io.transform_session("patient.mefd", "seizure_2h.mefd",
   channels, passwords, a new name and metadata edits in one pass.
 - **With `anonymize_session`**, the same `time_range` (in the original
   times) cuts before any shift is applied.
+- **Segments that disagree on the recording-time offset** are each placed by
+  their own offset, and each annotation file by the offset its segments
+  agree on (as the Reader reads them). A channel- or session-level
+  annotation file whose time depends on an offset its segments disagree on
+  cannot be placed, so the cut is refused (`time-range-offset-disputed`).
 
 **Which samples a cut keeps:** exactly those whose time is at or after
 `start` and before `end`. The copy's first sample is the first one at or after

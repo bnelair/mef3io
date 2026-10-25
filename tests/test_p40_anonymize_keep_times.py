@@ -54,6 +54,7 @@ from test_p29_anonymize import (
     _plant_record,
     _plant_ridx,
     _plant_s3,
+    _plant_text,
     _plant_uh,
     _read_all,
     _reseal,
@@ -370,3 +371,174 @@ def test_cli_keeps_the_times_by_default(tmp_path, kept, capsys):
     assert main(["anonymize", str(src), str(tmp_path / "B.mefd"), "--shift-us", str(SHIFT)]) == 0
     a, b = _read_all(src), _read_all(tmp_path / "B.mefd")
     assert b["ch1"][0]["start_time"] == a["ch1"][0]["start_time"] + SHIFT
+
+
+# --------------------------------------------------------------------------- cuts under a disputed offset
+#
+# Review round 1 of #144: a cut decides per segment and per record whether it
+# lies in the window, so each must be read against the offset ITS file is
+# stored against, not one session-wide value (0 when segments disagree).
+# transform_session shares the engine and had the same bug.
+
+
+def _copy_fns():
+    return {
+        "anonymize": lambda src, dst, **kw: _keep(src, dst, **kw),
+        "transform": lambda src, dst, **kw: mef3io.transform_session(src, dst, **kw),
+    }
+
+
+def _check_fns():
+    return {"anonymize": mef3io.anonymize.check, "transform": mef3io.transform.check}
+
+
+@pytest.mark.parametrize("op", ["anonymize", "transform"])
+def test_a_cut_under_a_disputed_offset_keeps_every_channel_with_samples(tmp_path, op):
+    # Channel a's offset puts it at the same instants as b: both are in the
+    # window, as the Reader shows them.
+    src = tmp_path / "dis.mefd"
+    rto = START - DAY
+    with mef3io.Writer(str(src), overwrite=True) as w:
+        w.write("a", _signal(int(FS * 60), 1), START, FS, precision=3)
+        w.write("b", _signal(int(FS * 60), 2), START + rto, FS, precision=3)
+    _set_rto(src, rto, ["a"])
+    with mef3io.Reader(str(src)) as r:
+        assert r.info("a")["start_time"] == r.info("b")["start_time"] == START + rto
+    t0 = START + rto + 10 * SECOND
+    t1 = t0 + 30 * SECOND
+    rep = _copy_fns()[op](src, tmp_path / "K.mefd", time_range=(t0, t1))
+    assert rep.verification.ok, rep.verification.summary()
+    assert rep.channels_kept == ("a", "b") and rep.channels_without_samples == ()
+    with mef3io.Reader(str(src)) as r1, mef3io.Reader(str(tmp_path / "K.mefd")) as r2:
+        for ch in ("a", "b"):
+            info = r2.info(ch)
+            assert t0 <= info["start_time"] < t0 + SECOND / FS
+            x = r2.read(ch)
+            np.testing.assert_array_equal(
+                x, r1.read(ch, info["start_time"], info["start_time"] + len(x) * SECOND / FS))
+
+
+@pytest.mark.parametrize("op", ["anonymize", "transform"])
+def test_a_cut_places_channel_records_by_their_own_offset(tmp_path, op):
+    src = tmp_path / "dis.mefd"
+    with mef3io.Writer(str(src), overwrite=True) as w:
+        for ch in ("a", "b"):
+            w.write(ch, _signal(int(FS * 60), 1), START, FS, precision=3)
+        w.write_annotations([{"time": START + 20 * SECOND, "type": "Note", "text": "x"}],
+                            channel="a")
+    _set_rto(src, 3600 * SECOND, ["a"])          # a's times read 1 h later than stored
+    with mef3io.Reader(str(src)) as r:
+        a0 = r.info("a")["start_time"]
+        want = [x["time"] for x in r.records("a")]
+    assert want == [a0 + 20 * SECOND]
+    window = (a0 + 10 * SECOND, a0 + 40 * SECOND)
+    rep = _copy_fns()[op](src, tmp_path / "K.mefd", time_range=window)
+    assert rep.verification.ok and rep.records_outside_window == 0
+    with mef3io.Reader(str(tmp_path / "K.mefd")) as r:
+        assert [x["time"] for x in r.records("a")] == want
+
+
+@pytest.mark.parametrize("op", ["anonymize", "transform"])
+def test_session_records_under_a_disputed_offset_refuse_a_cut(tmp_path, op):
+    src = _rich_session(tmp_path / "jane_roe.mefd")
+    _set_rto(src, START - DAY, ["ch1"])
+    kw = {"time_range": (START, START + 30 * SECOND)}
+    rep = _check_fns()[op](src, tmp_path / "K.mefd", **kw)
+    assert rep.codes and rep.codes[0] == "time-range-offset-disputed", rep.summary()
+    with pytest.raises(mef3io.WriteConflictError) as exc:
+        _copy_fns()[op](src, tmp_path / "K.mefd", **kw)
+    assert exc.value.code == "time-range-offset-disputed"
+    assert not (tmp_path / "K.mefd").exists()
+    # Without a cut nothing needs to place them: copied as stored.
+    rep = _copy_fns()[op](src, tmp_path / "W.mefd")
+    assert rep.verification.ok
+    assert any("disagree" in n for n in rep.notes) or op == "transform"
+
+
+def test_a_disputed_offset_gives_the_callback_no_made_up_time(tmp_path):
+    src = _rich_session(tmp_path / "jane_roe.mefd", unknown=False)
+    _set_rto(src, START - DAY, ["ch1"])
+    seen = []
+
+    def text(value, info):
+        seen.append((info["level"], info["channel"], info["time"]))
+        return None
+
+    rep = _keep(src, tmp_path / "K.mefd", text=text)
+    assert rep.verification.ok and rep.source_recording_time_offset == 0
+    assert any("disagree" in n for n in rep.notes)
+    session = [t for lvl, _, t in seen if lvl == "session"]
+    assert session and all(t is None for t in session)       # no single offset: unknown
+    with mef3io.Reader(str(src)) as r:
+        ch1 = [x["time"] for x in r.records("ch1", level="channel")]
+    assert [t for lvl, ch, t in seen if lvl == "channel" and ch == "ch1"] == ch1
+    assert (["segment"], [START + 3 * SECOND]) == (
+        sorted({lvl for lvl, _, _ in seen if lvl == "segment"}),
+        [t for lvl, _, t in seen if lvl == "segment"])
+
+
+def test_standalone_verify_notes_a_left_out_channel_with_samples(tmp_path, kept):
+    src, _, _ = kept
+    window = (START + 10 * SECOND, START + 40 * SECOND)
+    _keep(src, tmp_path / "K.mefd", time_range=window, exclude_channels=["ch3"])
+    rep = _verify(src, tmp_path / "K.mefd", time_range=window)
+    assert rep.ok                                   # an exclusion is legitimate...
+    assert any(n.location == "ch3" and "has samples in time_range" in n.message
+               for n in rep.notes), rep.summary()   # ...but it is said
+
+
+# --------------------------------------------------------------------------- cut segment spans
+
+
+def _plant_cut_uh(path, value_delta, rel_glob="a.timd/*.segd/*.tmet"):
+    rel = next(Path(path).glob(rel_glob)).relative_to(path)
+    raw = (Path(path) / rel).read_bytes()
+    (t,) = struct.unpack_from("<q", raw, 16)
+    _plant_uh(path, rel, 16, t + value_delta, TMET if rel.suffix == ".tmet" else None)
+
+
+@pytest.mark.parametrize("op", ["anonymize", "transform"])
+@pytest.mark.parametrize("glob", ["a.timd/*.segd/*.tmet", "a.timd/*.segd/*.tidx",
+                                  "a.timd/*.segd/*.tdat"])
+def test_verify_checks_a_cut_segments_span_on_an_offset_session(tmp_path, op, glob):
+    """At rto != 0 the validator stands its time checks down, so verify
+    itself checks every cut segment header against the blocks it holds."""
+    src = tmp_path / "rto.mefd"
+    with mef3io.Writer(str(src), overwrite=True) as w:
+        w.write("a", _signal(int(FS * 60), 1), START, FS, precision=3)
+    _set_rto(src, 3600 * SECOND, ["a"])
+    with mef3io.Reader(str(src)) as r:
+        a0 = r.info("a")["start_time"]
+    window = (a0 + 10 * SECOND + 1_234, a0 + 40 * SECOND)
+    _copy_fns()[op](src, tmp_path / "K.mefd", time_range=window)
+    verify = (lambda s, d: _verify(s, d, time_range=window)) if op == "anonymize" else \
+        (lambda s, d: mef3io.transform.verify(s, d, time_range=window))
+    assert verify(src, tmp_path / "K.mefd").ok
+    bad = _copy(tmp_path / "K.mefd", tmp_path, "bad")
+    shutil.move(str(bad), str(bad.parent / "K.mefd"))
+    bad = bad.parent / "K.mefd"
+    _plant_cut_uh(bad, -SECOND if glob.endswith("tmet") else SECOND, glob)
+    rep = verify(src, bad)
+    assert not rep.ok
+    assert any(p.field == "universal header start_time" for p in rep.problems), rep.summary()
+
+
+# --------------------------------------------------------------------------- non-time checks
+
+
+def test_keep_mode_verify_catches_a_planted_name_and_a_foreign_region(tmp_path, kept):
+    src, dst, _ = kept
+    bad = _copy(dst, tmp_path, "name")
+    _plant_text(bad, "channel_description", b"Jane")
+    rep = _verify(src, bad)
+    assert not rep.ok and any(p.field == "channel_description" for p in rep.leaks), rep.summary()
+    bad = _copy(dst, tmp_path, "region")
+    rel = next(Path(bad).glob("ch1.timd/ch1-000000.segd/*.tmet")).relative_to(bad)
+    raw = bytearray((bad / rel).read_bytes())
+    raw[900] = 0x41                                   # universal header protected region
+    _reseal(raw, TMET)
+    (bad / rel).write_bytes(bytes(raw))
+    rep = _verify(src, bad)
+    assert not rep.ok
+    assert any(p.field == "universal header protected region" for p in rep.problems), \
+        rep.summary()

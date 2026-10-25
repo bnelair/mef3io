@@ -164,6 +164,14 @@ def _disputed_offset(templates, tmp_path):
     return src, tmp_path / "S001.mefd", {}
 
 
+def _disputed_offset_with_session_records(templates, tmp_path):
+    # Session-level records stored against an offset (negated) whose
+    # segments disagree on it: a cut cannot place them.
+    src = _fresh(templates, tmp_path)
+    _set_rto(src, START - DAY, ["ch1"])
+    return src, tmp_path / "S001.mefd", {"time_range": (START, START + 30 * SECOND)}
+
+
 def _late_legacy(templates, tmp_path):
     src = _legacy(tmp_path / "src" / "late.mefd", rto=START + 3600 * SECOND)
     return src, tmp_path / "S001.mefd", {}
@@ -275,6 +283,8 @@ CASES = {
                                lambda t, p: _plain(t, p, exclude_channels=["ch1", "ch2", "ch3"])),
     "channels=[]": ("no-channels-left", lambda t, p: _plain(t, p, channels=[])),
     "segments disagree on the offset": ("rto-disputed", _disputed_offset),
+    "a cut of session records under a disputed offset": (
+        "time-range-offset-disputed", _disputed_offset_with_session_records),
     "a time at or before the offset": ("time-before-rto", _late_legacy),
     "level-1 password": ("password-level1-only",
                          _mutated(lambda s: None, which="enc", password="pw-one")),
@@ -477,6 +487,12 @@ def test_every_code_is_documented_and_reached():
             assert code in reached, f"no test reaches {code}"
     for code, _ in CASES.values():
         assert REFUSAL_CODES[code][1] == "check"
+    # The "(shift only)" markers in the table are exactly the codes a copy
+    # that keeps the times never meets: SHIFT_ONLY, plus the defensive
+    # time-overflow (only the shifting rule computes a time).
+    marked = set(re.findall(r"^\| `([a-z0-9-]+)` \|[^\n]*\*\(shift only\)\*", text,
+                            re.MULTILINE))
+    assert marked == SHIFT_ONLY | {"time-overflow"}, marked
 
 
 def test_check_lists_every_refusal_not_just_the_first(templates, tmp_path):
