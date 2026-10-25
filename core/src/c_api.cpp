@@ -635,6 +635,18 @@ int mef3io_extract_session_ex(const char* tar_path, const char* dest_dir, int ov
 
 /* ----- writer ------------------------------------------------------------ */
 
+static_assert(MEF3IO_MAX_BLOCK_SAMPLES == mef3io::MAX_BLOCK_SAMPLES,
+              "the C ABI's block cap must be the core's");
+
+int mef3io_check_block_length(int64_t samples_per_block) {
+  return guarded([&] { mef3io::check_block_length(samples_per_block); });
+}
+
+int mef3io_check_signal_parameters(double sampling_frequency, double units_conversion_factor) {
+  return guarded(
+      [&] { mef3io::check_signal_parameters(sampling_frequency, units_conversion_factor); });
+}
+
 int mef3io_writer_open(const char* mefd_path, int overwrite, const char* password_1,
                        const char* password_2, mef3io_writer** out) {
   if (!mefd_path || !out) return fail_argument("mefd_path and out must not be NULL");

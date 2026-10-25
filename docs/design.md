@@ -280,8 +280,12 @@ storage; lazy open + mmap indices already fix the pathological local case).
 - **Modes:**
   - `cache="auto"` (default): per-user OS cache dir
     (`platformdirs`-style: `~/Library/Caches/mef3io`, `$XDG_CACHE_HOME`,
-    `%LOCALAPPDATA%`), entry keyed by hash of absolute session path. Works
-    with read-only sessions.
+    `%LOCALAPPDATA%`), file `<hash16>.mef3cache`, named by a hash of the
+    absolute session path ONLY (since 2.0.0; earlier versions prefixed the
+    session folder's stem, which put a name that is often the subject's in
+    a file name; the next `cache="auto"` open of that session deletes its
+    old-named file, exactly that name and only if it is a mef3io snapshot,
+    and builds a new one). Works with read-only sessions.
   - `cache=<path>` / explicit persistent: user-requested dump file (e.g. next
     to the `.mefd`). **Never discovered or used unless explicitly passed** —
     a foreign/stale cache file inside a session dir cannot surprise a
@@ -322,7 +326,9 @@ storage; lazy open + mmap indices already fix the pathological local case).
   1. The cache file is parsed as JSON.
   2. A well-formed marker of this build and session is returned at once. It
      holds no metadata, and the Reader then opens normally. When that open
-     finds the session encrypted, the Reader deletes the marker.
+     succeeds and finds the session encrypted, the Reader deletes the marker.
+     An open that fails (a missing or wrong password raises `PasswordError`)
+     leaves it in place; it holds only a hash, so nothing is exposed.
   3. For anything else, the encryption check runs **before** format, version
      and session are compared. A file that parses as a JSON object with a
      `format` key, meaning any mef3io snapshot or marker of any version

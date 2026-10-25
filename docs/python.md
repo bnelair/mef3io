@@ -92,9 +92,24 @@ block_length=None, n_threads=0, metadata=None, durability="fast")`
   cut. After an unclean shutdown in fast mode, run `recover_session`. See
   [Long recordings](long_recordings.md).
 - `block_length` overrides the RED block size (default: `fs` samples for
-  fs ≥ 5000, else `10*fs`). `n_threads` (also a settable property) is how
-  many threads the Writer may use: `0` = automatic, `1` = no extra threads;
-  see [Threads](threads.md).
+  fs ≥ 5000, else `10*fs`, at least 1). A block can hold at most
+  858 993 396 samples (`mef3io._mef3io.MAX_BLOCK_SAMPLES`: its byte size is a
+  32-bit field and the worst case is 5 bytes per sample); a longer one, or a
+  rate whose default block would be longer, raises `ValueError` before
+  anything is created. `n_threads` (also a settable property) is how many
+  threads the Writer may use: `0` = automatic, `1` = no extra threads; see
+  [Threads](threads.md).
+
+**Arguments are checked before anything is written.** Every write
+(`write`, `write_int32`, and appends) raises `ValueError` and leaves the
+session as it was when `fs` is not a finite number greater than 0, when the
+conversion factor is 0, NaN or infinite (every sample would read back as 0
+or NaN; 0 is also meflib's "no entry" value for the field, meflib.h:439), or
+when the samples would end beyond the representable time range (a rate like
+`1e-300`). A **negative** conversion factor is allowed: it is a polarity
+inversion and reads back correctly in mef3io, pymef and mef_tools (pymef
+handles it explicitly, pymef3_file.c:972-978). The section-2 native minimum
+and maximum and `block_envelope()`'s `min`/`max` are swapped accordingly.
 
 ### `write(channel, data, start_uutc, fs, precision=-1, new_segment=False)`
 
@@ -109,7 +124,10 @@ The first write to a channel creates segment 0; later writes **append
 in-segment** (extending the existing files, like the legacy writer);
 `new_segment=True` forces a fresh segment. Appends must match the segment's
 fs and conversion factor and start at/after its end time — violations raise
-`WriteConflictError`.
+`WriteConflictError`. An append extends the channel's last segment folder
+under its real name, so a session from a writer that does not zero-pad
+segment numbers (`ch1-5.segd`) can be appended to; new segments are always
+named `<channel>-NNNNNN`.
 
 Returns a summary dict: `samples_written`, `blocks`, `gaps_skipped`,
 `segment`.
@@ -122,7 +140,8 @@ with `ufact` (e.g. an amplifier's volts-per-bit) in metadata. Optional
 samples. Because counts are never altered, `data` must be integer-typed
 (any width): floating-point input raises `TypeError` (use `write()` for
 float data), and values outside the int32 range raise `ValueError` instead
-of silently wrapping.
+of silently wrapping. A `valid` mask of the wrong length raises
+`ValueError`.
 
 ### `write_annotations(annotations, channel=None)`
 

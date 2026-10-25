@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <limits>
+#include <stdexcept>
 
 #include <fstream>
 
@@ -116,6 +117,7 @@ SessionWriter::SessionWriter(const std::string& mefd_path, bool overwrite, std::
     std::string ch = entry.path().stem().string();
     int nseg = 0;
     long long last = -1;
+    std::string last_stem, last_name;
     for (const auto& s : fs::directory_iterator(entry.path())) {
       if (!s.is_directory() || s.path().extension() != ".segd") continue;
       // A segment directory with no metadata is not a segment: it is what an
@@ -130,7 +132,15 @@ SessionWriter::SessionWriter(const std::string& mefd_path, bool overwrite, std::
         continue;
       }
       ++nseg;
-      last = std::max(last, detail::segment_number_of(s.path().stem().string()));
+      // The last segment by the SAME rule as last_segment_dir (number, then
+      // folder name), keeping its real name for the append (#83 item 5).
+      const long long number = detail::segment_number_of(s.path().stem().string());
+      const std::string name = s.path().filename().string();
+      if (last_stem.empty() || std::make_pair(number, name) > std::make_pair(last, last_name)) {
+        last = number;
+        last_name = name;
+        last_stem = s.path().stem().string();
+      }
     }
     // Segments are addressed by the HIGHEST real segment NUMBER, never by
     // how many there are: with a directory without metadata in the middle
@@ -140,6 +150,7 @@ SessionWriter::SessionWriter(const std::string& mefd_path, bool overwrite, std::
     // past every real segment is simply reused.
     channels_[ch].n_segments = nseg;
     channels_[ch].last_segment = static_cast<int>(last);
+    channels_[ch].last_segment_stem = last_stem;
     channels_[ch].hydrated = (nseg == 0);
   }
 }
@@ -159,7 +170,7 @@ void SessionWriter::check_still_writable() const {
 void SessionWriter::hydrate(const std::string& channel, ChannelState& st) {
   if (st.hydrated) return;
   st.hydrated = true;
-  const std::string base = segment_name(channel, st.last_segment);
+  const std::string base = segment_stem(channel, st, st.last_segment);
   const std::string tmet_path =
       (fs::path(mefd_path_) / (channel + ".timd") / (base + ".segd") / (base + ".tmet")).string();
   std::ifstream f(tmet_path, std::ios::binary);
@@ -438,19 +449,35 @@ void SessionWriter::write_records(std::optional<std::string> channel,
 
 si8 SessionWriter::block_length_for(sf8 fs) const {
   if (block_length_override_ > 0) return block_length_override_;
-  if (fs >= 5000.0) return static_cast<si8>(fs);
-  return static_cast<si8>(fs * 10.0);
+  // fs is finite and > 0 here (check_signal_parameters). Decided in double
+  // BEFORE the cast: a cast of a value outside si8 range is undefined, and a
+  // rate below 0.1 Hz gives less than one sample, which would never advance.
+  const sf8 n = fs >= 5000.0 ? fs : fs * 10.0;
+  if (n > static_cast<sf8>(MAX_BLOCK_SAMPLES))
+    throw std::invalid_argument(
+        "sampling frequency " + std::to_string(static_cast<long long>(fs)) +
+        " Hz gives a default block of more samples than a MEF 3.0 block can hold (" +
+        std::to_string(MAX_BLOCK_SAMPLES) + "); set a block length explicitly");
+  return std::max<si8>(1, static_cast<si8>(n));
+}
+
+std::string SessionWriter::segment_stem(const std::string& channel, const ChannelState& st,
+                                        int seg) const {
+  if (seg == st.last_segment && !st.last_segment_stem.empty()) return st.last_segment_stem;
+  return segment_name(channel, seg);
 }
 
 WriteSummary SessionWriter::write_int32(const std::string& channel, std::span<const si4> samples,
                                         sf8 ufact, si8 start_uutc, sf8 fs,
                                         std::span<const ui1> valid, bool new_segment) {
+  check_signal_parameters(fs, ufact);
   std::vector<si4> buf(samples.begin(), samples.end());
   return write_blocks(channel, buf, valid, ufact, start_uutc, fs, new_segment);
 }
 
 WriteSummary SessionWriter::write_float(const std::string& channel, std::span<const sf8> data,
                                         si8 start_uutc, sf8 fs, int precision, bool new_segment) {
+  check_signal_parameters(fs, 1.0);  // the factor is checked once it is known
   if (precision < 0) {
     // In-segment appends must keep the segment's conversion factor, so reuse
     // its precision instead of re-inferring (which could differ and conflict).
@@ -474,11 +501,28 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
                                          const std::vector<si4>& samples,
                                          std::span<const ui1> valid, sf8 ufact, si8 start_uutc,
                                          sf8 fs, bool new_segment) {
+  // Everything about the arguments is refused BEFORE anything is read or
+  // written (#83): a bad rate or factor, a block the format cannot describe,
+  // and data whose times would leave the uUTC range.
+  check_signal_parameters(fs, ufact);
+  const si8 n = static_cast<si8>(samples.size());
+  const si8 block_len = block_length_for(fs);
+  if (!valid.empty() && valid.size() != samples.size())
+    throw std::invalid_argument("valid mask has " + std::to_string(valid.size()) +
+                                " entries for " + std::to_string(samples.size()) + " samples");
+  {
+    const sf8 span_us = static_cast<sf8>(n) / fs * 1e6;
+    if (!(static_cast<sf8>(start_uutc) + span_us < 9.0e18)) {
+      char rate[40];
+      std::snprintf(rate, sizeof(rate), "%.17g", fs);
+      throw std::invalid_argument(std::to_string(n) + " samples at a sampling frequency of " +
+                                  rate + " Hz would end beyond the representable time range; "
+                                  "is the sampling frequency right?");
+    }
+  }
   check_still_writable();
   ChannelState& st = channels_[channel];
   hydrate(channel, st);
-  const si8 n = static_cast<si8>(samples.size());
-  const si8 block_len = block_length_for(fs);
 
   auto is_valid = [&](si8 i) { return valid.empty() ? true : valid[static_cast<std::size_t>(i)] != 0; };
 
@@ -528,7 +572,8 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   const bool append = !new_segment && st.n_segments > 0;
   const int seg = append ? st.last_segment : st.last_segment + 1;
   std::string seg_dir =
-      (fs::path(mefd_path_) / (channel + ".timd") / (segment_name(channel, seg) + ".segd")).string();
+      (fs::path(mefd_path_) / (channel + ".timd") / (segment_stem(channel, st, seg) + ".segd"))
+          .string();
 
   SegmentSpec spec;
   spec.session_name = session_name_;
@@ -590,7 +635,8 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   st.units_conversion_factor = ufact;
   if (!append) {
     ++st.n_segments;
-    note_new_segment(channel, (fs::path(seg_dir) / (segment_name(channel, seg) + ".tmet")).string(),
+    const std::string stem = fs::path(seg_dir).stem().string();
+    note_new_segment(channel, (fs::path(seg_dir) / (stem + ".tmet")).string(),
                      spec.recording_time_offset);
     // The slot is a real segment now: drop the stale "ignored" report.
     const auto e = empty_segment_dirs_.find(seg_dir);
@@ -602,6 +648,7 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
     }
   }
   st.last_segment = seg;
+  st.last_segment_stem = fs::path(seg_dir).stem().string();
   st.total_samples += stored;
   st.last_end_uutc =
       start_uutc + static_cast<si8>(std::llround(static_cast<sf8>(n) / fs * 1e6));

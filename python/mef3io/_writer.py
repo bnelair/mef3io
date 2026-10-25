@@ -176,7 +176,10 @@ class Writer:
         Physical units label stored in metadata (e.g. ``"uV"``).
     block_length : int or None, optional
         RED block size in samples. ``None`` (default) derives it from ``fs``
-        (``fs`` samples for ``fs`` >= 5000, else ``10*fs``).
+        (``fs`` samples for ``fs`` >= 5000, else ``10*fs``, at least 1).
+        At most ``mef3io._mef3io.MAX_BLOCK_SAMPLES`` (858 993 396: a block's
+        byte size is a 32-bit field); more raises ``ValueError`` before
+        anything is created, as does a rate whose derived block exceeds it.
     n_threads : int, optional
         How many threads this Writer may use (RED encoding): ``0`` (default)
         = automatic, ``1`` = no extra threads. Output is byte-identical
@@ -239,6 +242,10 @@ class Writer:
             raise ValueError(
                 f"durability must be 'full' or 'fast', not {durability!r}"
             )
+        if block_length is not None:
+            # More than a MEF 3.0 block can describe (its size is a 32-bit
+            # field): refused here, before the folder exists (#83).
+            _mef3io.check_block_length(int(block_length))
         self._path = str(path)
         self._impl = _mef3io.SessionWriter(str(path), overwrite, password1 or "", password2 or "")
         warn_unreadable_metadata(self._impl.unreadable_metadata, path=self._path)
@@ -334,6 +341,10 @@ class Writer:
 
         Raises
         ------
+        ValueError
+            If ``fs`` is not a finite number > 0, or ``precision`` makes the
+            conversion factor ``10**-precision`` 0 — checked before anything
+            is written.
         RuntimeError
             On an append conflict (fs / conversion-factor mismatch, or data
             starting before the segment's end).
@@ -389,7 +400,11 @@ class Writer:
             If ``data`` is floating-point (use :meth:`write` for float data —
             counts are never silently rounded here).
         ValueError
-            If any value is outside the int32 range (it would wrap).
+            If any value is outside the int32 range (it would wrap), if
+            ``fs`` or ``ufact`` is not a finite number > 0 (a ``ufact`` of 0
+            or NaN would make every sample read back as 0 or NaN), or if
+            ``valid`` does not have one entry per sample — all checked
+            before anything is written.
         RuntimeError
             On an append conflict.
         """

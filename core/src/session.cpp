@@ -852,12 +852,16 @@ BlockEnvelope Session::block_envelope(const std::string& channel, std::optional<
             if (b1 <= lo || b0 >= hi) continue;
             out.start_uutc.push_back(b0);
             out.end_uutc.push_back(b1);
-            out.minimum.push_back(e.minimum_sample_value == fmt::RED_NAN
-                                      ? nan
-                                      : static_cast<sf8>(e.minimum_sample_value) * uf);
-            out.maximum.push_back(e.maximum_sample_value == fmt::RED_NAN
-                                      ? nan
-                                      : static_cast<sf8>(e.maximum_sample_value) * uf);
+            const sf8 smin = e.minimum_sample_value == fmt::RED_NAN
+                                 ? nan
+                                 : static_cast<sf8>(e.minimum_sample_value) * uf;
+            const sf8 smax = e.maximum_sample_value == fmt::RED_NAN
+                                 ? nan
+                                 : static_cast<sf8>(e.maximum_sample_value) * uf;
+            // A negative factor (a polarity inversion) turns the largest
+            // count into the smallest value (#83; pymef3_file.c:972-978).
+            out.minimum.push_back(uf < 0.0 ? smax : smin);
+            out.maximum.push_back(uf < 0.0 ? smin : smax);
           }
         })) {
       out.start_uutc.resize(mark);

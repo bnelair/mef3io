@@ -337,5 +337,65 @@ isoGot = r.read('ch1');
 assert(sum(~isnan(isoGot)) == 2000, 'the intact segment must still read');
 delete(r);
 
+% ---- #83: refused before writing; sparse and string input ----------------
+% A rate that is not finite and > 0, or a conversion factor that is 0, NaN or
+% infinite, is a clean error and leaves nothing on disk.
+badPath = fullfile(sessionDir, 'matlab_bad_args.mefd');
+w = mef3io.Writer(badPath, Overwrite=true);
+for badFs = [0, -256, NaN, Inf]
+    gotError = false;
+    try w.write('ch1', x, start, badFs); catch, gotError = true; end
+    assert(gotError, 'write must refuse an invalid sampling frequency');
+    gotError = false;
+    try w.writeInt32('ch1', counts, 0.01, start, badFs); catch, gotError = true; end
+    assert(gotError, 'writeInt32 must refuse an invalid sampling frequency');
+end
+for badUfact = [0, NaN, Inf, -Inf]
+    gotError = false;
+    try w.writeInt32('ch1', counts, badUfact, start, fs); catch, gotError = true; end
+    assert(gotError, 'writeInt32 must refuse an invalid conversion factor');
+end
+assert(~exist(fullfile(badPath, 'ch1.timd'), 'dir'), 'a refused write must create nothing');
+% Sparse data and a sparse Valid mask (a sparse array crashed the MEX, and a
+% sparse mask stored the wrong validity).
+z = zeros(n, 1); z(1:100:end) = 7;
+w.write('sp', sparse(z), start, fs, Precision=0);
+spMask = true(n, 1); spMask(101:110) = false;   % a gap inside the data
+w.writeInt32('spv', counts, 0.01, start, fs, Valid=sparse(spMask));
+% A negative conversion factor is a polarity inversion, not an error.
+w.writeInt32('neg', counts, -0.5, start, fs);
+% string-class annotation text, type and channel.
+w.writeAnnotations(struct('time', {start + 1e6}, 'type', {"Note"}, ...
+                          'text', {"string text"}), "sp");
+delete(w);
+r = mef3io.Reader(badPath);
+spGot = r.read('sp');
+assert(isequal(spGot(:), z), 'sparse data must round-trip like full data');
+spvGot = r.read('spv');
+assert(all(isnan(spvGot(101:110))) && sum(~isnan(spvGot)) == n - 10, ...
+       'a sparse Valid mask must mark exactly its false entries');
+negGot = r.read('neg');
+assert(isequal(negGot(:), -0.5 * double(counts)), 'a negative factor must read back');
+spAnns = r.records('sp');
+assert(numel(spAnns) == 1 && strcmp(spAnns(1).text, 'string text'), ...
+       'string annotation text must be written');
+delete(r);
+
+% A refused block length must not cost the existing session: the check runs
+% BEFORE writer_open, which with Overwrite=true removes it (#83 review).
+gotError = false;
+try
+    mef3io.Writer(badPath, Overwrite=true, BlockLength=1e9);
+catch
+    gotError = true;
+end
+assert(gotError, 'a block length above the cap must be refused');
+assert(exist(fullfile(badPath, 'sp.timd'), 'dir') == 7, ...
+       'the existing session must survive a refused Writer');
+% Sparse SCALARS are valid arguments (S(i,j) of a sparse matrix is one).
+w = mef3io.Writer(badPath);
+w.write('spscalar', x(1:300), start, sparse(fs), Precision=3);
+delete(w);
+
 fprintf('test_mef3io: all assertions passed (%s)\n', sessionDir);
 end

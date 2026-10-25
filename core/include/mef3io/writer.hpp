@@ -113,6 +113,29 @@ struct SegmentSpec {
   bool durable = true;
 };
 
+/// Largest RED block, in samples, that the format can describe: a block's
+/// byte count is a ui4 in both its RED header and its `.tidx` entry, with
+/// 0xFFFFFFFF reserved as NO_ENTRY, and meflib's worst case for n samples is
+/// RED_MAX_COMPRESSED_BYTES = 5 n + 304 (header) + 7 (pad) bytes. A longer
+/// block would wrap those fields and write a header that disagrees with its
+/// data, so every write path refuses one up front (#83).
+inline constexpr si8 MAX_BLOCK_SAMPLES = (static_cast<si8>(0xFFFFFFFEu) - 304 - 7) / 5;
+
+/// Throws std::invalid_argument, naming the bad value, unless the sampling
+/// frequency is finite and > 0 and the units conversion factor finite and
+/// non-zero (#83; a negative factor is a polarity inversion and is allowed).
+/// A rate of 0, NaN or infinity used to hang the writer, a negative one to
+/// throw from deep inside std::vector, and a conversion factor of 0 or NaN
+/// to be stored, after which every sample reads back as 0 or NaN — the
+/// signal unrecoverable. Every write path calls this before anything exists
+/// on disk.
+void check_signal_parameters(sf8 sampling_frequency, sf8 units_conversion_factor);
+
+/// Throws std::invalid_argument unless `samples_per_block` is at most
+/// MAX_BLOCK_SAMPLES. Values <= 0 are accepted: the writers read them as
+/// "derive the block length from the rate".
+void check_block_length(si8 samples_per_block);
+
 // Write the three files for one segment into `segment_dir` (which must exist).
 // Blocks must be time-ordered. Returns the number of samples written.
 // Blocks are RED-encoded in parallel (n_threads: negative throws
@@ -127,6 +150,10 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
                               ui4* out_max_difference_bytes = nullptr);
 
 // Append blocks to an EXISTING segment (in-segment append): extends the .tdat
+// and .tidx of the segment whose folder is `segment_dir`; its files are named
+// after the folder (`<folder stem>.tdat` ...), so a foreign un-padded folder
+// such as `ch1-5.segd` is extended under its own name.
+//
 // and .tidx in place and rewrites the .tmet statistics plus the universal
 // headers' end times / entry counts / CRCs. The segment's fs and conversion
 // factor are authoritative: a mismatch with `spec`, or a first block starting

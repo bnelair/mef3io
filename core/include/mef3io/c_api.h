@@ -397,6 +397,16 @@ int mef3io_recover_session_ex(const char* mefd_path, int apply, int backup, cons
 
 /* ----- writer ------------------------------------------------------------ */
 
+/* The writer's argument rules (#83), for a caller that must refuse BEFORE
+ * mef3io_writer_open — which removes an existing session when overwrite is
+ * set. MEF3IO_ERR_ARGUMENT (message in mef3io_last_error) when the block
+ * length exceeds MEF3IO_MAX_BLOCK_SAMPLES (<= 0 = derive from the rate is
+ * fine), or fs is not finite > 0, or ufact is 0 / NaN / infinite (negative
+ * is a polarity inversion and allowed). Every write call checks the same. */
+#define MEF3IO_MAX_BLOCK_SAMPLES 858993396LL
+int mef3io_check_block_length(int64_t samples_per_block);
+int mef3io_check_signal_parameters(double sampling_frequency, double units_conversion_factor);
+
 /* Rejects tar archives: tar sessions are read-only. */
 int mef3io_writer_open(const char* mefd_path, int overwrite, const char* password_1,
                        const char* password_2, mef3io_writer** out);
