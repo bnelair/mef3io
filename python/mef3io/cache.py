@@ -177,9 +177,13 @@ def _os_cache_dir() -> Path:
 
 
 def auto_cache_path(session_path: str) -> Path:
+    """``<hash16>.mef3cache`` in the OS cache directory. The hash ONLY: a
+    session is often named after its subject, and the file name is visible
+    to anyone who can list that directory (#82). Snapshots saved by earlier
+    versions under ``<session stem>-<hash16>.mef3cache`` are no longer looked
+    up — the next ``cache="auto"`` open builds a new one."""
     key = hashlib.sha256(os.path.abspath(session_path).encode()).hexdigest()[:16]
-    stem = Path(session_path).stem
-    return _os_cache_dir() / f"{stem}-{key}.mef3cache"
+    return _os_cache_dir() / f"{key}.mef3cache"
 
 
 def resolve_cache_path(session_path: str, cache) -> Optional[Path]:

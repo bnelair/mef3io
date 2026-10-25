@@ -1480,6 +1480,13 @@ NB_MODULE(_mef3io, m) {
       },
       nb::arg("block"), nb::arg("password"), nb::arg("l1_field"), nb::arg("l2_field"));
 
+  // The writer's argument rules (#83), exposed so mef3io.Writer can refuse a
+  // bad block length BEFORE its constructor creates the session folder.
+  m.attr("MAX_BLOCK_SAMPLES") = mef3io::MAX_BLOCK_SAMPLES;
+  m.def("check_block_length", &mef3io::check_block_length, nb::arg("samples_per_block"));
+  m.def("check_signal_parameters", &mef3io::check_signal_parameters,
+        nb::arg("sampling_frequency"), nb::arg("units_conversion_factor"));
+
   // Write one single-segment time-series channel (P4 validation helper).
   // Splits `samples` into RED blocks of `block_len`; block 0 is marked as a
   // discontinuity (meflib convention for a segment's first block).

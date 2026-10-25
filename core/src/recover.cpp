@@ -3,8 +3,10 @@
 #include "mef3io/recover.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <set>
 
 #include "durability.hpp"
@@ -13,7 +15,9 @@
 #include "mef3io/crc.hpp"
 #include "mef3io/errors.hpp"
 #include "mef3io/headers.hpp"
+#include "mef3io/metadata.hpp"
 #include "mef3io/source.hpp"
+#include "mef3io/time.hpp"
 
 namespace fsys = std::filesystem;
 
@@ -112,6 +116,59 @@ bool block_looks_real(std::ifstream& f, std::uint64_t size, std::uint64_t offset
   return out.crc == crc::calculate(block);
 }
 
+/// The segment's end time, in the on-disk form, as recovery must set it in
+/// all three universal headers — or nullopt (with `why` set) when recovery
+/// leaves it to repair_session or cannot decide it safely.
+///
+/// Only at a NON-ZERO recording-time offset. At offset 0 the validator's
+/// times.segment-bounds repair rewrites the bounds after recovery (the CLI
+/// runs it), so recovery keeps to the index and the data there. At a non-zero
+/// offset every time check stands down (writers disagree on the sign
+/// convention, so the validator cannot tell a correct file from an inverted
+/// one), which left `info()`'s end time — the .tmet universal header's —
+/// describing the data from BEFORE the recovery (#83). Recovery has what the
+/// validator lacks: it has just placed the last block itself. The rule is
+/// unambiguous only in meflib's offset-applied form, so it acts only when the
+/// last block's stored time AND the .tmet end time are both negative (the
+/// form mef3io and meflib write); anything else is left as is, with a note.
+std::optional<si8> recovered_end_time(const std::vector<ui1>& tmet, const std::string& password,
+                                      si8 last_block_stored_start, ui4 last_block_samples,
+                                      std::string& why) {
+  TimeSeriesMetadata md;
+  try {
+    md = load_time_series_metadata(tmet, password);
+  } catch (const std::exception& e) {
+    why = std::string("the segment metadata could not be read (") + e.what() + ")";
+    return std::nullopt;
+  }
+  if (!md.section3_available) {
+    why = "the recording-time offset is locked (open with the level-2 password)";
+    return std::nullopt;
+  }
+  const si8 rto = segment_rto(md);
+  if (rto == 0) return std::nullopt;  // repair_session's job (see above)
+  const si8 stored_end = md.universal_header.end_time;
+  if (last_block_stored_start >= 0 || last_block_stored_start == fmt::UUTC_NO_ENTRY ||
+      (stored_end >= 0 && stored_end != fmt::UUTC_NO_ENTRY)) {
+    why = "its stored times are not all in the offset-applied (negated) form, so the end "
+          "time cannot be placed without guessing the convention";
+    return std::nullopt;
+  }
+  const sf8 fs_hz = md.section2.sampling_frequency;
+  const sf8 duration = static_cast<sf8>(last_block_samples) * 1e6 / fs_hz;
+  if (!std::isfinite(fs_hz) || !(fs_hz > 0.0) || !std::isfinite(duration) || duration > 9e18) {
+    why = "its sampling frequency is not a usable number";
+    return std::nullopt;
+  }
+  const si8 end = to_user_time(last_block_stored_start, rto) +
+                  static_cast<si8>(std::llround(duration));
+  if (!time_is_storable(end, rto)) {
+    why = "the end time cannot be stored under the segment's recording-time offset";
+    return std::nullopt;
+  }
+  return to_stored_time(end, rto);
+}
+
 }  // namespace
 
 namespace {
@@ -136,6 +193,12 @@ struct PlannedRecovery {
   std::vector<fmt::TimeSeriesIndex> rebuilt;  ///< entries recovered from .tdat
   std::uint64_t data_end = 0;                 ///< end of the last whole block
   si8 tail = 0;                               ///< trailing bytes to drop
+  /// Set only at a non-zero recording-time offset (recovered_end_time): the
+  /// stored end time for all three universal headers, and the .tmet header
+  /// it was decided from (re-checked before writing).
+  std::optional<si8> end_time;
+  fsys::path tmet;
+  std::vector<ui1> tmet_header;
 };
 
 struct SegmentDir {
@@ -147,7 +210,8 @@ struct SegmentDir {
 
 RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
                                const std::string& password, const Control& ctl) {
-  (void)password;  // only the index and data are touched; section 2 is not read
+  // The password is used only to read a segment's offset and rate when its
+  // end time has to be placed at a non-zero offset (recovered_end_time).
   if (path_has_suffix(path, ".tar"))
     throw IoError("cannot recover a tar session archive in place: " + path +
                   " (extract it first with extract_session)");
@@ -360,7 +424,40 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
     if (index_count != static_cast<si8>(n_after)) ++stale_headers;
     if (data_count != static_cast<si8>(n_after)) ++stale_headers;
 
-    if (dropped == 0 && recovered == 0 && tail == 0 && stale_headers == 0)
+    // At a non-zero offset the end time is placed here (recovered_end_time);
+    // decided in the scan so a dry run reports it too, and a segment whose blocks
+    // all line up but whose end time is stale (the .tmet rename lost in a
+    // crash) is recovered too.
+    std::optional<si8> end_time;
+    std::vector<ui1> tmet_header;
+    std::string end_note;
+    const fsys::path tmet = seg / (base + ".tmet");
+    if (n_after > 0 && fsys::exists(tmet)) {
+      const si8 last_start = rebuilt.empty() ? last_kept.start_time : rebuilt.back().start_time;
+      const ui4 last_samples =
+          rebuilt.empty() ? last_kept.number_of_samples : rebuilt.back().number_of_samples;
+      try {
+        const std::vector<ui1> tmet_bytes = read_all(tmet);
+        end_time = recovered_end_time(tmet_bytes, password, last_start, last_samples, end_note);
+        if (end_time)
+          tmet_header.assign(tmet_bytes.begin(),
+                             tmet_bytes.begin() + fmt::UNIVERSAL_HEADER_BYTES);
+      } catch (const std::exception& e) {
+        end_note = std::string("the segment metadata could not be read (") + e.what() + ")";
+      }
+    }
+
+    si8 stale_end = 0;
+    if (end_time) {
+      const si8 index_end = byteio::read<si8>(index_bytes, 24);
+      const si8 data_end_time =
+          data_head.size() >= fmt::UNIVERSAL_HEADER_BYTES ? byteio::read<si8>(data_head, 24) : 0;
+      const si8 tmet_end = byteio::read<si8>(tmet_header, 24);
+      for (si8 v : {tmet_end, index_end, data_end_time})
+        if (v != *end_time) ++stale_end;
+    }
+
+    if (dropped == 0 && recovered == 0 && tail == 0 && stale_headers == 0 && stale_end == 0)
       continue;  // segment is fine
 
     RecoveredSegment out;
@@ -394,6 +491,15 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
               ", data " + std::to_string(data_count) + ", really " + std::to_string(n_after) +
               ") — a reader clamps the block count down to it and would read the segment short";
     }
+    if (stale_end) {
+      if (!what.empty()) what += "; ";
+      what += "the end time was stale in " + std::to_string(stale_end) +
+              " universal header(s) and is set from the last block (the segment has a "
+              "recording-time offset, where repair_session leaves times alone)";
+    } else if (!end_note.empty()) {
+      report.notes.push_back(description + ": end time left as is: " + end_note +
+                             "; info() may report the end from before the recovery");
+    }
     out.action = what;
     report.segments.push_back(std::move(out));
 
@@ -414,6 +520,9 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
     p.rebuilt = std::move(rebuilt);
     p.data_end = offset;
     p.tail = tail;
+    p.end_time = end_time;
+    p.tmet = tmet;
+    p.tmet_header = std::move(tmet_header);
     plan.push_back(std::move(p));
   }
   // The last point at which a cancel is honoured. Nothing has been written.
@@ -502,7 +611,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
       auto uh = fmt::UniversalHeader::parse(new_index);
       uh.number_of_entries = static_cast<si8>(keep.size());
       uh.maximum_entry_size = fmt::TIME_SERIES_INDEX_BYTES;
-      if (!keep.empty()) uh.end_time = keep.back().start_time;
+      if (!keep.empty()) uh.end_time = p.end_time.value_or(keep.back().start_time);
       fmt::provenance::stamp_modified(uh, fmt::provenance::Operation::Recovery);
       uh.serialize(new_index);
       const ui4 body = crc::calculate(
@@ -526,7 +635,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
       std::vector<ui1> head = read_range(data_in, 0, fmt::UNIVERSAL_HEADER_BYTES);
       auto uh = fmt::UniversalHeader::parse(head);
       uh.number_of_entries = static_cast<si8>(keep.size());
-      if (!keep.empty()) uh.end_time = keep.back().start_time;
+      if (!keep.empty()) uh.end_time = p.end_time.value_or(keep.back().start_time);
       fmt::provenance::stamp_modified(uh, fmt::provenance::Operation::Recovery);
       uh.serialize(head);
       // The body changed, so the stored body CRC no longer describes it. Say
@@ -542,6 +651,29 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
       if (!f) throw IoError("header update failed: " + tdat.string());
     }
     (void)detail::fsync_file(tdat.string());
+    if (p.end_time && byteio::read<si8>(p.tmet_header, 24) != *p.end_time) {
+      // The .tmet universal header: header only (the body CRC is unchanged
+      // because the body is), the whole file rewritten by rename like the
+      // .tidx, any foreign padding past the fixed-length record kept. Skipped,
+      // with a note, if the header moved since the scan (a writer?).
+      std::vector<ui1> tmet_bytes = read_all(p.tmet);
+      if (tmet_bytes.size() < fmt::METADATA_FILE_BYTES ||
+          !std::equal(p.tmet_header.begin(), p.tmet_header.end(), tmet_bytes.begin())) {
+        report.notes.push_back(p.description + ": end time left as is: the segment metadata "
+                                               "changed while recovery was running");
+      } else {
+        if (backup)
+          back_up_bytes(backup_root, channel + "/" + base + ".tmet.header", p.tmet_header);
+        auto uh = fmt::UniversalHeader::parse(tmet_bytes);
+        uh.end_time = *p.end_time;
+        fmt::provenance::stamp_modified(uh, fmt::provenance::Operation::Recovery);
+        uh.serialize(tmet_bytes);
+        byteio::write<ui4>(tmet_bytes, 0,
+                           crc::calculate(std::span<const ui1>(tmet_bytes)
+                                              .subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4)));
+        write_all(p.tmet, tmet_bytes);
+      }
+    }
     if (const auto last = detail::last_segment_dir(p.channel_dir);
         last && detail::segment_number_of(last->stem().string()) != p.segment_number)
       channels_to_stamp.insert(p.channel_dir);

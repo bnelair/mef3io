@@ -327,7 +327,9 @@ build id `_mef3io.__build_id__` — git SHA, else configure time — + the
 extension binary's size/mtime, so dev builds and reinstalled wheels never share
 snapshots; TODO in `_version`: PyInstaller onefile gets a per-run identity);
 session identity is `session_key` = SHA-256 of the abs path, NEVER the path
-(subject names); per channel the .segd count (one listing of the .timd — always
+(subject names); the cache="auto" FILE NAME is `<hash16>.mef3cache`, hash only
+(#82; it carried the session stem until 2.0.0 — old files are simply not
+looked up and get rebuilt); per channel the .segd count (one listing of the .timd — always
 listed, never trust dir mtimes: FUSE/object stores report constant ones),
 start/end from the first/last segment's .tmet universal header plus both
 headers' random file_UUIDs (offset 836 — catches overwrite=True with the same
@@ -598,7 +600,15 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   the index or data — repair_session never does, which is what keeps it safe
   on anything. Index-ahead-of-data drops entries; data-ahead-of-index
   REBUILDS them from the RED block headers (CRC-checked). Dry run by
-  default. (4) Docs: `docs/long_recordings.md`, `docs/validation.md`,
+  default. ONE declaration it does write (#83): at a NON-ZERO rto, where the
+  validator's time checks stand down, it sets the END TIME of all three UHs
+  (.tmet = what info() reports) from the last kept block
+  (`recovered_end_time`: needs the rto + fs from the .tmet, so `password=`
+  matters; acts only when that block's stored time AND the .tmet end are
+  negated, else a `notes` entry and nothing changes); .tmet header backed up,
+  stamped Recovery; a stale end alone makes the segment need recovery. At
+  rto 0 it leaves the times to repair_session's times.segment-bounds
+  (test-pinned: .tmet byte-identical). (4) Docs: `docs/long_recordings.md`, `docs/validation.md`,
   `for_agents/INVARIANTS.md`.
 - **Durability is scoped, deliberately** (`core/src/durability.hpp`, shared by
   writer.cpp and validate.cpp — they had drifted, and the path writing SAMPLES
@@ -884,7 +894,23 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   segment in place (.tdat streamed-CRC append, .tidx extend, .tmet s2 rewrite);
   `new_segment=True` forces a fresh segment. Appends validate fs/ufact/start
   time vs on-disk metadata (`WriteConflictError` → Python RuntimeError); float
-  appends reuse the segment's precision. `Reader.segments(ch)` maps what data
+  appends reuse the segment's precision. The append extends the last segment
+  folder by its ON-DISK name (`ChannelState::last_segment_stem`, chosen by the
+  last_segment_dir rule; append_time_series_segment names the files after
+  the folder), so foreign un-padded `ch1-5.segd` works; new segments are
+  always `%06d`. ARGUMENT RULES (#83, writer.hpp `check_signal_parameters` /
+  `check_block_length` / `MAX_BLOCK_SAMPLES`, called by SessionWriter AND the
+  free segment functions BEFORE anything is read or written): fs finite > 0;
+  ufact finite and != 0 (0 = meflib NO_ENTRY, meflib.h:439; NEGATIVE ALLOWED =
+  polarity inversion, pymef3_file.c:972-978 swaps native min/max, and so do
+  the writer and block_envelope — oracle-tested in test_p40); block <=
+  MAX_BLOCK_SAMPLES (5n+311 must stay < ui4 NO_ENTRY), the fs-derived block
+  decided in double before the cast and clamped to >= 1 (fs < 0.1 Hz used to
+  loop forever); n/fs*1e6 must stay in si8 range (fs=1e-300); valid mask
+  length = data length. Python Writer checks block_length BEFORE its ctor
+  creates the folder. MATLAB Writer.m passes full() arrays and converts
+  string annotation fields; the MEX refuses sparse/complex (`require_dense_real`).
+  `Reader.segments(ch)` maps what data
   is where per segment. First appended block keeps discontinuity=true (readers
   are time-gridded so contiguous appends stay seamless).
 - **Off-grid block times: RECONCILED — the old entry here was wrong.** It

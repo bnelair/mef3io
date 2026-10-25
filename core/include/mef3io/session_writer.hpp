@@ -93,8 +93,12 @@ class SessionWriter {
   }
 
   // Optional override for the RED block length (samples per block). <= 0 uses
-  // the fs-derived heuristic.
-  void set_block_length(si8 n) { block_length_override_ = n; }
+  // the fs-derived heuristic. More than MAX_BLOCK_SAMPLES (writer.hpp) throws
+  // std::invalid_argument: the block's 32-bit size fields would wrap.
+  void set_block_length(si8 n) {
+    check_block_length(n);
+    block_length_override_ = n;
+  }
   void set_units(const std::string& u) { units_ = u; }
   void set_threads(int n) { n_threads_ = n; }
 
@@ -131,6 +135,10 @@ class SessionWriter {
     sf8 units_conversion_factor = 1.0;
     int n_segments = 0;      // real segments (with metadata) on disk
     int last_segment = -1;   // highest real segment NUMBER (-1: none)
+    // Folder stem of that segment as it is ON DISK ("ch1-000005", or a
+    // foreign writer's un-padded "ch1-5"), so an append extends the real
+    // folder. Empty: not adopted from disk; the canonical name is used.
+    std::string last_segment_stem;
     si8 total_samples = 0;   // channel-wide sample count so far
     si8 last_end_uutc = 0;   // for append-time validation
     bool hydrated = true;    // false for channels adopted from disk until their
@@ -154,6 +162,9 @@ class SessionWriter {
   };
 
   si8 block_length_for(sf8 fs) const;
+  // The folder stem of `seg` for `st`: the on-disk one for the adopted last
+  // segment, else the canonical zero-padded name.
+  std::string segment_stem(const std::string& channel, const ChannelState& st, int seg) const;
   // Load fs/ufact/total_samples/last_end_uutc from the channel's last segment
   // on disk (for sessions reopened with overwrite=false). No-op once hydrated.
   void check_still_writable() const;

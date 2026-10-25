@@ -9,6 +9,7 @@
 #include <fstream>
 #include <limits>
 #include <random>
+#include <stdexcept>
 #include <system_error>
 
 #ifdef _WIN32
@@ -247,9 +248,48 @@ fmt::UniversalHeader base_uh(const SegmentSpec& spec, const std::string& ftype, 
 
 }  // namespace
 
+namespace {
+std::string number_text(sf8 v) {
+  char buf[40];
+  std::snprintf(buf, sizeof(buf), "%.17g", v);
+  return buf;
+}
+}  // namespace
+
+void check_signal_parameters(sf8 sampling_frequency, sf8 units_conversion_factor) {
+  if (!std::isfinite(sampling_frequency) || !(sampling_frequency > 0.0))
+    throw std::invalid_argument("sampling frequency must be a finite number greater than 0 Hz, "
+                                "not " + number_text(sampling_frequency));
+  // A negative factor is a polarity inversion and reads back right; 0, NaN
+  // and infinity lose every sample.
+  if (!std::isfinite(units_conversion_factor) || units_conversion_factor == 0.0)
+    throw std::invalid_argument(
+        "units conversion factor must be a finite, non-zero number, not " +
+        number_text(units_conversion_factor) +
+        " (with it every sample would read back as 0, NaN or infinity)");
+}
+
+void check_block_length(si8 samples_per_block) {
+  if (samples_per_block > MAX_BLOCK_SAMPLES)
+    throw std::invalid_argument(
+        "block length " + std::to_string(samples_per_block) + " samples is more than a MEF 3.0 "
+        "block can hold (" + std::to_string(MAX_BLOCK_SAMPLES) + ": its size is a 32-bit field)");
+}
+
+namespace {
+// What the free functions below accept: a valid rate and factor, and blocks
+// the format can describe. SessionWriter checks the same before it creates
+// anything; these guard callers of the segment API itself.
+void check_segment_input(const SegmentSpec& spec, const std::vector<BlockSpec>& blocks) {
+  check_signal_parameters(spec.sampling_frequency, spec.units_conversion_factor);
+  for (const auto& b : blocks) check_block_length(static_cast<si8>(b.samples.size()));
+}
+}  // namespace
+
 si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec& spec,
                               const std::vector<BlockSpec>& blocks, int n_threads,
                               ui4* out_max_difference_bytes) {
+  check_segment_input(spec, blocks);
   if (!fs::is_directory(segment_dir)) throw IoError("segment dir does not exist: " + segment_dir);
   const sf8 fs_hz = spec.sampling_frequency;
   const si8 rto = spec.recording_time_offset;
@@ -450,8 +490,15 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
 si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec& spec,
                                const std::vector<BlockSpec>& blocks, int n_threads,
                                ui4* out_max_difference_bytes, AppendIndexCache* cache) {
+  check_segment_input(spec, blocks);
   if (blocks.empty()) return 0;
-  const std::string base = segment_base_name(spec);
+  // The files are named after the folder being extended, not rebuilt from the
+  // segment number: a foreign writer's un-padded `ch1-5.segd` holds
+  // `ch1-5.tdat`, and the padded name would not exist (#83).
+  const std::string base =
+      fs::path(segment_dir).has_stem() && fs::path(segment_dir).extension() == ".segd"
+          ? fs::path(segment_dir).stem().string()
+          : segment_base_name(spec);
   const std::string tmet_path = (fs::path(segment_dir) / (base + ".tmet")).string();
   const std::string tidx_path = (fs::path(segment_dir) / (base + ".tidx")).string();
   const std::string tdat_path = (fs::path(segment_dir) / (base + ".tdat")).string();
@@ -490,7 +537,9 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   // Per-block half-microsecond rounding can store an end time up to ~1 us past
   // the grid-exact end, so allow half a sample period of slack: a start within
   // it cannot land on (or before) any stored grid sample.
-  const si8 slack = static_cast<si8>(std::llround(0.5e6 / fs_hz));
+  // fs is finite and positive (checked against spec above), but a tiny one
+  // makes this quotient leave si8 range, where llround is undefined.
+  const si8 slack = static_cast<si8>(std::llround(std::min(0.5e6 / fs_hz, 1e18)));
   if (blocks.front().start_uutc < old_end - slack)
     throw WriteConflictError("append starts at " + std::to_string(blocks.front().start_uutc) +
                              " uUTC, before segment end " + std::to_string(old_end));

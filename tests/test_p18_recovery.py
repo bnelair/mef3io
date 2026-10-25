@@ -269,3 +269,115 @@ def test_recovery_reports_a_stale_universal_header_count(tmp_path):
         mef3io.repair_session(str(path), ids)
     assert mef3io.Validator(str(path)).validate().ok
     assert struct.unpack_from("<q", tdat.read_bytes(), 32)[0] == real
+
+
+# --- #83: the end time at a non-zero recording-time offset -------------------
+# At rto != 0 every validator time check stands down (writers disagree on the
+# sign convention there), so repair_session never fixed the end time recovery
+# left behind, and info() kept reporting the end from BEFORE the recovery.
+
+S3_RTO = 1024 + 1536 + 10752          # section 3, field 0 (si8)
+TMET_BYTES = 16384
+
+
+def _set_rto(path, rto):
+    """Give every .tmet this offset. The writer stored every time as -t, so
+    the session simply moves by rto — a consistent rto session."""
+    for tmet in Path(path).glob("*.timd/*.segd/*.tmet"):
+        raw = bytearray(tmet.read_bytes())
+        struct.pack_into("<q", raw, S3_RTO, rto)
+        struct.pack_into("<I", raw, 4, m.crc32(bytes(raw[UH:TMET_BYTES])))
+        struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH])))
+        tmet.write_bytes(bytes(raw))
+
+
+def _crashed_append(tmp_path, rto, lose_index=True):
+    """Six appends; the .tmet (and, with lose_index, the index) of the last
+    three never landed — what `durability="fast"` can leave after a crash."""
+    path = tmp_path / "s.mefd"
+    rng = np.random.default_rng(3)
+    n = 2000
+    with mef3io.Writer(str(path), durability="fast") as w:
+        for i in range(6):
+            w.write_int32("ch1", rng.integers(-9000, 9000, n, dtype=np.int32), 0.5,
+                          START + int(i * n / FS * 1e6), FS)
+            if i == 2:
+                tmet = next(path.glob("*.timd/*.segd/*.tmet"))
+                old_tmet = tmet.read_bytes()
+                tidx = next(path.glob("*.timd/*.segd/*.tidx"))
+                old_entries = _entries(tidx)
+    tmet.write_bytes(old_tmet)
+    if lose_index:
+        tidx.write_bytes(tidx.read_bytes()[: UH + old_entries * TSI])
+        _fix_index_header(tidx, old_entries)
+    if rto:
+        _set_rto(path, rto)
+    true_end = START + rto + int(6 * n / FS * 1e6)
+    return path, tmet, true_end
+
+
+def _recover_and_repair(path):
+    report = mef3io.recover_session(str(path), apply=True)
+    ids = mef3io.Validator(str(path)).validate().repairable_check_ids
+    if ids:
+        mef3io.repair_session(str(path), ids)
+    return report
+
+
+@pytest.mark.parametrize("lose_index", [True, False], ids=["index-lost", "only-tmet-lost"])
+def test_recovery_sets_the_end_time_at_a_nonzero_offset(tmp_path, lose_index):
+    rto = 1_000_000_000
+    path, tmet, true_end = _crashed_append(tmp_path, rto, lose_index)
+    with mef3io.Reader(str(path)) as r:
+        assert r.info("ch1")["end_time"] < true_end - 10_000_000, "the fixture must be stale"
+    before = tmet.read_bytes()
+    dry = mef3io.recover_session(str(path))
+    assert dry.segments and "end time" in dry.segments[0].action, dry.summary()
+    assert tmet.read_bytes() == before and not dry.applied, "a dry run must not write"
+
+    _recover_and_repair(path)
+    with mef3io.Reader(str(path)) as r:
+        info = r.info("ch1")
+        assert info["end_time"] == true_end
+        assert np.isfinite(r.read("ch1")).sum() == 6 * 2000
+        # The three universal headers agree, and the value is stored in the
+        # offset-applied form: rto - t, never the real date in plain.
+        seg = r.segments("ch1")[0]
+        assert "recovery" in seg["provenance"]["operations"]
+    seg_dir = tmet.parent
+    for f in (seg_dir / (seg_dir.stem + ext) for ext in (".tmet", ".tidx", ".tdat")):
+        stored = struct.unpack_from("<q", f.read_bytes(), 24)[0]
+        assert stored == rto - true_end, f.name
+    assert mef3io.Validator(str(path)).validate().ok
+    # Idempotent: a second pass finds nothing to do.
+    assert mef3io.recover_session(str(path)).nothing_to_do
+
+
+def test_at_offset_zero_recovery_leaves_the_metadata_to_repair(tmp_path):
+    """Negative control: at rto 0 the validator owns the times (its
+    segment-bounds repair fixes the end), so recovery does not touch .tmet,
+    and the end comes out the same either way."""
+    path, tmet, true_end = _crashed_append(tmp_path, 0)
+    before = tmet.read_bytes()
+    mef3io.recover_session(str(path), apply=True)
+    assert tmet.read_bytes() == before
+    ids = mef3io.Validator(str(path)).validate().repairable_check_ids
+    mef3io.repair_session(str(path), ids)
+    with mef3io.Reader(str(path)) as r:
+        assert r.info("ch1")["end_time"] == true_end
+
+
+def test_an_ambiguous_stored_convention_is_left_alone_with_a_note(tmp_path):
+    """A .tmet end time stored as a plain (positive) value at rto != 0 is
+    ambiguous (absolute, or a legacy positive delta?): never guessed."""
+    rto = 1_000_000_000
+    path, tmet, _ = _crashed_append(tmp_path, rto)
+    raw = bytearray(tmet.read_bytes())
+    stored_end = struct.unpack_from("<q", raw, 24)[0]
+    struct.pack_into("<q", raw, 24, -stored_end + rto)   # same instant, absolute form
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH])))
+    tmet.write_bytes(bytes(raw))
+    report = mef3io.recover_session(str(path), apply=True)
+    assert any("end time left as is" in n for n in report.notes), report.notes
+    assert struct.unpack_from("<q", tmet.read_bytes(), 24)[0] == -stored_end + rto
+    assert report.segments[0].blocks_recovered == 3, "the index is still recovered"

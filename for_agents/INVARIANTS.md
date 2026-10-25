@@ -112,7 +112,10 @@ Keep these apart. `repair_session` only ever rewrites section 2 and the
 universal headers — never samples, never the index — which is what makes it safe
 to run on anything. `recover_session` may truncate the index, rebuild entries
 from `.tdat` block headers, and drop a sub-block fragment; it is dry-run by
-default and backed up before it writes.
+default and backed up before it writes. Its one declaration write: at a
+non-zero recording-time offset, where repair's time checks stand down, it sets
+the segment's end time (all three universal headers) from the last block it
+kept, and only when the stored times are in the negated form (#83).
 
 ## 6. Round trips cannot prove compatibility
 

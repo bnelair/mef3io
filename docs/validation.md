@@ -341,6 +341,21 @@ sample count, byte count, start time and discontinuity flag — everything an
 index entry needs. Only blocks whose **CRC verifies** are indexed: a torn tail
 is not a block, and is dropped instead.
 
+**The end time at a non-zero recording-time offset.** Normally recovery
+touches only the index and the data, and the follow-up `repair_session` fixes
+the start and end times in the three universal headers. In a session with a
+non-zero recording-time offset (meflib's date-masking), every time check
+stands down, because writers disagree on how times are stored there. Recovery
+then sets the end time itself, from the last block it kept: in `.tmet` (which
+is where `info()` reads it), `.tidx` and `.tdat`, stored in the offset-applied
+form (offset − time), never the real date. It does this only when the last
+block's time and the `.tmet` end time are both stored in that form; otherwise
+it leaves the end time alone and says why in `report.notes`. The `.tmet` header
+goes to the backup first. A segment whose blocks are all in place but whose end
+time is stale (the `.tmet` update lost in a crash) also counts as needing
+recovery there. Reading the offset and the rate can need the session's
+password (`password=`).
+
 ### Reading the report
 
 ```python
@@ -359,7 +374,8 @@ for s in report.segments:
 
 - **Dry run by default.** Nothing is written unless you pass `apply=True`.
 - **Backs up what changes, not the file.** The `.tidx`, the `.tdat`'s
-  1024-byte header, and any dropped fragment go to
+  1024-byte header, the `.tmet`'s header when the end time is set (see above),
+  and any dropped fragment go to
   `<session>.recover-backup/`. The `.tdat` itself may be tens of gigabytes —
   and that is one channel — so copying it to undo a header patch would make the
   tool unusable on exactly the sessions it is for. Pass `backup=False` to skip.
