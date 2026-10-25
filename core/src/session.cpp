@@ -33,29 +33,15 @@ std::size_t index_entry_count(std::span<const ui1> idx, const std::string& path)
   return body / fmt::TIME_SERIES_INDEX_BYTES;
 }
 
-// Whether a segment lies wholly outside [lo, hi) by the times in its .tmet
-// universal header, so its block index need not be read at all (#110 item 3:
-// a one-minute window of a day-long session used to load and parse the index
-// of every segment). Conservative, because a wrong skip silently drops blocks:
-//   * only when the header times are plausible (a foreign writer may leave
-//     them 0 or unset),
-//   * with a second of margin for recorder jitter,
-//   * and NEVER by its end time for the channel's LAST segment: an append
-//     extends the .tdat and .tidx before it republishes the .tmet, so after an
-//     interrupted append (durability="fast", before recover_session) the last
-//     segment's index can run past the end its header states. Only the last
-//     segment is ever appended to; a start time never moves.
-bool segment_outside(const TimeSeriesMetadata& md, si8 lo, si8 hi, bool last) {
-  constexpr si8 MARGIN = 1'000'000;
-  const si8 rto = segment_rto(md);
+// A .tmet start time that can be trusted for skipping: set, positive, and
+// the segment's own (an append never moves a segment's start). nullopt when
+// a foreign writer left it unset or implausible.
+std::optional<si8> plausible_start(const TimeSeriesMetadata& md) {
   const auto& uh = md.universal_header;
-  if (uh.start_time == fmt::UUTC_NO_ENTRY || uh.end_time == fmt::UUTC_NO_ENTRY) return false;
-  const si8 s0 = to_user_time(uh.start_time, rto);
-  const si8 s1 = to_user_time(uh.end_time, rto);
-  if (!(s0 > 0 && s1 >= s0)) return false;
-  if (hi < std::numeric_limits<si8>::max() - MARGIN && s0 >= hi + MARGIN) return true;
-  if (!last && lo > std::numeric_limits<si8>::min() + MARGIN && s1 < lo - MARGIN) return true;
-  return false;
+  if (uh.start_time == fmt::UUTC_NO_ENTRY) return std::nullopt;
+  const si8 s0 = to_user_time(uh.start_time, segment_rto(md));
+  if (s0 <= 0) return std::nullopt;
+  return s0;
 }
 
 }  // namespace
@@ -63,7 +49,7 @@ bool segment_outside(const TimeSeriesMetadata& md, si8 lo, si8 hi, bool last) {
 Session::Session(const std::string& mefd_path, std::string password, bool strict, int n_threads)
     : mefd_path_(mefd_path), source_(open_session_source(mefd_path)),
       password_(std::move(password)), strict_(strict) {
-  n_threads_.store(n_threads);
+  n_threads_.store(check_threads(n_threads));
   discover();
 }
 
@@ -72,7 +58,7 @@ Session::Session(std::shared_ptr<const SessionSource> source, std::string passwo
     : mefd_path_(source ? source->describe("") : std::string()), source_(std::move(source)),
       password_(std::move(password)), strict_(strict) {
   if (!source_) throw std::invalid_argument("Session: null source");
-  n_threads_.store(n_threads);
+  n_threads_.store(check_threads(n_threads));
   discover();
 }
 
@@ -141,6 +127,53 @@ const TimeSeriesMetadata& Session::segment_metadata(const SegmentReader& seg) co
   if (!seg.metadata)
     throw std::logic_error("segment metadata not loaded: " + source_->describe(seg.tmet_path));
   return *seg.metadata;
+}
+
+bool Session::skip_segment(const SegmentReader& seg, si8 lo, si8 hi) const {
+  // 1. Starts a second or more after the window ends (recorder jitter aside,
+  //    no block of a segment starts before the segment does).
+  constexpr si8 MARGIN = 1'000'000;
+  if (const auto s0 = plausible_start(segment_metadata(seg));
+      s0 && hi < std::numeric_limits<si8>::max() - MARGIN && *s0 >= hi + MARGIN)
+    return true;
+  // 2. Its index, walked once already, has no block in the window.
+  std::lock_guard<std::mutex> lock(index_mu_);
+  if (!seg.span_known || seg.span_open) return false;
+  return seg.span_hi <= lo || seg.span_lo >= hi;
+}
+
+void Session::learn_span(SegmentReader& seg, std::span<const ui1> idx, std::size_t n_entries,
+                         si8 rto, sf8 fs) {
+  {
+    std::lock_guard<std::mutex> lock(index_mu_);
+    if (seg.span_known) return;
+  }
+  // A SUPERSET of what any windowed walk can select: every entry is counted,
+  // also the ones a walk drops for their byte range; one without a usable
+  // count (0 = damaged, kept by collect_blocks; NO_ENTRY) makes the span
+  // unbounded. Times and lengths by the walks' own expressions.
+  bool open = !(fs > 0) || !std::isfinite(fs);
+  si8 lo = std::numeric_limits<si8>::max(), hi = std::numeric_limits<si8>::min();
+  for (std::size_t i = 0; i < n_entries && !open; ++i) {
+    const auto e = fmt::TimeSeriesIndex::parse(
+        idx.subspan(fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES,
+                    fmt::TIME_SERIES_INDEX_BYTES));
+    if (e.number_of_samples == 0 || e.number_of_samples == fmt::UI4_NO_ENTRY) {
+      open = true;
+      break;
+    }
+    const si8 b0 = to_user_time(e.start_time, rto);
+    const si8 b1 = b0 + static_cast<si8>(
+                            std::llround(static_cast<sf8>(e.number_of_samples) * 1e6 / fs));
+    lo = std::min(lo, b0);
+    hi = std::max(hi, b1);
+  }
+  std::lock_guard<std::mutex> lock(index_mu_);
+  if (seg.span_known) return;
+  seg.span_known = true;
+  seg.span_open = open;
+  seg.span_lo = lo;
+  seg.span_hi = hi;
 }
 
 std::shared_ptr<const std::vector<ui1>> Session::segment_index(SegmentReader& seg) {
@@ -528,9 +561,7 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
   const si8 t1 = t1_opt.value_or(ch.info.end_time + 1);
   const sf8 fs = ch.info.sampling_frequency;
 
-  for (std::size_t si = 0; si < ch.segments.size(); ++si) {
-    auto& seg = ch.segments[si];
-    const bool last = si + 1 == ch.segments.size();
+  for (auto& seg : ch.segments) {
     // Between segments, OUTSIDE with_segment: a cancellation is not a damaged
     // segment, and (Cancelled being no std::exception) a lenient session could
     // not contain it anyway. Nothing has been appended for this segment yet, so
@@ -544,7 +575,9 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
                       mark_mm = out.mismatches.size();
     if (!with_segment(channel, seg, [&] {
     auto& md = segment_metadata(seg);
-    if (segment_outside(md, t0, t1, last)) return;  // its index is not even read
+    // #110 item 3: a segment known to hold nothing in the window is not even
+    // looked at (its index may have been evicted; it is not re-read).
+    if (skip_segment(seg, t0, t1)) return;
     const si8 rto = segment_rto(md);
     crypto::AccessKeys keys = crypto::validate_password(
         password_, md.universal_header.level_1_password_validation_field,
@@ -553,6 +586,7 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
     const auto idx_pin = segment_index(seg);  // keeps the bytes alive for this call
     const std::span<const ui1> idx(*idx_pin);
     const std::size_t n_entries = index_entry_count(idx, source_->describe(seg.tidx_path));
+    learn_span(seg, idx, n_entries, rto, fs);
 
     // Determine whether any block in this segment is in range before loading
     // the (potentially large) .tdat.
@@ -802,19 +836,19 @@ BlockEnvelope Session::block_envelope(const std::string& channel, std::optional<
   const si8 hi = t1.value_or(std::numeric_limits<si8>::max());
 
   BlockEnvelope out;
-  for (std::size_t si = 0; si < ch.segments.size(); ++si) {
-    auto& seg = ch.segments[si];
-    const bool last = si + 1 == ch.segments.size();
+  for (auto& seg : ch.segments) {
     const std::size_t mark = out.start_uutc.size();
     if (!with_segment(channel, seg, [&] {
           auto& md = segment_metadata(seg);
           const si8 rto = segment_rto(md);
-          // Skip a segment wholly outside the window before touching its
-          // index (a day-long session has thousands of them).
-          if (segment_outside(md, lo, hi, last)) return;
+          // Skip a segment outside the window before touching its index (a
+          // day-long session has thousands of them) — by its start, or by the
+          // span a previous walk learnt; never by its header's end time.
+          if (skip_segment(seg, lo, hi)) return;
           const auto idx_pin = segment_index(seg);  // keeps the bytes alive for this call
           const std::span<const ui1> idx(*idx_pin);
           const std::size_t n = index_entry_count(idx, source_->describe(seg.tidx_path));
+          learn_span(seg, idx, n, rto, fs);
           for (std::size_t i = 0; i < n; ++i) {
             const auto e = fmt::TimeSeriesIndex::parse(
                 idx.subspan(fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES,

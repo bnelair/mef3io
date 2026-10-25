@@ -17,6 +17,8 @@
 #include <cstddef>
 #include <exception>
 #include <mutex>
+#include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -37,6 +39,10 @@ inline constexpr unsigned kMinAutomaticIoThreads = 8;
 /// Resolve a requested thread count. A positive request is taken as is; 0 (or
 /// a negative value) is AUTOMATIC: the hardware concurrency for CPU work, and
 /// at least kMinAutomaticIoThreads for file access.
+///
+/// INTERNAL: every public entry point rejects a negative count
+/// (check_threads); <= 0 is accepted here only so internal callers can pass
+/// "automatic" either way.
 inline unsigned resolve_threads(int requested, Work kind = Work::Cpu) {
   if (requested > 0) return static_cast<unsigned>(requested);
   unsigned hc = std::thread::hardware_concurrency();
@@ -44,9 +50,31 @@ inline unsigned resolve_threads(int requested, Work kind = Work::Cpu) {
   return kind == Work::Io ? std::max(hc, kMinAutomaticIoThreads) : hc;
 }
 
+/// A thread count from a caller (constructor, set_threads): >= 0, 0 =
+/// automatic. A negative count is an error everywhere (Python ValueError, C
+/// ABI MEF3IO_ERR_ARGUMENT), not a second spelling of "automatic".
+inline int check_threads(int n) {
+  if (n < 0)
+    throw std::invalid_argument("n_threads must be >= 0 (0 = automatic), not " +
+                                std::to_string(n));
+  return n;
+}
+
+namespace detail {
+/// TEST HOOK, null in production: called before each extra thread is
+/// started (with how many are running already), and may throw to simulate a
+/// failed start (EAGAIN under a process limit). Lets a test count the threads
+/// a call starts, and prove a failed start degrades instead of aborting.
+inline std::atomic<void (*)(unsigned)> thread_start_hook{nullptr};
+}  // namespace detail
+
 // Run body(i) for i in [0, n). Exceptions from any item are re-thrown after all
 // workers join (first one wins). Deterministic: body(i) must only touch outputs
-// owned by index i.
+// owned by index i. A thread that cannot be STARTED (std::thread throws, e.g.
+// EAGAIN under a pids or `ulimit -u` cap) is not an error: the work runs on the
+// threads already started and on the caller, which always works too. Results
+// do not depend on the count, so degrading is safe; aborting (an unjoined
+// std::thread's destructor calls std::terminate) never is.
 template <typename F>
 void parallel_for(std::size_t n, int requested_threads, F body, Work kind = Work::Cpu) {
   unsigned n_threads = resolve_threads(requested_threads, kind);
@@ -80,8 +108,15 @@ void parallel_for(std::size_t n, int requested_threads, F body, Work kind = Work
   };
 
   std::vector<std::thread> pool;
-  pool.reserve(n_threads - 1);
-  for (unsigned t = 1; t < n_threads; ++t) pool.emplace_back(worker);
+  try {
+    pool.reserve(n_threads - 1);
+    for (unsigned t = 1; t < n_threads; ++t) {
+      if (auto hook = detail::thread_start_hook.load()) hook(static_cast<unsigned>(pool.size()));
+      pool.emplace_back(worker);
+    }
+  } catch (...) {
+    // Fewer threads than asked for: carry on with the ones running.
+  }
   worker();
   for (auto& th : pool) th.join();
 

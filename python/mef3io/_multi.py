@@ -330,8 +330,15 @@ class MultiReader:
 
         opened: list = [None] * len(given)
         error = None
-        if len(given) == 1:
-            opened[0] = open_one(0)
+        if len(given) == 1 or workers <= 1:
+            # n_threads=1 means NO extra thread, also for the open: serial,
+            # on the caller (a one-worker pool would still start a thread).
+            for i in range(len(given)):
+                try:
+                    opened[i] = open_one(i)
+                except BaseException as e:  # noqa: BLE001 - raised below, after cleanup
+                    error = e
+                    break
         else:
             with ThreadPoolExecutor(max_workers=workers) as ex:
                 futures = [ex.submit(open_one, i) for i in range(len(given))]

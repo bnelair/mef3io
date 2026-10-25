@@ -263,12 +263,16 @@ of the remaining time.
 ### Reads skip segments outside the window
 
 A windowed read used to load and walk the block index of every segment of
-the channel, even for a one-second window. It now skips the segments whose
-metadata places them outside the window first. It is conservative: only on
-plausible header times, with a second of margin, and never by the end time of
-the channel's last segment, which an interrupted append can leave stale.
-1 channel x 2,400 segments, 3,000 one-second reads, 1 thread: **3.9 ms per
-read before, 0.24 ms after** (16x).
+the channel, even for a one-second window. It now skips a segment without
+touching its index when the segment starts at least a second after the
+window ends (by its metadata), or when the span its index really covers,
+learnt the first time a read walks that index, misses the window. A
+segment's declared END time is never used: other writers state it short, and
+an interrupted append leaves it stale. So nothing a full walk returns is ever
+skipped, and the first windowed read of a session still walks the indexes of
+the segments before the window once. 1 channel x 2,400 segments, 3,000
+one-second reads, 1 thread, best of 5 runs of the loop: **3.9 ms per read
+before, 0.24 ms after** (16x).
 
 ## Reproducing
 

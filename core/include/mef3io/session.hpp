@@ -16,6 +16,7 @@
 #include "mef3io/control.hpp"
 #include "mef3io/headers.hpp"
 #include "mef3io/metadata.hpp"
+#include "mef3io/parallel.hpp"
 #include "mef3io/records.hpp"
 #include "mef3io/source.hpp"
 #include "mef3io/types.hpp"
@@ -47,6 +48,18 @@ struct SegmentReader {
   /// Session::index_mu_.
   std::shared_ptr<const std::vector<ui1>> tidx;
   std::uint64_t index_last_used = 0;                // for cache eviction (index_mu_)
+  /// The time span the segment's block index ACTUALLY covers, learnt the
+  /// first time a read walks the index and kept for the Session's life (16
+  /// bytes; it survives index eviction). A later windowed read skips the
+  /// segment when the window misses the span: the same test every entry would
+  /// fail, so nothing a full walk returns is ever lost. The .tmet header's
+  /// END is never used for that (#146 review): it is stale after an
+  /// interrupted append and short in files from other writers.
+  /// `span_open` = an entry has no usable count, so the span is unbounded.
+  /// Guarded by Session::index_mu_.
+  bool span_known = false;
+  bool span_open = false;
+  si8 span_lo = 0, span_hi = 0;
   /// Why this segment could not be read, in lenient mode. Empty means fine.
   /// Set once: a segment that failed is not retried on every later call.
   /// Guarded by Session::state_mu_.
@@ -228,16 +241,19 @@ class Session {
   ///                 not depend on the count.
   Session(const std::string& mefd_path, std::string password = "", bool strict = true,
           int n_threads = 0);
-  /// Open a session through an existing source (e.g. a decorator that counts
-  /// or delays requests, as the open-cost tests do). No naming check: the
-  /// source decides what it serves. The source must be safe for concurrent
-  /// calls (every SessionSource is).
+  /// INTERNAL / TESTING — not part of the supported API. Opens a session
+  /// through an existing source (a decorator that counts or delays requests,
+  /// as the open-cost tests do). It skips the session NAMING rule (`.mefd` /
+  /// `.mefd.tar`) that every public path enforces, because the source decides
+  /// what it serves; use the path constructor in applications. The source must
+  /// be safe for concurrent calls.
   Session(std::shared_ptr<const SessionSource> source, std::string password = "",
           bool strict = true, int n_threads = 0);
 
   /// Thread count for the NEXT call (0 = automatic, 1 = no extra threads);
   /// calls in flight keep theirs. Safe while other threads read.
-  void set_threads(int n) { n_threads_.store(n, std::memory_order_relaxed); }
+  /// @throws std::invalid_argument for a negative count.
+  void set_threads(int n) { n_threads_.store(check_threads(n), std::memory_order_relaxed); }
   /// The thread count as set (0 = automatic), not resolved.
   int threads() const { return n_threads_.load(std::memory_order_relaxed); }
 
@@ -410,6 +426,14 @@ class Session {
   /// The segment's block index, PINNED: the returned reference keeps the bytes
   /// alive even if another thread evicts them from the cache meanwhile.
   std::shared_ptr<const std::vector<ui1>> segment_index(SegmentReader& seg);
+  /// Whether `seg` certainly holds no block overlapping [lo, hi), from what
+  /// is known WITHOUT reading its index: its learnt span (see SegmentReader),
+  /// and its .tmet start time (a segment starting at least a second after the
+  /// window ends). Never its .tmet end time.
+  bool skip_segment(const SegmentReader& seg, si8 lo, si8 hi) const;
+  /// Record the span of `idx` (the segment's whole index) if not known yet.
+  void learn_span(SegmentReader& seg, std::span<const ui1> idx, std::size_t n_entries, si8 rto,
+                  sf8 fs);
   /// Drop the least recently used block indices until the cache fits its
   /// budget.
   ///

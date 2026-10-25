@@ -20,18 +20,36 @@ notes at release time. The next release is **2.0.0**; it has breaking changes
 
   `cancel=` and `progress=` are keyword-only on the C++ binding's
   `read`/`read_raw` (the Python `Reader` already required that).
-- **`n_threads` must be an int >= 0** (`0` = automatic). A negative value now
-  raises `ValueError`, and a bool or float raises `TypeError`. Before, a
-  negative value silently meant "all cores".
+- **`n_threads` must be an int >= 0** (`0` = automatic). A bool or float
+  raises `TypeError`; for negative values see below.
 - **`MultiReader(n_threads=)` is a total**, shared by its recordings and never
   multiplied by them: the open splits it between the recordings it opens at
   once, a read between the recordings it touches, and a read inside one
   recording gets all of it. Before, every recording was opened with the full
   count, so a MultiReader of 10 recordings could run 10 times its budget.
   Setting `MultiReader.n_threads` re-splits from the next call.
+- **`n_threads=1` now makes the open serial too**, not just decoding. If you
+  passed 1 for comparisons with meflib or pymef, the open on a network share
+  is now as slow as before this release's parallel open. Leave the open
+  automatic and set `r.n_threads = 1` after opening if you only want serial
+  decoding.
+- **The default open starts threads**: at least 8 per open pass, also on
+  small machines (file access waits on round trips, not on cores). An
+  application that opens many Readers from its own thread pool multiplies
+  that; pass a small `n_threads` there. If a thread cannot be started (a
+  process or container thread limit), the work continues on the threads
+  already running, and in the worst case on the calling thread alone. It
+  never aborts.
+- **Negative counts are errors everywhere**: `ValueError` in Python,
+  `std::invalid_argument` in C++ (`Session`, `Reader`, `set_threads`,
+  `SessionWriter::set_threads`), `MEF3IO_ERR_ARGUMENT` from the C ABI
+  (`mef3io_reader_open`/`_open_ex`, `mef3io_reader_set_threads`,
+  `mef3io_writer_set_threads`). Before, a negative count meant "all cores".
 - C++: `Reader::read` / `read_raw` take `(channel, t0, t1, ctl)`, and
   `Reader::kUseDefaultThreads` is gone. `Session`'s constructors take an
-  optional `n_threads` after `strict`.
+  optional `n_threads` after `strict`. The constructors taking a
+  `shared_ptr<const SessionSource>` are internal (for tests): they skip the
+  `.mefd`/`.mefd.tar` naming rule.
 
 See [Threads](../threads.md) for the rule.
 
@@ -68,10 +86,15 @@ See [Threads](../threads.md) for the rule.
   `problems()` (in the same order) and the strict error (the first in listing
   order, as a serial open meets it) are all the same.
 - **Windowed reads skip segments outside the window** before reading their
-  block index (#110). A one-second read of a 2,400-segment channel went from
-  3.9 ms to 0.24 ms. The last segment of a channel is never skipped by its end
-  time, which an interrupted append can leave stale. `block_envelope` uses
-  the same rule.
+  block index (#110). A segment is skipped when it starts at least a second
+  after the window, or when the span its index covers (learnt the first time
+  a read walks it) misses the window. Repeated one-second reads of a
+  2,400-segment channel went from 3.9 ms to 0.24 ms each.
+- **Fixed: `block_envelope` could leave out blocks** of a segment whose
+  metadata states an end time earlier than its data. This happens with files
+  from writers that store a shorter end, and after an interrupted append that
+  was followed by a new segment. It skipped segments by that end time; it now
+  uses the rule above, which never relies on a segment's declared end.
 
 - **Opening a session reads each segment's metadata file with one bounded
   read** of its fixed record size. There is no longer a separate seek to find

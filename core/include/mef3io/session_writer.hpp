@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "mef3io/parallel.hpp"
 #include "mef3io/records.hpp"
 #include "mef3io/types.hpp"
 #include "mef3io/writer.hpp"  // SessionMetadata, SegmentSpec
@@ -101,7 +102,8 @@ class SessionWriter {
   /// automatic, 1 = no extra threads. Output is byte-identical whatever the
   /// count. Takes effect on the next write; atomic, so setting it from another
   /// thread is not a data race (a Writer is still not shared-safe otherwise).
-  void set_threads(int n) { n_threads_.store(n, std::memory_order_relaxed); }
+  /// @throws std::invalid_argument for a negative count.
+  void set_threads(int n) { n_threads_.store(check_threads(n), std::memory_order_relaxed); }
   /// The thread count as set (0 = automatic).
   int threads() const { return n_threads_.load(std::memory_order_relaxed); }
 

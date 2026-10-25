@@ -36,7 +36,17 @@ w = mef3io.Writer("out.mefd", n_threads=2)
   milliseconds whatever the number of cores, so more requests in flight pay
   off even on a small machine.
 
-A positive count is used as given for both kinds of work.
+A positive count is used as given for both kinds of work. A **negative**
+count is an error everywhere: `ValueError` in Python, `std::invalid_argument`
+in C++, `MEF3IO_ERR_ARGUMENT` from the C ABI, and a validation error in
+MATLAB.
+
+`1` really means no extra thread: the open, reads and writes then run on the
+calling thread only, and so does a `MultiReader` with `n_threads=1`.
+
+If the system refuses to start a thread (a process or container limit), the
+work continues on the threads already running, and at worst on the calling
+thread alone. Results stay the same; nothing aborts.
 
 ## What uses the threads
 

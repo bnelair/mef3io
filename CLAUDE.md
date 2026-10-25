@@ -56,8 +56,11 @@ scaling, parallel decode), `records` (read+write), `writer` (segment writer),
 `session_writer` (precision inference, quantization, NaN splitting, segments),
 `parallel.hpp` (the thread rule: `resolve_threads(n, Work::Cpu|Io)` is the
 ONLY place "automatic" is decided — hardware concurrency, >= 8 for file
-access; `parallel_for`; `parallel_try_each` = every item runs, per-item
-exception, for work whose error must be the serial one), `anonymize.hpp` (`anonymize_session` + `verify_anonymized`,
+access; `check_threads` rejects negatives at every public entry;
+`parallel_for` degrades when a thread cannot start (never std::terminate;
+`detail::thread_start_hook` is the TEST hook that counts/fails starts);
+`parallel_try_each` = every item runs, per-item exception, for work whose
+error must be the serial one), `anonymize.hpp` (`anonymize_session` + `verify_anonymized`,
 #70; see below) and `transform.hpp` (`transform_session` + `check_transform`
 + `verify_transform`, #73, and the types EVERY copy shares: `CopyOptions`,
 `CopyRefusal`/`CopyError` = `AnonymizeRefusal`/`AnonymizeError` aliases,
@@ -583,7 +586,9 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   serial — each header gives the next offset — and is now most of a parallel
   tar open). The "open scales linearly" timing pin runs with 1 thread on
   purpose. Measured (CountingSource, 20 ms/request): 209 ch x 10 seg 173 s ->
-  10.9 s on 16 threads (docs/benchmarks.md).
+  10.9 s on 16 threads (docs/benchmarks.md). The `shared_ptr<const
+  SessionSource>` constructors of Session/Reader are INTERNAL (tests): they
+  skip the naming rule, so applications use the path constructors.
 - **The MAIN use case is a session appended to for DAYS TO MONTHS** (5-20 min
   blocks per channel). Two consequences, both load-bearing. (1) An append must
   be O(NEW data), never O(total blocks) — section 2 describes ALL of a segment's
@@ -680,12 +685,20 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   instead (decrypt → edit → re-encrypt when the section is encrypted), which is
   what the validator's repair path already did.
 - **`block_envelope` (Session/Reader, viewers)** reads ONLY `.tidx` (rchar-
-  pinned in test_p38) and skips segments outside the window by their .tmet
-  UH times before touching their index — `segment_outside` in session.cpp,
-  shared with collect_blocks (#110 item 3: a 1-s read of 2400 segments 3.9 ms
-  -> 0.24 ms): plausible UH times only, 1 s margin, and NEVER by end time for
-  the channel's LAST segment (an interrupted append extends .tdat/.tidx
-  before republishing the .tmet, so its UH end can be stale). Per-block min/max are the INDEX
+  pinned in test_p38) and skips segments outside the window before touching
+  their index — `Session::skip_segment`, shared with collect_blocks (#110
+  item 3: a 1-s read of 2400 segments 3.9 ms -> 0.24 ms once warm). Two rules
+  ONLY: (1) the .tmet START is >= 1 s after the window's end (an append never
+  moves a start); (2) the segment's LEARNT index span (`learn_span`: every
+  entry's [start, start + n/fs) by the walks' own expressions, unbounded if
+  any count is 0/NO_ENTRY; kept after eviction, under index_mu_) misses the
+  window — the same test each entry would fail, so provably nothing a walk
+  returns is lost. NEVER skip by a .tmet END: stale after an interrupted
+  append once a new segment follows, = start of the last block for some
+  writers, verbatim caller end_uutc from mef_tools (round-1 review of #146
+  lost samples on all three; test_p42 pins them). A cold windowed read
+  therefore walks the indexes of the segments BEFORE the window once.
+  Per-block min/max are the INDEX
   copies (raw counts, scaled by the channel ufact like read()); RED_NAN ->
   NaN. Times come from the index entries, not the RED headers (reading those
   would mean touching .tdat); read() places by the header copy, which agrees
@@ -1042,7 +1055,7 @@ recording budget // touched through the PRIVATE `Reader._read_raw(_split=)`
 -> binding keyword `_n_threads` -> C++ `Reader::read_raw_split`; a read
 inside one recording gets the whole budget. Setting `n_threads` re-splits
 (sub-readers' counts updated). The private per-call path exists ONLY for
-this: never re-expose a public per-call count (test_p40 pins signatures and
+this: never re-expose a public per-call count (test_p42 pins signatures and
 that the budget is never exceeded on open or read).
 
 Per-segment isolation (#12): a Session/Reader opened `strict=False` CONTAINS a

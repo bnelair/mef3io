@@ -80,7 +80,9 @@ const char* mef3io_last_error(void);
  *
  * `n_threads` is how many threads the reader may use for everything it does
  * (opening, file access, decoding, decrypting): 0 = automatic, 1 = no extra
- * threads. Results never depend on it. See mef3io_reader_set_threads. */
+ * threads. Results never depend on it; negative = MEF3IO_ERR_ARGUMENT
+ * (since 2.0; before, negative meant automatic). See
+ * mef3io_reader_set_threads. */
 int mef3io_reader_open(const char* mefd_path, const char* password, int n_threads,
                        mef3io_reader** out);
 /* As above, but `strict` 0 CONTAINS a segment-level failure instead of failing
@@ -95,8 +97,9 @@ int mef3io_reader_open(const char* mefd_path, const char* password, int n_thread
 int mef3io_reader_open_ex(const char* mefd_path, const char* password, int n_threads,
                           int strict, mef3io_reader** out);
 void mef3io_reader_close(mef3io_reader* r);
-/* Change the reader's thread count (same meaning as at open). Takes effect on
- * the next call; calls in flight keep theirs. Safe while other threads read. */
+/* Change the reader's thread count (same meaning as at open; negative =
+ * MEF3IO_ERR_ARGUMENT). Takes effect on the next call; calls in flight keep
+ * theirs. Safe while other threads read. */
 int mef3io_reader_set_threads(mef3io_reader* r, int n_threads);
 /* The thread count as set (0 = automatic). */
 int mef3io_reader_threads(mef3io_reader* r, int* out);
@@ -403,7 +406,8 @@ int mef3io_writer_set_units(mef3io_writer* w, const char* units);
 int mef3io_writer_set_metadata(mef3io_writer* w, const mef3io_metadata* md);
 int mef3io_writer_set_block_length(mef3io_writer* w, int64_t samples_per_block);
 /* How many threads the writer may use (encoding): 0 = automatic, 1 = no extra
- * threads; output is byte-identical whatever the count. Next write on. */
+ * threads, negative = MEF3IO_ERR_ARGUMENT (since 2.0); output is
+ * byte-identical whatever the count. Next write on. */
 int mef3io_writer_set_threads(mef3io_writer* w, int n_threads);
 /* The thread count as set (0 = automatic). */
 int mef3io_writer_threads(mef3io_writer* w, int* out);

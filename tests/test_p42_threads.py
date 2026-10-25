@@ -1,4 +1,4 @@
-"""P40: ONE thread rule (docs/threads.md), the parallel open (#141), #110.
+"""P42: ONE thread rule (docs/threads.md), the parallel open (#141), #110.
 
 ``n_threads`` is how many threads an object may use for everything it does
 (opening, file access, decoding, decrypting, encoding); 0 = automatic, 1 = no
@@ -71,7 +71,7 @@ def _damage(path):
 
 @pytest.fixture(scope="module")
 def damaged(tmp_path_factory):
-    d = tmp_path_factory.mktemp("p40")
+    d = tmp_path_factory.mktemp("p42")
     path = _damage(_write(d / "dmg.mefd"))
     tar = mef3io.archive_session(str(path))
     return [str(path), str(tar)]
@@ -235,7 +235,15 @@ def test_writer_n_threads_property(tmp_path):
 # --------------------------------------------------------------------------
 
 class _Meter:
-    """Threads in use at once, summed over concurrent calls."""
+    """The thread counts DECLARED to concurrent opens and reads, summed.
+
+    A MODEL check, not a measured peak: it adds up the count each sub-Reader
+    open is given (resolved for file access) and the share each read is
+    passed (``_split``), while those calls overlap (each sleeps 20 ms so they
+    do). The core runs at most that many threads per call (parallel_for), so
+    the sum bounds the real total. Real thread starts are counted in C++
+    (``thread_start_hook``, core/tests/test_parallel_open.cpp).
+    """
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -290,6 +298,8 @@ def _metered(monkeypatch):
 
 @pytest.mark.parametrize("budget", [1, 2, 4, 5, 16])
 def test_multireader_never_uses_more_than_its_budget(monkeypatch, days, budget):
+    """The declared shares of overlapping opens/reads never sum past the budget
+    (see _Meter), and a read inside one recording is given all of it."""
     opens, reads = _metered(monkeypatch)
     with _quiet(mef3io.MultiReader, days, n_threads=budget) as mr:
         assert opens.peak <= max(budget, 1)
@@ -420,3 +430,105 @@ def test_a_skipped_record_file_is_warned_about_once(tmp_path):
         skipped = [w for w in caught if issubclass(w.category, mef3io.UnreadableSegmentWarning)]
         assert len(skipped) == 1, [str(w.message) for w in skipped]
         assert sum(p["kind"] == "records" for p in r.problems) == 1
+
+
+def test_multireader_with_one_thread_starts_no_thread(monkeypatch, days):
+    """n_threads=1 = no extra thread, also for the MultiReader's own open/read."""
+    started = []
+    real_start = threading.Thread.start
+
+    def start(self):
+        started.append(self.name)
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    with _quiet(mef3io.MultiReader, days, n_threads=1) as mr:
+        mr.read("a")
+        mr.segments("a")
+        mr.toc("a")
+    assert started == []
+
+
+def test_a_negative_count_is_refused_by_the_backend_too(tmp_path):
+    path = _write(tmp_path / "s.mefd")
+    with pytest.raises(ValueError):
+        ext.Reader(str(path), "", -1)
+    r = ext.Reader(str(path), "", 2)
+    with pytest.raises(ValueError):
+        r.set_threads(-3)
+    assert r.threads() == 2
+
+
+# --------------------------------------------------------------------------
+# #110 item 3 without data loss (#146 review): a windowed read returns what
+# the same window of a FULL read holds, even when a segment's .tmet end time
+# understates its data. Each case failed with the .tmet-end skip.
+# --------------------------------------------------------------------------
+
+def _finite(x):
+    return int(np.isfinite(x).sum())
+
+
+def _assert_window_matches_full_read(path, channel, t0, t1, expected):
+    with _quiet(mef3io.Reader, str(path)) as r:
+        start = r.info(channel)["start_time"]
+        full = r.read(channel, start, t1 + 10 * SECOND)
+        fs = r.info(channel)["sampling_frequency"]
+        i0 = int(round((t0 - start) * fs / 1e6))
+        want = full[i0:i0 + int(round((t1 - t0) * fs / 1e6))]
+        got = r.read(channel, t0, t1)
+        assert _finite(got) == _finite(want) == expected
+        np.testing.assert_array_equal(got, want)
+        env = r.block_envelope(channel, t0, t1)
+        assert len(env["start_uutc"]) > 0  # the envelope sees those blocks too
+
+
+def _stale_tmet_session(path, fs, block, first_s, appended_s, then_s):
+    """Segment 0 written for `first_s` seconds, its .tmet saved, then appended
+    to `first_s + appended_s` s in place; a NEW segment at `then_s`; segment
+    0's .tmet put back. Exactly what an interrupted append leaves (the .tdat
+    and .tidx extended, the .tmet not yet renamed) once the recorder restarts
+    in a new segment — and what a writer with a short header end produces."""
+    rng = np.random.default_rng(3)
+    with mef3io.Writer(str(path), overwrite=True, block_length=block) as w:
+        w.write("ch", rng.integers(-99, 99, int(first_s * fs)).astype(float), START, fs,
+                precision=0)
+    tmet = _seg(path, "ch", 0, ".tmet")
+    saved = tmet.read_bytes()
+    with mef3io.Writer(str(path), block_length=block) as w:
+        w.write("ch", rng.integers(-99, 99, int(appended_s * fs)).astype(float),
+                START + first_s * SECOND, fs, precision=0)
+        w.write("ch", rng.integers(-99, 99, int(10 * fs)).astype(float),
+                START + then_s * SECOND, fs, precision=0, new_segment=True)
+    tmet.write_bytes(saved)
+    return path
+
+
+def test_window_inside_an_interrupted_append_of_a_non_last_segment(tmp_path):
+    # (a): .tmet end 80 s, data to 100 s, then a new segment at 120 s.
+    path = _stale_tmet_session(tmp_path / "a.mefd", 256.0, 2560, 80, 20, 120)
+    _assert_window_matches_full_read(path, "ch", START + 90 * SECOND, START + 100 * SECOND,
+                                     2560)
+
+
+def test_window_inside_a_long_last_block_past_the_header_end(tmp_path):
+    # (b): 10 s blocks; the header ends where the LAST block starts (50 s).
+    path = _stale_tmet_session(tmp_path / "b.mefd", 100.0, 1000, 50, 10, 100)
+    _assert_window_matches_full_read(path, "ch", START + 52 * SECOND, START + 58 * SECOND, 600)
+
+
+def test_window_past_a_short_end_written_by_mef_tools(tmp_path):
+    # (c): mef_tools writes the caller's end_uutc verbatim into the header.
+    pytest.importorskip("mef_tools", reason="legacy oracle not installed")
+    from mef_tools.io import MefWriter
+
+    path = tmp_path / "c.mefd"
+    fs = 256.0
+    w = MefWriter(str(path), overwrite=True)
+    x = np.arange(int(60 * fs), dtype=np.float64) % 50
+    w.write_data(x, "ch", START, fs, end_uutc=START + 30 * SECOND, precision=0,
+                 discont_handler=False)
+    w.write_data(x[: int(10 * fs)], "ch", START + 100 * SECOND, fs, precision=0,
+                 new_segment=True)
+    del w
+    _assert_window_matches_full_read(path, "ch", START + 40 * SECOND, START + 50 * SECOND, 2560)

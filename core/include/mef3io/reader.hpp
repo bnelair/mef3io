@@ -41,6 +41,7 @@ class Reader {
   ///                   (docs/threads.md): 0 = automatic (the default), 1 = no
   ///                   extra threads. Results never depend on it. Changeable
   ///                   later with set_threads(); the open uses this value.
+  ///                   Negative throws std::invalid_argument.
   /// @param strict  true (the default) lets a segment-level failure fail the
   ///                 whole session. false contains it: the segment is skipped,
   ///                 its time span reads back as a gap like any other missing
@@ -50,7 +51,8 @@ class Reader {
   Reader(const std::string& mefd_path, std::string password = "", int n_threads = 0,
          bool strict = true)
       : session_(mefd_path, std::move(password), strict, n_threads) {}
-  /// Open through an existing source (see the matching Session constructor).
+  /// INTERNAL / TESTING (see the matching Session constructor): no naming
+  /// check on this path.
   Reader(std::shared_ptr<const SessionSource> source, std::string password = "",
          int n_threads = 0, bool strict = true)
       : session_(std::move(source), std::move(password), strict, n_threads) {}
@@ -66,7 +68,8 @@ class Reader {
 
   /// Change the thread count (0 = automatic, 1 = no extra threads). Takes
   /// effect on the NEXT call; calls in flight keep the count they started
-  /// with. Safe while other threads use this Reader.
+  /// with. Safe while other threads use this Reader. Negative throws
+  /// std::invalid_argument.
   void set_threads(int n) { session_.set_threads(n); }
   /// The thread count as set (0 = automatic), not resolved.
   int threads() const { return session_.threads(); }

@@ -17,6 +17,9 @@
 #include <string>
 #include <thread>
 #include <typeinfo>
+#include <atomic>
+#include <stdexcept>
+#include <system_error>
 #include <vector>
 
 #include "counting_source.hpp"
@@ -353,4 +356,113 @@ TEST_CASE("open time with a per-request delay, by thread count", "[.open-bench-t
         }
         fsys::remove_all(dir);
       }
+}
+
+namespace {
+// Installs a thread_start_hook for the scope of a test.
+struct HookGuard {
+  explicit HookGuard(void (*fn)(unsigned)) { detail::thread_start_hook.store(fn); }
+  ~HookGuard() { detail::thread_start_hook.store(nullptr); }
+};
+std::atomic<int> g_started{0};
+void count_start(unsigned) { ++g_started; }
+void fail_after_two(unsigned running) {
+  if (running >= 2) throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+  ++g_started;
+}
+void fail_always(unsigned) {
+  throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+}
+}  // namespace
+
+TEST_CASE("a thread that cannot be started degrades, never aborts", "[parallel-open]") {
+  // std::thread throws EAGAIN under a pids / ulimit -u cap; an unjoined
+  // std::thread then used to std::terminate the process (#146 review).
+  const auto dir = write_damaged("mef3io_par_open_spawnfail.mefd");
+  Session serial(dir, "", false, 1);
+  const std::string want = describe(serial);
+  Reader rs(dir, "", 1, false);
+  const auto want_read = rs.read_raw("e");
+  for (auto hook : {&fail_after_two, &fail_always}) {
+    g_started = 0;
+    HookGuard guard(hook);
+    Session s(dir, "", false, 16);
+    CHECK(describe(s) == want);
+    Reader r(dir, "", 16, false);
+    const auto got = r.read_raw("e");
+    CHECK(got.samples == want_read.samples);
+    CHECK(got.valid == want_read.valid);
+    CHECK(g_started <= 2 * 8);  // never more than the hook let through per pass
+    std::vector<int> hits(100, 0);
+    parallel_for(100, 16, [&](std::size_t i) { ++hits[i]; });
+    for (int h : hits) CHECK(h == 1);
+  }
+  fsys::remove_all(dir);
+}
+
+TEST_CASE("n_threads = 1 starts no extra thread: open, read, write", "[parallel-open]") {
+  const auto dir = write_damaged("mef3io_par_open_one.mefd");
+  {
+    g_started = 0;
+    HookGuard guard(&count_start);
+    Session s(dir, "", false, 1);
+    Reader r(dir, "", 1, false);
+    r.read_raw("e");
+    r.read("f");
+    r.toc("e");
+    const auto wdir = (fsys::temp_directory_path() / "mef3io_par_open_one_w.mefd").string();
+    SessionWriter w(wdir, true);
+    w.set_threads(1);
+    std::vector<si4> x(50000, 3);
+    w.write_int32("z", x, 1.0, START, 250.0, {}, false);
+    CHECK(g_started == 0);
+    fsys::remove_all(wdir);
+  }
+  {
+    g_started = 0;
+    HookGuard guard(&count_start);
+    Session s(dir, "", false, 4);
+    CHECK(g_started > 0);  // the hook does see a parallel open
+  }
+  fsys::remove_all(dir);
+}
+
+TEST_CASE("a negative thread count is an error everywhere", "[parallel-open]") {
+  const auto dir = write_damaged("mef3io_par_open_neg.mefd");
+  CHECK_THROWS_AS(Session(dir, "", false, -1), std::invalid_argument);
+  CHECK_THROWS_AS(Reader(dir, "", -4, false), std::invalid_argument);
+  Reader r(dir, "", 2, false);
+  CHECK_THROWS_AS(r.set_threads(-1), std::invalid_argument);
+  CHECK(r.threads() == 2);
+  SessionWriter w((fsys::temp_directory_path() / "mef3io_par_open_neg_w.mefd").string(), true);
+  CHECK_THROWS_AS(w.set_threads(-1), std::invalid_argument);
+  CHECK(check_threads(0) == 0);
+  fsys::remove_all(dir);
+  fsys::remove_all(fsys::temp_directory_path() / "mef3io_par_open_neg_w.mefd");
+}
+
+TEST_CASE("a windowed read skips segments by their learnt index span", "[parallel-open]") {
+  // #110 item 3, done without trusting a .tmet END (stale after an
+  // interrupted append, short from other writers): the first walk learns
+  // each segment's real span, later windows skip by it — even after the
+  // index itself was evicted from the cache.
+  const auto dir = (fsys::temp_directory_path() / "mef3io_par_open_span.mefd").string();
+  fsys::remove_all(dir);
+  {
+    SessionWriter w(dir, true);
+    std::vector<si4> a(2560, 1);
+    for (int s = 0; s < 40; ++s)
+      w.write_int32("ch", a, 1.0, START + s * 20'000'000LL, 256.0, {}, s > 0);
+  }
+  auto src = std::make_shared<test::CountingSource>(open_session_source(dir));
+  Reader r(std::shared_ptr<const SessionSource>(src), "", 1);
+  r.session().set_index_cache_bytes(1);  // every index evicted after each call
+  const auto full = r.read("ch");
+  src->reset();
+  const si8 t = START + 20 * 20'000'000LL + 2'000'000LL;  // inside segment 20 only
+  const auto win = r.read("ch", t, t + 1'000'000);
+  REQUIRE(win.size() == 256);
+  for (double v : win) CHECK(v == 1.0);
+  CHECK(src->calls().read_all == 1);  // segment 20's index, no other
+  fsys::remove_all(dir);
 }

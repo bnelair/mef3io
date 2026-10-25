@@ -230,12 +230,19 @@ THREAD RULE (docs/threads.md, documented ONCE there): an object's
 `n_threads` is how many threads it may use for everything (open, file
 access, decode, decrypt, encode); 0 = automatic, decided ONLY by
 `resolve_threads` in parallel.hpp (Python asks `_mef3io.resolve_threads`;
-never re-derive it), 1 = no extra threads; settable at runtime, next call on.
+never re-derive it), 1 = NO extra thread anywhere (MultiReader open
+included; pinned by `thread_start_hook` in C++ and a Thread.start patch in
+test_p42), negative = error everywhere (`check_threads`; C ABI
+MEF3IO_ERR_ARGUMENT); settable at runtime, next call on. A thread that cannot
+be STARTED never aborts: `parallel_for` catches the spawn failure and runs on
+the threads already started plus the caller (an unjoined std::thread
+destructor = std::terminate, which the parallel open reached on every open
+under a pids limit).
 NO per-call count in any public API (removed in 2.0). MultiReader's budget is
 a TOTAL split between recordings; the per-call share goes through the
 PRIVATE `Reader._read_raw(_split=)` -> binding `_n_threads` ->
 `Reader::read_raw_split`. Never expose it publicly (pinned by
-tests/test_p40_threads.py, which also checks the budget is never exceeded).
+tests/test_p42_threads.py, which also checks the budget is never exceeded).
 
 THE PARALLEL OPEN must behave like a serial one: `discover_layout` and
 `Session::discover` run their passes with `parallel_try_each` (every item
@@ -244,7 +251,7 @@ failure a serial walk would meet. Strict raises that, lenient records
 problems() in the serial order. Never use `parallel_for`'s "first error in
 time" for work whose error is user-visible. Pinned at 1/2/8/32 threads, dir
 and tar, damaged + incomplete segments, with a scrambling source
-(core/tests/test_parallel_open.cpp, tests/test_p40_threads.py).
+(core/tests/test_parallel_open.cpp, tests/test_p42_threads.py).
 
 ## 13. No private product name in public text
 
