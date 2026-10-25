@@ -39,8 +39,9 @@ them. The [format reference](mef3_format.md) has every byte.
   themselves; see [what encryption protects](encryption_model.md#what-encryption-protects).
 - **Sharing without identifying the patient.** To give a recording to
   someone outside your study, make a de-identified copy with
-  `mef3io.anonymize_session`: every date is moved, names and other
-  identifying text are removed, and the signal stays the same. See
+  `mef3io.anonymize_session`: names and other identifying text are
+  removed, the signal stays the same, and every date can be moved (by
+  default the copy keeps the real dates and times). See
   [De-identification](anonymization.md).
 
 It is a poor fit for signals without a fixed sampling rate (event streams,

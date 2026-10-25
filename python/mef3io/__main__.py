@@ -14,8 +14,11 @@ neither can be reached by accident from the other::
 and only after an interrupted write. It is a dry run unless ``--apply`` is
 given.
 
-``anonymize`` never touches the source; it writes a new, de-identified copy::
+``anonymize`` never touches the source; it writes a new, de-identified copy.
+By default the copy keeps every time (it still shows when the recording was
+made); ``--shift-us`` or ``--reference-date`` moves every time instead::
 
+    python -m mef3io anonymize SRC.mefd DST.mefd
     python -m mef3io anonymize SRC.mefd DST.mefd --shift-us N
     python -m mef3io anonymize SRC.mefd DST.mefd --reference-date 2000-01-03 --tz Europe/Prague
 
@@ -34,7 +37,7 @@ COMMANDS = {
     "validate": "check a session's declarations against its data (never writes)",
     "repair": "rewrite only the declarations for the checks you name",
     "recover": "after an interrupted write, make the index and data agree again",
-    "anonymize": "write a de-identified copy: every time shifted, identity removed",
+    "anonymize": "write a de-identified copy: identity removed, times kept or shifted",
     "transform": "write a copy with chosen channels, passwords, name and details",
     "merge": "merge two or more recordings into one new session",
 }

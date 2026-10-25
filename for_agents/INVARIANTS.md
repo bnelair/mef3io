@@ -209,8 +209,15 @@ answered. Rules:
 - Refusal codes are stable API, kept equal in three places by test_p32:
   `REFUSAL_CODES` (`python/mef3io/anonymize.py`), the table in
   `docs/anonymization.md`, and the test cases.
+- Times are KEPT unless a shift is given (2.0.0): no `shift_us` = every
+  stored time and each segment's recording-time offset copied verbatim (the
+  transform's time path, `Rules::keep_times()`), verify requires every time
+  EQUAL to the source's; GMT offset/DST are cleared in both modes. The
+  shift-only checks (floor, sign, offset convention, `id-number-time`, the
+  time leak window) run only with a shift. One argument, one meaning: never
+  add a separate keep-times flag, and `0` stays refused (`shift-zero`).
 - No message, warning or `VerifyIssue` carries a source time or the
-  recording-time offset. `AnonymizeReport.source_*` times are the
+  recording-time offset (in either mode). `AnonymizeReport.source_*` times are the
   re-identification key: in memory only, left out of `repr`, `summary()`,
   `to_dict()` (unless asked) and pickles.
 
