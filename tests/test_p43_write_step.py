@@ -212,9 +212,9 @@ def test_infinite_values_are_refused(tmp_path):
     with mef3io.Writer(str(p), overwrite=True) as w:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            with pytest.raises(ValueError, match="int32"):
+            with pytest.raises(ValueError, match="not finite"):
                 w.write("ch1", x, START, FS, precision="step")
-            with pytest.raises(ValueError, match="int32"):
+            with pytest.raises(ValueError, match="not finite"):
                 w.write("ch1", x, START, FS)
     assert not (p / "ch1.timd").exists()
 
@@ -551,3 +551,23 @@ def test_huge_steps_are_found_and_tiny_ones_say_why(tmp_path):
     x[_outside_sample(len(x)) if len(x) > 70_000 else -1] = -(2.0 ** 31) * 0.195
     s, _ = write(tmp_path / "b.mefd", x)
     assert s["quantization"] == "decimal" and "int32" in s["step_fallback"]
+
+
+def test_int32_refusals_say_what_fits(tmp_path):
+    """Round 2: the message fits the case — precision 0, inf, a channel factor."""
+    p = tmp_path / "s.mefd"
+    with mef3io.Writer(str(p), overwrite=True) as w:
+        with pytest.raises(ValueError, match="too large for any precision") as e:
+            w.write("ch1", np.array([1.0, 3.0e9]), START, FS)  # beyond int32 even at 1e0
+        assert "smaller precision" not in str(e.value)
+        with pytest.raises(ValueError, match="smaller precision"):
+            w.write("ch1", np.array([1.0, 3.0e6]), START, FS, precision=3)
+        with pytest.raises(ValueError, match="not finite"):
+            w.write("ch1", np.array([1.0, np.inf]), START, FS)
+        x = adc_counts(20_000, seed=41) * 0.195
+        w.write("ch1", x, START, FS, precision="step")
+        t1 = START + int(round(len(x) / FS * 1e6))
+        with pytest.raises(ValueError, match="not finite"):
+            w.write("ch1", np.array([0.195, -np.inf]), t1, FS, precision="step")
+        with pytest.raises(mef3io.WriteConflictError, match="too large for the factor"):
+            w.write("ch1", np.array([0.195, 0.195 * 3e9]), t1, FS, precision="step")

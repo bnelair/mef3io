@@ -68,8 +68,13 @@ void claim_range(IntervalMap& covered, si8 b, si8 e,
 }
 }  // namespace
 
-RawData Reader::read_raw(const std::string& channel, std::optional<si8> t0_opt,
-                         std::optional<si8> t1_opt, int n_threads, const Control& ctl) {
+RawData Reader::read_raw(const std::string& channel, std::optional<si8> t0,
+                         std::optional<si8> t1, const Control& ctl) {
+  return read_raw_split(channel, t0, t1, session_.threads(), ctl);
+}
+
+RawData Reader::read_raw_split(const std::string& channel, std::optional<si8> t0_opt,
+                               std::optional<si8> t1_opt, int n_threads, const Control& ctl) {
   const ChannelInfo& ci = session_.channel_info(channel);
   const sf8 fs = ci.sampling_frequency;
   const si8 t0 = t0_opt.value_or(ci.start_time);
@@ -87,7 +92,8 @@ RawData Reader::read_raw(const std::string& channel, std::optional<si8> t0_opt,
 
   BlockJobs jobs = session_.collect_blocks(channel, t0, t1, ctl);
   out.block_copy_mismatches = std::move(jobs.mismatches);
-  const int threads = (n_threads == kUseDefaultThreads) ? n_threads_ : n_threads;
+  // Read once: a set_threads() from another thread applies to the next call.
+  const int threads = n_threads;
   const std::size_t n_jobs = jobs.jobs.size();
 
   // Blocks do NOT always occupy disjoint sample ranges. Only writers that put
@@ -160,8 +166,8 @@ RawData Reader::read_raw(const std::string& channel, std::optional<si8> t0_opt,
 }
 
 std::vector<sf8> Reader::read(const std::string& channel, std::optional<si8> t0,
-                              std::optional<si8> t1, int n_threads, const Control& ctl) {
-  RawData raw = read_raw(channel, t0, t1, n_threads, ctl);
+                              std::optional<si8> t1, const Control& ctl) {
+  RawData raw = read_raw(channel, t0, t1, ctl);
   const sf8 uf = raw.units_conversion_factor;
   const sf8 nan = std::numeric_limits<sf8>::quiet_NaN();
   std::vector<sf8> out(raw.samples.size());

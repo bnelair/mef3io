@@ -73,8 +73,8 @@ version number.
 - **Responsive, with thread-safe reads** — opening, reading and writing
   release Python's GIL, so a GUI stays responsive while a session opens or
   decodes on a worker thread, and reads on one `Reader` can run from several
-  threads at once (a `Writer` is not for sharing; limits in
-  [Parallelism](python.md#parallelism)).
+  threads at once (a `Writer` is not for sharing). One `n_threads` count per
+  object covers opening, file access and decoding; see [Threads](threads.md).
 - **Made for tools** — `mef3io.inspect()` describes a session without
   reading its samples; reads and long operations can report progress and be
   cancelled from another thread; refusals of a de-identified copy come with

@@ -44,7 +44,8 @@ delete(w);                                            % or let it go out of scop
 
 `mef3io.Writer(path, ...)` name-value options: `Overwrite` (default false —
 an existing session is reopened for appending), `Password1`/`Password2`
-(both required for encryption), `Units`, `BlockLength`, `Threads`,
+(both required for encryption), `Units`, `BlockLength`, `Threads` (encode
+threads, `0` = automatic; `w.setThreads(n)` / `w.threads()` later),
 `Metadata` (below) and `Durability` (`'fast'`, the default, or `'full'`; see
 [Long recordings](long_recordings.md)). After an unclean shutdown with
 `'fast'`, `mef3io.recoverSession(path)` reports what is wrong (a dry run) and
@@ -103,7 +104,10 @@ Windows too. Bytes that are not valid UTF-8 become U+FFFD, as in Python.
 `mef3io.Reader(path, password, nThreads, strict)`: strict (`true`, the
 default) fails on a segment that cannot be read; `false` skips it, reads its
 span as NaN, raises the warning `mef3io:unreadableSegment`, and lists it in
-`r.problems()`.
+`r.problems()`. `nThreads` is how many threads the Reader may use for
+everything it does (opening, file access, decoding): `0` = automatic, `1` =
+no extra threads; `r.setThreads(n)` changes it from the next call and
+`r.threads()` returns it ([Threads](threads.md)).
 
 `info` returns `sampling_frequency`, `units_conversion_factor`,
 `units_description`, `start_time`/`end_time` (int64 uUTC),

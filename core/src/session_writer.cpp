@@ -88,11 +88,20 @@ std::vector<si4> quantize_to_int32(std::span<const sf8> data, int precision) {
     sf8 rounded = std::round(data[i] * scale);  // round(data,prec)*10^prec == round(data*10^prec)
     // Never wrap: a count outside int32 (or INT32_MIN, RED's NaN) is refused
     // before anything is written. It used to wrap into a wrong value.
-    if (!(std::abs(rounded) <= static_cast<sf8>(std::numeric_limits<si4>::max())))
+    if (!(std::abs(rounded) <= static_cast<sf8>(std::numeric_limits<si4>::max()))) {
+      const std::string at = "the value at index " + std::to_string(i);
+      if (!std::isfinite(data[i]))
+        throw std::invalid_argument(at + " is not finite; MEF stores finite samples only "
+                                    "(use NaN for a gap). Nothing was written");
       throw std::invalid_argument(
-          "the value at index " + std::to_string(i) + " needs a count beyond int32 at the "
-          "conversion factor 1e" + std::to_string(-precision) + "; nothing was written. Use a "
-          "smaller precision");
+          at + " needs a count beyond int32 at the conversion factor 1e" +
+          std::to_string(-precision) + "; nothing was written. " +
+          (precision > 0 ? std::string("Use a smaller precision, or write_int32 with a "
+                                       "larger factor")
+                         : std::string("It is too large for any precision the float path "
+                                       "uses; scale the data, or use write_int32 with a "
+                                       "larger factor")));
+    }
     out[i] = static_cast<si4>(rounded);
   }
   return out;
@@ -509,12 +518,22 @@ WriteSummary SessionWriter::write_float(const std::string& channel, std::span<co
       hydrate(channel, it->second);
       const sf8 u = it->second.units_conversion_factor;
       std::string why;
-      if (!quantize_to_step(data, u, counts, valid, &why))
+      StepMismatch kind = StepMismatch::None;
+      if (!quantize_to_step(data, u, counts, valid, &why, &kind)) {
+        if (kind == StepMismatch::NotFinite)
+          throw std::invalid_argument(why + "; MEF stores finite samples only (use NaN for a "
+                                      "gap). Nothing was written");
+        if (kind == StepMismatch::Overflow)
+          throw WriteConflictError(
+              "precision='step': " + why + " of channel " + channel + "'s conversion factor; "
+              "nothing was written. The value is too large for the factor this channel keeps: "
+              "write it to a new channel, or scale the data");
         throw WriteConflictError(
             "precision='step': the data for channel " + channel + " is not stored on the "
             "channel's conversion factor " + detail::shortest_number(u) + " (" + why + "); nothing "
             "was written. A channel keeps one factor: quantize the data yourself and write the "
             "counts with write_int32 at that factor, or write it to a new channel");
+      }
       WriteSummary s = write_blocks(channel, counts, valid, u, start_uutc, fs, new_segment);
       s.quantization = Quantization::Step;
       return s;
@@ -668,7 +687,7 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   if (append) {
     // fs / conversion-factor / start-time conflicts are validated against the
     // on-disk metadata inside append_time_series_segment.
-    append_time_series_segment(seg_dir, spec, blocks, n_threads_, &written_difference_bytes,
+    append_time_series_segment(seg_dir, spec, blocks, n_threads_.load(), &written_difference_bytes,
                                &st.index_cache);
   } else {
     // Everything that can refuse runs BEFORE a directory exists: a refused
@@ -681,7 +700,7 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
     const bool created_segd = !fs::exists(seg_dir);
     fs::create_directories(seg_dir);
     try {
-      write_time_series_segment(seg_dir, spec, blocks, n_threads_, &written_difference_bytes);
+      write_time_series_segment(seg_dir, spec, blocks, n_threads_.load(), &written_difference_bytes);
     } catch (...) {
       std::error_code ec;
       if (created_timd)

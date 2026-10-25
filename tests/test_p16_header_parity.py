@@ -35,7 +35,7 @@ warnings.filterwarnings("ignore")
 import mef3io  # noqa: E402
 
 pytest.importorskip("mef_tools", reason="legacy oracle not installed (pip install mef3io[test])")
-from mef_tools.io import MefWriter  # noqa: E402
+from mef_tools.io import MefReader, MefWriter  # noqa: E402
 
 START = 1577836800000000
 FS = 256.0
@@ -204,12 +204,39 @@ def _collect(session, channel="ch1"):
     return out
 
 
-def _compare(ours, theirs, where):
-    """Fail on any difference that is not in the ledger."""
+# Divergences that only a particular SIGNAL produces, keyed by case. Kept out
+# of KNOWN_DIVERGENCES on purpose: there, units_conversion_factor must stay
+# unlisted (test_a_new_divergence_would_be_caught relies on it), because for
+# ordinary data the two stacks MUST agree on the factor.
+CASE_DIVERGENCES = {
+    "one-sided offset": {
+        "s2.units_conversion_factor": (
+            "Data far from zero on one side only (3e6 + noise of 0.001). The legacy "
+            "stack's precision inference calls an int32 range bad only when BOTH "
+            "ends overflow, so it picks 1e-6, and 3e6 / 1e-6 = 3e12 counts wraps: "
+            "the file reads back as garbage. mef3io requires both ends to fit and "
+            "picks 0.01, which reads back within half a step (#149, round 1). "
+            "mef3io is right here."
+        ),
+        "s2.maximum_native_sample_value": (
+            "Follows from the wrapped counts above: the legacy value is the "
+            "wrapped one (about -2147), mef3io's is the real maximum (3e6)."
+        ),
+        "s2.minimum_native_sample_value": ("Same as the maximum: wrapped in the legacy file."),
+    },
+}
+
+
+def _compare(ours, theirs, where, case=None):
+    """Fail on any difference that is not in the ledger (or the case's own)."""
     unexplained, notes = [], []
+    extra = CASE_DIVERGENCES.get(case, {})
     for key in sorted(set(ours) | set(theirs)):
         a, b = ours.get(key), theirs.get(key)
         if a == b:
+            continue
+        if key in extra:
+            notes.append(f"  {key}: mef3io={a} legacy={b} (case: {case})")
             continue
         # The ledger is keyed by field, not by which file it came from.
         ledger_key = key if key in KNOWN_DIVERGENCES else "s2." + key.split(".")[-1]
@@ -268,6 +295,25 @@ def test_declarations_match_the_legacy_stack_or_are_explained(tmp_path, chunks, 
         print(n)
 
 
+def test_one_sided_offset_the_legacy_stack_wraps_and_mef3io_does_not(tmp_path):
+    """Both float paths, inferred precision, on data whose one-sided extreme
+    overflows int32 at the legacy stack's choice. Every difference must be in
+    the ledger or this case's own entry; then mef3io's file must read back
+    right through the legacy reader too."""
+    x = 3.0e6 + np.random.default_rng(1).normal(0, 0.001, int(FS * 20))
+    ours = str(tmp_path / "ours.mefd")
+    with mef3io.Writer(ours) as w:
+        s = w.write("ch1", x, START, FS)
+    assert s["units_conversion_factor"] == 0.01
+    theirs = str(tmp_path / "theirs.mefd")
+    lw = MefWriter(theirs, overwrite=True)
+    lw.write_data(x, "ch1", START, FS)
+    del lw
+    _compare(_collect(ours), _collect(theirs), "one-sided offset", case="one-sided offset")
+    got = np.asarray(MefReader(ours).get_data("ch1")).ravel()[: len(x)]
+    assert np.max(np.abs(got - x)) <= 0.005 + 1e-9
+
+
 def test_the_ledger_has_no_stale_entries():
     """An entry that no longer describes a real divergence is misleading.
 
@@ -276,7 +322,9 @@ def test_the_ledger_has_no_stale_entries():
     but it is reported so the ledger does not rot into folklore.
     """
     assert KNOWN_DIVERGENCES, "the ledger must not be empty"
-    for key, reason in KNOWN_DIVERGENCES.items():
+    entries = list(KNOWN_DIVERGENCES.items())
+    entries += [kv for case in CASE_DIVERGENCES.values() for kv in case.items()]
+    for key, reason in entries:
         assert key.startswith(("s2.", "uh.")), key
         assert len(reason) > 40, f"{key}: give a real reason, not '{reason}'"
 

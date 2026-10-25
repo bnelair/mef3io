@@ -319,6 +319,18 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     plhs[0] = make_handle(r);
     return;
   }
+  if (cmd == "reader_set_threads") {
+    need_args(nrhs, 3, "reader_set_threads");
+    check(mef3io_reader_set_threads(get_reader(prhs[1]), get_int(prhs[2], "n_threads")));
+    return;
+  }
+  if (cmd == "reader_threads") {
+    need_args(nrhs, 2, "reader_threads");
+    int n = 0;
+    check(mef3io_reader_threads(get_reader(prhs[1]), &n));
+    plhs[0] = mxCreateDoubleScalar(static_cast<double>(n));
+    return;
+  }
   if (cmd == "reader_problems") {
     need_args(nrhs, 2, "reader_problems");
     mef3io_reader* r = get_reader(prhs[1]);
@@ -740,6 +752,13 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     need_args(nrhs, 3, "writer_set_threads");
     check(mef3io_writer_set_threads(get_writer(prhs[1]),
                                     get_int(prhs[2], "n_threads")));
+    return;
+  }
+  if (cmd == "writer_threads") {
+    need_args(nrhs, 2, "writer_threads");
+    int n = 0;
+    check(mef3io_writer_threads(get_writer(prhs[1]), &n));
+    plhs[0] = mxCreateDoubleScalar(static_cast<double>(n));
     return;
   }
   if (cmd == "writer_write" || cmd == "writer_write_int32") {

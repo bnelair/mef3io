@@ -196,7 +196,12 @@ answered. Rules:
   "Muller" that the scan finds for "Müller" and the copy is refused for
   nothing (#115). Their matching rules stay separate. What the rewrite still
   cannot remove is refused before writing (`text-unremovable`), never
-  discovered after a long copy.
+  discovered after a long copy. So is a kept channel whose name the
+  channel-name rule refuses (`channel-name-identity`, #143): the pre-flight
+  calls verify's `Scanner::channel`/`Scanner::path` on the names the copy
+  writes (one-way: the Verifier never gets the pre-flight's selection).
+  `Scanner::path` never matches the segment number of `<ch>-NNNNNN`: it is
+  mef3io's counter, checked on its own (subject ID "PT0001" vs "-000001").
 - Rewrite every text field whole, and zero every region another writer may
   fill; never "leave it if unchanged".
 - Every new field the copy carries needs a planted-leak test in
@@ -221,20 +226,53 @@ answered. Rules:
   re-identification key: in memory only, left out of `repr`, `summary()`,
   `to_dict()` (unless asked) and pickles.
 
-## 12. Calls on one Reader can overlap
+## 12. Calls on one Reader can overlap; ONE thread count per object
 
 The bindings release the GIL on open and on every long call, so several
 threads may call one `Reader`/`Session` at once: reads, toc, segments and
-records. NOT yet safe in Python (#110): `Reader._ensure_impl` with `cache=` is
-an unlocked check-then-set (5 warm Readers x 8 threads built 39 backends);
-`close()` racing a first read can reopen the session; `records()` warning
-dedup diffs the cumulative problems list, so concurrent calls can double-warn;
-the C++ setters (`set_threads`, `set_index_cache_bytes`) are unsynchronised.
-The docs say exactly this — do not widen the claim before #110 lands. A
-Writer is not shared-safe. A new long call must release
-the GIL too (and get a `tests/test_p31_gil_release.py` case); any state it
-mutates must be locked; core globals must be `constexpr` or immutable (the AES
-inverse S-box used to be filled lazily, a data race).
+records. #110 made the Python side safe too: `Reader._ensure_impl` and
+`close()` share one lock (one backend per warm Reader; a close racing the
+first build stays closed), and record warnings are announced once per Reader
+(`_Announced`), never by diffing the cumulative problem list per call. The
+C++ setters (`set_threads`, `set_index_cache_bytes`) are atomics. Metadata
+loaded at open is IMMUTABLE afterwards and read without a lock
+(`segment_metadata` is const); never add a lazy load back. A Writer is not
+shared-safe. A new long call must release the GIL too (and get a
+`tests/test_p31_gil_release.py` case); any state it mutates must be locked;
+core globals must be `constexpr` or immutable (the AES inverse S-box used to
+be filled lazily, a data race).
+
+THREAD RULE (docs/threads.md, documented ONCE there): an object's
+`n_threads` is how many threads it may use for everything (open, file
+access, decode, decrypt, encode); 0 = automatic, decided ONLY by
+`resolve_threads` in parallel.hpp (Python asks `_mef3io.resolve_threads`;
+never re-derive it), 1 = NO extra thread anywhere (MultiReader open
+included; pinned by `thread_start_hook` in C++ and a Thread.start patch in
+test_p42), negative = error everywhere (`check_threads`; C ABI
+MEF3IO_ERR_ARGUMENT); settable at runtime, next call on. A thread that cannot
+be STARTED never aborts: `parallel_for` catches the spawn failure and runs on
+the threads already started plus the caller (an unjoined std::thread
+destructor = std::terminate, which the parallel open reached on every open
+under a pids limit).
+NO per-call count in any public API (removed in 2.0). MultiReader's budget is
+a TOTAL split between recordings; the per-call share goes through the
+PRIVATE `Reader._read_raw(_split=)` -> binding `_n_threads` ->
+`Reader::read_raw_split`. Never expose it publicly (pinned by
+tests/test_p42_threads.py, which also checks the budget is never exceeded).
+
+SKIPPING SEGMENTS in a read or block_envelope uses ONLY the learnt span of
+the CACHED index, dropped with it on eviction. Never a .tmet start or end
+time (stale or wrong in the field; #146 lost samples on both), never a span
+that outlived its index (it hid an append).
+
+THE PARALLEL OPEN must behave like a serial one: `discover_layout` and
+`Session::discover` run their passes with `parallel_try_each` (every item
+runs, each one's exception kept) and assemble IN ORDER, rethrowing the first
+failure a serial walk would meet. Strict raises that, lenient records
+problems() in the serial order. Never use `parallel_for`'s "first error in
+time" for work whose error is user-visible. Pinned at 1/2/8/32 threads, dir
+and tar, damaged + incomplete segments, with a scrambling source
+(core/tests/test_parallel_open.cpp, tests/test_p42_threads.py).
 
 ## 13. No private product name in public text
 

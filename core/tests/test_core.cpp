@@ -487,6 +487,15 @@ TEST_CASE("C ABI round trip (write, read, records, segments)") {
   // --- write ---
   mef3io_writer* w = nullptr;
   REQUIRE(mef3io_writer_open(path.c_str(), 1, "", "", &w) == MEF3IO_OK);
+  {
+    int t = -1;
+    REQUIRE(mef3io_writer_threads(w, &t) == MEF3IO_OK);
+    REQUIRE(t == 0);  // automatic
+    REQUIRE(mef3io_writer_set_threads(w, 2) == MEF3IO_OK);
+    REQUIRE(mef3io_writer_threads(w, &t) == MEF3IO_OK);
+    REQUIRE(t == 2);
+    REQUIRE(mef3io_writer_threads(nullptr, &t) == MEF3IO_ERR_ARGUMENT);
+  }
   mef3io_write_summary sum{};
   REQUIRE(mef3io_writer_write_float(w, "ch1", data.data(), 1000, start, fs, 3, 0, &sum) ==
           MEF3IO_OK);
@@ -501,6 +510,15 @@ TEST_CASE("C ABI round trip (write, read, records, segments)") {
   // --- read back ---
   mef3io_reader* r = nullptr;
   REQUIRE(mef3io_reader_open(path.c_str(), "", 1, &r) == MEF3IO_OK);
+  {
+    int t = -1;
+    REQUIRE(mef3io_reader_threads(r, &t) == MEF3IO_OK);
+    REQUIRE(t == 1);
+    REQUIRE(mef3io_reader_set_threads(r, 0) == MEF3IO_OK);
+    REQUIRE(mef3io_reader_threads(r, &t) == MEF3IO_OK);
+    REQUIRE(t == 0);
+    REQUIRE(mef3io_reader_set_threads(nullptr, 1) == MEF3IO_ERR_ARGUMENT);
+  }
   int32_t nch = 0;
   REQUIRE(mef3io_reader_n_channels(r, &nch) == MEF3IO_OK);
   REQUIRE(nch == 1);
@@ -692,8 +710,9 @@ TEST_CASE("Decoding is thread-count invariant when blocks overlap the sample gri
   Reader r(dir.string(), "", 1);
   const RawData base = r.read_raw("ch1");
   for (int threads : {2, 3, 4, 8, 16, 0}) {
+    r.set_threads(threads);
     for (int rep = 0; rep < 3; ++rep) {
-      const RawData got = r.read_raw("ch1", std::nullopt, std::nullopt, threads);
+      const RawData got = r.read_raw("ch1");
       REQUIRE(got.samples == base.samples);
       REQUIRE(got.valid == base.valid);
     }

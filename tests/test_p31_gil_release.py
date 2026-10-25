@@ -90,11 +90,21 @@ def _assert_releases(make_call, runs=3):
         "it holds the GIL")
 
 
+# The open runs on the object's threads now (#141), and on this fixture an
+# AUTOMATIC open is too fast to tell a stall apart (it skipped). So each
+# constructor is measured with a fixed count: 1 (serial) for every
+# constructor, and 2 for the parallel path: the calling thread waits for (and
+# works in) the pool without the GIL either way.
 @pytest.mark.parametrize("open_", [
-    pytest.param(lambda p: mef3io.Reader(p), id="mef3io.Reader"),
-    pytest.param(lambda p: mef3io.Reader(p, strict=False), id="mef3io.Reader-lenient"),
-    pytest.param(lambda p: m.Reader(p), id="_mef3io.Reader"),
-    pytest.param(lambda p: m.Session(p), id="_mef3io.Session"),
+    pytest.param(lambda p: mef3io.Reader(p, n_threads=1), id="mef3io.Reader"),
+    pytest.param(lambda p: mef3io.Reader(p, strict=False, n_threads=1),
+                 id="mef3io.Reader-lenient"),
+    pytest.param(lambda p: m.Reader(p, "", 1), id="_mef3io.Reader"),
+    pytest.param(lambda p: m.Session(p, "", True, 1), id="_mef3io.Session"),
+    pytest.param(lambda p: mef3io.Reader(p, n_threads=2), id="mef3io.Reader-2-threads"),
+    pytest.param(lambda p: m.Reader(p, "", 2), id="_mef3io.Reader-2-threads"),
+    pytest.param(lambda p: m.Session(p, "", False, 2), id="_mef3io.Session-lenient-2-threads"),
+    pytest.param(lambda p: mef3io.MultiReader([p], n_threads=2), id="mef3io.MultiReader"),
 ])
 def test_an_open_does_not_hold_the_gil(many_segments, open_):
     open_(many_segments)  # warm the page cache: measure parsing, not the disk
@@ -218,6 +228,23 @@ def test_a_rename_does_not_hold_the_gil(many_segments, tmp_path):
     _assert_releases(make, runs=2)
 
 
-def test_block_envelope_does_not_hold_the_gil(many_segments):
+@pytest.fixture(scope="module")
+def envelope_segments(tmp_path_factory):
+    # block_envelope costs ~20 us per segment (one .tidx each, cold): on the
+    # 2400-segment fixture the call was ~50 ms, just above MIN_CALL, and a slow
+    # CI runner's scheduling noise then decided the result (a macOS flake).
+    # 3x the segments keeps the call well above the floor; the stall
+    # criterion is unchanged.
+    path = tmp_path_factory.mktemp("gil_env") / "env.mefd"
+    w = m.SessionWriter(str(path), True)
+    x = np.arange(256, dtype=np.int32)
+    for seg in range(3 * SEGMENTS):
+        w.write_int32("ch", x, 1.0, START + seg * 10_000_000, 256.0, None, seg > 0)
+    del w
+    return str(path)
+
+
+def test_block_envelope_does_not_hold_the_gil(envelope_segments):
     """block_envelope reads every segment's .tidx (fresh Reader: cold index cache)."""
-    _assert_releases(lambda: (lambda r=m.Reader(many_segments): r.block_envelope("ch", None, None)))
+    _assert_releases(
+        lambda: (lambda r=m.Reader(envelope_segments): r.block_envelope("ch", None, None)))

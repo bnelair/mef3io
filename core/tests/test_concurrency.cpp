@@ -88,3 +88,47 @@ TEST_CASE("concurrent opens and reads of an encrypted session", "[concurrency]")
   for (auto& t : threads) t.join();
   REQUIRE(wrong == 0);
 }
+
+TEST_CASE("set_threads and set_index_cache_bytes while other threads read", "[concurrency]") {
+  // Both setters were plain stores read by every call (#110 item 4); they are
+  // atomics now, and a change applies to the NEXT call. Results never depend
+  // on the count, so every read must still match.
+  const auto path = write_session("mef3io_concurrent_setters.mefd", 8);
+  Reader r(path, "", 2);
+  const auto expected = r.read_raw("ch1");
+  std::atomic<bool> stop{false};
+  std::atomic<int> wrong{0};
+  std::vector<std::thread> readers;
+  for (int t = 0; t < 4; ++t)
+    readers.emplace_back([&] {
+      while (!stop.load()) {
+        const auto got = r.read_raw("ch1");
+        if (got.samples != expected.samples || got.valid != expected.valid) ++wrong;
+        r.session().read_index("ch1");
+      }
+    });
+  for (int i = 0; i < 400; ++i) {
+    r.set_threads(i % 5);
+    r.session().set_index_cache_bytes(i % 2 ? 1 : 0);
+    (void)r.threads();
+  }
+  stop = true;
+  for (auto& t : readers) t.join();
+  REQUIRE(wrong == 0);
+}
+
+TEST_CASE("parallel opens of one session on many threads each", "[concurrency]") {
+  // The open's own pool (channel listings, file checks, .tmet parses) inside
+  // several concurrent opens: no shared state but the immutable source.
+  const auto path = write_session("mef3io_concurrent_par_open.mefd", 24, "pw1", "pw2");
+  std::atomic<int> wrong{0};
+  std::vector<std::thread> threads;
+  for (int t = 0; t < 4; ++t)
+    threads.emplace_back([&] {
+      Reader r(path, "pw2", 8);
+      if (r.info("ch1").n_segments != 24) ++wrong;
+      if (r.read("ch1").size() < 24 * 2500) ++wrong;
+    });
+  for (auto& t : threads) t.join();
+  REQUIRE(wrong == 0);
+}

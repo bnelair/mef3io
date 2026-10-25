@@ -64,6 +64,7 @@ nav:
       - Long recordings with gaps: howto/long_recordings.md
   - Guides:
       - Python: python.md
+      - Threads: threads.md
       - MATLAB: matlab.md
       - C++ and C ABI: cpp.md
       - Session metadata: metadata.md

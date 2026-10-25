@@ -4,6 +4,8 @@ delegating all real work to the backend."""
 from __future__ import annotations
 
 import contextlib
+import operator
+import threading
 from typing import Callable, Optional
 
 import numpy as np
@@ -173,17 +175,37 @@ def _warn_legacy_password(impl, path: str, pending: list) -> None:
                         dict(path=path, details=channels, also=_identity_of(impl))))
 
 
+class _Announced:
+    """What a reader has already warned about, so each item is warned ONCE.
+
+    Concurrent calls share the backend's cumulative lists; diffing them per
+    call warned twice or announced another call's items (#110). Whichever
+    call sees an item first announces it.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._seen: dict = {}
+
+    def new(self, kind: str, items: list, key) -> list:
+        with self._lock:
+            seen = self._seen.setdefault(kind, set())
+            out = [x for x in items if key(x) not in seen]
+            seen.update(key(x) for x in out)
+            return out
+
+
 @contextlib.contextmanager
-def _warning_on_legacy_records(impl, path: str, pending: list):
+def _warning_on_legacy_records(announced: _Announced, impl, path: str, pending: list):
     """Warn about record files a records() call opened via the old mapping."""
     # finally: a strict call can read an old-keyed file and then fail on the
-    # next one. The list is cumulative and deduplicated, so a file not
-    # announced now would never be announced.
-    before = len(impl.legacy_password_record_files())
+    # next one. Each file is announced ONCE per Reader, by whichever call sees
+    # it first: concurrent records() calls share the cumulative list, so
+    # diffing it per call warned twice or announced another call's files.
     try:
         yield
     finally:
-        added = impl.legacy_password_record_files()[before:]
+        added = announced.new("legacy", impl.legacy_password_record_files(), lambda f: f)
         if added:
             pending.append((LegacyPasswordWarning,
                             _legacy_password_warning_text(f"{len(added)} record file(s)"),
@@ -254,6 +276,19 @@ def _flush(pending: list, stacklevel: int) -> None:
         _emit(category, message, stacklevel=stacklevel + 1, **kw)
 
 
+def _check_threads(value) -> int:
+    """An ``n_threads`` value: an int >= 0 (0 = automatic)."""
+    if isinstance(value, bool):
+        raise TypeError("n_threads must be an int, not bool")
+    try:
+        n = operator.index(value)
+    except TypeError:
+        raise TypeError(f"n_threads must be an int, not {type(value).__name__}") from None
+    if n < 0:
+        raise ValueError(f"n_threads must be >= 0 (0 = automatic), not {n}")
+    return n
+
+
 class Reader:
     """Read-only interface to a MEF 3.0 session.
 
@@ -279,8 +314,11 @@ class Reader:
         Which implementation to use. Defaults to the C++ backend; the pure
         backend is not yet implemented.
     n_threads : int, optional
-        Worker threads for RED block decoding. ``0`` (default) uses all cores,
-        ``1`` is serial. Output is byte-identical regardless of thread count.
+        How many threads this Reader may use for everything it does —
+        opening, file access, decoding, decrypting. ``0`` (default) =
+        automatic, ``1`` = no extra threads. Results never depend on it.
+        Changeable later through :attr:`n_threads`. See
+        [the threads guide](https://bnelair.github.io/mef3io/threads/).
     cache : str or None, optional
         Opt-in warm-start cache for channel metadata. ``None`` (default)
         disables it; ``"auto"`` uses the per-user OS cache directory; a path
@@ -325,9 +363,15 @@ class Reader:
         self._path = str(path)
         self._password = password or ""
         self._backend_name = backend
-        self._n_threads = n_threads
+        self._n_threads = _check_threads(n_threads)
         self._strict = bool(strict)
         self._impl = None  # constructed lazily so a warm start stays cheap
+        self._closed = False
+        # Guards _impl/_closed/_n_threads (a warm Reader builds its backend on
+        # the first call, possibly from several threads at once, and close()
+        # may race it) and the once-per-Reader warning bookkeeping.
+        self._lock = threading.RLock()
+        self._announced = _Announced()
 
         # Warm start: serve channel metadata from a valid cache snapshot, and
         # defer building the backend until data is actually read. Caching is
@@ -489,26 +533,53 @@ class Reader:
         return list(self._declaration_issues)
 
     def _ensure_impl(self):
-        if getattr(self, "_closed", False):
-            raise ValueError(
-                "this Reader is closed; open a new one "
-                "(close() releases the backend's file handles, so reusing it "
-                "would silently reopen the session)"
-            )
-        if self._impl is None:
-            if self._backend_name == "cpp":
-                from . import _mef3io
-
-                self._impl = _mef3io.Reader(
-                    self._path, self._password, self._n_threads, self._strict
+        # Locked: two threads on a warm (cache=) Reader each built a backend
+        # (#110), and a close() racing the first build could leave one set
+        # after close, silently reopening the session. The build itself runs
+        # with the GIL released, so other threads wait for it on this lock.
+        with self._lock:
+            if self._closed:
+                raise ValueError(
+                    "this Reader is closed; open a new one "
+                    "(close() releases the backend's file handles, so reusing it "
+                    "would silently reopen the session)"
                 )
-            elif self._backend_name == "pure":
-                from .pure import Reader as PureReader
+            if self._impl is None:
+                if self._backend_name == "cpp":
+                    from . import _mef3io
 
-                self._impl = PureReader(self._path, self._password)
-            else:
-                raise ValueError(f"unknown backend: {self._backend_name!r}")
-        return self._impl
+                    self._impl = _mef3io.Reader(
+                        self._path, self._password, self._n_threads, self._strict
+                    )
+                elif self._backend_name == "pure":
+                    from .pure import Reader as PureReader
+
+                    self._impl = PureReader(self._path, self._password)
+                else:
+                    raise ValueError(f"unknown backend: {self._backend_name!r}")
+            return self._impl
+
+    @property
+    def n_threads(self) -> int:
+        """How many threads this Reader may use (``0`` = automatic).
+
+        Settable at any time: the new count applies from the next call (calls
+        already running keep theirs). The open used the value given to the
+        constructor. One count covers everything the Reader does — opening,
+        file access, decoding, decrypting; see
+        [the threads guide](https://bnelair.github.io/mef3io/threads/).
+        Results never depend on it.
+        """
+        return self._n_threads
+
+    @n_threads.setter
+    def n_threads(self, value: int) -> None:
+        value = _check_threads(value)
+        with self._lock:
+            self._n_threads = value
+            impl = self._impl
+            if impl is not None and hasattr(impl, "set_threads"):
+                impl.set_threads(value)
 
     def __enter__(self) -> "Reader":
         return self
@@ -525,8 +596,9 @@ class Reader:
         back without notice, which is the opposite of what they asked for.
         Closing twice is harmless.
         """
-        self._impl = None
-        self._closed = True
+        with self._lock:
+            self._impl = None
+            self._closed = True
 
     @property
     def channels(self) -> list[str]:
@@ -588,7 +660,6 @@ class Reader:
         channel: str,
         t0: Optional[int] = None,
         t1: Optional[int] = None,
-        n_threads: Optional[int] = None,
         *,
         cancel: Optional["CancelToken"] = None,
         progress: Optional[Callable[[int, int], object]] = None,
@@ -603,9 +674,6 @@ class Reader:
             Half-open time window ``[t0, t1)`` in uUTC. Defaults span the whole
             channel. The number of samples returned is
             ``round((t1 - t0) * fs / 1e6)``.
-        n_threads : int, optional
-            Per-call override of the reader's thread count (``0`` = all cores,
-            ``1`` = serial). ``None`` (default) uses the reader default.
         cancel : CancelToken, optional
             Stop the read from another thread: it is checked before each
             segment is fetched and before each block is decoded, and a
@@ -615,13 +683,9 @@ class Reader:
             decoded. Called at a bounded rate, possibly from a decode worker
             thread (with the GIL held for the call only), never concurrently.
             If it raises, the read stops and the exception propagates.
-            Reads on one Reader may run from several threads at once, and
-            cancelling one does not affect the others. Until #110: with
-            ``cache=``, make one read (or ``toc``/``segments``/``records``)
-            before sharing the Reader (``info``, ``channels`` and ``metadata``
-            come from the snapshot and do not open it), and do not
-            ``close()`` it while other threads read (see the Python guide,
-            "Parallelism").
+            Reads on one Reader may run from several threads at once (also
+            with ``cache=``), and cancelling one does not affect the others
+            (see the Python guide, "Parallelism").
 
         Returns
         -------
@@ -638,16 +702,15 @@ class Reader:
         hooks = _hooks(cancel, progress)
         if hooks and self._backend_name != "cpp":
             raise NotImplementedError("cancel=/progress= need the C++ backend")
-        if n_threads is None:
-            return impl.read(channel, t0, t1, **hooks)
-        return impl.read(channel, t0, t1, int(n_threads), **hooks)
+        # The thread count is the Reader's (n_threads); there is no per-call
+        # override (removed in 2.0, see the threads guide).
+        return impl.read(channel, t0, t1, **hooks)
 
     def read_raw(
         self,
         channel: str,
         t0: Optional[int] = None,
         t1: Optional[int] = None,
-        n_threads: Optional[int] = None,
         *,
         cancel: Optional["CancelToken"] = None,
         progress: Optional[Callable[[int, int], object]] = None,
@@ -660,8 +723,6 @@ class Reader:
             Channel name.
         t0, t1 : int or float, optional
             Half-open ``[t0, t1)`` window in uUTC; defaults span the channel.
-        n_threads : int, optional
-            Per-call thread-count override (see :meth:`read`).
         cancel, progress : optional
             As in :meth:`read`.
 
@@ -683,19 +744,22 @@ class Reader:
             meflib and pymef do, so the read still matches theirs.
         """
         pending: list = []
-        out = self._read_raw(channel, t0, t1, n_threads, _hooks(cancel, progress), pending)
+        out = self._read_raw(channel, t0, t1, _hooks(cancel, progress), pending)
         _flush(pending, stacklevel=2)
         return out
 
-    def _read_raw(self, channel, t0, t1, n_threads, hooks: dict, pending: list) -> dict:
+    def _read_raw(self, channel, t0, t1, hooks: dict, pending: list, _split=None) -> dict:
         # read_raw with its warning collected into `pending` (see _flush).
+        # `_split` is PRIVATE to MultiReader: this call's share of ITS one
+        # thread budget (the backend's `_n_threads`). Never expose it — the
+        # public rule is one thread count per object.
         impl = self._ensure_impl()
         if hooks and self._backend_name != "cpp":
             raise NotImplementedError("cancel=/progress= need the C++ backend")
-        if n_threads is None:
+        if _split is None:
             out = impl.read_raw(channel, t0, t1, **hooks)
         else:
-            out = impl.read_raw(channel, t0, t1, int(n_threads), **hooks)
+            out = impl.read_raw(channel, t0, t1, _n_threads=int(_split), **hooks)
         mismatches = out.get("block_copy_mismatches") or []
         if mismatches:
             pending.append((BlockCopyWarning, _block_copy_warning_text(mismatches),
@@ -860,10 +924,13 @@ class Reader:
         # records() with its warnings collected into `pending` (see _flush);
         # they are delivered even when the call raises.
         impl = self._ensure_impl()
-        before = len(impl.problems())
-        with _warning_on_legacy_records(impl, self._path, pending):
+        with _warning_on_legacy_records(self._announced, impl, self._path, pending):
             out = impl.records(channel, segment, level)
-        added = impl.problems()[before:]
+        # Each skipped record file is warned about once per Reader (see
+        # _unannounced); segment problems were reported by the open.
+        added = self._announced.new(
+            "records", [p for p in impl.problems() if p.get("kind") == "records"],
+            lambda p: (p["channel"], p["segment_number"], p["segment"]))
         if added:
             # Lenient only (strict raises): a record file that could not be
             # read was skipped. Say so — a missing annotation is otherwise

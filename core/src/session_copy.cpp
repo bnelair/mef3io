@@ -656,6 +656,30 @@ struct Scanner {
     return r;
   }
 
+  /// The rule for a path component of the copy: the channel rule when it is
+  /// derived from a kept channel's name (its folder, its segments, its record
+  /// files), the rewritten-field rule otherwise (the session's own record
+  /// file `session_name`.rdat, anything else).
+  Result path(const std::string& name, const std::string& session_name,
+              const std::set<std::string>& kept) const {
+    const auto dot = name.rfind('.');
+    const std::string base = name.substr(0, dot);
+    const std::string ext = dot == std::string::npos ? std::string() : name.substr(dot);
+    if (base == session_name) return text(base);
+    // "<ch>.timd", "<ch>.rdat": the base itself. The base is tried first, so
+    // a channel "LAH-12" owns "LAH-12.timd".
+    if (kept.count(base)) return channel(name);
+    // "<ch>-NNNNNN.segd" and the segment's files: the channel part only. The
+    // segment number is mef3io's own counter, not source text, and is
+    // checked on its own (folder suffix = the .tmet header's number); matched
+    // here, a subject ID "PT0001" would refuse "-000001" (#143).
+    const auto dash = base.rfind('-');
+    if (dash != std::string::npos && all_digits(base.substr(dash + 1)) &&
+        kept.count(base.substr(0, dash)))
+      return channel(base.substr(0, dash) + ext);
+    return text(name);
+  }
+
   /// The rule for a field the copy rewrites.
   Result text(const std::string& value) const {
     const std::string h = scan_folded(value);
@@ -2174,21 +2198,12 @@ class Verifier {
   /// record file.
   void path_component(const std::string& name, const std::string& loc) {
     ++rep_.text_fields_checked;
-    const std::string base = name.substr(0, name.rfind('.'));
-    if (base == dst_.session_name()) {
-      report(scan_.text(base), loc, "path");
-      return;
-    }
-    std::string owner = base;  // "<ch>-NNNNNN" -> "<ch>"
-    const auto dash = base.rfind('-');
-    if (dash != std::string::npos && all_digits(base.substr(dash + 1))) owner = base.substr(0, dash);
-    if (!kept_.count(owner)) {
-      report(scan_.text(name), loc, "path");
-      return;
-    }
-    report(scan_.channel(name), loc, "path");
+    report(scan_.path(name, dst_.session_name(), kept_), loc, "path");
   }
 
+  /// The copy's channels, from the COPY's own layout. Never the pre-flight's
+  /// selection (pf.kept): verify must stay independent of the plan it checks
+  /// (the pre-flight reuses this class's Scanner, never the other way round).
   void set_kept(std::set<std::string> k) { kept_ = std::move(k); }
 
   bool transform() const { return edits_ != nullptr; }
@@ -3852,6 +3867,57 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
       pf.segment_numbers[seg.tmet] = folder_number;
     }
   }
+  // ---- kept channel names (#143) ------------------------------------------
+  // A kept channel's name stays verbatim: in its folder and file names, its
+  // universal headers' channel_name and the Seiz entries naming it. The
+  // copy's verification applies the channel-name rule (Scanner::channel, and
+  // Scanner::path for the folder and file names) to all of them; whatever it
+  // would refuse is refused HERE, before anything is written. Only names the
+  // copy writes are checked: record files where the source has them, segment
+  // files where the channel has segments (Scanner::path leaves the segment
+  // number out, so one name per kind stands for every segment, cut or not).
+  // ONE-WAY reuse: the pre-flight calls the verifier's matcher; the Verifier
+  // must never be handed pf.kept (or anything else of the plan's selection),
+  // it takes the kept channels from the copy's own layout.
+  if (an && dst_named) {
+    const Scanner scan = build_scanner(plan, pf.new_name, an->clear_subject, an->clear_location,
+                                       pf.excluded, pf.kept, pf.pseudonym);
+    std::map<std::string, const detail::LayoutChannel*> data;
+    for (const auto& c : plan.layout.channels) data[c.name] = &c;
+    for (const auto& ch : pf.kept) {
+      ctl.check();
+      std::vector<std::string> names = {ch, ch + ".timd"};
+      if (src.exists(ch + ".timd/" + ch + ".rdat")) {
+        names.push_back(ch + ".rdat");
+        names.push_back(ch + ".ridx");
+      }
+      if (const auto it = data.find(ch); it != data.end() && !it->second->segments.empty()) {
+        const std::string stem = canonical_segment_stem(ch, 0);
+        for (const char* ext : {".segd", ".tmet", ".tidx", ".tdat"}) names.push_back(stem + ext);
+        const auto& segs = it->second->segments;
+        if (std::any_of(segs.begin(), segs.end(),
+                        [&](const auto& seg) { return src.exists(seg.rdat()); })) {
+          names.push_back(stem + ".rdat");
+          names.push_back(stem + ".ridx");
+        }
+      }
+      for (const auto& name : names) {
+        // The bare name: its channel_name fields and Seiz entries (verify's
+        // name rule for a kept name); the rest: verify's path rule.
+        const Scanner::Result r =
+            name == ch ? scan.channel(name) : scan.path(name, pf.new_name, pf.kept);
+        if (r.refuse.empty()) continue;
+        add(RefusalKind::WriteConflict, "channel-name-identity",
+            "kept channel " + ch + ": " +
+                (name == ch ? std::string("its name, which the copy keeps,")
+                            : "the folder and file names the copy makes from it") +
+                " contain" + (name == ch ? "s " : " ") + r.refuse +
+                "; leave the channel out (exclude_channels) for this copy",
+            ch, "channels");
+        break;  // one refusal per channel
+      }
+    }
+  }
   for (const auto& ch : pf.kept) {
     const std::string crec = ch + ".timd/" + ch + ".rdat";
     if (src.exists(crec)) record_files.push_back({crec, ch, false});
@@ -4082,7 +4148,10 @@ std::vector<std::string> redact_text(const std::string& src, const std::string& 
                            /*check_shift=*/false);
   // What the copy itself would refuse, it refuses here too: a locked section
   // 3 leaves the subject names out of the rules, an unknown channel or a name
-  // carrying the identity changes them. Only what does not decide the
+  // carrying the identity changes them. A kept channel named after the
+  // patient (channel-name-identity) decides it too: the Redactor never edits
+  // inside a kept channel's name (`protect`), so "Roe slept" with a kept
+  // channel "Roe" would come back unchanged. Only what does not decide the
   // redaction is let through: the destination being in use, and the text
   // the redaction cannot take out (which is what the caller asks about).
   static const std::set<std::string> irrelevant = {"dst-exists", "partial-exists",

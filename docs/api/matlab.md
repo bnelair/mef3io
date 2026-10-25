@@ -30,9 +30,13 @@ call the same C++ core.
 | `Reader.toc` | `Reader.toc` |
 | `Reader.records` | `Reader.records` |
 | `Reader.problems` | `Reader.problems` |
+| `Reader.n_threads` (get) | `Reader.threads()` |
+| `Reader.n_threads = n` | `Reader.setThreads(n)` |
 | `Writer.write` | `Writer.write` |
 | `Writer.write_int32` | `Writer.writeInt32` |
 | `Writer.write_annotations` | `Writer.writeAnnotations` |
+| `Writer.n_threads` (get) | `Writer.threads()` |
+| `Writer.n_threads = n` | `Writer.setThreads(n)` |
 | `mef3io.archive_session` | `mef3io.archiveSession` |
 | `mef3io.extract_session` | `mef3io.extractSession` |
 | `mef3io.recover_session` | `mef3io.recoverSession` |

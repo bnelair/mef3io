@@ -303,3 +303,36 @@ TEST_CASE("copy_segment: dropping blocks flags the next kept one and renumbers s
     CHECK_THROWS_AS(detail::copy_segment(spec), std::invalid_argument);
   }
 }
+
+TEST_CASE("a kept channel named after the patient is refused before any write (#143)") {
+  const auto dir = fresh("mef3io_anon_channel_identity");
+  const std::string src = (dir / "s.mefd").string();
+  {
+    SessionWriter w(src, true);
+    SessionMetadata m;
+    m.subject_name_1 = "Jane";
+    m.subject_name_2 = "Roe";
+    m.subject_id = "PT12345";
+    w.set_metadata(m);
+    for (const char* ch : {"Fz", "Roe"}) {
+      std::vector<si4> x(5000, 1);
+      w.write_int32(ch, x, 1.0, START, 256.0, {}, false);
+    }
+  }
+  const std::string dst = (dir / "S1.mefd").string();
+  for (const bool shifted : {false, true}) {
+    AnonymizeOptions o;
+    if (shifted) o.shift_us = -400 * DAY;
+    const AnonymizeCheck c = check_anonymize(src, dst, o);
+    REQUIRE(c.refusals.size() == 1);
+    CHECK(c.refusals[0].code == "channel-name-identity");
+    CHECK(c.refusals[0].channel == "Roe");
+    CHECK(c.refusals[0].kind == RefusalKind::WriteConflict);
+    CHECK(code_of<WriteConflictError>([&] { anonymize_session(src, dst, o); }) ==
+          "channel-name-identity");
+    CHECK_FALSE(fsys::exists(dst));
+    CHECK_FALSE(fsys::exists(dst + ".partial"));
+    o.exclude_channels = {"Roe"};
+    CHECK(check_anonymize(src, dst, o).ok);
+  }
+}

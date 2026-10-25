@@ -289,6 +289,7 @@ void check_segment_input(const SegmentSpec& spec, const std::vector<BlockSpec>& 
 si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec& spec,
                               const std::vector<BlockSpec>& blocks, int n_threads,
                               ui4* out_max_difference_bytes) {
+  check_threads(n_threads);  // before any file is touched
   check_segment_input(spec, blocks);
   if (!fs::is_directory(segment_dir)) throw IoError("segment dir does not exist: " + segment_dir);
   const sf8 fs_hz = spec.sampling_frequency;
@@ -490,6 +491,7 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
 si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec& spec,
                                const std::vector<BlockSpec>& blocks, int n_threads,
                                ui4* out_max_difference_bytes, AppendIndexCache* cache) {
+  check_threads(n_threads);  // before any file is touched
   check_segment_input(spec, blocks);
   if (blocks.empty()) return 0;
   // The files are named after the folder being extended, not rebuilt from the

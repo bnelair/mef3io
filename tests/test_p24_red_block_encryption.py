@@ -86,9 +86,9 @@ def test_fixture_blocks_are_meflib_encrypted():
 
 @pytest.mark.parametrize("n_threads", [1, 4])
 def test_mef3io_reads_meflib_encrypted_blocks(n_threads):
-    r = m.Reader(str(SESSION), "pass2")
+    r = m.Reader(str(SESSION), "pass2", n_threads=n_threads)
     for ch in LEVELS:
-        raw = r.read_raw(ch, None, None, n_threads)
+        raw = r.read_raw(ch, None, None)
         assert np.asarray(raw["valid"]).astype(bool).all(), ch
         np.testing.assert_array_equal(np.asarray(raw["samples"]), TRUTH[ch], err_msg=ch)
 

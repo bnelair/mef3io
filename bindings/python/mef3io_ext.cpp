@@ -22,6 +22,7 @@
 #include "mef3io/inspect.hpp"
 #include "mef3io/metadata.hpp"
 #include "mef3io/naming.hpp"
+#include "mef3io/parallel.hpp"
 #include "mef3io/reader.hpp"
 #include "mef3io/recover.hpp"
 #include "mef3io/red.hpp"
@@ -1538,10 +1539,14 @@ NB_MODULE(_mef3io, m) {
       // Opening scans the tree and parses every segment's metadata: without
       // the GIL (#79), like every other long call. See construct_nogil.
       .def("__init__",
-           [](mef3io::Session* self, const std::string& path, std::string password) {
-             construct_nogil(self, path, std::move(password));
+           [](mef3io::Session* self, const std::string& path, std::string password, bool strict,
+              int n_threads) {
+             construct_nogil(self, path, std::move(password), strict, n_threads);
            },
-           nb::arg("path"), nb::arg("password") = "")
+           nb::arg("path"), nb::arg("password") = "", nb::arg("strict") = true,
+           nb::arg("n_threads") = 0)
+      .def("set_threads", &mef3io::Session::set_threads, nb::arg("n"))
+      .def("threads", &mef3io::Session::threads)
       .def_prop_ro("channels", &mef3io::Session::channels)
       .def("channel_info",
            [](mef3io::Session& s, const std::string& name) {
@@ -1646,6 +1651,7 @@ NB_MODULE(_mef3io, m) {
       .def_prop_ro("legacy_password_segments",
                    [](const mef3io::SessionWriter& w) { return w.legacy_password_segments(); })
       .def("set_threads", &mef3io::SessionWriter::set_threads)
+      .def("threads", &mef3io::SessionWriter::threads)
           .def("set_durable", &mef3io::SessionWriter::set_durable, nb::arg("durable"))
       .def(
           "set_metadata",
@@ -1774,6 +1780,15 @@ NB_MODULE(_mef3io, m) {
     return out;
   });
 
+  // The ONE thread rule's resolver (parallel.hpp): what "automatic" means.
+  // Python asks here instead of re-deriving it (MultiReader's budget).
+  m.def(
+      "resolve_threads",
+      [](int n, bool io) {
+        return mef3io::resolve_threads(n, io ? mef3io::Work::Io : mef3io::Work::Cpu);
+      },
+      nb::arg("n"), nb::arg("io") = false);
+
   m.def("infer_precision", [](nb::ndarray<const mef3io::sf8, nb::ndim<1>, nb::c_contig> d) {
     nb::gil_scoped_release rel;  // one pass over the data; the argument keeps it alive
     return mef3io::infer_precision(std::span<const mef3io::sf8>(d.data(), d.size()));
@@ -1792,7 +1807,8 @@ NB_MODULE(_mef3io, m) {
            },
            nb::arg("path"), nb::arg("password") = "", nb::arg("n_threads") = 0,
            nb::arg("strict") = true)
-      .def("set_threads", &mef3io::Reader::set_threads)
+      .def("set_threads", &mef3io::Reader::set_threads, nb::arg("n"))
+      .def("threads", &mef3io::Reader::threads)
       .def("problems",
            [](mef3io::Reader& r) {
              nb::list out;
@@ -1893,27 +1909,32 @@ NB_MODULE(_mef3io, m) {
       .def(
           "read",
           [opt_time](mef3io::Reader& r, const std::string& ch, nb::object t0, nb::object t1,
-                     int n_threads, const mef3io::CancelToken* cancel, nb::object progress) {
+                     const mef3io::CancelToken* cancel, nb::object progress) {
             // Resolve the Python arguments BEFORE releasing the GIL —
             // nb::cast is Python C API and crashes without a thread state
             // (bit us with float timestamps, e.g. t0 + 10*1e6).
             auto a = opt_time(t0), b = opt_time(t1);
             PyHooks hooks(cancel, std::move(progress));
             std::vector<mef3io::sf8> v = hooks.run(
-                [&](const mef3io::Control& ctl) { return r.read(ch, a, b, n_threads, ctl); });
+                [&](const mef3io::Control& ctl) { return r.read(ch, a, b, ctl); });
             return vec_to_numpy(std::move(v));
           },
           nb::arg("channel"), nb::arg("t0") = nb::none(), nb::arg("t1") = nb::none(),
-          nb::arg("n_threads") = mef3io::Reader::kUseDefaultThreads,
-          nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none())
+          nb::kw_only(), nb::arg("cancel").none() = nb::none(),
+          nb::arg("progress") = nb::none())
       .def(
           "read_raw",
           [opt_time](mef3io::Reader& r, const std::string& ch, nb::object t0, nb::object t1,
-                     int n_threads, const mef3io::CancelToken* cancel, nb::object progress) {
+                     const mef3io::CancelToken* cancel, nb::object progress,
+                     std::optional<int> split) {
             auto a = opt_time(t0), b = opt_time(t1);  // see read: cast needs the GIL
             PyHooks hooks(cancel, std::move(progress));
-            mef3io::RawData d = hooks.run(
-                [&](const mef3io::Control& ctl) { return r.read_raw(ch, a, b, n_threads, ctl); });
+            // `_n_threads` is PRIVATE (MultiReader's per-call share of its one
+            // budget, Reader::read_raw_split). Not public API: the public rule
+            // is one thread count per object (docs/threads.md).
+            mef3io::RawData d = hooks.run([&](const mef3io::Control& ctl) {
+              return split ? r.read_raw_split(ch, a, b, *split, ctl) : r.read_raw(ch, a, b, ctl);
+            });
             nb::dict out;
             out["start_uutc"] = d.start_uutc;
             out["sampling_frequency"] = d.sampling_frequency;
@@ -1935,8 +1956,8 @@ NB_MODULE(_mef3io, m) {
             return out;
           },
           nb::arg("channel"), nb::arg("t0") = nb::none(), nb::arg("t1") = nb::none(),
-          nb::arg("n_threads") = mef3io::Reader::kUseDefaultThreads,
-          nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none())
+          nb::kw_only(), nb::arg("cancel").none() = nb::none(),
+          nb::arg("progress") = nb::none(), nb::arg("_n_threads") = nb::none())
       .def("segments",
            [](mef3io::Reader& r, const std::string& ch) {
              std::vector<mef3io::SegmentInfo> segs;

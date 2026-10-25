@@ -251,8 +251,10 @@ StepEstimate detect_step(std::span<const sf8> data) {
 }
 
 bool quantize_to_step(std::span<const sf8> data, sf8 step, std::vector<si4>& counts,
-                      std::vector<ui1>& valid, std::string* why) {
-  auto fail = [&](std::size_t i, const char* what) {
+                      std::vector<ui1>& valid, std::string* why, StepMismatch* kind) {
+  if (kind) *kind = StepMismatch::None;
+  auto fail = [&](std::size_t i, const char* what, StepMismatch k) {
+    if (kind) *kind = k;
     if (why) *why = "the value at index " + std::to_string(i) + " " + what + " " + detail::shortest_number(step);
     return false;
   };
@@ -260,10 +262,12 @@ bool quantize_to_step(std::span<const sf8> data, sf8 step, std::vector<si4>& cou
   // the counts change sign, the check below is the same.
   if (step == 0.0 || !std::isfinite(step)) {
     if (why) *why = "the step is not a finite non-zero number";
+    if (kind) *kind = StepMismatch::BadStep;
     return false;
   }
   if (!std::isfinite(1.0 / step)) {  // subnormal: no reciprocal to convert by
     if (why) *why = "the step " + detail::shortest_number(step) + " is too small (subnormal)";
+    if (kind) *kind = StepMismatch::BadStep;
     return false;
   }
   const std::size_t n = data.size();
@@ -287,12 +291,13 @@ bool quantize_to_step(std::span<const sf8> data, sf8 step, std::vector<si4>& cou
       continue;
     }
     const sf8 y = x * inv;
-    if (!(std::abs(y) <= kMaxCount))  // also an infinite x
-      return fail(i, std::isfinite(x) ? "needs a count beyond int32 at the step"
-                                      : "is infinite, not a whole multiple of the step");
+    if (!(std::abs(y) <= kMaxCount)) {  // also an infinite x
+      if (!std::isfinite(x)) return fail(i, "is not finite, at the step", StepMismatch::NotFinite);
+      return fail(i, "needs a count beyond int32 at the step", StepMismatch::Overflow);
+    }
     const sf8 q = (y + kRound) - kRound;
     if (std::abs(x - q * step) > kStepRelTol * std::abs(x))
-      return fail(i, "is not a whole multiple of the step");
+      return fail(i, "is not a whole multiple of the step", StepMismatch::NotMultiple);
     out[i] = static_cast<si4>(q);
     ok[i] = 1;
   }

@@ -12,6 +12,7 @@
 
 #include "mef3io/byteio.hpp"
 #include "mef3io/errors.hpp"
+#include "mef3io/parallel.hpp"
 #include "mef3io/red.hpp"
 #include "mef3io/validate.hpp"
 #include "mef3io/time.hpp"
@@ -34,54 +35,134 @@ std::size_t index_entry_count(std::span<const ui1> idx, const std::string& path)
 
 }  // namespace
 
-Session::Session(const std::string& mefd_path, std::string password, bool strict)
+Session::Session(const std::string& mefd_path, std::string password, bool strict, int n_threads)
     : mefd_path_(mefd_path), source_(open_session_source(mefd_path)),
       password_(std::move(password)), strict_(strict) {
+  n_threads_.store(check_threads(n_threads));
   discover();
 }
 
-Session::Session(std::shared_ptr<const SessionSource> source, std::string password, bool strict)
+Session::Session(std::shared_ptr<const SessionSource> source, std::string password, bool strict,
+                 int n_threads)
     : mefd_path_(source ? source->describe("") : std::string()), source_(std::move(source)),
       password_(std::move(password)), strict_(strict) {
   if (!source_) throw std::invalid_argument("Session: null source");
+  n_threads_.store(check_threads(n_threads));
   discover();
 }
 
 void Session::discover() {
-  // The layout rules live in session_layout.hpp, shared with inspect_session.
-  auto layout = detail::discover_layout(*source_);
+  // The open is mostly waiting on the file system (on a network share every
+  // request is a round trip), so it runs on the object's thread budget
+  // resolved for FILE ACCESS. Three parallel passes, each assembled in order:
+  // the layout (session_layout.hpp: channel listings, segment file checks),
+  // then every segment's .tmet read + parse, then — serially, in the order a
+  // one-thread open uses — the channel infos. A failure is therefore raised
+  // (strict) or recorded in problems() (lenient) exactly as a serial open
+  // would: same error, same order, whatever the thread count.
+  const int threads = n_threads_.load();
+  auto layout = detail::discover_layout(*source_, threads);
   record_only_channels_ = std::move(layout.record_only_channels);
-  for (auto& lc : layout.channels) {
-    Channel ch;
-    ch.info.name = lc.name;
+
+  std::vector<Channel> chans(layout.channels.size());
+  std::vector<SegmentReader*> flat;
+  std::vector<std::size_t> first(layout.channels.size(), 0);
+  for (std::size_t c = 0; c < layout.channels.size(); ++c) {
+    auto& lc = layout.channels[c];
+    chans[c].info.name = lc.name;
     for (auto& ls : lc.segments) {
       SegmentReader seg;
       seg.segment_number = ls.number;
       seg.tmet_path = std::move(ls.tmet);
       seg.tidx_path = std::move(ls.tidx);
       seg.tdat_path = std::move(ls.tdat);
-      ch.segments.push_back(std::move(seg));
+      chans[c].segments.push_back(std::move(seg));
     }
-    load_channel_basic_info(ch.info.name, ch);
-    channel_names_.push_back(ch.info.name);
-    channels_.emplace(ch.info.name, std::move(ch));
+  }
+  // Pointers only once every vector has its final size.
+  for (std::size_t c = 0; c < chans.size(); ++c) {
+    first[c] = flat.size();
+    for (auto& seg : chans[c].segments) flat.push_back(&seg);
+  }
+  // Each item writes only its own segment: nothing is shared but the source,
+  // which is safe for concurrent calls (DirectorySource and TarSource open
+  // their own stream per request; TarSource's tables are read-only after
+  // construction).
+  const auto errors = parallel_try_each(
+      flat.size(), threads,
+      [&](std::size_t i) {
+        // ONE bounded request: .tmet is a fixed-length record and the loader
+        // never looks past METADATA_FILE_BYTES (foreign padding after it is
+        // ignored, as the bounded body CRC requires). A short file comes back
+        // short and fails the loader's size check exactly as before (#141).
+        auto bytes = source_->read_head(flat[i]->tmet_path, fmt::METADATA_FILE_BYTES);
+        flat[i]->metadata = load_time_series_metadata(bytes, password_);
+      },
+      Work::Io);
+
+  for (std::size_t c = 0; c < chans.size(); ++c) {
+    Channel& ch = chans[c];
+    const std::string name = ch.info.name;
+    load_channel_basic_info(name, ch, errors.data() + first[c]);
+    channel_names_.push_back(name);
+    channels_.emplace(name, std::move(ch));
   }
   std::sort(channel_names_.begin(), channel_names_.end());
 }
 
-TimeSeriesMetadata& Session::segment_metadata(SegmentReader& seg) {
-  // Loaded for every readable segment at open; a later call only reads it.
-  // Locked anyway: it is never reset, so the reference stays valid after.
-  std::lock_guard<std::mutex> lock(state_mu_);
-  if (!seg.metadata) {
-    // ONE bounded request: .tmet is a fixed-length record and the loader
-    // never looks past METADATA_FILE_BYTES (foreign padding after it is
-    // ignored, as the bounded body CRC requires). A short file comes back
-    // short and fails the loader's size check exactly as before (#141).
-    auto bytes = source_->read_head(seg.tmet_path, fmt::METADATA_FILE_BYTES);
-    seg.metadata = load_time_series_metadata(bytes, password_);
-  }
+const TimeSeriesMetadata& Session::segment_metadata(const SegmentReader& seg) const {
+  // Written by the open, read-only after it: no lock (#110). Every caller runs
+  // inside with_segment, which never reaches here for a failed segment.
+  if (!seg.metadata)
+    throw std::logic_error("segment metadata not loaded: " + source_->describe(seg.tmet_path));
   return *seg.metadata;
+}
+
+bool Session::skip_segment(const SegmentReader& seg, si8 lo, si8 hi) const {
+  // ONLY the span of the index that is cached right now (learn_span): it is
+  // dropped with that index, so it can never be older than what a walk would
+  // read. No metadata time is used — a .tmet start or end can be stale or
+  // wrong (#146 review rounds 1-2) and a skip on it is silent data loss.
+  std::lock_guard<std::mutex> lock(index_mu_);
+  if (!seg.span_known || seg.span_open || !seg.tidx) return false;
+  return seg.span_hi <= lo || seg.span_lo >= hi;
+}
+
+void Session::learn_span(SegmentReader& seg, const std::shared_ptr<const std::vector<ui1>>& pin,
+                         std::size_t n_entries, si8 rto, sf8 fs) {
+  {
+    std::lock_guard<std::mutex> lock(index_mu_);
+    if (seg.span_known || seg.tidx != pin) return;
+  }
+  const std::span<const ui1> idx(*pin);
+  // A SUPERSET of what any windowed walk can select: every entry is counted,
+  // also the ones a walk drops for their byte range; one without a usable
+  // count (0 = damaged, kept by collect_blocks; NO_ENTRY) makes the span
+  // unbounded. Times and lengths by the walks' own expressions.
+  bool open = !(fs > 0) || !std::isfinite(fs);
+  si8 lo = std::numeric_limits<si8>::max(), hi = std::numeric_limits<si8>::min();
+  for (std::size_t i = 0; i < n_entries && !open; ++i) {
+    const auto e = fmt::TimeSeriesIndex::parse(
+        idx.subspan(fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES,
+                    fmt::TIME_SERIES_INDEX_BYTES));
+    if (e.number_of_samples == 0 || e.number_of_samples == fmt::UI4_NO_ENTRY) {
+      open = true;
+      break;
+    }
+    const si8 b0 = to_user_time(e.start_time, rto);
+    const si8 b1 = b0 + static_cast<si8>(
+                            std::llround(static_cast<sf8>(e.number_of_samples) * 1e6 / fs));
+    lo = std::min(lo, b0);
+    hi = std::max(hi, b1);
+  }
+  std::lock_guard<std::mutex> lock(index_mu_);
+  // Only for the index still cached: if another thread's trim evicted (and a
+  // call re-read) it meanwhile, this span describes bytes nobody walks now.
+  if (seg.span_known || seg.tidx != pin) return;
+  seg.span_known = true;
+  seg.span_open = open;
+  seg.span_lo = lo;
+  seg.span_hi = hi;
 }
 
 std::shared_ptr<const std::vector<ui1>> Session::segment_index(SegmentReader& seg) {
@@ -101,14 +182,19 @@ std::shared_ptr<const std::vector<ui1>> Session::segment_index(SegmentReader& se
   return seg.tidx;
 }
 
-void Session::load_channel_basic_info(const std::string& name, Channel& ch) {
+void Session::load_channel_basic_info(const std::string& name, Channel& ch,
+                                      const std::exception_ptr* errors) {
   ChannelInfo& info = ch.info;
   bool first = true;
   int readable = 0;
-  for (auto& seg : ch.segments) {
+  for (std::size_t k = 0; k < ch.segments.size(); ++k) {
+    auto& seg = ch.segments[k];
     // Nothing below can throw once the metadata is in hand, so containing the
     // whole body cannot leave `info` half-updated by a segment that failed.
     const bool ok = with_segment(name, seg, [&] {
+    // The load ran in parallel; its failure surfaces HERE, in segment order,
+    // so strict raises and lenient records exactly what a serial open did.
+    if (errors[k]) std::rethrow_exception(errors[k]);
     auto& md = segment_metadata(seg);
     const si8 rto = segment_rto(md);
     si8 seg_start = to_user_time(md.universal_header.start_time, rto);
@@ -478,6 +564,9 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
                       mark_mm = out.mismatches.size();
     if (!with_segment(channel, seg, [&] {
     auto& md = segment_metadata(seg);
+    // #110 item 3: a segment whose CACHED index holds nothing in the window is
+    // not walked again (no I/O either way: the index is in memory).
+    if (skip_segment(seg, t0, t1)) return;
     const si8 rto = segment_rto(md);
     crypto::AccessKeys keys = crypto::validate_password(
         password_, md.universal_header.level_1_password_validation_field,
@@ -486,6 +575,7 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
     const auto idx_pin = segment_index(seg);  // keeps the bytes alive for this call
     const std::span<const ui1> idx(*idx_pin);
     const std::size_t n_entries = index_entry_count(idx, source_->describe(seg.tidx_path));
+    learn_span(seg, idx_pin, n_entries, rto, fs);
 
     // Determine whether any block in this segment is in range before loading
     // the (potentially large) .tdat.
@@ -605,12 +695,13 @@ std::size_t Session::index_cache_bytes() const {
 }
 
 void Session::trim_index_cache() {
-  if (index_budget_ == 0) return;
+  const std::size_t budget = index_budget_.load(std::memory_order_relaxed);
+  if (budget == 0) return;
   std::lock_guard<std::mutex> lock(index_mu_);
   std::size_t total = 0;
   for (const auto& name : channel_names_)
     for (const auto& seg : channels_.at(name).segments) total += cached_bytes(seg);
-  if (total <= index_budget_) return;
+  if (total <= budget) return;
 
   // Oldest first. Called at the end of a public operation, so THIS call holds
   // no index. Another thread's call may: it holds its own pin (segment_index
@@ -630,10 +721,13 @@ void Session::trim_index_cache() {
             [](const Victim& a, const Victim& b) { return a.used < b.used; });
 
   for (const auto& v : victims) {
-    if (total <= index_budget_) break;
+    if (total <= budget) break;
     total -= cached_bytes(*v.seg);
     v.seg->tidx.reset();  // the memory goes with the last pin
     v.seg->index_last_used = 0;
+    // The span describes THAT index: once it is gone, the next walk re-reads
+    // the file (which may have grown since) and learns the span again.
+    v.seg->span_known = false;
   }
 }
 
@@ -739,23 +833,13 @@ BlockEnvelope Session::block_envelope(const std::string& channel, std::optional<
     if (!with_segment(channel, seg, [&] {
           auto& md = segment_metadata(seg);
           const si8 rto = segment_rto(md);
-          // Skip a segment wholly outside the window before touching its
-          // index (a day-long session has thousands of them).
-          const si8 s0 = to_user_time(md.universal_header.start_time, rto);
-          const si8 s1 = to_user_time(md.universal_header.end_time, rto);
-          // Only when those times are plausible (a foreign writer may leave
-          // them 0 or unset), and with a second of margin for recorder
-          // jitter: a wrong skip would silently drop blocks read() returns.
-          constexpr si8 MARGIN = 1'000'000;
-          const bool plausible = md.universal_header.start_time != fmt::UUTC_NO_ENTRY &&
-                                 md.universal_header.end_time != fmt::UUTC_NO_ENTRY &&
-                                 s0 > 0 && s1 >= s0;
-          if (plausible && ((lo > std::numeric_limits<si8>::min() + MARGIN && s1 < lo - MARGIN) ||
-                            (hi < std::numeric_limits<si8>::max() - MARGIN && s0 >= hi + MARGIN)))
-            return;
+          // A segment whose cached index holds nothing in the window is not
+          // walked again (a day-long session has thousands of them).
+          if (skip_segment(seg, lo, hi)) return;
           const auto idx_pin = segment_index(seg);  // keeps the bytes alive for this call
           const std::span<const ui1> idx(*idx_pin);
           const std::size_t n = index_entry_count(idx, source_->describe(seg.tidx_path));
+          learn_span(seg, idx_pin, n, rto, fs);
           for (std::size_t i = 0; i < n; ++i) {
             const auto e = fmt::TimeSeriesIndex::parse(
                 idx.subspan(fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES,

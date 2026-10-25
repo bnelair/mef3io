@@ -96,7 +96,9 @@ block_length=None, n_threads=0, metadata=None, durability="fast")`
   858 993 396 samples (`mef3io._mef3io.MAX_BLOCK_SAMPLES`: its byte size is a
   32-bit field and the worst case is 5 bytes per sample); a longer one, or a
   rate whose default block would be longer, raises `ValueError` before
-  anything is created. `n_threads=0` uses all cores.
+  anything is created. `n_threads` (also a settable property) is how many
+  threads the Writer may use: `0` = automatic, `1` = no extra threads; see
+  [Threads](threads.md).
 
 **Arguments are checked before anything is written.** Every write
 (`write`, `write_int32`, and appends) raises `ValueError` and leaves the
@@ -174,8 +176,20 @@ How it works, and what it guarantees:
   and otherwise **not at all** — the write raises `WriteConflictError` and
   writes nothing, rather than round the data. Write such data to a new
   channel, or quantize it yourself and use `write_int32` at the channel's
-  factor. A first chunk with only even counts, for example, gives the
-  channel the step 0.39, and later odd counts are refused.
+  factor.
+
+  **The hazard for long acquisitions: the first chunk decides.** If the
+  first chunk written with `"step"` shows a coarser step than the data
+  really has — only even counts (step 0.39 instead of 0.195), or an
+  amplifier gain changed later to a finer one — every later, finer chunk
+  is refused, for the rest of the channel's life. Nothing is lost or
+  rounded, but the acquisition stops writing that channel. What to do:
+  when you know the amplifier's step, write `write_int32(counts, ufact)`
+  with it from the first chunk (no estimate at all); otherwise make the
+  first chunk long enough to show the real step, and check the first
+  summary's `units_conversion_factor` against what you expect. A channel
+  already locked to a coarse factor can be continued only in a new
+  channel (or by your own quantization at that factor with `write_int32`).
 - **Keep passing `precision="step"` when appending** to a channel written
   that way (or with `write_int32` at a factor that is not a power of ten).
   The default `precision=-1` can only reuse a power-of-ten factor and
@@ -251,6 +265,10 @@ warn_declarations=True, strict=True)`
   encrypted session; that is mef3io's policy, not protection, because the
   samples themselves are not encrypted
   ([details](encryption_model.md#what-encryption-protects)).
+- `n_threads` is how many threads the Reader may use for everything it does
+  (opening, file access, decoding, decrypting): `0` = automatic, `1` = no
+  extra threads. It is also a settable property, used from the next call on;
+  see [Threads](threads.md).
 - `strict=True` (the default) raises when any segment cannot be read.
   `strict=False` skips it instead: its time span reads back as NaN, it is
   listed in `Reader.problems`, and an `UnreadableSegmentWarning` is raised.
@@ -289,15 +307,17 @@ for w in caught:
 of them. Python's `"default"` (and `"module"`) filter action shows each
 warning once per session, not once per process.
 
-### `read(channel, t0=None, t1=None, n_threads=None, *, cancel=None, progress=None)`
+### `read(channel, t0=None, t1=None, *, cancel=None, progress=None)`
 
 Float64 samples on the uniform fs grid over `[t0, t1)` (whole channel by
 default): `N = round((t1 - t0) * fs / 1e6)` samples, discontinuity gaps
 filled with NaN, values scaled by the conversion factor. Windowed reads
 fetch only the needed bytes — cheap on huge sessions. `cancel=` /
-`progress=`: see [Cancelling and progress](#cancelling-and-progress).
+`progress=`: see [Cancelling and progress](#cancelling-and-progress). The
+thread count is the Reader's `n_threads`; there is no per-call override
+(removed in 2.0).
 
-### `read_raw(channel, t0=None, t1=None, n_threads=None, *, cancel=None, progress=None)`
+### `read_raw(channel, t0=None, t1=None, *, cancel=None, progress=None)`
 
 Dict with the stored `samples` (int32), a `valid` mask (0 in gaps),
 `start_uutc`, `sampling_frequency`, `units_conversion_factor`.
@@ -607,8 +627,9 @@ with mef3io.MultiReader(days) as r:
 It is a drop-in for `Reader`: the same methods and properties, with the same
 arguments, return types, dict keys and dtypes, so code written for a `Reader`
 works unchanged. Only the first argument differs (a list of sessions, folders
-or `.mefd.tar` archives, mixed as you like), and `n_threads` is the budget for
-the whole call: a read touching several recordings reads them at once.
+or `.mefd.tar` archives, mixed as you like), and `n_threads` is the total for
+the whole MultiReader, split between the recordings it opens or reads at once
+and never multiplied by them ([Threads](threads.md#multireader-a-total-never-multiplied)).
 
 What a read returns is exactly what `Reader` returns for the same window of
 the same recordings merged on disk with [`merge_sessions`](merge.md): the
@@ -923,7 +944,7 @@ token.cancel()
 ```
 
 **Several reads at once.** Reads on one `Reader` can run from several
-threads at once, within the limits in [Parallelism](#parallelism). When a
+threads at once (see [Parallelism](#parallelism)). When a
 newer request supersedes a read, cancel the old one with its own token; the
 cancelled call returns promptly and the other reads are unaffected.
 
@@ -1047,26 +1068,26 @@ Metadata works both the legacy and the modern way on `MefWriter`: mutate the
 
 ## Parallelism
 
-RED block decode/encode run on an internal thread pool (`n_threads`: 0 = all
-cores, 1 = serial; per-call override on reads). Output is byte-identical
-regardless of thread count, and the bindings release the GIL, so external
-dataloader parallelism is safe.
+Every `Reader`, `MultiReader` and `Writer` follows one rule: its `n_threads`
+covers everything it does, `0` = automatic, `1` = no extra threads, and it
+can be changed later. The full rule, what "automatic" means and how a
+`MultiReader` shares its budget are in [Threads](threads.md). Output is
+byte-identical regardless of thread count, and the bindings release the GIL,
+so external dataloader parallelism is safe.
 
 Opening a session releases the GIL too: `Reader(...)` (and the writer's
 reopen of an existing session) scans the tree and parses every segment's
-metadata in C++ while other Python threads keep running. So a GUI can open a
-large session on a worker thread without freezing its event loop, and several
-sessions can be opened at once on different threads. `toc`, `segments`,
-`records` and `Writer.write_annotations` release the GIL as well.
+metadata in C++, on the Reader's threads, while other Python threads keep
+running. So a GUI can open a large session on a worker thread without
+freezing its event loop, and several sessions can be opened at once on
+different threads. `toc`, `segments`, `records` and
+`Writer.write_annotations` release the GIL as well.
 
-**Sharing one `Reader`:** reads, `toc`, `segments` and `records` on one `Reader` may run at once. Three
-limits remain until [#110](https://github.com/bnelair/mef3io/issues/110)
-adds the locks: with `cache=`, make one read (or `toc`, `segments` or
-`records`) before sharing the `Reader`, since that first call builds its
-backend (`info`, `channels` and `metadata` come from the snapshot and do
-not open it); do not
-`close()` it while other threads are reading; and an open-time or record
-warning may be shown more than once.
-A `Writer` is not meant to be shared between threads. The Python-level parts
-of an open (the warm-start cache, building the open-time warnings) are short
-and run with the GIL as usual.
+**Sharing one `Reader`:** reads, `toc`, `segments`, `block_envelope` and
+`records` on one `Reader` may run at once, also on a `Reader` opened with
+`cache=` (its backend is built once, by whichever call comes first), and
+`n_threads` may be changed meanwhile. `close()` waits for a backend still
+being built and then stays closed; a later call raises. A skipped record file
+is warned about once per Reader. A `Writer` is not meant to be shared between
+threads. The Python-level parts of an open (the warm-start cache, building
+the open-time warnings) are short and run with the GIL as usual.

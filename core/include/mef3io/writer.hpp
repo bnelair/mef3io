@@ -138,7 +138,8 @@ void check_block_length(si8 samples_per_block);
 
 // Write the three files for one segment into `segment_dir` (which must exist).
 // Blocks must be time-ordered. Returns the number of samples written.
-// Blocks are RED-encoded in parallel (n_threads: 0 -> hardware concurrency,
+// Blocks are RED-encoded in parallel (n_threads: negative throws
+// std::invalid_argument; 0 -> hardware concurrency,
 // 1 -> serial) then assembled into the .tdat in order, so the output is
 // byte-identical regardless of thread count.
 /// `out_max_difference_bytes` (optional) receives the exact maximum
