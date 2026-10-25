@@ -1,8 +1,11 @@
 // mef3io — a de-identified copy of a session (#70).
 //
-// anonymize_session() writes a NEW session: every time shifted by one
-// constant, the time-zone fields set to fixed values, identity removed. The
-// source is never modified. The copy pass reads the source once and writes
+// anonymize_session() writes a NEW session with the identity removed. By
+// default every time is KEPT exactly as the source stores it (the copy still
+// shows when the recording happened); with AnonymizeOptions::shift_us set,
+// every time is shifted by that one constant instead. The time-zone fields
+// (GMT offset, DST) are set to fixed values in both modes. The source is
+// never modified. The copy pass reads the source once and writes
 // the copy once (verify then re-reads the source data and the copy). RED
 // blocks are never decoded or re-encoded: only their start time (and, for
 // encrypted blocks, the first 16 statistics bytes) is patched, the regions
@@ -10,8 +13,10 @@
 // are bit-identical.
 //
 // verify_anonymized() compares a copy against its source: the validator,
-// block payloads and statistics, every time (exactly the shift), the records,
-// and a FIELD-WISE leak scan of every time and text field. anonymize_session
+// block payloads and statistics, every time (exactly the source's when the
+// times are kept, exactly the shift away otherwise), the records, and a
+// FIELD-WISE leak scan of every text field (and, when shifting, of every time
+// field). anonymize_session
 // runs it on the copy before publishing it.
 //
 // check_anonymize() runs every check anonymize_session makes before it writes
@@ -48,7 +53,7 @@ struct RecordTextField {
   RecordLevel level = RecordLevel::Session;
   std::string channel;      ///< "" at session level
   int segment = -1;         ///< segment number at segment level, else -1
-  si8 time = 0;             ///< the record's time in the COPY (shifted, uUTC)
+  si8 time = 0;             ///< the record's time in the COPY (uUTC; shifted when shifting)
 };
 
 /// Replace one non-empty record text field. Return the new text ("" clears).
@@ -65,10 +70,16 @@ enum class RecordTextPolicy {
 /// rename) plus what anonymization adds. A left-out channel's name is also
 /// redacted from kept text; with `rename`, session_description too.
 struct AnonymizeOptions : CopyOptions {
-  /// Added to every time, in microseconds. Must be non-zero, keep every time
-  /// above 0, and be at least the session's time span plus one day in
-  /// magnitude (so no shifted time can land inside the original range).
-  si8 shift_us = 0;
+  /// Unset (the default): every time is KEPT, stored exactly as the source
+  /// stores it, and the copy keeps each segment's recording-time offset (it
+  /// is needed to read those stored times back to the same instants). The
+  /// copy then still shows when the recording happened.
+  ///
+  /// Set: added to every time, in microseconds; the copy's recording-time
+  /// offset is 0. Must be non-zero, keep every time above 0, and be at least
+  /// the session's time span plus one day in magnitude (so no shifted time
+  /// can land inside the original range).
+  std::optional<si8> shift_us;
   /// Written to every universal header's anonymized_name. Empty = the new
   /// session name (the stem of `dst`).
   std::string pseudonym;
@@ -113,10 +124,15 @@ struct SourceChannelTimes {
 
 struct AnonymizeReport : CopyReport {
   std::string pseudonym;
-  si8 shift_us = 0;
-  si8 source_recording_time_offset = 0;  ///< read from the source; the copy has 0
+  /// The shift applied; unset = the times were kept.
+  std::optional<si8> shift_us;
+  /// Read from the source. A shifted copy has 0; a copy that keeps the times
+  /// keeps the source's.
+  si8 source_recording_time_offset = 0;
   /// The SOURCE's first and last sample time (uUTC; empty without samples).
   /// THE RE-IDENTIFICATION KEY: with the shift they give the real dates back.
+  /// (A copy that keeps the times shows them anyway; they are handled the
+  /// same way regardless.)
   /// Returned to the caller only: never written into the copy, never logged,
   /// never put into a warning or a message.
   std::optional<si8> source_start_us, source_end_us;
@@ -136,8 +152,8 @@ struct AnonymizeReport : CopyReport {
 /// Every refusal below is thrown as an exception that is ALSO an
 /// AnonymizeError carrying a stable code (docs/anonymization.md).
 ///
-/// @throws std::invalid_argument  a bad option: zero shift, shift below the
-///         floor or into times <= 0, unknown/conflicting channel selection,
+/// @throws std::invalid_argument  a bad option: (when shifting) a zero
+///         shift, a shift below the floor or into times <= 0, unknown/conflicting channel selection,
 ///         one output password without the other, a callback policy without
 ///         a callback.
 /// @throws IoError        `dst` (or `<dst>.partial`) exists, `dst` is inside
@@ -145,8 +161,9 @@ struct AnonymizeReport : CopyReport {
 /// @throws WriteConflictError  the session cannot be copied without risking
 ///         a misplaced or leaked date: the conditions inspect_session marks
 ///         as blocking (video channels, unreadable or incomplete segments,
-///         disputed or ambiguous recording-time offset, locked sections),
-///         or a stored time at or before a non-zero offset.
+///         locked sections; when shifting also a disputed or ambiguous
+///         recording-time offset), or (when shifting) a stored time at or
+///         before a non-zero offset.
 /// @throws PasswordError  the source is encrypted and the password does not
 ///         grant level-2 access.
 /// @throws FormatError / CrcError  damaged source data (never laundered).
@@ -164,13 +181,14 @@ AnonymizeReport anonymize_session(const std::string& src, const std::string& dst
 /// header or a block's own time that the shift rule refuses,
 /// a failed verification); docs/anonymization.md lists which.
 ///
-/// `check_shift = false` skips the shift checks (for a shift not chosen yet).
+/// `options.shift_us` decides which copy is checked, exactly as for
+/// anonymize_session: unset = the copy that keeps every time (no shift
+/// checks apply), set = the shifted copy.
 /// @throws Cancelled  `ctl.cancel` was set. A refusal is never thrown, it is
 ///         returned; only an error that is not one (a bug, an OS failure)
 ///         propagates.
 AnonymizeCheck check_anonymize(const std::string& src, const std::string& dst,
-                               const AnonymizeOptions& options, const Control& ctl = {},
-                               bool check_shift = true);
+                               const AnonymizeOptions& options, const Control& ctl = {});
 
 /// The text anonymize_session would keep for each of `texts` (record text
 /// with RecordTextPolicy::Keep, or a description it keeps): the exact
@@ -189,7 +207,11 @@ std::vector<std::string> redact_text(const std::string& src, const std::string& 
                                      const Control& ctl = {});
 
 /// Check a copy against its source. Reads both; writes nothing.
-VerifyReport verify_anonymized(const std::string& src, const std::string& dst, si8 shift_us,
+/// `shift_us` as the copy was made with: unset = the copy keeps every time,
+/// and every time in it must equal the source's (as stored, so also as read);
+/// set = every time must be exactly that shift away.
+VerifyReport verify_anonymized(const std::string& src, const std::string& dst,
+                               std::optional<si8> shift_us,
                                const VerifyOptions& options = {}, const Control& ctl = {});
 
 }  // namespace mef3io

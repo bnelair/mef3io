@@ -46,8 +46,9 @@ version number.
   hides identity and annotation text, not the samples themselves — see
   [what it protects](encryption_model.md#what-encryption-protects).
 - **De-identified copies for sharing** — `mef3io.anonymize_session` writes
-  a copy with every date moved by the same amount, the subject's identity,
-  the session name, descriptions and annotation text removed, chosen
+  a copy with the subject's identity, the session name, descriptions and
+  annotation text removed (and, with a shift, every date moved by the same
+  amount; by default the real dates are kept), chosen
   channels left out, and the samples unchanged; the copy can be unencrypted
   or get new passwords. `mef3io.anonymize.check` reports what would stop a
   copy before anything is written, and every copy is verified against its

@@ -7,8 +7,8 @@ description: "How to make a de-identified copy of a MEF 3.0 session with anonymi
 This page has two parts:
 
 1. **[De-identified copies](#de-identified-copies-with-anonymize_session)**:
-   how to make a copy of a recording that you can share, with every date
-   moved and the patient's identity removed, using `anonymize_session`
+   how to make a copy of a recording that you can share, with the patient's
+   identity removed and, if you ask for it, every date moved, using `anonymize_session`
    (Python and C++; not MATLAB). A runnable example is
    [`examples/13_anonymize.py`](https://github.com/bnelair/mef3io/blob/main/examples/13_anonymize.py).
 2. **[The recording-time offset](#the-recording-time-offset-deprecated)**:
@@ -32,20 +32,31 @@ This page has two parts:
 `anonymize_session` makes a **copy** of a recording that you can share. In
 the copy:
 
-- **every date and time is moved** by the same amount, so the copy no longer
-  says when the recording was made. Times keep their order and spacing, so
-  seizures, sleep stages and gaps still line up with the signal;
 - **the patient's details are removed**: name, ID, recording location, the
   session's name, the free-text descriptions and, by default, the text of
   annotations;
-- **the signal itself is copied unchanged**, sample for sample.
+- **the signal itself is copied unchanged**, sample for sample;
+- **dates and times are kept exactly as they were, unless you ask for them
+  to be moved.** With a shift, every date and time is moved by the same
+  amount, so the copy no longer says when the recording was made. Times keep
+  their order and spacing either way, so seizures, sleep stages and gaps
+  still line up with the signal.
+
+!!! warning "By default the copy still shows when the recording was made"
+    Without a shift, the copy keeps the **real dates and times** of the
+    recording: anyone who opens it can see the day and the time of day it was
+    made. A recording date can identify a patient, together with other
+    information. To hide it, give a shift: `shift_us=` in Python
+    (`mef3io.anonymize.reference_shift` computes one from a date you choose),
+    or `--reference-date` / `--shift-us` on the command line. See
+    [Choosing the shift](#choosing-the-shift).
 
 Your original recording is never changed. The copy is checked before it is
 saved under its final name; if anything is wrong, or you cancel, nothing is
 left behind.
 
-If you anonymize several recordings of one patient with the **same** shift,
-they stay in the right order and the right distance apart.
+If you shift several recordings of one patient, use the **same** shift for
+all of them: they then stay in the right order and the right distance apart.
 
 ### What it costs
 
@@ -59,19 +70,23 @@ once.
 ```python
 import mef3io
 
-# Move the recording so it starts on 3 January 2000, keeping the local time of day.
+# Identity removed, every date and time kept (the copy shows the real dates).
+report = mef3io.anonymize_session("patient.mefd", "S001.mefd")
+
+# Identity removed AND the dates hidden: move the recording so it starts on
+# 3 January 2000, keeping the local time of day.
 start = mef3io.inspect("patient.mefd").start_time            # µs since 1970, UTC
 shift = mef3io.anonymize.reference_shift(start, "2000-01-03", tz="Europe/Prague")
-
-report = mef3io.anonymize_session("patient.mefd", "S001.mefd", shift)
+report = mef3io.anonymize_session("patient.mefd", "S002.mefd", shift)
 print(report.summary())     # includes the shift: keep the output with the original
 ```
 
 From a terminal:
 
 ```
-python -m mef3io anonymize patient.mefd S001.mefd --reference-date 2000-01-03 --tz Europe/Prague
-python -m mef3io anonymize patient.mefd S001.mefd --shift-us -630720000000000
+python -m mef3io anonymize patient.mefd S001.mefd                 # times kept
+python -m mef3io anonymize patient.mefd S002.mefd --reference-date 2000-01-03 --tz Europe/Prague
+python -m mef3io anonymize patient.mefd S003.mefd --shift-us -630720000000000
 ```
 
 The copy's folder name (`S001` above) becomes its session name everywhere.
@@ -88,9 +103,10 @@ A typical workflow, which
 [`examples/13_anonymize.py`](https://github.com/bnelair/mef3io/blob/main/examples/13_anonymize.py)
 runs end to end on a small made-up session:
 
-1. **Choose the shift** once per patient (see below) and keep it, with the
-   original recording, away from the copy: together with the copy it gives
-   the real dates back.
+1. **Decide whether the dates must be hidden.** If they must, choose the
+   shift once per patient (see below) and keep it, with the original
+   recording, away from the copy: together with the copy it gives the real
+   dates back. Without a shift the copy keeps the real dates.
 2. **Check first.** `mef3io.anonymize.check(src, dst, shift, ...)` takes the
    same arguments as the copy and lists everything that would stop it, each
    with a stable code, without writing anything
@@ -105,8 +121,9 @@ runs end to end on a small made-up session:
 
 ### Choosing the shift
 
-The shift is a number of microseconds added to every time. Pick it from the
-date you want the recording to start on:
+Without a shift (`shift_us=None`, the default) every time is kept. To hide
+the dates, give a shift: a number of microseconds added to every time. Pick
+it from the date you want the recording to start on:
 
 - **Keep the UTC time of day:** `reference_shift(start, new_date)`. The shift
   is a whole number of days.
@@ -120,19 +137,22 @@ date you want the recording to start on:
   reference recording, and use it for all of them. A recording made in the
   other daylight-saving season then shows its local time one hour off.
 
-Two rules protect the copy:
+Two rules protect a shifted copy:
 
 - the shift must be at least the recording's length **plus one day** (in
   either direction), so that no moved time can land inside the original
   dates, which is what lets the check below recognise a leaked date;
 - every moved time must stay after 1 January 1970.
 
+A shift of `0` is refused (`shift-zero`): leave the shift out to keep the
+times.
+
 ### What changes, in detail
 
 | | What happens |
 |---|---|
-| Times | Moved by the shift, each kept in the form it was stored in: universal-header start and end in every file, the block index, every data block's header (its checksum is recomputed), annotation headers and the annotation index at session, channel and segment level, and the times inside `Seiz` (onset, offset, per-channel onset and offset), `Epoc` (start, end) and `Curs` (trace time) annotations. |
-| Time-zone fields | Set, not moved: `recording_time_offset = 0`, `GMT_offset = 0`, daylight-saving start and end = "no entry". |
+| Times | **Without a shift (default): kept**, byte for byte as the source stores them, so the copy reads back exactly the source's dates and times. **With a shift:** moved by the shift, each kept in the form it was stored in: universal-header start and end in every file, the block index, every data block's header (its checksum is recomputed), annotation headers and the annotation index at session, channel and segment level, and the times inside `Seiz` (onset, offset, per-channel onset and offset), `Epoc` (start, end) and `Curs` (trace time) annotations. |
+| Time-zone fields | `GMT_offset = 0` and daylight-saving start and end = "no entry", in both modes: they can tell where the recording was made, and no time mef3io reads depends on them (all times are UTC). `recording_time_offset`: **kept** without a shift (the stored times are read against it, so keeping it is what keeps the times), `0` with a shift. |
 | Subject | `subject_name_1`, `subject_name_2`, `subject_id` and `recording_location` cleared (`clear=`). |
 | Session name | Replaced by the copy's name in every file header, in the names of the session-level annotation files, and in `session_description`. `anonymized_name` is set to `pseudonym` (default: the copy's name). |
 | Descriptions | `session_description`, `channel_description` and `reference_description` cleared. With `clear=("subject", "location")` they are kept, with the old session name replaced and the removed names taken out. |
@@ -178,18 +198,30 @@ Nothing is written when:
   a leftover `<dst>.partial` from an interrupted run is in the way (remove it
   if no copy is running);
 - the session has something `inspect` marks as blocking: video channels,
-  unreadable or incomplete segments, parts the password does not open,
-  segments that disagree on the recording-time offset, or a time stored in
-  the legacy convention that cannot be told apart from an absolute one (see
-  [The sign convention is not reliable either](#the-sign-convention-is-not-reliable-either));
-- the shift is zero, smaller than the recording's length plus one day, or
-  would move a time to 1970 or before;
+  unreadable or incomplete segments, parts the password does not open;
 - a data block or annotation fails its checksum: damaged data is never
   re-sealed into a copy that would then look intact.
 
-A session that uses meflib's recording-time offset **is** accepted when the
-offset is unambiguous: its times are read as true UTC, moved, and the copy
-has offset 0.
+With a shift, also when:
+
+- segments disagree on the recording-time offset, the offset cannot be read,
+  or a time is stored in the legacy convention that cannot be told apart
+  from an absolute one (see
+  [The sign convention is not reliable either](#the-sign-convention-is-not-reliable-either)):
+  moving a time needs to know which instant it is;
+- the shift is zero, smaller than the recording's length plus one day, or
+  would move a time to 1970 or before;
+- an `Epoc` or `Curs` ID number holds a time of the recording, which the
+  copy would carry unchanged.
+
+Without a shift none of these apply: every time and each segment's
+recording-time offset are copied exactly as stored, so the copy reads back
+the same times as the source, whatever convention they were stored in.
+
+A session that uses meflib's recording-time offset **is** accepted. Without
+a shift the copy keeps the offset and the times as stored. With a shift,
+when the offset is unambiguous, its times are read as true UTC, moved, and
+the copy has offset 0.
 
 ### Checking before copying
 
@@ -214,7 +246,9 @@ if not rep.ok:
   each kept segment's 1 KB metadata header and the kept channels' annotation
   files. It never reads the data (`.tdat`) files, so it takes about as long
   as `inspect`. It releases the GIL and accepts `cancel=`.
-- **`shift_us=None`** skips the shift checks, for a date not chosen yet.
+- **`shift_us` picks the copy that is checked**, as for `anonymize_session`:
+  `None` (default) checks the copy that keeps every time, to which no shift
+  check applies; a number checks the shifted copy.
 - A check that depends on one that failed is skipped: when the source cannot
   be opened, nothing about it is checked.
 - `rep.notes` holds what the copy would note up front: a source using
@@ -224,12 +258,12 @@ if not rep.ok:
 `rep.ok` means the copy will start. A few refusals can only come from the
 copy itself (marked *copy* below): a data block that fails its checksum or
 runs past the end of its file, which needs the data blocks, and a failed
-verification, which needs the finished copy. Every time in the metadata
-and annotation files goes through the copy's own shifting rule up front, so
-a time at or before a non-zero recording-time offset, or one the shift would
-take to 1970 or before, is caught there; only a time in a block index or
-data file's header, or a data block's own time, is met by the copy alone,
-with the same code.
+verification, which needs the finished copy. With a shift, every time in
+the metadata and annotation files goes through the copy's own shifting rule
+up front, so a time at or before a non-zero recording-time offset, or one
+the shift would take to 1970 or before, is caught there; only a time in a
+block index or data file's header, or a data block's own time, is met by
+the copy alone, with the same code.
 
 No refusal or verification message holds one of the source's times: they
 name the field and describe the problem in words. Messages may name the
@@ -253,14 +287,15 @@ table.
 `anonymize_session`; **copy** = only the copy pass can find it, and the
 partial copy is removed; **defensive** = guards a state an earlier check
 already rules out, or a fault of the system (a full disk), so that every
-refusal has a code.
+refusal has a code. Codes marked *(shift only)* are made only for a copy
+with a shift; a copy that keeps the times never meets them.
 
 | Code | Raised as | Where | Meaning |
 |---|---|---|---|
 | `argument-type` | `TypeError` | check | A channel list holds something other than names. Raised by `check` too. |
 | `clear-unknown` | `ValueError` | check | `clear=` names something other than subject, location, descriptions. |
 | `text-invalid` | `ValueError` | check | `text=` is not `"drop"`, `"keep"` or a callable. |
-| `shift-zero` | `ValueError` | check | The shift is 0. |
+| `shift-zero` | `ValueError` | check | *(shift only)* The shift is 0. Leave the shift out to keep the times. |
 | `channel-selection-conflict` | `ValueError` | check | Both `channels` and `exclude_channels` given. |
 | `text-callback-missing` | `ValueError` | defensive | C++ only: the callback policy without a callback. |
 | `output-password-unpaired` | `ValueError` | check | One output password, or not a pair of non-empty strings. |
@@ -284,16 +319,16 @@ refusal has a code.
 | `unread-record-files` | `WriteConflictError` | check | Annotation files at the session root that are not the session's own. |
 | `unreadable-records` | `WriteConflictError` | defensive | `inspect` could not read an annotation file (a strict open fails first). |
 | `parts-locked` | `WriteConflictError` | check | Parts the password does not open (comes with a password refusal). |
-| `rto-disputed` | `WriteConflictError` | check | Segments disagree on the recording-time offset. |
-| `rto-unreadable` | `WriteConflictError` | check | The recording-time offset cannot be read, so some times are unknown. |
-| `time-before-rto` | `WriteConflictError` | check | A time stored at or before a non-zero recording-time offset (a block index, data header or block time: only in the copy pass). |
+| `rto-disputed` | `WriteConflictError` | check | *(shift only)* Segments disagree on the recording-time offset. |
+| `rto-unreadable` | `WriteConflictError` | check | *(shift only)* The recording-time offset cannot be read, so some times are unknown. |
+| `time-before-rto` | `WriteConflictError` | check | *(shift only)* A time stored at or before a non-zero recording-time offset (a block index, data header or block time: only in the copy pass). |
 | `inspect-blocker` | `WriteConflictError` | defensive | A blocking `inspect` warning this table does not know yet (`details["inspect_code"]` names it). |
 | `channel-unknown` | `ValueError` | check | A named channel is not in the session (`details["channel"]`). |
 | `no-channels-left` | `ValueError` | check | The selection leaves no channel. |
 | `time-range-invalid` | `ValueError` | check | `time_range` does not start before it ends. |
 | `time-range-empty` | `ValueError` | check | No channel of the copy has samples inside `time_range`. |
-| `shift-below-floor` | `ValueError` | check | The shift is smaller than the recording's span plus one day. |
-| `shift-not-positive` | `ValueError` | check | The shift moves a time to 1970 or before (a block index, data header or block time: only in the copy pass). |
+| `shift-below-floor` | `ValueError` | check | *(shift only)* The shift is smaller than the recording's span plus one day. |
+| `shift-not-positive` | `ValueError` | check | *(shift only)* The shift moves a time to 1970 or before (a block index, data header or block time: only in the copy pass). |
 | `rename-name-mismatch` | `ValueError` | check | `rename=False` and the destination is not named after the source. |
 | `name-contains-identity` | `ValueError` | check | The copy's name holds the patient's name, ID, location or the original session name. |
 | `pseudonym-contains-identity` | `ValueError` | check | The pseudonym holds one of them. |
@@ -305,13 +340,13 @@ refusal has a code.
 | `record-crc` | `CrcError` | defensive | An annotation fails its checksum (`inspect` fails first: `source-crc`). |
 | `record-locked` | `PasswordError` | check | An annotation the password does not open (listed by `check` after the password refusal). |
 | `record-index-mismatch` | `FormatError` | check | An annotation index does not match its annotation file. |
-| `id-number-time` | `WriteConflictError` | check | An `Epoc` or `Curs` ID number holds a time inside the recording, which the copy would carry. |
+| `id-number-time` | `WriteConflictError` | check | *(shift only)* An `Epoc` or `Curs` ID number holds a time inside the recording, which the copy would carry. |
 | `text-unremovable` | `WriteConflictError` | check | Text the copy keeps (`text="keep"`, or kept descriptions) holds a removed name in a form the removal does not take out, such as a left-out channel's name glued into a longer word; the copy's check would refuse it. The message names the field, never the text. Drop the text, or clear the descriptions, for this copy. |
 | `block-crc` | `CrcError` | copy | A data block fails its checksum; damaged data is never re-sealed. |
 | `data-damaged` | `FormatError` | copy | A data block runs past its file, or the index and data disagree. |
 | `verify-failed` | `WriteConflictError` | copy | The copy failed its verification (see below); it was removed. |
 | `data-locked` | `PasswordError` | defensive | An encrypted data block the password does not open. |
-| `time-overflow` | `FormatError` | defensive | A stored time out of range. |
+| `time-overflow` | `FormatError` | defensive | *(shift only)* A stored time out of range. |
 | `write-failed` | `IoError` | defensive | Writing the copy failed (disk full, permissions). |
 | `io-error` | `IoError` | defensive | Any other input/output error without a code of its own. |
 | `write-conflict` | `WriteConflictError` | defensive | Any other conflict without a code of its own. |
@@ -330,7 +365,8 @@ each kept channel to its own `(start, end)` (`(None, None)` for a channel
 that holds only annotations).
 
 **They are the re-identification key**: with `shift_us` they give the real
-dates back. They are returned to your program in memory and nowhere else.
+dates back. A copy made without a shift shows the real dates anyway; the
+fields are handled exactly the same way. They are returned to your program in memory and nowhere else.
 mef3io never writes them into the copy (its leak scan would refuse the copy
 if one appeared there), never logs them, and never puts them in a warning or
 an error message. They are left out of `repr(report)`, `report.summary()`
@@ -347,7 +383,8 @@ copy.
 giving it its final name; you can run the same check later:
 
 ```python
-report = mef3io.anonymize.verify("patient.mefd", "S001.mefd", shift)
+report = mef3io.anonymize.verify("patient.mefd", "S001.mefd")          # times kept
+report = mef3io.anonymize.verify("patient.mefd", "S002.mefd", shift)   # shifted copy
 assert report.ok, report.summary()
 ```
 
@@ -358,13 +395,19 @@ It confirms that:
 - every data block's compressed data and its compression table are
   byte-identical to the source's (compared decrypted where encrypted), so the
   samples are too;
-- every time differs from the source's by exactly the shift, in the same
-  stored form, and the time-zone fields hold their set values;
+- without a shift: every time (file headers, block index, data block
+  headers, annotation headers and index, the times inside annotations)
+  **equals** the source's, as stored and so also as read, and so does each
+  segment's recording-time offset; any difference stops the copy. With a
+  shift: every time differs from the source's by exactly the shift, in the
+  same stored form, and the offset is 0. In both, the GMT offset and
+  daylight-saving fields hold their set values;
 - the annotations match in number, order and type;
-- **no date leaked.** Every time field, one field at a time, is compared with
-  the source's recording dates (widened by a day, plain or negated), and so
-  is the ID number of `Epoc` and `Curs` annotations, which a recorder may
-  fill with a time; every text field, every name in a seizure's channel list
+- **no date leaked** (with a shift). Every time field, one field at a time,
+  is compared with the source's recording dates (widened by a day, plain or
+  negated), and so is the ID number of `Epoc` and `Curs` annotations, which a
+  recorder may fill with a time;
+- **no name leaked** (both modes): every text field, every name in a seizure's channel list
   and every folder and file name is searched for the names that should be
   gone, as plain text, ignoring case and word boundaries; every byte after a
   text field's end must be empty; no source identifier is reused. Sizes,
@@ -437,9 +480,9 @@ text the copy would keep for the given strings, with the same options. An
 application can use it to compare a copy's text with what mef3io itself would
 leave, without copying the rules. It writes nothing.
 
-For a source that used meflib's recording-time offset, times are also
-compared with the source's *stored* values (the time of day). A negative
-shift that lands the copy within a few days of 1 January 1970 can therefore
+With a shift, for a source that used meflib's recording-time offset, times
+are also compared with the source's *stored* values (the time of day). A
+negative shift that lands the copy within a few days of 1 January 1970 can therefore
 be refused although nothing leaked; choose a later date.
 
 The report never repeats a name it found, so it can be logged.
@@ -449,6 +492,7 @@ The report never repeats a name it found, so it can be logged.
 - It does not change the **signal**. A recording can identify a person by
   its content (an unusual rhythm, a voice on an audio channel). Leave such
   channels out.
+- Without a shift it keeps the **dates and times** of the recording.
 - It keeps **channel names**, sampling rates, filter settings and file
   sizes.
 - It does not handle **video** (sessions with video channels are refused).
@@ -499,8 +543,8 @@ See
 - mef3io will never make new sessions like this.
 - mef3io still opens existing ones, shows their true dates and times, and
   can add data or notes to them without breaking them.
-- For sharing, make a de-identified **copy**: every date moved, names
-  removed. See
+- For sharing, make a de-identified **copy** with a shift: every date
+  moved, names removed. See
   [De-identified copies](#de-identified-copies-with-anonymize_session).
 
 ### What the offset is
@@ -659,8 +703,10 @@ as meflib does.
     level-1 password (`PasswordError`), or damaged metadata where the
     offset matters (`WriteConflictError`).
   The full rules are in the [format reference](mef3_format.md#times).
-- **New de-identification goes through `anonymize_session`.** It produces a
-  separate copy with `recording_time_offset = 0`; see the next section.
+- **New de-identification goes through `anonymize_session`.** With a
+  shift it produces a separate copy with `recording_time_offset = 0`; see
+  the next section. Without a shift the copy keeps the offset, and with it
+  the real dates.
 
 ### Backward compatibility
 
@@ -750,7 +796,8 @@ The same behaviour is pinned in more detail by `tests/test_p22_records.py`.
   whatever the password, and so do the samples and their times of day
   ([What encryption protects](encryption_model.md#what-encryption-protects)).
 - **To share it de-identified, make a copy with `anonymize_session`**
-  ([De-identified copies](#de-identified-copies-with-anonymize_session)). It
-  reads the offset session's true times, moves every date, sets the offset to
-  0 and removes identity. Do not treat a recording-time offset as
+  ([De-identified copies](#de-identified-copies-with-anonymize_session))
+  and a shift. It reads the offset session's true times, moves every date,
+  sets the offset to 0 and removes identity (without a shift the copy keeps
+  the offset and the dates). Do not treat a recording-time offset as
   de-identification.

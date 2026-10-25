@@ -72,7 +72,10 @@ Copy engine (#73, `core/src/session_copy.cpp`): anonymize_session and
 transform_session are ONE driver (`run_copy`: preflight -> Copier pass into
 `<dst>.partial` -> fsync -> `verify_impl` -> rename), ONE `preflight()`, ONE
 `Copier` and ONE `Verifier`, steered by `Rules` (`anon` set = anonymize;
-unset = transform with `edits`). NEVER fork a second copy path for a new
+unset = transform with `edits`; anonymize either SHIFTS, `Rules::shifting()`
+= `AnonymizeOptions::shift_us` set, or KEEPS every time,
+`Rules::keep_times()`, the 2.0.0 DEFAULT, which is the transform's verbatim
+time path inside the same rules). NEVER fork a second copy path for a new
 operation (cut/merge #103, re-encode #121): add rules or options to this one.
 CUT (#103, `CopyOptions::time_range` + `exact`, both operations): decided per
 block from the RED HEADER's time and count; sample i of a block at t lies at
@@ -241,10 +244,27 @@ size/count fields, RED payload + stats compared, not scanned. (2) Build in
 `<dst>.partial`, fsync, verify, THEN rename; any failure/cancel removes it.
 (3) Never re-seal a failing block or record CRC. (4) Source-encrypted RED
 blocks are re-encrypted at their level with the new keys, decrypted only
-with no output passwords; never silently downgraded. (5) |shift| >= span +
-1 day, all times stay > 0. (6) Sentinels (UUTC_NO_ENTRY, 0, body -1) never
-shifted; every time keeps its stored sign; output rto 0, GMT 0, DST
-NO_ENTRY. (7) Every text field is REWRITTEN whole (`write_string`
+with no output passwords; never silently downgraded. KEEP-TIMES MODE (no
+shift, the default since 2.0.0; `tests/test_p40_anonymize_keep_times.py`,
+test_p32 `test_check_agrees_without_a_shift`): `std::optional<si8>
+shift_us` is the ONE switch (never a separate flag; 0 stays `shift-zero`);
+Copier::time returns every stored time verbatim, each segment's s3 rto is
+KEPT (the stored times are read against it, so user times = the source's;
+no rto-disputed check), GMT 0 / DST NO_ENTRY in both modes (location-
+revealing, no returned time uses them). Verify: `keep_times_` -> every
+time_field must EQUAL the source's stored value and each segment's rto the
+source segment's; no time-leak window, no id_number window, no shift floor;
+everything else (names, regions, UUIDs, provenance 6, scrub_times) as when
+shifting. Skipped without a shift (pre-flight, `shifting`): shift-zero/
+floor/not-positive, the time-only inspect blockers (rto-disputed,
+time-before-rto, rto-unreadable), the per-field Shifter run (time-overflow),
+id-number-time. check(shift_us=None) = check of THIS copy (it used to mean
+"shifted, shift not chosen yet"; C++ check_anonymize lost `check_shift`;
+preflight keeps an internal check_shift=false for redact_text only). The
+report's source_* key is handled the same in both modes. (5) WHEN SHIFTING:
+|shift| >= span + 1 day, all times stay > 0. (6) WHEN SHIFTING: Sentinels
+(UUTC_NO_ENTRY, 0, body -1) never shifted; every time keeps its stored
+sign; output rto 0, GMT 0, DST NO_ENTRY. (7) Every text field is REWRITTEN whole (`write_string`
 zero-fills; a guarded "if changed" left hidden bytes after the NUL), and
 foreign regions are zeroed: UH, s1/s2/s3, `.tidx` entry 40/45/48, RED
 header 5/8. Segment folders renamed canonically. Unknown record bodies are

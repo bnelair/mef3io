@@ -9,6 +9,9 @@ What is pinned here:
   refusal is exactly what ``anonymize_session`` raises: same code, same
   exception type, same message (inspect blockers: one exception lists them
   all). Neither writes anything;
+* the same agreement for the default copy, which keeps every time (no
+  shift): every refusal that is not about a shift is still made, the
+  shift-only ones are not, and where ``check`` passes the copy is published;
 * the refusals only the copy pass can meet are raised with their code, and
   ``check`` passes those sessions;
 * every code in ``REFUSAL_CODES`` is documented in docs/anonymization.md
@@ -364,6 +367,52 @@ def test_check_agrees_with_anonymize_session(templates, tmp_path, case):
         assert not _source_times_in(text), text
 
 
+# Codes that concern only a SHIFTED copy: one that keeps every time (no
+# shift) copies each time and offset as stored, so none of them applies.
+SHIFT_ONLY = {"shift-zero", "shift-below-floor", "shift-not-positive", "time-before-rto",
+              "rto-disputed", "rto-unreadable", "id-number-time"}
+
+
+@pytest.mark.parametrize("case", list(CASES) + list(COPY_CASES))
+def test_check_agrees_without_a_shift(templates, tmp_path, case):
+    """The default copy (no shift, every time kept) through BOTH paths: every
+    refusal that is not about a shift is still made, and check() agrees with
+    anonymize_session on the first one, or on a clean pass."""
+    code, build = CASES[case] if case in CASES else COPY_CASES[case]
+    src, dst, kw = build(templates, tmp_path)
+    kw.pop("shift", None)
+    dst = Path(dst)
+    before = _tree(tmp_path)
+    rep = _quiet(mef3io.anonymize.check, src, dst, **kw)
+    assert _tree(tmp_path) == before, "check wrote something"
+    if case in COPY_CASES or code in SHIFT_ONLY:
+        assert code not in rep.codes, rep.summary()
+    else:
+        assert code in rep.codes, rep.summary()
+    if rep.ok:
+        if case in COPY_CASES:
+            with pytest.raises(Exception) as exc:
+                _quiet(mef3io.anonymize_session, src, dst, **kw)
+            assert exc.value.code == code
+            assert _tree(tmp_path) == before
+        else:
+            out = _quiet(mef3io.anonymize_session, src, dst, **kw)
+            assert out.shift_us is None and out.verification.ok, out.verification.summary()
+        return
+    with pytest.raises(Exception) as exc:
+        _quiet(mef3io.anonymize_session, src, dst, **kw)
+    e, first = exc.value, rep.refusals[0]
+    assert getattr(e, "code", None) == first.code, (first, e)
+    assert type(e).__name__ == first.error
+    if first.inspect_code:
+        assert f"{first.inspect_code}: {first.message}" in str(e)
+    else:
+        assert str(e) == first.message
+    assert _tree(tmp_path) == before, "anonymize_session left something behind"
+    for text in [str(e)] + [r.message for r in rep.refusals]:
+        assert not _source_times_in(text), text
+
+
 @pytest.mark.parametrize("case", list(COPY_CASES))
 def test_copy_pass_refusals_carry_codes(templates, tmp_path, case):
     code, build = COPY_CASES[case]
@@ -458,7 +507,7 @@ def test_a_clean_check_and_the_shift_left_open(templates, tmp_path):
     assert rep.channels_kept == ("ch1", "ch3") and rep.channels_excluded == ("ch2",)
     assert any("level-1 output password" in n for n in rep.notes)
     assert "nothing stops the copy" in rep.summary()
-    # the shift may be chosen later; a bad one is caught once given
+    # no shift: the copy that keeps the times; a bad shift is caught once given
     assert mef3io.anonymize.check(src, tmp_path / "S001.mefd").ok
     assert mef3io.anonymize.check(src, tmp_path / "S001.mefd", 0).codes == ("shift-zero",)
     assert not list(tmp_path.glob("S001*"))

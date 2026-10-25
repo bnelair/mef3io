@@ -2,8 +2,10 @@
 // anonymize_session / verify_anonymized (#70, anonymize.hpp) and
 // transform_session / verify_transform (#73, transform.hpp). ONE engine: the
 // pre-flight, the copy pass, the verification and the publish are shared; the
-// rules decide what changes. `Rules::anonymize()` = shift every time, remove
-// identity, clear the regions other writers fill, unlink the copy; otherwise
+// rules decide what changes. `Rules::anonymize()` = remove identity, clear
+// the regions other writers fill, unlink the copy, and either keep every time
+// as stored (the default, `Rules::keep_times()`: the transform's verbatim
+// time path) or shift every time (`Rules::shifting()`); otherwise
 // (a transform) every time, region and record body is copied verbatim and
 // only the channels, passwords, name and edited metadata differ.
 //
@@ -231,11 +233,17 @@ struct Shifter {
 
 /// Which copy this is. `anon` set: anonymize_session's rules. Unset: a
 /// transform (times, regions and record bodies verbatim; `edits` applied).
+/// An anonymized copy either SHIFTS every time (`anon->shift_us` set) or
+/// KEEPS every time as stored (unset, the default): the same verbatim time
+/// path as a transform, with the source's recording-time offset kept so the
+/// stored times read back to the same instants.
 struct Rules {
   const CopyOptions* copy = nullptr;
   const AnonymizeOptions* anon = nullptr;
   const MetadataEdits* edits = nullptr;  ///< transform only (may be empty)
   bool anonymize() const { return anon != nullptr; }
+  bool shifting() const { return anon != nullptr && anon->shift_us.has_value(); }
+  bool keep_times() const { return anon != nullptr && !anon->shift_us.has_value(); }
 };
 
 // ---------------------------------------------------------------------------
@@ -1144,9 +1152,10 @@ class Copier {
 
   std::vector<std::string> written;  // every output file, for the flush
 
-  /// A stored time as the copy writes it: shifted (anonymize) or verbatim.
+  /// A stored time as the copy writes it: shifted (anonymize with a shift)
+  /// or verbatim (a transform, or anonymize keeping the times).
   si8 time(si8 s, const std::string& what, bool body = false) const {
-    return rules_.anonymize() ? sh_(s, what, body) : s;
+    return rules_.shifting() ? sh_(s, what, body) : s;
   }
 
   /// Patch a universal header in place (any file type). Counts, maximum
@@ -1243,7 +1252,10 @@ class Copier {
     auto s3 = b.subspan(S3, S3_BYTES);
     auto s1 = b.subspan(S1, S1_BYTES);
     if (rules_.anonymize()) {
-      if (t.rto != sh_.rto)
+      // Shifting reads every time against ONE offset; keeping them copies
+      // each segment's times and offset as stored, so a disagreement does
+      // not concern it.
+      if (rules_.shifting() && t.rto != sh_.rto)
         refuse(RefusalKind::WriteConflict, "rto-disputed",
                "segments disagree on the recording-time offset (" + src_.describe(rel) +
                    " differs from the rest of the session), so there is no single right way to read their times",
@@ -1260,8 +1272,12 @@ class Copier {
       write_string(s2, S2_UNITS, S2_UNITS_BYTES,
                    red_->apply(read_string(s2, S2_UNITS, S2_UNITS_BYTES)));
       std::fill(s2.begin() + S2_REGIONS, s2.end(), ui1{0});
-      // Section 3: time-zone fields SET, identity cleared.
-      write<si8>(s3, S3_RTO, 0);
+      // Section 3: time-zone fields SET, identity cleared. The offset is 0
+      // in a shifted copy (its times are absolute); a copy that keeps the
+      // times keeps it, since its stored times are read against it. GMT
+      // offset and DST can say where the recording was made and change no
+      // time a reader returns (uUTC), so they are cleared in both.
+      if (rules_.shifting()) write<si8>(s3, S3_RTO, 0);
       write<si8>(s3, S3_DST_START, fmt::UUTC_NO_ENTRY);
       write<si8>(s3, S3_DST_END, fmt::UUTC_NO_ENTRY);
       write<si4>(s3, S3_GMT, 0);
@@ -1441,8 +1457,8 @@ class Copier {
         end_t = sample_time(t, read<ui4>(cb.block, 32), seg_fs_);
       }
       if (rules_.anonymize()) {
-        write<si8>(cb.block, 40, sh_(read<si8>(cb.block, 40), what + " start time"));
-        write<si8>(cb.entry, 8, sh_(read<si8>(cb.entry, 8), "index entry " + what));
+        write<si8>(cb.block, 40, time(read<si8>(cb.block, 40), what + " start time"));
+        write<si8>(cb.entry, 8, time(read<si8>(cb.entry, 8), "index entry " + what));
         // Regions meflib leaves to writers, zero in everything it writes:
         // index entry protected (40, 4 B), RED-protected (45, 3 B) and
         // discretionary (48, 8 B); block header protected (5, 3 B) and
@@ -1578,7 +1594,8 @@ class Copier {
       const si8 t = time(r.time, what + " time");
       std::vector<ui1> body;
       if (rules_.anonymize()) {
-        RecordTextField tf{r.type, "", level, channel, segment, to_user_time(t, 0)};
+        RecordTextField tf{r.type, "", level, channel, segment,
+                           to_user_time(t, rules_.shifting() ? 0 : sh_.rto)};
         body = rewrite_body(r, tf, what);
       } else {
         body = kept_body(r);
@@ -1709,7 +1726,7 @@ class Copier {
       return b;
     }
     for (std::size_t off : lay->times)
-      write<si8>(b, off, sh_(read<si8>(b, off), what + " body time", true));
+      write<si8>(b, off, time(read<si8>(b, off), what + " body time", true));
     for (const auto& slot : lay->text) {
       tf.field = slot.name;
       write_string(b, slot.offset, slot.bytes,
@@ -1739,8 +1756,8 @@ class Copier {
       if (now != name) ++arep_->record_text_fields_changed;
       write_string(e, 0, SEIZ_CHANNEL_NAME, now);
       for (std::size_t off : {SEIZ_CH_ONSET, SEIZ_CH_OFFSET})
-        write<si8>(e, off, sh_(read<si8>(e, off), what + " channel " + std::to_string(c) + " time",
-                               true));
+        write<si8>(e, off, time(read<si8>(e, off), what + " channel " + std::to_string(c) + " time",
+                                true));
       out.insert(out.end(), e.begin(), e.end());
       ++kept;
     }
@@ -1966,14 +1983,16 @@ Scanner build_scanner(const SourcePlan& p, const std::string& new_name, bool cle
 class Verifier {
  public:
   /// `edits` set = a transform's verification (times, regions and bodies
-  /// must equal the source's; only the edits may differ); unset = anonymize.
-  Verifier(const SessionSource& src, const SessionSource& dst, const SourcePlan& plan, si8 shift,
-           const VerifyOptions& o, const MetadataEdits* edits, const Control& ctl,
-           std::function<void(std::uint64_t)> progress, VerifyReport& rep)
+  /// must equal the source's; only the edits may differ); unset = anonymize,
+  /// with every time `shift` away, or (`shift` unset) every time kept.
+  Verifier(const SessionSource& src, const SessionSource& dst, const SourcePlan& plan,
+           std::optional<si8> shift, const VerifyOptions& o, const MetadataEdits* edits,
+           const Control& ctl, std::function<void(std::uint64_t)> progress, VerifyReport& rep)
       : src_(src), dst_(dst), plan_(plan), o_(o), edits_(edits), ctl_(ctl),
         progress_(std::move(progress)), rep_(rep) {
+    keep_times_ = !edits && !shift;
     sh_.rto = plan.rto;
-    sh_.shift = shift;
+    sh_.shift = shift.value_or(0);
     // The leak window: the original range, widened by just under a day on
     // each side. A shift that passed the floor puts every copied time outside
     // it, so a value inside can only be one the rewrite missed.
@@ -2013,6 +2032,11 @@ class Verifier {
     ++rep_.times_checked;
     if (transform()) {  // copied verbatim
       if (dst_v != src_v) problem(loc, field, "differs from the source's (a transform copies every time as stored)");
+      return;
+    }
+    if (keep_times_) {  // kept: as stored, so also as read (the offset is kept too)
+      if (dst_v != src_v)
+        problem(loc, field, "differs from the source's (the copy keeps every time as stored)");
       return;
     }
     if (!(body && is_sentinel(dst_v, true)) && in_window(dst_v))
@@ -2116,7 +2140,10 @@ class Verifier {
       return;
     }
     if (cut_segment_) {  // a cut segment's span: only the leak scan applies
+      // (kept times: the span of what the segment holds, which the
+      // validator checks against its blocks, as for a transform)
       for (std::size_t off : {UH_START, UH_END}) {
+        if (keep_times_) break;
         ++rep_.times_checked;
         if (in_window(read<si8>(d, off)))
           leak(loc, "universal header time", "holds a time inside the source's recording range");
@@ -2260,8 +2287,13 @@ class Verifier {
     }
     const auto ds2 = db.subspan(S2, S2_BYTES), ss2 = sb.subspan(S2, S2_BYTES);
     const auto ds3 = db.subspan(S3, S3_BYTES);
-    // Time-zone fields: SET values, not shifted.
-    if (read<si8>(ds3, S3_RTO) != 0) {
+    // Time-zone fields: SET values, not shifted. The offset: 0 in a shifted
+    // copy, the source segment's own in one that keeps the times.
+    if (keep_times_) {
+      if (read<si8>(ds3, S3_RTO) != s.rto)
+        problem(drel, "recording_time_offset",
+                "is not the source's (a copy that keeps the times keeps it)");
+    } else if (read<si8>(ds3, S3_RTO) != 0) {
       if (in_window(read<si8>(ds3, S3_RTO)))
         leak(drel, "recording_time_offset", "holds a date from the source's range");
       problem(drel, "recording_time_offset", "is not 0");
@@ -2837,8 +2869,9 @@ class Verifier {
       time_field(read<si8>(a.body, off), read<si8>(b.body, off), loc,
                  "record body time at " + std::to_string(off), true);
     // Epoc / Curs id_number (+0) is an si8 a recorder may fill with a time.
-    // It is copied as is; a value in the recording range is reported.
-    if (a.type == "Epoc" || a.type == "Curs") {
+    // It is copied as is; a value in the recording range is reported (when
+    // shifting: a copy that keeps the times shows the dates anyway).
+    if (!keep_times_ && (a.type == "Epoc" || a.type == "Curs")) {
       ++rep_.times_checked;
       if (in_absolute_window(read<si8>(b.body, 0)))
         leak(loc, "record id_number", "holds a value inside the source's recording range");
@@ -2888,6 +2921,7 @@ class Verifier {
   const SourcePlan& plan_;
   const VerifyOptions& o_;
   const MetadataEdits* edits_;  // set = a transform
+  bool keep_times_ = false;     // anonymize without a shift: every time kept
   std::map<Uuid, Uuid> level_map_;  // transform: source level UUID -> the copy's
   // A cut (#103): set while a segment of the copy is checked.
   bool cut_segment_ = false;
@@ -2915,7 +2949,8 @@ std::string finding_key(const Finding& f) {
 /// `edits` set = verify a transform (MetadataEdits it was made with); unset =
 /// verify an anonymized copy (shift, VerifyOptions' clear flags).
 VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
-                         const SourcePlan& plan, const std::string& dst_path, si8 shift,
+                         const SourcePlan& plan, const std::string& dst_path,
+                         std::optional<si8> shift,
                          const VerifyOptions& o, const MetadataEdits* edits, const Control& ctl,
                          std::function<void(std::uint64_t)> progress) {
   VerifyReport rep;
@@ -2968,10 +3003,11 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
   }
 
   // The shift floor, re-checked: below it the leak window cannot tell a
-  // leak from a legitimately shifted time.
-  if (!edits && plan.has_times) {
+  // leak from a legitimately shifted time. (No shift: the times are kept,
+  // and every one is compared with the source's instead.)
+  if (!edits && shift && plan.has_times) {
     const si8 span = saturating_add(plan.last, -plan.first);
-    const si8 mag = shift == INT64_MIN ? INT64_MAX : (shift < 0 ? -shift : shift);
+    const si8 mag = *shift == INT64_MIN ? INT64_MAX : (*shift < 0 ? -*shift : *shift);
     if (mag < saturating_add(span, DAY_US))
       v.problem(dst_path, "shift", "|shift| is below the session's time span plus one day");
   }
@@ -3078,7 +3114,8 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
         for (; next < sc.segments.size(); ++next) {
           const si8 rto = segment_rto(
               load_time_series_metadata(src.read_all(sc.segments[next].tmet), o.password));
-          const si8 t = edits ? to_user_time(stored, rto) : to_user_time(stored, 0) - shift;
+          const si8 t = (edits || !shift) ? to_user_time(stored, rto)
+                                          : to_user_time(stored, 0) - *shift;
           if (t >= spans[next].first && t < spans[next].second) {
             ss = sc.segments.begin() + static_cast<std::ptrdiff_t>(next++);
             break;
@@ -3181,14 +3218,18 @@ Redactor copy_redactor(const SourcePlan& plan, const AnonymizeOptions& an, const
 /// `collect`: false = throw the first refusal (anonymize_session /
 /// transform_session), true = record every refusal and go on with the checks
 /// that do not depend on a failed one (check_anonymize / check_transform).
-/// Reads metadata only, never a `.tdat`. The anonymization checks (shift,
-/// identity in the new names, the offset convention, times hidden in record
-/// ids) run only under anonymize's rules; a transform copies every time as
-/// stored, so none of them applies to it.
+/// Reads metadata only, never a `.tdat`. The anonymization checks (identity
+/// in the new names) run only under anonymize's rules; the time checks (the
+/// shift, the offset convention, times hidden in record ids) only when it
+/// SHIFTS. A transform, and an anonymized copy that keeps the times, copy
+/// every time as stored, so none of those applies to them.
+/// `check_shift` false (redact_text): the shift's own size and sign are not
+/// checked; the shifting rules still apply when a shift is given.
 Preflight preflight(const std::string& src_path, const std::string& dst_path, const Rules& rules,
                     const Control& ctl, bool collect, bool check_shift) {
   const CopyOptions& o = *rules.copy;
   const AnonymizeOptions* an = rules.anon;
+  const bool shifting = rules.shifting();
   Preflight pf;
   auto add = [&](RefusalKind kind, std::string code, std::string message,
                  std::string channel = {}, std::string field = {}) {
@@ -3212,8 +3253,10 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
   ctl.check();
 
   // ---- options -----------------------------------------------------------
-  if (an && check_shift && an->shift_us == 0)
-    add(RefusalKind::InvalidArgument, "shift-zero", "shift_us must not be 0", {}, "shift_us");
+  if (shifting && check_shift && *an->shift_us == 0)
+    add(RefusalKind::InvalidArgument, "shift-zero",
+        "shift_us must not be 0 (leave the shift out to keep every time as it is)", {},
+        "shift_us");
   const bool selection_conflict = !o.channels.empty() && !o.exclude_channels.empty();
   if (selection_conflict)
     add(RefusalKind::InvalidArgument, "channel-selection-conflict",
@@ -3300,15 +3343,16 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
             (an ? "anonymizing" : "copying") + " needs the level-2 password",
         {}, "password");
   {
-    // A transform copies every time as stored, so how the offset convention
-    // reads them does not concern it; everything else (parts it could not
-    // copy whole) does.
+    // A transform (and an anonymized copy that keeps the times) copies every
+    // time as stored, with the offset it is read against, so how the offset
+    // convention reads them does not concern it; everything else (parts it
+    // could not copy whole) does.
     static const std::set<std::string> time_only = {
         "time-offset-disputed", "ambiguous-time-convention", "offset-assumed-zero",
         "times-unresolved"};
     std::vector<CopyRefusal> blockers;
     for (const auto& w : plan.summary.warnings)
-      if (w.blocks_anonymize && (an || !time_only.count(w.code)))
+      if (w.blocks_anonymize && (shifting || !time_only.count(w.code)))
         blockers.push_back(CopyRefusal{blocker_code(w.code), scrub_times(plan, w.message),
                                        RefusalKind::WriteConflict, {}, {}, w.code});
     if (!blockers.empty() && !collect) {
@@ -3321,9 +3365,12 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
     }
     for (auto& b : blockers) pf.refusals.push_back(std::move(b));
   }
-  if (an && plan.rto != 0)
+  if (shifting && plan.rto != 0)
     pf.notes.push_back("the source used meflib's recording-time offset; its times were read as "
                        "true UTC and the copy has recording_time_offset = 0");
+  else if (an && plan.rto != 0)
+    pf.notes.push_back("the source used meflib's recording-time offset; the copy keeps it with "
+                       "every time as stored, so it reads the same times");
 
   // ---- channel selection -------------------------------------------------
   {
@@ -3447,8 +3494,8 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
 
   // ---- the shift ---------------------------------------------------------
   bool first_time_refused = false;
-  if (an && check_shift && an->shift_us != 0 && plan.has_times) {
-    const si8 shift_us = an->shift_us;
+  if (shifting && check_shift && *an->shift_us != 0 && plan.has_times) {
+    const si8 shift_us = *an->shift_us;
     const si8 span = saturating_add(plan.last, -plan.first);
     const si8 mag =
         shift_us == INT64_MIN ? INT64_MAX : (shift_us < 0 ? -shift_us : shift_us);
@@ -3537,11 +3584,12 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
   // offset, moved to 0 or below, out of range) is refused here first. Only
   // the .tidx/.tdat headers and block times are left to the copy pass. After
   // the first such refusal the rest are skipped (one per cause is enough).
-  // A transform writes times as stored: nothing to check.
-  const Shifter sh{plan.rto, an && check_shift ? an->shift_us : 0};
+  // A transform, and a copy that keeps the times, write times as stored:
+  // nothing to check.
+  const Shifter sh{plan.rto, shifting && check_shift ? *an->shift_us : 0};
   bool time_refused = first_time_refused;  // that refusal covers the rest
   auto shift_time = [&](si8 v, const std::string& what, bool body, const std::string& channel) {
-    if (!an || time_refused) return;
+    if (!shifting || time_refused) return;
     try {
       (void)sh(v, what, body);
     } catch (...) {
@@ -3664,7 +3712,7 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
             "record index of " + where + " has no entry for record " + std::to_string(i) +
                 "; which time is right is unknown",
             channel);
-      if (an && (r.type == "Epoc" || r.type == "Curs") && layout_of(r) &&
+      if (shifting && (r.type == "Epoc" || r.type == "Curs") && layout_of(r) &&
           in_absolute_window(plan, read<si8>(r.body, 0)))
         add(RefusalKind::WriteConflict, "id-number-time",
             "record " + std::to_string(i) + " (" + r.type + ") of " + where +
@@ -3735,7 +3783,8 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
 
 /// verify_anonymized / verify_transform: plan the source, then verify_impl
 /// with its own progress over both sessions.
-VerifyReport verify_standalone(const std::string& src, const std::string& dst, si8 shift_us,
+VerifyReport verify_standalone(const std::string& src, const std::string& dst,
+                               std::optional<si8> shift_us,
                                const VerifyOptions& options, const MetadataEdits* edits,
                                const Control& ctl) {
   const auto source = open_session_source(src);
@@ -3758,8 +3807,9 @@ VerifyReport verify_standalone(const std::string& src, const std::string& dst, s
 
 // ---------------------------------------------------------------------------
 
-VerifyReport verify_anonymized(const std::string& src, const std::string& dst, si8 shift_us,
-                               const VerifyOptions& options, const Control& ctl) {
+VerifyReport verify_anonymized(const std::string& src, const std::string& dst,
+                               std::optional<si8> shift_us, const VerifyOptions& options,
+                               const Control& ctl) {
   return verify_standalone(src, dst, shift_us, options, nullptr, ctl);
 }
 
@@ -3794,10 +3844,9 @@ CopyCheck check_of(Preflight& pf) {
 }  // namespace
 
 AnonymizeCheck check_anonymize(const std::string& src, const std::string& dst,
-                               const AnonymizeOptions& options, const Control& ctl,
-                               bool check_shift) {
+                               const AnonymizeOptions& options, const Control& ctl) {
   Preflight pf = preflight(src, dst, Rules{&options, &options, nullptr}, ctl, /*collect=*/true,
-                           check_shift);
+                           /*check_shift=*/true);
   AnonymizeCheck c;
   c.pseudonym = pf.pseudonym;
   static_cast<CopyCheck&>(c) = check_of(pf);
@@ -3869,7 +3918,7 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
   const std::string& new_name = pf.new_name;
   const std::string& pseudonym = pf.pseudonym;
 
-  Shifter sh{plan.rto, an ? an->shift_us : 0};
+  Shifter sh{plan.rto, rules.shifting() ? *an->shift_us : 0};
   std::optional<Redactor> red;
   if (an) {
     red = copy_redactor(plan, *an, pf);
@@ -3990,7 +4039,8 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
       vo.clear_location = an->clear_location;
       vo.clear_descriptions = an->clear_descriptions;
     }
-    rep.verification = verify_impl(src_path, src, plan, root.string(), an ? an->shift_us : 0, vo,
+    rep.verification = verify_impl(src_path, src, plan, root.string(),
+                                   an ? an->shift_us : std::optional<si8>(0), vo,
                                    an ? nullptr : rules.edits, ctl, on_bytes);
     // verify alone cannot tell a dropped channel from an excluded one; here
     // the selection is known.

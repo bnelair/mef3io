@@ -108,7 +108,7 @@ rep = mef3io.transform_session("patient.mefd", "seizure_2h.mefd",
 - **Every other rule on this page still applies**, so a cut combines with
   channels, passwords, a new name and metadata edits in one pass.
 - **With `anonymize_session`**, the same `time_range` (in the original
-  times) cuts before every time is shifted.
+  times) cuts before any shift is applied.
 
 **Which samples a cut keeps:** exactly those whose time is at or after
 `start` and before `end`. The copy's first sample is the first one at or after
