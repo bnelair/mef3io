@@ -662,16 +662,21 @@ struct Scanner {
   /// file `session_name`.rdat, anything else).
   Result path(const std::string& name, const std::string& session_name,
               const std::set<std::string>& kept) const {
-    const std::string base = name.substr(0, name.rfind('.'));
+    const auto dot = name.rfind('.');
+    const std::string base = name.substr(0, dot);
+    const std::string ext = dot == std::string::npos ? std::string() : name.substr(dot);
     if (base == session_name) return text(base);
-    // "<ch>.timd", "<ch>.rdat": the base itself; "<ch>-NNNNNN.segd" and the
-    // segment's files: the base without its segment number. The base is
-    // tried first, so a channel "LAH-12" owns "LAH-12.timd".
+    // "<ch>.timd", "<ch>.rdat": the base itself. The base is tried first, so
+    // a channel "LAH-12" owns "LAH-12.timd".
     if (kept.count(base)) return channel(name);
+    // "<ch>-NNNNNN.segd" and the segment's files: the channel part only. The
+    // segment number is mef3io's own counter, not source text, and is
+    // checked on its own (folder suffix = the .tmet header's number); matched
+    // here, a subject ID "PT0001" would refuse "-000001" (#143).
     const auto dash = base.rfind('-');
     if (dash != std::string::npos && all_digits(base.substr(dash + 1)) &&
         kept.count(base.substr(0, dash)))
-      return channel(name);
+      return channel(base.substr(0, dash) + ext);
     return text(name);
   }
 
@@ -2196,6 +2201,9 @@ class Verifier {
     report(scan_.path(name, dst_.session_name(), kept_), loc, "path");
   }
 
+  /// The copy's channels, from the COPY's own layout. Never the pre-flight's
+  /// selection (pf.kept): verify must stay independent of the plan it checks
+  /// (the pre-flight reuses this class's Scanner, never the other way round).
   void set_kept(std::set<std::string> k) { kept_ = std::move(k); }
 
   bool transform() const { return edits_ != nullptr; }
@@ -3862,34 +3870,36 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
   // ---- kept channel names (#143) ------------------------------------------
   // A kept channel's name stays verbatim: in its folder and file names, its
   // universal headers' channel_name and the Seiz entries naming it. The
-  // copy's verification applies the channel-name rule (Scanner::channel) to
-  // all of them; whatever it would refuse is refused HERE, before anything
-  // is written, on the names the copy will produce (segments numbered as
-  // above; a cut renumbers from 0, so 0..n-1 covers what it can keep). The
-  // verifier still makes its own call on what the copy actually holds.
+  // copy's verification applies the channel-name rule (Scanner::channel, and
+  // Scanner::path for the folder and file names) to all of them; whatever it
+  // would refuse is refused HERE, before anything is written. Only names the
+  // copy writes are checked: record files where the source has them, segment
+  // files where the channel has segments (Scanner::path leaves the segment
+  // number out, so one name per kind stands for every segment, cut or not).
+  // ONE-WAY reuse: the pre-flight calls the verifier's matcher; the Verifier
+  // must never be handed pf.kept (or anything else of the plan's selection),
+  // it takes the kept channels from the copy's own layout.
   if (an && dst_named) {
     const Scanner scan = build_scanner(plan, pf.new_name, an->clear_subject, an->clear_location,
                                        pf.excluded, pf.kept, pf.pseudonym);
-    std::map<std::string, std::vector<int>> numbers;  // per kept data channel
-    for (const auto& c : plan.layout.channels) {
-      if (!pf.kept.count(c.name)) continue;
-      auto& n = numbers[c.name];
-      for (std::size_t i = 0; i < c.segments.size(); ++i) {
-        if (o.time_range) {
-          n.push_back(static_cast<int>(i));
-        } else if (const auto it = pf.segment_numbers.find(c.segments[i].tmet);
-                   it != pf.segment_numbers.end()) {
-          n.push_back(it->second);
-        }
-      }
-    }
+    std::map<std::string, const detail::LayoutChannel*> data;
+    for (const auto& c : plan.layout.channels) data[c.name] = &c;
     for (const auto& ch : pf.kept) {
       ctl.check();
-      std::vector<std::string> names = {ch, ch + ".timd", ch + ".rdat", ch + ".ridx"};
-      for (int number : numbers[ch]) {
-        const std::string stem = canonical_segment_stem(ch, number);
-        for (const char* ext : {".segd", ".tmet", ".tidx", ".tdat", ".rdat", ".ridx"})
-          names.push_back(stem + ext);
+      std::vector<std::string> names = {ch, ch + ".timd"};
+      if (src.exists(ch + ".timd/" + ch + ".rdat")) {
+        names.push_back(ch + ".rdat");
+        names.push_back(ch + ".ridx");
+      }
+      if (const auto it = data.find(ch); it != data.end() && !it->second->segments.empty()) {
+        const std::string stem = canonical_segment_stem(ch, 0);
+        for (const char* ext : {".segd", ".tmet", ".tidx", ".tdat"}) names.push_back(stem + ext);
+        const auto& segs = it->second->segments;
+        if (std::any_of(segs.begin(), segs.end(),
+                        [&](const auto& seg) { return src.exists(seg.rdat()); })) {
+          names.push_back(stem + ".rdat");
+          names.push_back(stem + ".ridx");
+        }
       }
       for (const auto& name : names) {
         // The bare name: its channel_name fields and Seiz entries (verify's
@@ -3900,8 +3910,8 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
         add(RefusalKind::WriteConflict, "channel-name-identity",
             "kept channel " + ch + ": " +
                 (name == ch ? std::string("its name, which the copy keeps,")
-                            : "the folder or file name " + name + " the copy makes for it") +
-                " contains " + r.refuse +
+                            : "the folder and file names the copy makes from it") +
+                " contain" + (name == ch ? "s " : " ") + r.refuse +
                 "; leave the channel out (exclude_channels) for this copy",
             ch, "channels");
         break;  // one refusal per channel
@@ -4138,7 +4148,10 @@ std::vector<std::string> redact_text(const std::string& src, const std::string& 
                            /*check_shift=*/false);
   // What the copy itself would refuse, it refuses here too: a locked section
   // 3 leaves the subject names out of the rules, an unknown channel or a name
-  // carrying the identity changes them. Only what does not decide the
+  // carrying the identity changes them. A kept channel named after the
+  // patient (channel-name-identity) decides it too: the Redactor never edits
+  // inside a kept channel's name (`protect`), so "Roe slept" with a kept
+  // channel "Roe" would come back unchanged. Only what does not decide the
   // redaction is let through: the destination being in use, and the text
   // the redaction cannot take out (which is what the caller asks about).
   static const std::set<std::string> irrelevant = {"dst-exists", "partial-exists",

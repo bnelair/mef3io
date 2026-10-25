@@ -223,8 +223,10 @@ name) also a 3+-letter value equal to a letter/digit part ("Roe1") or a
 4+-char value inside a token ("JaneRoe"); else NOTE (256-channel montages
 hit "12"/"P3"/"EEG"). That rule (`Scanner::channel`, paths via
 `Scanner::path`) is ALSO run by the pre-flight (#143) on each kept channel's
-name and the folder/file names the copy makes from it (segment numbers from
-the .tmet UH; a cut: 0..n-1) -> `channel-name-identity` before any write;
+name and the folder/file names the copy writes from it (`Scanner::path`
+drops the segment number of `<ch>-NNNNNN`: mef3io's counter, checked on its
+own; ID "PT0001" vs "-000001" refused every multi-segment copy) ->
+`channel-name-identity` before any write;
 verify still applies it to what the copy holds (the pre-flight calls the
 verifier's matcher, as text-unremovable does; never the other way round). The copy name/pseudonym holding an identity value
 (3+ substring, shorter whole token; own-name excuse only for <3 chars) is a

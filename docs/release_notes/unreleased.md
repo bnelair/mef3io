@@ -103,6 +103,12 @@ Overlaps that the rule only notes ("12" in "LAH12", "P3", a session called
 "EEG" vs "EEG1") still pass. Leave such a channel out with
 `exclude_channels`. Transforms are unaffected.
 
+- **Segment numbers are no longer read as the subject ID.** The copy's
+  check matched the number in a segment folder's name (`Fz-000001.segd`)
+  against the ID's digits, so a subject `PT0001` with more than one segment
+  per channel could not be anonymized at all (`verify-failed`). The number
+  is mef3io's own counter and is checked on its own; only the channel part
+  of those names is searched now, by the check and by the verification.
 - **Migration:** code that caught `verify-failed` for this case now gets
   `channel-name-identity`, raised as the same `WriteConflictError`, before
   the copy starts.

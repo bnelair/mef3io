@@ -355,9 +355,6 @@ CASES = {
     "a channel named after the session": (
         "channel-name-identity", _named("S001.mefd", channels=("night7", "C4"),
                                         subject=mef3io.Subject(), folder="night7.mefd")),
-    "the segment files a channel's name makes": (
-        "channel-name-identity", _named("S001.mefd", channels=("C3", "C4"),
-                                        subject=mef3io.Subject(id="PT000000"))),
     "a body time the shift takes below 0": (
         "shift-not-positive",
         _mutated(_record_file_header_before_the_shift, shift=-(START - DAY // 2))),
@@ -598,6 +595,40 @@ def test_verify_still_refuses_a_channel_named_after_the_patient(tmp_path):
     fields = {(p.field, p.message) for p in rep.problems}
     assert ("path", "contains a subject name or ID") in fields
     assert ("universal header channel_name", "contains a subject name or ID") in fields
+
+
+def _multi_segment(path, channels, subject, n_segments=3):
+    with mef3io.Writer(str(path), overwrite=True,
+                       metadata=mef3io.Metadata(subject=subject)) as w:
+        for k in range(n_segments):
+            for i, ch in enumerate(channels):
+                w.write(ch, _signal(2560, i), START + k * 60 * SECOND, FS, precision=3,
+                        new_segment=k > 0)
+    return Path(path)
+
+
+@pytest.mark.parametrize("shifted", [True, False], ids=["shift", "keep-times"])
+@pytest.mark.parametrize("cut", [False, True], ids=["whole", "cut-in-segment-0"])
+def test_segment_numbers_are_not_matched_against_the_id(tmp_path, shifted, cut):
+    """The segment number in "<ch>-000001.segd" is mef3io's own counter, not
+    source text: subject ID "PT0001" (digit run "0001") must not refuse a
+    multi-segment session, neither up front nor in verify; a cut inside
+    segment 0 likewise. A channel name holding the ID still is refused."""
+    src = _multi_segment(tmp_path / "s.mefd", ("Fz", "Cz"), mef3io.Subject(id="PT0001"))
+    kw = {"time_range": (START + SECOND, START + 5 * SECOND)} if cut else {}
+    args = (src, tmp_path / "S001.mefd") + ((SHIFT,) if shifted else ())
+    rep = _quiet(mef3io.anonymize.check, *args, **kw)
+    assert rep.ok, rep.summary()
+    out = _quiet(mef3io.anonymize_session, *args, **kw)
+    assert out.verification.ok, out.verification.summary()
+    assert any(p.name.endswith("-000001.segd")
+               for p in (tmp_path / "S001.mefd").rglob("*.segd")) != cut
+    bad = _multi_segment(tmp_path / "b" / "s.mefd", ("Fz", "Cz_0001"),
+                         mef3io.Subject(id="PT0001"))
+    rep = _quiet(mef3io.anonymize.check, bad, tmp_path / "S002.mefd",
+                 *((SHIFT,) if shifted else ()), **kw)
+    assert rep.codes == ("channel-name-identity",), rep.summary()
+    assert rep.refusals[0].channel == "Cz_0001"
 
 
 def test_channel_name_identity_does_not_concern_a_transform(tmp_path):
