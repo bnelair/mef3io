@@ -57,6 +57,7 @@ COPY_REFUSAL_CODES: Dict[str, Tuple[str, str]] = {
     # a cut (time_range)
     "time-range-invalid": ("ValueError", "check"),
     "time-range-empty": ("ValueError", "check"),
+    "time-range-offset-disputed": ("WriteConflictError", "check"),
     # the copy's names
     "rename-name-mismatch": ("ValueError", "check"),
     "name-too-long": ("ValueError", "check"),

@@ -22,7 +22,7 @@ The key entry points:
   checking, repairing and recovering sessions ([Validation](../validation.md)).
 - **`mef3io::anonymize_session`** / **`mef3io::check_anonymize`** /
   **`mef3io::verify_anonymized`** (`anonymize.hpp`) — a de-identified copy
-  with every time shifted, every check it makes before writing (without
+  with every time kept (the default) or shifted, every check it makes before writing (without
   writing), and its check against the source
   ([De-identification](../anonymization.md)). Refusals are thrown with the
   `mef3io::AnonymizeError` mixin carrying a stable code

@@ -117,8 +117,9 @@ start after the segment end) and throw `WriteConflictError` on violation.
 ## De-identified copies
 
 `mef3io::anonymize_session` (`anonymize.hpp`) writes a de-identified copy of
-a session: every time moved by `shift_us`, identity removed, samples copied
-byte for byte, verified against the source before it is published. What it
+a session: identity removed, samples copied byte for byte, every time kept
+(the default) or moved by `shift_us` when it is set, verified against the
+source before it is published. What it
 does, and every refusal, is described in
 [De-identification](anonymization.md).
 
@@ -126,7 +127,7 @@ does, and every refusal, is described in
 #include "mef3io/anonymize.hpp"
 
 mef3io::AnonymizeOptions opt;
-opt.shift_us = shift;
+opt.shift_us = shift;              // std::optional: leave unset to keep every time
 opt.exclude_channels = {"ECG"};
 
 mef3io::AnonymizeCheck chk = mef3io::check_anonymize("patient.mefd", "S001.mefd", opt);

@@ -72,7 +72,10 @@ Copy engine (#73, `core/src/session_copy.cpp`): anonymize_session and
 transform_session are ONE driver (`run_copy`: preflight -> Copier pass into
 `<dst>.partial` -> fsync -> `verify_impl` -> rename), ONE `preflight()`, ONE
 `Copier` and ONE `Verifier`, steered by `Rules` (`anon` set = anonymize;
-unset = transform with `edits`). NEVER fork a second copy path for a new
+unset = transform with `edits`; anonymize either SHIFTS, `Rules::shifting()`
+= `AnonymizeOptions::shift_us` set, or KEEPS every time,
+`Rules::keep_times()`, the 2.0.0 DEFAULT, which is the transform's verbatim
+time path inside the same rules). NEVER fork a second copy path for a new
 operation (cut/merge #103, re-encode #121): add rules or options to this one.
 CUT (#103, `CopyOptions::time_range` + `exact`, both operations): decided per
 block from the RED HEADER's time and count; sample i of a block at t lies at
@@ -80,7 +83,8 @@ t + i*1e6/fs (`sample_time`), a block keeps [i0, i1) (`window_slice`); fully
 outside = dropped (engine flags the next kept block), straddling + exact =
 `trim_block` decodes, slices and RE-ENCODES with red::encode_block (source's
 encryption level with the copy's keys, plain without passwords; time in the
-source's stored convention via `stored_like`, shifted when anonymizing) and
+source's stored convention via `stored_like`, shifted when anonymizing with a
+shift) and
 hands it to the engine as `CopyBlock::replacement` (the engine sets offset,
 block_bytes, CRC; requires `start_sample`). A segment's data is now copied
 BEFORE its .tmet (`copy_segment`), so section 2's derived fields
@@ -111,8 +115,25 @@ to exactly its window samples (check_trimmed_block) with the time
 stored_like + shift; leftover/missing/duplicated/reordered copy blocks fail;
 the source blocks just outside the range must hold nothing of the window.
 Copy segments are matched to source segments by TIME (each one's own rto).
-Cut UH times / other derived s2 fields are left to the validator (verify
-runs it), so a cut NEVER excuses validator findings more loosely than the
+OFFSETS IN A CUT (review of #144; transform had the bug too): everything is
+placed by the offset ITS file is stored against, never one session-wide
+value (plan.rto is 0 when segments disagree): the pre-flight's first look
+and window per segment (`segment_rto_of`; `SourcePlan::segment_rtos` read
+only when inspect says "disputed"), records per level (`level_rto_of` =
+Session::agreed_rto's rule: segment's own; channel/session = what all their
+segments agree on, a segment-less channel takes the session's) in the
+Copier (`set_level_rto`) and in verify (its OWN source-metadata reads, not
+the plan). A channel/session record file with an offset-dependent (negated)
+time and no agreed offset is refused under a cut:
+`time-range-offset-disputed` (shared code; the Reader refuses such files
+too). verify also re-checks every channel run_copy left out as "no samples
+in the window" against the source (each segment's own rto, block HEADERS),
+and a standalone verify with time_range NOTES a missing channel that has
+samples. A cut segment's UH start/end (.tmet/.tidx/.tdat) is checked by
+verify itself against the source blocks it matched in lockstep (first kept
+sample .. end of the last, + shift when shifting, read with the copy's own
+rto): the validator's time checks stand down at rto != 0. Other derived s2
+fields are left to the validator (verify runs it), so a cut NEVER excuses validator findings more loosely than the
 exact key (check|channel|segment|field|message): a source already failing
 e.g. times.recording-duration gets its cut refused (repair first). A
 check+channel key was tried and rejected in review: on legacy mef_tools
@@ -241,10 +262,27 @@ size/count fields, RED payload + stats compared, not scanned. (2) Build in
 `<dst>.partial`, fsync, verify, THEN rename; any failure/cancel removes it.
 (3) Never re-seal a failing block or record CRC. (4) Source-encrypted RED
 blocks are re-encrypted at their level with the new keys, decrypted only
-with no output passwords; never silently downgraded. (5) |shift| >= span +
-1 day, all times stay > 0. (6) Sentinels (UUTC_NO_ENTRY, 0, body -1) never
-shifted; every time keeps its stored sign; output rto 0, GMT 0, DST
-NO_ENTRY. (7) Every text field is REWRITTEN whole (`write_string`
+with no output passwords; never silently downgraded. KEEP-TIMES MODE (no
+shift, the default since 2.0.0; `tests/test_p40_anonymize_keep_times.py`,
+test_p32 `test_check_agrees_without_a_shift`): `std::optional<si8>
+shift_us` is the ONE switch (never a separate flag; 0 stays `shift-zero`);
+Copier::time returns every stored time verbatim, each segment's s3 rto is
+KEPT (the stored times are read against it, so user times = the source's;
+no rto-disputed check), GMT 0 / DST NO_ENTRY in both modes (location-
+revealing, no returned time uses them). Verify: `keep_times_` -> every
+time_field must EQUAL the source's stored value and each segment's rto the
+source segment's; no time-leak window, no id_number window, no shift floor;
+everything else (names, regions, UUIDs, provenance 6, scrub_times) as when
+shifting. Skipped without a shift (pre-flight, `shifting`): shift-zero/
+floor/not-positive, the time-only inspect blockers (rto-disputed,
+time-before-rto, rto-unreadable), the per-field Shifter run (time-overflow),
+id-number-time. check(shift_us=None) = check of THIS copy (it used to mean
+"shifted, shift not chosen yet"; C++ check_anonymize lost `check_shift`;
+preflight keeps an internal check_shift=false for redact_text only). The
+report's source_* key is handled the same in both modes. (5) WHEN SHIFTING:
+|shift| >= span + 1 day, all times stay > 0. (6) WHEN SHIFTING: Sentinels
+(UUTC_NO_ENTRY, 0, body -1) never shifted; every time keeps its stored
+sign; output rto 0, GMT 0, DST NO_ENTRY. (7) Every text field is REWRITTEN whole (`write_string`
 zero-fills; a guarded "if changed" left hidden bytes after the NUL), and
 foreign regions are zeroed: UH, s1/s2/s3, `.tidx` entry 40/45/48, RED
 header 5/8. Segment folders renamed canonically. Unknown record bodies are
@@ -272,8 +310,10 @@ that test_p32 keeps equal: `REFUSAL_CODES` (python/mef3io/anonymize.py),
 the table in docs/anonymization.md (code, type, check|copy|defensive), and
 the cases in test_p32 (every non-defensive code must be reached, no
 defensive one may be). Copy-only: block-crc, data-damaged, verify-failed
-(and a time the Shifter refuses in a .tidx/.tdat UH or a block; every
-.tmet UH and record-file time goes through the SAME Shifter in preflight).
+(and a time the Shifter refuses in a .tidx/.tdat UH or a block; when
+shifting, every .tmet UH and record-file time goes through the SAME Shifter
+in preflight). The docs table's "(shift only)" markers = test_p32's
+SHIFT_ONLY + time-overflow (pinned in test_every_code_is_documented_and_reached).
 Messages NEVER carry a source time (or rto): built without them, and
 `scrub_times()` replaces any 10+-digit number in the source window in
 VerifyIssue text, inherited findings, inspect blocker and shared-code
