@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "mef3io/source.hpp"
@@ -70,52 +69,8 @@ struct SessionLayout {
   std::vector<LayoutChannel> incomplete_channels;
 };
 
-/// What one listing says is in a folder, answering "does this file exist?"
-/// the way the former per-file exists() calls did, without a request per
-/// file: on a network share each one is a full round trip (#141). A name the
-/// listing does not show (or shows as a link, which may dangle) is confirmed
-/// with exists(), so a case-insensitive volume or a dangling link still gets
-/// exactly the old answer — and a complete segment costs no exists() at all.
-/// A folder that cannot be listed falls back to exists() for every name.
-class FolderListing {
- public:
-  /// Lists `dir`; a listing that fails leaves every answer to exists()
-  /// (e.g. a folder that can be traversed but not read).
-  FolderListing(const SessionSource& src, std::string dir) : src_(src), dir_(std::move(dir)) {
-    try {
-      entries_ = src.list_dir(dir_);
-      listed_ = true;
-    } catch (...) {
-      listed_ = false;
-    }
-  }
-  /// From a listing the caller already made (and let throw).
-  FolderListing(const SessionSource& src, std::string dir, std::vector<SourceDirEntry> entries)
-      : src_(src), dir_(std::move(dir)), entries_(std::move(entries)), listed_(true) {}
-  /// Does `<dir>/<leaf>` exist (as anything, like SessionSource::exists)?
-  bool has(const std::string& leaf) const {
-    if (listed_) {
-      for (const auto& e : entries_)
-        if (e.name == leaf) return !e.is_symlink || src_.exists(path(leaf));
-    }
-    return src_.exists(path(leaf));
-  }
-  const std::vector<SourceDirEntry>& entries() const { return entries_; }
-  std::string path(const std::string& leaf) const {
-    return dir_.empty() ? leaf : dir_ + "/" + leaf;
-  }
-
- private:
-  const SessionSource& src_;
-  std::string dir_;
-  std::vector<SourceDirEntry> entries_;
-  bool listed_ = false;
-};
-
-/// Walk the root and every `.timd` and `.segd`: one listing per folder and
-/// NO per-file request on a complete session (#141; it used to be three
-/// exists() per segment). The answers are the ones exists() gave — see
-/// FolderListing.
+/// Walk the root and every `.timd`. One listing per channel; three existence
+/// checks per segment, exactly what the Session always did.
 inline SessionLayout discover_layout(const SessionSource& src) {
   SessionLayout out;
   for (const auto& entry : src.list_dir("")) {
@@ -128,20 +83,16 @@ inline SessionLayout discover_layout(const SessionSource& src) {
 
     LayoutChannel ch;
     ch.name = entry.name.substr(0, entry.name.size() - 5);
-    // A .timd that cannot be listed still fails the open, as it always has.
-    const FolderListing timd(src, entry.name, src.list_dir(entry.name));
-    for (const auto& seg_entry : timd.entries()) {
+    for (const auto& seg_entry : src.list_dir(entry.name)) {
       if (!seg_entry.is_dir || !seg_entry.name.ends_with(".segd")) continue;
       const std::string stem = seg_entry.name.substr(0, seg_entry.name.size() - 5);
       const std::string dir = entry.name + "/" + seg_entry.name;
-      const FolderListing segd(src, dir);
       LayoutSegment seg;
       seg.number = layout_segment_number(stem);
       seg.tmet = dir + "/" + stem + ".tmet";
       seg.tidx = dir + "/" + stem + ".tidx";
       seg.tdat = dir + "/" + stem + ".tdat";
-      const bool has[3] = {segd.has(stem + ".tmet"), segd.has(stem + ".tidx"),
-                           segd.has(stem + ".tdat")};
+      const bool has[3] = {src.exists(seg.tmet), src.exists(seg.tidx), src.exists(seg.tdat)};
       if (has[0] && has[1] && has[2]) {
         ch.segments.push_back(std::move(seg));
         continue;
@@ -159,8 +110,9 @@ inline SessionLayout discover_layout(const SessionSource& src) {
         }
       }
       for (const char* ext : {".rdat", ".ridx"}) {
-        if (segd.has(stem + ext)) {
-          bad.present.push_back(dir + "/" + stem + ext);
+        const std::string f = dir + "/" + stem + ext;
+        if (src.exists(f)) {
+          bad.present.push_back(f);
           if (std::string(ext) == ".rdat") bad.has_records = true;
         }
       }
@@ -171,7 +123,7 @@ inline SessionLayout discover_layout(const SessionSource& src) {
                 return a.number < b.number;
               });
     if (ch.segments.empty()) {
-      if (timd.has(ch.name + ".rdat")) out.record_only_channels.push_back(ch.name);
+      if (src.exists(ch.rdat())) out.record_only_channels.push_back(ch.name);
       out.incomplete_channels.push_back(std::move(ch));
       continue;
     }

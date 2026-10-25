@@ -202,30 +202,31 @@ writers' files.
 ## Opening over a slow file system
 
 On a network share every file-system request is a round trip (around
-110 ms over SMB in one report), and opening a session is a sequence of
-small requests: a listing per folder and a read of each segment's
-metadata file. Opening now makes exactly one listing per folder (session,
-channel, segment) and one bounded read per segment, and no per-file
-existence check or size probe on a complete session. A C++ test pins
-those counts.
+110 ms over SMB in one report), and opening a session makes its requests one
+after another: a listing of the session and of each channel folder, three
+existence checks per segment, and a read of each segment's metadata file.
 
-Requests per open, counted at the library's file-access layer, and the open
-time with a fixed delay added to each request (2026-10-25):
+Counting the library's own requests is not the same as counting round trips.
+Replacing the three existence checks with one listing of each segment folder
+halves the library's count, but a listing is several system calls (open,
+read the entries, close), where an existence check is one. Measured, it
+increased the system calls by about 10%, slowed a local open by 10-20%, and
+gained only 12% on a pass-through FUSE file system with 2 ms added per
+request. It was not kept.
 
-| session | requests before / after | 20 ms per request, before / after |
+What was kept is reading each metadata file with one bounded read of its
+fixed size. 209 channels x 10 segments, 2026-10-25:
+
+| | before | after |
 |---|---|---|
-| 64 channels x 1 segment | 321 / 193 | 6.5 s / 3.9 s |
-| 64 channels x 10 segments | 2,625 / 1,345 | 53.0 s / 27.3 s |
-| 209 channels x 1 segment | 1,046 / 628 | 21.1 s / 12.7 s |
-| 209 channels x 10 segments | 8,570 / 4,390 | 173.0 s / 89.1 s |
+| system calls per open (local disk, strace) | 20,454 | 14,184 |
+| FUSE, 2 ms per request, attributes cached 1 s: kernel requests / time | 17,826 / 43.8-48.0 s | 17,822 / 43.4-43.8 s |
+| FUSE, 2 ms per request, no attribute caching: kernel requests / time | 47,255 / 115.1-116.5 s | 45,165 / 108.8-110.9 s |
 
-That model counts a folder listing as one request. An operating system
-turns a listing into several (open, read the entries, close), so the saving
-at the file-system level is smaller. A pass-through FUSE file system with
-2 ms added to every kernel request opened 209 channels x 10 segments in
-43.7 s before and 38.6 s after (-12%), with about the same number of kernel
-requests. Most of the remaining time is requests made one after another,
-which later work addresses by making them in parallel.
+The local saving is the three seeks per segment that sized the file. A file
+system that re-checks attributes on a seek to the end saves one request per
+segment. The large gain for slow shares comes from making the requests in
+parallel.
 
 ## Reproducing
 
@@ -236,7 +237,7 @@ python benchmarks/compression_test.py
 python benchmarks/long_session_benchmark.py --with-mef-tools
 python benchmarks/access_modes_benchmark.py
 python benchmarks/mef_benchmark.py
-# open cost per request (C++ test suite, hidden case)
+# open cost with a delay per library request (C++ test suite, hidden case)
 build-core/mef3io_tests "[.open-bench]"
 ```
 

@@ -16,10 +16,6 @@ namespace mef3io {
 struct SourceDirEntry {
   std::string name;
   bool is_dir = false;
-  /// A symbolic link (DirectorySource only; a tar member never is one). A
-  /// listed link may dangle, so a caller that takes "listed" for "exists"
-  /// confirms a link with exists().
-  bool is_symlink = false;
 };
 
 /// Read-only view of a session tree. Paths are source-relative, always

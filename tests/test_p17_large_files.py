@@ -299,11 +299,11 @@ def _write_segments(path, segments, channels=("ch1", "ch2")):
 
 
 def test_opening_reads_each_tmet_record_not_its_padding(tmp_path):
-    """#141: a .tmet is read with ONE bounded request of METADATA_FILE_BYTES.
+    """#141: a .tmet is read with ONE bounded read of METADATA_FILE_BYTES.
 
     Foreign writers append bytes past the fixed-length record. Reading the
-    file whole cost a size probe per segment (a round trip on a network
-    share) and pulled the padding in; the bounded read does neither."""
+    file whole took three seeks to size it and pulled the padding in; the
+    bounded read does neither."""
     path = tmp_path / "padded.mefd"
     segments, pad = 10, 1 << 20
     _write_segments(path, segments)
@@ -342,16 +342,21 @@ class _PyFsCalls:
 
 
 def test_the_python_side_of_an_open_is_not_per_segment(tmp_path, monkeypatch):
-    """#141: Reader.__init__ (no cache=) adds no per-segment or per-channel
-    file-system call on top of the C++ open."""
-    counts = {}
+    """#141: Reader.__init__ (no cache=) adds no per-segment file-system call
+    on top of the C++ open (the C++ side is pinned by test_open_calls.cpp)."""
+    counts, control = {}, {}
     for segments in (1, 12):
         path = tmp_path / f"s{segments}.mefd"
         _write_segments(path, segments, channels=tuple(f"ch{i}" for i in range(6)))
-        monkeypatch.undo()
         calls = _PyFsCalls(monkeypatch)
         r = mef3io.Reader(str(path))
         [r.info(c) for c in r.channels]
         counts[segments] = calls.n
+        # Positive control: a cache= open does Python-side I/O (it lists the
+        # session for its signature), so a counter that silently stopped
+        # intercepting would fail here instead of passing on 0 == 0.
+        mef3io.Reader(str(path), cache=str(tmp_path / f"c{segments}.mef3cache"))
+        control[segments] = calls.n - counts[segments]
         monkeypatch.undo()
+    assert all(n > 0 for n in control.values()), control
     assert counts[1] == counts[12], counts

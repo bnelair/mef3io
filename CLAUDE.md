@@ -530,35 +530,36 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   too, and add a case to `tests/test_p31_gil_release.py`, which measures the
   main thread's longest stall (best of 3; skips a call under 40 ms) while a
   worker runs the call on a 2400-segment channel.
-- **COUNT REQUESTS ON THE OPEN PATH, not just bytes (#141).** On an SMB
-  share every file-system request is a ~110 ms round trip and the open is
-  serial, so a 209-channel session took 11-24 s to open. The open now costs
-  exactly `1 + channels + segments` listings (root, each `.timd`, each
-  `.segd`) plus ONE `read_head(tmet, METADATA_FILE_BYTES)` per segment, and
-  ZERO exists()/file_size()/read_all() on a complete session —
-  `core/tests/test_open_calls.cpp` pins it through `CountingSource`
-  (core/tests/counting_source.hpp: counts by kind, optional fixed delay per
-  request; `Session`/`Reader` take a `shared_ptr<const SessionSource>` for
-  it). `discover_layout` answers "does this file exist" from the `.segd`
-  listing (`FolderListing`); a name the listing does not show, or shows as a
-  symlink (may dangle), is confirmed with exists(), and a `.segd` that cannot
-  be listed falls back to exists() per name — so the answers, the
-  incomplete-segment report and problems() are EXACTLY what the old
-  three-exists()-per-segment walk gave (the test keeps that walk as a
-  reference and compares). A `.timd` that cannot be listed still throws.
-  `SessionSource::read_head` = first min(size, n) bytes in one request (a
-  short file comes back short, so the loader's ">= METADATA_FILE_BYTES"
-  check fails with the same message; padding past the record is never read
-  — rchar-pinned in test_p17). The Python `Reader.__init__` adds no
-  per-segment call (test_p17 counts os/open calls at 1 vs 12 segments).
-  MEASURED CAVEAT: the decorator counts a listing as ONE request, but the OS
-  makes it opendir + readdir + close; a pass-through FUSE with 2 ms per
-  kernel request showed about the SAME kernel-request count before/after
-  (209 ch x 10 seg: 43.7 s -> 38.6 s, -12%) — d_type must come with the
-  listing or is_directory()/is_symlink() stat every entry. The big win is
-  the next step (parallel metadata pass with n_threads; then multi-channel
-  read), not more call shaving. Never add a per-segment request to the open
-  without counting it.
+- **A LIBRARY CALL IS NOT A ROUND TRIP — measure the open at the OS level
+  (#141).** On an SMB share each request is ~110 ms and the open is serial
+  (209 channels: 11-24 s). Round 1 of the fix replaced the three exists() per
+  segment in `discover_layout` with one listing of each `.segd`: that HALVED
+  the SessionSource call count and was REVERTED, because a listing is
+  opendir + getdents (x2) + fcntl + close (+ an lstat per entry where d_type
+  is missing) while exists() is one stat — strace showed ~10% MORE syscalls,
+  a local open 10-20% slower, a 2 ms/request FUSE mount only -12% with about
+  the same kernel-request count, and per-segment TarSource::list_dir made
+  tar opens quadratic. DO NOT RETRY IT. What stayed: (a) the `.tmet` is read
+  with `SessionSource::read_head(rel, METADATA_FILE_BYTES)` = first
+  min(size, n) bytes, one open + one read, no seek-to-end (strace, 209 ch x
+  10 seg: 20,454 -> 14,184 syscalls, all 6,270 lseeks gone; FUSE without
+  attribute caching: one getattr less per segment, ~-6%; with caching:
+  identical). A short file comes back short, so the loader's
+  ">= METADATA_FILE_BYTES" check fails with the same message; padding past
+  the record is never read (rchar-pinned in test_p17). (b) TarSource builds a
+  dir -> children index once (`children_`), so list_dir is O(log + children),
+  not a scan of the whole archive per call. (c) `CountingSource`
+  (core/tests/counting_source.hpp: counts list_dir/exists/file_size/
+  read_all/read_head/read_range, optional fixed delay per call) +
+  `Session`/`Reader(shared_ptr<const SessionSource>)`; test_open_calls.cpp
+  pins the open at `1 + channels` listings, `3 x segments` exists and
+  `segments` read_head, zero read_all/file_size/read_range (dir and tar),
+  and TIMES the open at 100 vs 3200 segments (per-segment cost flat; tar
+  within 2x of dir) because a count pin cannot see a call that got more
+  expensive. The Python `Reader.__init__` makes no per-segment call
+  (test_p17, with a positive control). The real gain for #141 is step 2: the
+  metadata pass in parallel with n_threads (latency hiding), then a
+  multi-channel read.
 - **The MAIN use case is a session appended to for DAYS TO MONTHS** (5-20 min
   blocks per channel). Two consequences, both load-bearing. (1) An append must
   be O(NEW data), never O(total blocks) — section 2 describes ALL of a segment's

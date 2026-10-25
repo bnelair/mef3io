@@ -22,10 +22,8 @@ std::string DirectorySource::join(const std::string& rel) const {
 
 std::vector<SourceDirEntry> DirectorySource::list_dir(const std::string& rel) const {
   std::vector<SourceDirEntry> out;
-  // is_directory()/is_symlink() come from the listing itself where the OS
-  // provides the type (d_type, FindFirstFile), so no per-entry stat.
   for (const auto& entry : fs::directory_iterator(join(rel)))
-    out.push_back({entry.path().filename().string(), entry.is_directory(), entry.is_symlink()});
+    out.push_back({entry.path().filename().string(), entry.is_directory()});
   return out;
 }
 

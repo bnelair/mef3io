@@ -1,21 +1,30 @@
-// How many file-system requests opening a session costs (#141). On a network
-// share every request is a full round trip (~110 ms measured on SMB), so the
-// open must stay at one listing per folder plus one bounded read per segment's
-// .tmet — no per-file exists(), no size probe. Pinned here through a counting
-// SessionSource decorator so a new per-segment request cannot slip in.
+// What opening a session costs in file-system requests (#141). On a network
+// share every request is a round trip (~110 ms reported on SMB), so the
+// per-segment request count of the open is pinned here through a counting
+// SessionSource decorator: a new per-segment request cannot slip in unnoticed.
+//
+// The count is the LIBRARY's, not the operating system's: a listing is one
+// list_dir() here but opendir + getdents + close (+ a stat per entry on some
+// file systems) below. Replacing three exists() per segment by one listing
+// per .segd halved this count and ADDED syscalls (strace), so it was reverted;
+// see CLAUDE.md. A count pin also cannot see a call that got more expensive
+// (a tar list_dir that scanned the whole archive made the opens quadratic),
+// hence the scaling cases at the end.
 //
 // The "[.open-bench]" case is hidden: it adds a fixed delay per request and
-// prints open times for the PR / docs/benchmarks.md numbers.
+// prints open times.
 //   build-core/mef3io_tests "[.open-bench]"
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <cstdio>
+#include <algorithm>
+#include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <string>
 #include <vector>
 
-#include "../src/session_layout.hpp"
 #include "counting_source.hpp"
 #include "mef3io/errors.hpp"
 #include "mef3io/reader.hpp"
@@ -47,101 +56,6 @@ std::shared_ptr<CountingSource> counted(const std::string& path,
   return std::make_shared<CountingSource>(open_session_source(path), delay);
 }
 
-// The layout walk as it was before #141 (three exists() per segment, plus two
-// for an incomplete one and one for a channel without segments), kept here as
-// the reference the listing-based walk must agree with.
-detail::SessionLayout reference_layout(const SessionSource& src) {
-  using namespace detail;
-  SessionLayout out;
-  for (const auto& entry : src.list_dir("")) {
-    if (!entry.is_dir) continue;
-    if (entry.name.ends_with(".vidd")) {
-      out.video_channels.push_back(entry.name.substr(0, entry.name.size() - 5));
-      continue;
-    }
-    if (!entry.name.ends_with(".timd")) continue;
-    LayoutChannel ch;
-    ch.name = entry.name.substr(0, entry.name.size() - 5);
-    for (const auto& seg_entry : src.list_dir(entry.name)) {
-      if (!seg_entry.is_dir || !seg_entry.name.ends_with(".segd")) continue;
-      const std::string stem = seg_entry.name.substr(0, seg_entry.name.size() - 5);
-      const std::string dir = entry.name + "/" + seg_entry.name;
-      LayoutSegment seg;
-      seg.number = layout_segment_number(stem);
-      seg.tmet = dir + "/" + stem + ".tmet";
-      seg.tidx = dir + "/" + stem + ".tidx";
-      seg.tdat = dir + "/" + stem + ".tdat";
-      const bool has[3] = {src.exists(seg.tmet), src.exists(seg.tidx), src.exists(seg.tdat)};
-      if (has[0] && has[1] && has[2]) {
-        ch.segments.push_back(std::move(seg));
-        continue;
-      }
-      IncompleteSegment bad;
-      bad.number = seg.number;
-      bad.dir = dir;
-      const std::string* files[3] = {&seg.tmet, &seg.tidx, &seg.tdat};
-      const char* exts[3] = {".tmet", ".tidx", ".tdat"};
-      for (int i = 0; i < 3; ++i) {
-        if (has[i])
-          bad.present.push_back(*files[i]);
-        else
-          bad.missing += (bad.missing.empty() ? "" : ", ") + std::string(exts[i]);
-      }
-      for (const char* ext : {".rdat", ".ridx"}) {
-        const std::string f = dir + "/" + stem + ext;
-        if (src.exists(f)) {
-          bad.present.push_back(f);
-          if (std::string(ext) == ".rdat") bad.has_records = true;
-        }
-      }
-      ch.incomplete.push_back(std::move(bad));
-    }
-    std::sort(ch.incomplete.begin(), ch.incomplete.end(),
-              [](const auto& a, const auto& b) { return a.number < b.number; });
-    if (ch.segments.empty()) {
-      if (src.exists(ch.rdat())) out.record_only_channels.push_back(ch.name);
-      out.incomplete_channels.push_back(std::move(ch));
-      continue;
-    }
-    std::sort(ch.segments.begin(), ch.segments.end(),
-              [](const auto& a, const auto& b) { return a.number < b.number; });
-    out.channels.push_back(std::move(ch));
-  }
-  return out;
-}
-
-void require_same_channels(const std::vector<detail::LayoutChannel>& a,
-                           const std::vector<detail::LayoutChannel>& b) {
-  REQUIRE(a.size() == b.size());
-  for (std::size_t i = 0; i < a.size(); ++i) {
-    CAPTURE(a[i].name);
-    REQUIRE(a[i].name == b[i].name);
-    REQUIRE(a[i].segments.size() == b[i].segments.size());
-    for (std::size_t j = 0; j < a[i].segments.size(); ++j) {
-      REQUIRE(a[i].segments[j].number == b[i].segments[j].number);
-      REQUIRE(a[i].segments[j].tmet == b[i].segments[j].tmet);
-      REQUIRE(a[i].segments[j].tidx == b[i].segments[j].tidx);
-      REQUIRE(a[i].segments[j].tdat == b[i].segments[j].tdat);
-    }
-    REQUIRE(a[i].incomplete.size() == b[i].incomplete.size());
-    for (std::size_t j = 0; j < a[i].incomplete.size(); ++j) {
-      const auto &x = a[i].incomplete[j], &y = b[i].incomplete[j];
-      REQUIRE(x.number == y.number);
-      REQUIRE(x.dir == y.dir);
-      REQUIRE(x.present == y.present);
-      REQUIRE(x.missing == y.missing);
-      REQUIRE(x.has_records == y.has_records);
-    }
-  }
-}
-
-void require_same_layout(const detail::SessionLayout& a, const detail::SessionLayout& b) {
-  require_same_channels(a.channels, b.channels);
-  require_same_channels(a.incomplete_channels, b.incomplete_channels);
-  REQUIRE(a.record_only_channels == b.record_only_channels);
-  REQUIRE(a.video_channels == b.video_channels);
-}
-
 std::string segd(const std::string& session, const std::string& ch, int n) {
   char buf[16];
   std::snprintf(buf, sizeof buf, "%06d", n);
@@ -154,86 +68,38 @@ std::string stem(const std::string& ch, int n) {
 }
 }  // namespace
 
-TEST_CASE("opening a session: one listing per folder, one read per segment",
-          "[open-calls]") {
+TEST_CASE("opening a session: requests per channel and per segment", "[open-calls]") {
   const int C = 3, S = 4;
   const auto path = write_session("mef3io_open_calls.mefd", C, S);
-
+  // root + every .timd listed; three existence checks and ONE bounded .tmet
+  // read per segment; the index stays lazy; no size probes.
+  auto check = [&](const mef3io::test::SourceCalls& c) {
+    CHECK(c.list_dir == 1 + C);
+    CHECK(c.exists == 3 * C * S);
+    CHECK(c.read_head == C * S);
+    CHECK(c.read_all == 0);
+    CHECK(c.read_range == 0);
+    CHECK(c.file_size == 0);
+  };
   SECTION("Session, directory") {
     auto src = counted(path);
     Session s{std::shared_ptr<const SessionSource>(src)};
-    const auto c = src->calls();
     REQUIRE(s.channels().size() == C);
-    CHECK(c.list_dir == 1 + C + C * S);  // root + every .timd + every .segd
-    CHECK(c.read_head == C * S);         // one bounded .tmet read per segment
-    CHECK(c.read_all == 0);              // the index stays lazy
-    CHECK(c.read_range == 0);
-    CHECK(c.exists == 0);
-    CHECK(c.file_size == 0);
+    check(src->calls());
   }
   SECTION("Reader, directory") {
     auto src = counted(path);
     Reader r{std::shared_ptr<const SessionSource>(src)};
-    CHECK(src->calls().total() == 1 + C + C * S + C * S);
+    check(src->calls());
   }
   SECTION("Session, tar archive") {
     const auto tar = archive_session(path, "", true);
     auto src = std::make_shared<CountingSource>(std::make_shared<TarSource>(tar));
     Session s{std::shared_ptr<const SessionSource>(src)};
-    const auto c = src->calls();
     REQUIRE(s.channels().size() == C);
-    CHECK(c.list_dir == 1 + C + C * S);
-    CHECK(c.read_head == C * S);
-    CHECK(c.exists + c.read_all + c.read_range + c.file_size == 0);
+    check(src->calls());
     fsys::remove(tar);
   }
-}
-
-TEST_CASE("the listing-based layout agrees with the exists()-based one", "[open-calls]") {
-  const auto path = write_session("mef3io_open_layout.mefd", 4, 3);
-  // ch0: complete. ch1 segment 1 lost its .tdat but kept records next to it.
-  fsys::remove(segd(path, "ch1", 1) + "/" + stem("ch1", 1) + ".tdat");
-  { std::ofstream(segd(path, "ch1", 1) + "/" + stem("ch1", 1) + ".rdat") << "x"; }
-  // ch2 segment 0: .tmet and .tidx gone; segment 2: its .tmet is a DANGLING link.
-  fsys::remove(segd(path, "ch2", 0) + "/" + stem("ch2", 0) + ".tmet");
-  fsys::remove(segd(path, "ch2", 0) + "/" + stem("ch2", 0) + ".tidx");
-  { std::ofstream(segd(path, "ch2", 0) + "/" + stem("ch2", 0) + ".ridx") << "x"; }
-  const auto tmet2 = segd(path, "ch2", 2) + "/" + stem("ch2", 2) + ".tmet";
-  fsys::remove(tmet2);
-  bool linked = true;
-  try {
-    fsys::create_symlink(segd(path, "ch2", 2) + "/nowhere", tmet2);
-  } catch (...) {
-    linked = false;  // no symlinks here (e.g. unprivileged Windows)
-  }
-  // ch3: no complete segment left, but channel-level records -> record-only.
-  for (int n = 0; n < 3; ++n) fsys::remove(segd(path, "ch3", n) + "/" + stem("ch3", n) + ".tdat");
-  { std::ofstream(path + "/ch3.timd/ch3.rdat") << "x"; }
-
-  const auto src = open_session_source(path);
-  const auto now = detail::discover_layout(*src);
-  require_same_layout(now, reference_layout(*src));
-  REQUIRE(now.record_only_channels == std::vector<std::string>{"ch3"});
-  if (linked) {
-    // The dangling link reads as missing, as exists() always said.
-    bool found = false;
-    for (const auto& ch : now.channels)
-      if (ch.name == "ch2")
-        for (const auto& bad : ch.incomplete)
-          if (bad.number == 2) found = bad.missing == ".tmet";
-    REQUIRE(found);
-  }
-  // Only the names the listings do not vouch for are asked about one by one.
-  CountingSource c(src);
-  detail::discover_layout(c);
-  // ch1/1: .tdat, .ridx; ch2/0: .tmet, .tidx, .rdat; ch2/2: the link (or the
-  // missing .tmet), .rdat, .ridx; ch3: .tdat, .rdat, .ridx in each of 3.
-  CHECK(c.calls().exists == 2 + 3 + 3 + 3 * 3);
-
-  // The lenient open reports exactly what it did before: incomplete segments
-  // are skipped silently, a dangling .tmet is not even attempted.
-  Session s(path, "", false);
-  REQUIRE(s.problems().empty());
 }
 
 TEST_CASE("the .tmet read is bounded by the fixed record size", "[open-calls]") {
@@ -290,4 +156,101 @@ TEST_CASE("open cost with a per-request delay", "[.open-bench]") {
       }
       fsys::remove_all(path);
     }
+}
+
+namespace {
+double best_of_3(const std::function<void()>& fn) {
+  double best = 1e30;
+  for (int i = 0; i < 3; ++i) {
+    const auto t0 = std::chrono::steady_clock::now();
+    fn();
+    best = std::min(best,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+  }
+  return best;
+}
+
+// Every folder of a tar session lists exactly as the same folder on disk.
+void require_same_listings(const SessionSource& dir, const SessionSource& tar,
+                           const std::string& rel = "") {
+  auto a = dir.list_dir(rel), b = tar.list_dir(rel);
+  auto by_name = [](const SourceDirEntry& x, const SourceDirEntry& y) { return x.name < y.name; };
+  std::sort(a.begin(), a.end(), by_name);
+  REQUIRE(a.size() == b.size());
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    CAPTURE(rel, a[i].name);
+    REQUIRE(a[i].name == b[i].name);
+    REQUIRE(a[i].is_dir == b[i].is_dir);
+    if (a[i].is_dir) require_same_listings(dir, tar, rel.empty() ? a[i].name : rel + "/" + a[i].name);
+  }
+}
+}  // namespace
+
+TEST_CASE("TarSource::list_dir lists the children only, in sorted order", "[open-calls][tar]") {
+  const auto path = write_session("mef3io_tar_listing.mefd", 3, 3);
+  { std::ofstream(path + "/ch1.timd/ch1.rdat") << "x"; }
+  const auto tar = archive_session(path, "", true);
+  DirectorySource dir(path);
+  TarSource t(tar);
+  require_same_listings(dir, t);
+  REQUIRE_THROWS_AS(t.list_dir("nope.timd"), IoError);
+#ifndef _WIN32
+  // A foreign archive: "./" prefixes and NO directory members, so every
+  // folder is implied by the file paths.
+  const auto foreign = fsys::temp_directory_path() / "mef3io_tar_foreign.mefd.tar";
+  const auto parent = fsys::path(path).parent_path().string();
+  const auto name = fsys::path(path).filename().string();
+  const std::string cmd = "cd '" + parent + "' && find './" + name +
+                          "' -type f | tar --no-recursion -cf '" + foreign.string() +
+                          "' -T - 2>/dev/null";
+  if (std::system(cmd.c_str()) == 0) {
+    TarSource f(foreign.string());
+    require_same_listings(dir, f);
+    fsys::remove(foreign);
+  }
+#endif
+  fsys::remove(tar);
+}
+
+TEST_CASE("TarSource::list_dir does not scale with the archive", "[open-calls][tar]") {
+  // It once scanned every member of the archive per call, so an open that
+  // lists each channel folder cost O(channels x members).
+  auto per_call = [](int segments) {
+    const auto path = write_session("mef3io_tar_scale.mefd", 1, segments);
+    const auto tar = archive_session(path, "", true);
+    TarSource t(tar);
+    const double secs = best_of_3([&] {
+      for (int i = 0; i < 2000; ++i) t.list_dir("ch0.timd/" + stem("ch0", i % segments) + ".segd");
+    });
+    fsys::remove(tar);
+    fsys::remove_all(path);
+    return secs / 2000;
+  };
+  const double small = per_call(100), big = per_call(800);  // 8x the members
+  CAPTURE(small, big);
+  CHECK(big < 3 * small + 2e-6);  // a scan per call would be ~8x
+}
+
+TEST_CASE("an open scales linearly in segments, directory and tar", "[open-calls]") {
+  // A count pin cannot see a request that got MORE EXPENSIVE: listing every
+  // .segd through a TarSource that scanned the whole archive per call made a
+  // tar open O(segments x members) with the same request count. Timed, so
+  // the bounds are loose: the per-segment cost must not grow much from S to
+  // 32S, and a tar must open about as fast as the same session on disk (that
+  // bug made it ~3-6x slower at 3200 segments; it is ~1.0-1.2x).
+  struct Cost { double dir, tar; };
+  auto per_segment = [](int segments) {
+    const auto path = write_session("mef3io_open_scale.mefd", 1, segments);
+    const auto tar = archive_session(path, "", true);
+    Cost c{best_of_3([&] { Session s(path); }) / segments,
+           best_of_3([&] { Session s(tar); }) / segments};
+    fsys::remove(tar);
+    fsys::remove_all(path);
+    return c;
+  };
+  const Cost small = per_segment(100), big = per_segment(3200);
+  CAPTURE(small.dir, small.tar, big.dir, big.tar);
+  CHECK(big.dir < 3 * small.dir);
+  CHECK(big.tar < 3 * small.tar);
+  CHECK(big.tar < 2 * big.dir);
 }

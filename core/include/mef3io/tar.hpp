@@ -71,6 +71,11 @@ class TarSource : public SessionSource {
   std::string root_;                        // stripped member prefix ("" if none)
   std::map<std::string, TarMember> files_;  // root-relative
   std::set<std::string> dirs_;              // root-relative; always contains ""
+  /// dir -> its immediate children, sorted by name (a name that is both a
+  /// directory and a file is listed once, as the directory). Built once in
+  /// the constructor so list_dir costs O(log dirs + children), not a scan of
+  /// the whole archive per call (an open lists every channel folder).
+  std::map<std::string, std::vector<SourceDirEntry>> children_;
 };
 
 /// Pack a session directory into a single uncompressed tar archive and return
