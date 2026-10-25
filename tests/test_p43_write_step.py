@@ -14,7 +14,10 @@ What is pinned here:
 * data off any step (filtered, resampled, an outlier outside the sample)
   FALLS BACK to the default path, with a StepFallbackWarning, and stores what
   a default write stores; int32 overflow falls back too;
-* appends: a channel keeps its factor (the reader scales a channel by one);
+* too little evidence (a DC level, a square wave) adopts no step;
+* appends and new segments: a channel keeps its factor (the reader scales a
+  channel by one, #150); data off it is REFUSED, never rounded;
+* no path wraps a count beyond int32: it is refused, nothing written;
 * it is fast (detection on a bounded sample; one verifying pass) and the
   files are much smaller; the legacy stack reads them identically.
 """
@@ -199,12 +202,21 @@ def test_int32_overflow_falls_back(tmp_path):
     assert len(fb) == 1
 
 
-def test_infinite_values_fall_back(tmp_path):
+def test_infinite_values_are_refused(tmp_path):
+    """No step for inf; the default path then refuses it (it used to store
+    whatever llround(inf) gave)."""
     x = adc_counts(10_000, seed=9) * 0.195
     x[5] = np.inf
     assert _mef3io.detect_step(x)["step"] is None
-    s, fb = write(tmp_path / "s.mefd", x, )
-    assert s["quantization"] == "decimal" and s["step_fallback"] and len(fb) == 1
+    p = tmp_path / "s.mefd"
+    with mef3io.Writer(str(p), overwrite=True) as w:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ValueError, match="int32"):
+                w.write("ch1", x, START, FS, precision="step")
+            with pytest.raises(ValueError, match="int32"):
+                w.write("ch1", x, START, FS)
+    assert not (p / "ch1.timd").exists()
 
 
 def test_only_step_is_accepted_as_a_string(tmp_path):
@@ -231,22 +243,43 @@ def test_step_append_on_the_step_stays_exact(tmp_path):
     assert np.array_equal(mef3io.Reader(str(p)).read("ch1"), x)
 
 
-def test_step_append_off_the_step_is_rounded_to_the_channel_factor(tmp_path):
+def _tree(path):
+    return {str(f): f.stat().st_size for f in Path(path).rglob("*") if f.is_file()}
+
+
+def test_step_append_off_the_step_is_refused(tmp_path):
     p = tmp_path / "s.mefd"
     x = adc_counts(20_000, seed=11) * 0.195
     write(p, x)
+    before = _tree(p)
     y = np.convolve(adc_counts(20_000, seed=12) * 0.195, [0.3, 0.7], "same")
     t1 = START + int(round(len(x) / FS * 1e6))
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    for new_segment in (False, True):
         with mef3io.Writer(str(p)) as w:
-            s = w.write("ch1", y, t1, FS, precision="step")
-    assert s["quantization"] == "factor" and s["units_conversion_factor"] == 0.195
-    assert s["segment"] == 0 and s["step_fallback"]
-    assert any(issubclass(c.category, mef3io.StepFallbackWarning) for c in caught)
-    got = mef3io.Reader(str(p)).read("ch1")
-    np.testing.assert_array_equal(got[: len(x)], x)
-    assert np.max(np.abs(got[len(x):] - y)) <= 0.195 / 2 + 1e-12
+            with pytest.raises(mef3io.WriteConflictError, match="write_int32"):
+                w.write("ch1", y, t1, FS, precision="step", new_segment=new_segment)
+        assert _tree(p) == before  # nothing written
+    assert np.array_equal(mef3io.Reader(str(p)).read("ch1"), x)
+
+
+@pytest.mark.parametrize("step", [10.0, 1e6])
+def test_factor_of_ten_or_more_is_kept_on_new_segments(tmp_path, step):
+    """Factors >= 10 have a negative 'precision': never confused with 'infer'."""
+    p = tmp_path / "s.mefd"
+    x = adc_counts(20_000, seed=30) * step
+    s, _ = write(p, x)
+    assert s["units_conversion_factor"] == step
+    t1 = START + int(round(len(x) / FS * 1e6)) + 10_000_000
+    y = adc_counts(20_000, seed=31) * step
+    with mef3io.Writer(str(p)) as w:
+        s = w.write("ch1", y, t1, FS, precision="step", new_segment=True)
+        assert s["segment"] == 1 and s["units_conversion_factor"] == step
+        with pytest.raises(mef3io.WriteConflictError):
+            w.write("ch1", np.random.default_rng(0).normal(0, 30, 5120),
+                    t1 + 60_000_000, FS, precision="step", new_segment=True)
+    r = mef3io.Reader(str(p))
+    got = r.read("ch1", t1, t1 + int(round(len(y) / FS * 1e6)))
+    assert np.array_equal(got, y)
 
 
 def test_step_new_segment_keeps_the_channel_factor(tmp_path):
@@ -278,15 +311,12 @@ def test_step_on_a_decimal_channel(tmp_path):
     assert s["quantization"] == "step" and s["units_conversion_factor"] == 0.001
     got = mef3io.Reader(str(p)).read("ch1")[len(x):]
     np.testing.assert_allclose(got, y, rtol=64 * EPS, atol=0)
-    # Off that grid: exactly what the default append does.
+    # Off that grid: refused, not rounded.
     t2 = t1 + int(round(len(y) / FS * 1e6))
     z = np.random.default_rng(17).normal(0, 1, 1000)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        with mef3io.Writer(str(p)) as w:
-            s = w.write("ch1", z, t2, FS, precision="step")
-    assert s["quantization"] == "decimal" and s["units_conversion_factor"] == 0.001
-    assert s["step_fallback"]
+    with mef3io.Writer(str(p)) as w:
+        with pytest.raises(mef3io.WriteConflictError):
+            w.write("ch1", z, t2, FS, precision="step")
 
 
 def test_compat_writer_accepts_step(tmp_path):
@@ -337,13 +367,8 @@ def _timed(fn):
     return time.perf_counter() - t
 
 
-def test_step_write_is_not_slower_than_the_default(tmp_path):
-    """The whole step write (detection + verifying pass + encode) against the
-    default write of the same data, best of 3: pinned generously at +10 %
-    (measured: the step write is FASTER, its counts are smaller). The worst
-    case — on the step up to the very last value, then the fallback — is a
-    second quantization pass: pinned at +60 %."""
-    x = adc_counts(10_000_000, seed=21) * 0.195
+def _write_times(tmp_path, n):
+    x = adc_counts(n, seed=21) * 0.195
     y = x.copy()
     y[-1] += 0.01
 
@@ -355,8 +380,26 @@ def test_step_write_is_not_slower_than_the_default(tmp_path):
                     w.write("ch1", data, START, FS, precision=precision)
         return min(_timed(go) for _ in range(3))
 
-    default, step = run(x, -1), run(x, "step")
-    worst_default, worst = run(y, -1), run(y, "step")
+    return run(x, -1), run(x, "step"), run(y, -1), run(y, "step")
+
+
+def test_step_write_time_sanity(tmp_path):
+    """Default suite: only a loose bound (shared runners are noisy); the
+    tight ratios are the opt-in benchmark below."""
+    default, step, worst_default, worst = _write_times(tmp_path, 2_000_000)
+    assert step <= 2.5 * default
+    assert worst <= 2.5 * worst_default
+
+
+@pytest.mark.benchmark
+def test_step_write_is_not_slower_than_the_default(tmp_path):
+    """The whole step write (detection + verifying pass + encode) against the
+    default write of the same data, best of 3: pinned generously at +10 %
+    (measured: the step write is FASTER, its counts are smaller). The worst
+    case — on the step up to the very last value, then the fallback — is a
+    second quantization pass: pinned at +60 %. Opt-in (--run-benchmark):
+    wall-clock ratios flake on shared runners."""
+    default, step, worst_default, worst = _write_times(tmp_path, 10_000_000)
     print(f"\n10 M samples: default {default:.3f} s, step {step:.3f} s; "
           f"fallback at the last value {worst:.3f} s vs {worst_default:.3f} s")
     assert step <= 1.10 * default
@@ -400,8 +443,111 @@ def test_step_append_on_a_negative_factor(tmp_path):
         s = w.write("ch1", y, t1, FS, precision="step")
     assert s["quantization"] == "step" and s["units_conversion_factor"] == -0.195
     assert np.array_equal(mef3io.Reader(str(p)).read("ch1")[len(c):], y)
+    with mef3io.Writer(str(p)) as w:
+        with pytest.raises(mef3io.WriteConflictError):
+            w.write("ch1", np.full(100, 0.1), t1 + 30_000_000, FS, precision="step")
+
+
+
+# --- evidence before a step is adopted (#149 review) ----------------------------
+
+
+@pytest.mark.parametrize("kind", ["square wave", "dc", "few levels"])
+def test_too_little_evidence_adopts_no_step(tmp_path, kind):
+    n = 20_000
+    if kind == "square wave":
+        x = np.where((np.arange(n) // 256) % 2 == 0, 50.115, -50.115)
+    elif kind == "dc":
+        x = np.full(n, 0.585)
+    else:
+        x = np.random.default_rng(32).integers(-7, 8, n) * 0.195  # 7 magnitudes
+    assert _mef3io.detect_step(x)["step"] is None
+    p = tmp_path / "s.mefd"
+    s, fb = write(p, x)
+    assert s["quantization"] == "decimal" and "distinct" in s["step_fallback"] and len(fb) == 1
+    # The channel did not lock the level as its factor. The default's decimal
+    # factor holds real step data appended later within float64 rounding —
+    # except a DC level, where the default itself picks factor 1: then the
+    # later data is refused, never rounded.
+    y = adc_counts(20_000, seed=33) * 0.195
+    t1 = START + int(round(n / FS * 1e6))
+    with mef3io.Writer(str(p)) as w:
+        if kind == "dc":
+            assert s["units_conversion_factor"] == 1.0
+            with pytest.raises(mef3io.WriteConflictError):
+                w.write("ch1", y, t1, FS, precision="step")
+            return
+        s = w.write("ch1", y, t1, FS, precision="step")
+    assert s["quantization"] == "step"
+    got = mef3io.Reader(str(p)).read("ch1")[n:]
+    assert np.all(np.abs(got - y) <= 64 * EPS * np.abs(y))
+
+
+def test_even_counts_first_then_odd_counts_are_refused_not_rounded(tmp_path):
+    p = tmp_path / "s.mefd"
+    x = adc_counts(20_000, seed=34) * 2 * 0.195  # only even counts: step 0.39
+    s, _ = write(p, x)
+    assert s["units_conversion_factor"] == 0.39
+    y = (adc_counts(20_000, seed=35) * 2 + 1) * 0.195  # odd counts
+    t1 = START + int(round(len(x) / FS * 1e6))
+    with mef3io.Writer(str(p)) as w:
+        with pytest.raises(mef3io.WriteConflictError, match="0.39"):
+            w.write("ch1", y, t1, FS, precision="step")
+
+
+# --- no silent int32 wrap, anywhere (#149 review) --------------------------------
+
+
+def test_no_path_wraps_a_count_beyond_int32(tmp_path):
+    p = tmp_path / "s.mefd"
+    x = np.round(adc_counts(5_000, seed=36) * 0.001, 3)
+    with mef3io.Writer(str(p), overwrite=True) as w:
+        w.write("ch1", x, START, FS, precision=3)
+    before = _tree(p)
+    t1 = START + int(round(len(x) / FS * 1e6))
+    big = np.full(512, 3.0e6 + 0.0004)  # 3e9 counts at 0.001
+    with mef3io.Writer(str(p)) as w:
+        with pytest.raises(mef3io.WriteConflictError, match="int32"):
+            w.write("ch1", big, t1, FS, precision="step")
+        with pytest.raises(ValueError, match="int32"):
+            w.write("ch1", big, t1, FS)  # the default append: used to wrap
+        with pytest.raises(ValueError, match="int32"):
+            w.write("ch1", big, t1, FS, precision=3)
+    assert _tree(p) == before
+    # A fresh default write of one-sided large data picks a precision that
+    # fits instead of wrapping (the inference checked only "both ends").
+    q = tmp_path / "q.mefd"
+    z = 3.0e6 + np.round(np.random.default_rng(37).normal(0, 1, 5000), 3)
+    with mef3io.Writer(str(q), overwrite=True) as w:
+        s = w.write("ch1", z, START, FS)
+    got = mef3io.Reader(str(q)).read("ch1")
+    assert np.max(np.abs(got - z)) <= s["units_conversion_factor"] / 2 + 1e-9
+
+
+def test_default_append_to_a_step_channel_is_refused_clearly(tmp_path):
+    p = tmp_path / "s.mefd"
+    x = adc_counts(20_000, seed=38) * 0.195
+    write(p, x)
+    t1 = START + int(round(len(x) / FS * 1e6))
+    with mef3io.Writer(str(p)) as w:
+        with pytest.raises(mef3io.WriteConflictError, match="not a power of ten"):
+            w.write("ch1", x, t1, FS)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        with mef3io.Writer(str(p)) as w:
-            s = w.write("ch1", np.full(100, 0.1), t1 + 30_000_000, FS, precision="step")
-    assert s["quantization"] == "factor" and s["units_conversion_factor"] == -0.195
+        mw = mef3io.MefWriter(str(p), overwrite=False)
+        with pytest.raises(mef3io.WriteConflictError, match="precision='step'"):
+            mw.write_data(x, "ch1", t1, FS)
+
+
+# --- estimator edge cases: the reasons say what happened ------------------------
+
+
+def test_huge_steps_are_found_and_tiny_ones_say_why(tmp_path):
+    c = adc_counts(20_000, seed=39, walk=3)
+    assert _mef3io.detect_step(c * 1e300)["step"] == 1e300  # no overflow in the refit
+    s, _ = write(tmp_path / "a.mefd", c * 1e300)
+    assert s["quantization"] == "step"
+    x = adc_counts(20_000, seed=40) * 0.195
+    x[_outside_sample(len(x)) if len(x) > 70_000 else -1] = -(2.0 ** 31) * 0.195
+    s, _ = write(tmp_path / "b.mefd", x)
+    assert s["quantization"] == "decimal" and "int32" in s["step_fallback"]

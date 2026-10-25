@@ -1621,7 +1621,6 @@ NB_MODULE(_mef3io, m) {
       case mef3io::Quantization::Counts: q = "int32"; break;
       case mef3io::Quantization::Decimal: q = "decimal"; break;
       case mef3io::Quantization::Step: q = "step"; break;
-      case mef3io::Quantization::Factor: q = "factor"; break;
     }
     d["quantization"] = q;
     if (s.step_fallback.empty())

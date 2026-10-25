@@ -20,18 +20,17 @@ _INT32_MIN, _INT32_MAX = -(2**31), 2**31 - 1
 
 
 class StepFallbackWarning(MefWarning):
-    """``Writer.write(..., precision="step")`` could not store the data on its step.
+    """``Writer.write(..., precision="step")`` on a NEW channel could not use a step.
 
-    Raised once per such write. The data was still written, the way the
-    write's summary describes (``quantization`` and ``step_fallback``):
+    Raised once per such write. The data was still written, with the default
+    (inferred power-of-ten) precision — what a default write stores: the
+    data was not a whole multiple of one step (filtered or resampled data
+    never is), showed too few distinct values to establish one (a DC level,
+    a square wave: fewer than 16 distinct magnitudes in the sample), or its
+    counts would not fit int32. The summary's ``step_fallback`` says which.
 
-    * on a new channel, with the default (inferred power-of-ten) precision —
-      the data was not a whole multiple of one step (filtered or resampled
-      data never is), or its counts would not fit int32. Nothing is lost
-      that the default path would not lose; the file is just not smaller.
-    * on a channel that already has segments, rounded to the channel's
-      conversion factor, which a channel never changes (the reader scales a
-      whole channel by one factor).
+    (On a channel that already has data, ``"step"`` never falls back: data
+    off the channel's factor is refused with ``WriteConflictError``.)
 
     ``w.message.details`` is ``[channel, reason]``; ``w.message.path`` the
     session.
@@ -347,10 +346,14 @@ class Writer:
         when the data was ``counts * step`` in float64; otherwise within
         float64 rounding, 64 eps relative). Data that is not on one step
         (filtered, resampled) falls back to the default path with a
-        :class:`StepFallbackWarning`. A channel keeps the conversion factor
-        of its first segment: on a channel that already has data, ``"step"``
-        stores data on that factor exactly when it fits, and rounds to it
-        (warning) when it does not.
+        :class:`StepFallbackWarning`, as does data showing too few distinct
+        values to establish a step (a DC level, a square wave). A channel
+        keeps the conversion factor of its first segment: on a channel that
+        already has data, ``"step"`` stores data on that factor exactly, and
+        REFUSES data off it (``WriteConflictError``, nothing written) rather
+        than round it. Appending with the default precision to a channel
+        whose factor is not a power of ten (a step, or ``write_int32``) is
+        refused too: keep passing ``"step"``.
 
         Parameters
         ----------
@@ -377,8 +380,7 @@ class Writer:
             ``samples_written``, ``blocks``, ``gaps_skipped``, ``segment``,
             ``units_conversion_factor`` (the factor the stored counts carry),
             ``quantization`` (``"decimal"``: rounded to ``10**-precision``;
-            ``"step"``: stored exactly on the factor; ``"factor"``: rounded
-            to a channel's existing non-decimal factor) and
+            ``"step"``: stored exactly on the factor) and
             ``step_fallback`` (``precision="step"`` only: ``None`` when the
             step was used, else why not).
 
@@ -386,11 +388,14 @@ class Writer:
         ------
         ValueError
             If ``fs`` is not a finite number > 0, ``precision`` makes the
-            conversion factor ``10**-precision`` 0, or is a string other
-            than ``"step"`` — checked before anything is written.
-        RuntimeError
-            On an append conflict (fs / conversion-factor mismatch, or data
-            starting before the segment's end).
+            conversion factor ``10**-precision`` 0, is a string other than
+            ``"step"``, or a value's count would leave int32 at the factor
+            (it would wrap) — checked before anything is written.
+        WriteConflictError
+            On an append conflict (fs / conversion-factor mismatch, data
+            starting before the segment's end, a default-precision append
+            to a factor that is no power of ten, or ``"step"`` data off the
+            channel's factor). Nothing is written.
         """
         step = _is_step(precision)
         data = np.atleast_1d(np.ascontiguousarray(data, dtype=np.float64))

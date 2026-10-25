@@ -46,6 +46,12 @@ import pytest  # noqa: E402
 
 def pytest_addoption(parser):
     parser.addoption(
+        "--run-benchmark",
+        action="store_true",
+        default=False,
+        help="run the wall-clock ratio benchmarks (shared CI runners are too noisy for them)",
+    )
+    parser.addoption(
         "--run-leak",
         action="store_true",
         default=False,
@@ -57,12 +63,20 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "leak: resource-hygiene test; needs --run-leak (slow, RSS-sensitive)"
     )
+    config.addinivalue_line(
+        "markers", "benchmark: wall-clock ratio pin; needs --run-benchmark (timing-sensitive)"
+    )
 
 
 def pytest_collection_modifyitems(config, items):
-    if config.getoption("--run-leak"):
-        return
-    skip = pytest.mark.skip(reason="needs --run-leak (slow, RSS-sensitive)")
-    for item in items:
-        if "leak" in item.keywords:
-            item.add_marker(skip)
+    opt_in = {
+        "leak": ("--run-leak", "needs --run-leak (slow, RSS-sensitive)"),
+        "benchmark": ("--run-benchmark", "needs --run-benchmark (timing-sensitive)"),
+    }
+    for marker, (option, reason) in opt_in.items():
+        if config.getoption(option):
+            continue
+        skip = pytest.mark.skip(reason=reason)
+        for item in items:
+            if marker in item.keywords:
+                item.add_marker(skip)

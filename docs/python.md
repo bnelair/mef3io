@@ -157,25 +157,41 @@ How it works, and what it guarantees:
   step.
 - **Data that is not on a step falls back to the default path** for that
   write, with a `StepFallbackWarning`: filtered or resampled data, noise,
-  an infinite value, or a step whose counts would not fit in int32. The
+  or a step whose counts would not fit in int32. So does data that shows
+  too little of a step to trust it: fewer than 16 distinct magnitudes in
+  the sample, such as a DC level, a calibration square wave or a handful of
+  levels (the level itself is "a step", and the channel would keep it). The
   file is then what a default write produces. A filter whose coefficients
-  are short decimals or powers of two can keep data on a finer step; that
-  step is then found and the data is stored exactly — losslessly, but not
-  always smaller than the default.
+  are short decimals or powers of two can keep data on a finer step, and so
+  can adding an offset that is not a multiple of the step (`counts * 0.195
+  + 0.05` is on a 0.005 step); that step is then found and the data is
+  stored exactly — losslessly, but not always smaller than the default.
 - **A channel keeps one conversion factor.** The reader scales a whole
-  channel by the factor of its first segment, so once a channel has data
-  (an append, or `new_segment=True`), `"step"` stores new data on the
-  channel's factor: exactly when the data is a whole multiple of it, and
-  otherwise rounded to it (`quantization` is `"decimal"` for a power-of-ten
-  factor, `"factor"` for any other), with a `StepFallbackWarning`. Keep
-  passing `precision="step"` when appending to a channel written that way:
-  the default `precision=-1` reuses only power-of-ten factors and refuses an
-  append to a factor like 0.195 with `WriteConflictError`.
+  channel by the factor of its first segment (per-segment factors are
+  [#150](https://github.com/bnelair/mef3io/issues/150)), so once a channel
+  has data (an append, or `new_segment=True`), `"step"` stores new data on
+  the channel's factor: exactly when the data is a whole multiple of it,
+  and otherwise **not at all** — the write raises `WriteConflictError` and
+  writes nothing, rather than round the data. Write such data to a new
+  channel, or quantize it yourself and use `write_int32` at the channel's
+  factor. A first chunk with only even counts, for example, gives the
+  channel the step 0.39, and later odd counts are refused.
+- **Keep passing `precision="step"` when appending** to a channel written
+  that way (or with `write_int32` at a factor that is not a power of ten).
+  The default `precision=-1` can only reuse a power-of-ten factor and
+  refuses the append with a `WriteConflictError` saying so; the same holds
+  for `MefWriter.write_data`. With `new_segment=True` the default path
+  still infers a new precision, which gives the channel a second factor
+  ([#150](https://github.com/bnelair/mef3io/issues/150)).
+- **No count ever wraps.** Every float write, step or default, refuses a
+  value whose count would leave int32 at the factor (`ValueError`, nothing
+  written), and the inferred precision is chosen so both ends of the data
+  fit. An infinite value is refused the same way.
 
 The returned summary says what happened: `quantization` is `"step"`
-(stored exactly on the factor), `"decimal"` (rounded to `10**-precision`)
-or `"factor"`, and `step_fallback` is `None` or the reason the step was not
-used. `MefWriter.write_data(..., precision="step")` does the same; Python
+(stored exactly on the factor) or `"decimal"` (rounded to
+`10**-precision`), and `step_fallback` is `None` or the reason the step was
+not used. `MefWriter.write_data(..., precision="step")` does the same; Python
 and C++ only (`Precision::detect_step()` in `SessionWriter::write_float`),
 not the C ABI or MATLAB.
 

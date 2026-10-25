@@ -456,26 +456,39 @@ pass, no second read), every value must satisfy
 `|x - double(k)*step| <= 64 eps |x|` (the reader's own product) and |k| <=
 INT32_MAX (INT32_MIN = RED_NAN), else false. Fresh channel failing either ->
 the default path for that write (byte-identical to a default write's
-counts), `step_fallback` reason + Python `StepFallbackWarning`. A CHANNEL
-KEEPS ONE FACTOR: the reader scales a whole channel by its FIRST segment's
-factor (session.cpp load_channel_basic_info) — a new segment with another
-factor reads back silently mis-scaled (PRE-EXISTING for the default path with
-new_segment=True and a different precision; not fixed here) — so "step" on a
-channel with segments (append OR new_segment) uses the channel's factor:
-exact if the data fits, else rounded to it (decimal factor = exactly the
-default path; other factor = round(x/u), `quantization="factor"`, refused
-before writing if a count leaves int32). The default `precision=-1` append
-onto a non-decimal factor still raises WriteConflictError (unchanged).
-WriteSummary gained `units_conversion_factor`, `quantization`
-(Counts/Decimal/Step/Factor), `step_fallback`; the Python dict the same keys.
-`Precision` is implicitly constructible from int so every
-`write_float(..., 3)` caller compiles. Tests: tests/test_p43_write_step.py
-(exactness, fallbacks incl. an off-step value OUTSIDE the sample and int32
-overflow, appends, size within 5% of write_int32, detection on 50 M < 0.25 s,
-step write <= 1.10x default / worst-case fallback <= 1.60x, pymef/mef_tools
-oracle), core/tests/test_write_step.cpp. Gotcha for tests: a filter with
-short-decimal or dyadic taps keeps data on a finer grid (found, stored
-exactly) — use irrational taps to force a fallback.
+counts), `step_fallback` reason + Python `StepFallbackWarning`. MINIMUM
+EVIDENCE: a sample with < 16 distinct non-zero magnitudes (DC, square wave,
+a few levels) gives no step (the default path) — the level itself would
+become the channel's factor. A CHANNEL KEEPS ONE FACTOR: the reader scales a
+whole channel by its FIRST segment's factor (session.cpp
+load_channel_basic_info; per-segment scaling is #150) — a new segment with
+another factor reads back silently mis-scaled (PRE-EXISTING for the default
+path with new_segment=True; #150) — so "step" on a channel with segments
+(append OR new_segment) uses the channel's factor itself (never via a
+`precision` int: factors >= 10 have p < 0, the "infer" sentinel — review
+round 1 found that): exact if the data fits, else REFUSED
+(WriteConflictError, nothing written), never rounded (decided in review;
+once #150 lands a later change may start a new segment instead — not now).
+The default `precision=-1` append onto a non-power-of-ten factor is refused
+with a WriteConflictError naming "step"/write_int32. NO INT32 WRAP anywhere:
+`quantize_to_int32` throws std::invalid_argument (ValueError) for a count
+beyond +-INT32_MAX (INT32_MIN = RED_NAN) or inf, and `int32_range_ok`
+requires BOTH ends to fit (it was mef_tools' "both ends overflow" rule, which
+let one-sided data wrap). The estimator's least-squares refit sums in units of
+the step (no overflow at 1e300). WriteSummary gained
+`units_conversion_factor`, `quantization` (Counts/Decimal/Step),
+`step_fallback`; the Python dict the same keys. `Precision` is implicitly
+constructible from int so every `write_float(..., 3)` caller compiles.
+Tests: tests/test_p43_write_step.py (exactness, fallbacks incl. an off-step
+value OUTSIDE the sample and int32 overflow, evidence cases, refusals on
+append/new segment incl. factors 10 and 1e6, no-wrap on every path, size
+within 5% of write_int32, detection on 50 M < 0.25 s, a loose 2.5x write-time
+sanity bound; the tight ratios (step <= 1.10x default, worst-case fallback
+<= 1.60x) are `@pytest.mark.benchmark`, opt-in via `--run-benchmark`,
+because wall-clock ratios flake on shared runners), core/tests/
+test_write_step.cpp. Gotcha for tests: a filter with short-decimal or dyadic
+taps keeps data on a finer grid (found, stored exactly) — use irrational
+taps to force a fallback.
 
 Session metadata (subject/acquisition): `mef3io.Metadata`/`Subject`/
 `Acquisition` dataclasses (`python/mef3io/metadata.py`), settable via

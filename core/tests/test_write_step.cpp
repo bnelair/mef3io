@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "mef3io/errors.hpp"
 #include "mef3io/reader.hpp"
 #include "mef3io/session_writer.hpp"
 
@@ -113,14 +114,15 @@ TEST_CASE("SessionWriter: precision step stores the counts, falls back otherwise
     REQUIRE(r.quantization == Quantization::Step);
     REQUIRE(r.units_conversion_factor == 0.195);
     REQUIRE(r.step_fallback.empty());
-    // Off the step on an existing channel: rounded to its factor.
+    // Off the step on an existing channel: refused, never rounded, and the
+    // default precision cannot append to a factor that is no power of ten.
     std::vector<sf8> y(1000, 0.1);
     const si8 t1 = kStart + static_cast<si8>(std::llround(20000 / 512.0 * 1e6));
-    const WriteSummary a = w.write_float("ch1", y, t1, 512.0, Precision::detect_step());
-    REQUIRE(a.quantization == Quantization::Factor);
-    REQUIRE(a.units_conversion_factor == 0.195);
-    REQUIRE_FALSE(a.step_fallback.empty());
-    REQUIRE(a.segment == 0);
+    REQUIRE_THROWS_AS(w.write_float("ch1", y, t1, 512.0, Precision::detect_step()),
+                      WriteConflictError);
+    REQUIRE_THROWS_AS(w.write_float("ch1", y, t1, 512.0, Precision::detect_step(), true),
+                      WriteConflictError);
+    REQUIRE_THROWS_AS(w.write_float("ch1", y, t1, 512.0), WriteConflictError);
     // A new channel of off-step data: the default path.
     std::vector<sf8> f(x.size());
     for (std::size_t i = 0; i < x.size(); ++i) f[i] = x[i] / 3.0 + 1e-7 * std::sin(i);
@@ -137,4 +139,18 @@ TEST_CASE("SessionWriter: precision step stores the counts, falls back otherwise
   REQUIRE(raw.units_conversion_factor == 0.195);
   REQUIRE(raw.samples.size() == c.size());
   for (std::size_t i = 0; i < c.size(); ++i) REQUIRE(raw.samples[i] == c[i]);
+}
+
+TEST_CASE("detect_step: too few distinct magnitudes is no step") {
+  std::vector<sf8> sq(4096);
+  for (std::size_t i = 0; i < sq.size(); ++i) sq[i] = (i / 64) % 2 ? 50.115 : -50.115;
+  const StepEstimate e = detect_step(sq);
+  REQUIRE_FALSE(e.step.has_value());
+  REQUIRE(e.reason.find("distinct") != std::string::npos);
+}
+
+TEST_CASE("quantize_to_int32 refuses instead of wrapping") {
+  std::vector<sf8> x{1.0, 3.0e6};
+  REQUIRE_THROWS_AS(quantize_to_int32(x, 3), std::invalid_argument);
+  REQUIRE(infer_precision(std::vector<sf8>{3.0e6, 3.0e6 + 0.001}) <= 2);
 }

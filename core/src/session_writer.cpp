@@ -17,6 +17,7 @@
 #include "mef3io/writer.hpp"
 #include "mef3io/time.hpp"
 #include "last_segment.hpp"
+#include "number_text.hpp"
 
 namespace fs = std::filesystem;
 
@@ -24,9 +25,12 @@ namespace mef3io {
 namespace {
 
 bool int32_range_ok(sf8 xmin, sf8 xmax, sf8 alpha) {
-  // Matches mef_tools check_int32_dynamic_range: bad only if BOTH ends overflow.
-  return !(xmin * alpha < std::numeric_limits<si4>::min() &&
-           xmax * alpha > std::numeric_limits<si4>::max());
+  // BOTH ends must fit (INT32_MIN excluded: RED's NaN). mef_tools'
+  // check_int32_dynamic_range called a range bad only when both ends
+  // overflowed, so one-sided data wrapped silently; quantize_to_int32 now
+  // refuses that, and the inference must not choose it.
+  const sf8 lim = static_cast<sf8>(std::numeric_limits<si4>::max());
+  return std::abs(std::round(xmin * alpha)) <= lim && std::abs(std::round(xmax * alpha)) <= lim;
 }
 
 std::string segment_name(const std::string& channel, int seg) {
@@ -82,7 +86,14 @@ std::vector<si4> quantize_to_int32(std::span<const sf8> data, int precision) {
       continue;
     }
     sf8 rounded = std::round(data[i] * scale);  // round(data,prec)*10^prec == round(data*10^prec)
-    out[i] = static_cast<si4>(std::llround(rounded));
+    // Never wrap: a count outside int32 (or INT32_MIN, RED's NaN) is refused
+    // before anything is written. It used to wrap into a wrong value.
+    if (!(std::abs(rounded) <= static_cast<sf8>(std::numeric_limits<si4>::max())))
+      throw std::invalid_argument(
+          "the value at index " + std::to_string(i) + " needs a count beyond int32 at the "
+          "conversion factor 1e" + std::to_string(-precision) + "; nothing was written. Use a "
+          "smaller precision");
+    out[i] = static_cast<si4>(rounded);
   }
   return out;
 }
@@ -492,41 +503,21 @@ WriteSummary SessionWriter::write_float(const std::string& channel, std::span<co
     if (it != channels_.end() && it->second.n_segments > 0) {
       // A channel's factor is fixed once it has segments: the reader scales
       // the WHOLE channel by one factor, so neither an append nor a new
-      // segment may change it. Data on it is stored exactly; other data is
-      // rounded to it (below) — the default append rule, generalised.
+      // segment may change it (#150 may lift this for new segments). Data on
+      // it is stored exactly; anything else is refused — rounding it would
+      // be lossier than the caller asked for, and silently so.
       hydrate(channel, it->second);
       const sf8 u = it->second.units_conversion_factor;
       std::string why;
-      if (quantize_to_step(data, u, counts, valid, &why)) {
-        WriteSummary s = write_blocks(channel, counts, valid, u, start_uutc, fs, new_segment);
-        s.quantization = Quantization::Step;
-        return s;
-      }
-      step_fallback = "not a whole multiple of the channel's conversion factor (" + why +
-                      "); rounded to it, as a channel keeps one factor";
-      // (A foreign writer's factor can be negative, a polarity inversion.)
-      const int p = u > 0.0 ? static_cast<int>(std::llround(-std::log10(u))) : 0;
-      if (u > 0.0 && std::abs(std::pow(10.0, -p) - u) <= 1e-12 * u) {
-        precision = p;  // a decimal factor: exactly the default path
-      } else {
-        check_signal_parameters(fs, u);
-        valid.assign(data.size(), 0);
-        counts.assign(data.size(), 0);
-        for (std::size_t i = 0; i < data.size(); ++i) {
-          if (std::isnan(data[i])) continue;
-          const sf8 q = std::round(data[i] / u);
-          if (!(std::abs(q) <= 2147483647.0))
-            throw std::invalid_argument(
-                "the value at index " + std::to_string(i) + " needs a count beyond int32 at " +
-                "channel " + channel + "'s conversion factor; nothing was written");
-          counts[i] = static_cast<si4>(q);
-          valid[i] = 1;
-        }
-        WriteSummary s = write_blocks(channel, counts, valid, u, start_uutc, fs, new_segment);
-        s.quantization = Quantization::Factor;
-        s.step_fallback = step_fallback;
-        return s;
-      }
+      if (!quantize_to_step(data, u, counts, valid, &why))
+        throw WriteConflictError(
+            "precision='step': the data for channel " + channel + " is not stored on the "
+            "channel's conversion factor " + detail::shortest_number(u) + " (" + why + "); nothing "
+            "was written. A channel keeps one factor: quantize the data yourself and write the "
+            "counts with write_int32 at that factor, or write it to a new channel");
+      WriteSummary s = write_blocks(channel, counts, valid, u, start_uutc, fs, new_segment);
+      s.quantization = Quantization::Step;
+      return s;
     } else {
       const StepEstimate est = detect_step(data);
       std::string why = est.reason;
@@ -549,8 +540,16 @@ WriteSummary SessionWriter::write_float(const std::string& channel, std::span<co
     auto it = channels_.find(channel);
     if (!new_segment && it != channels_.end() && it->second.n_segments > 0) {
       hydrate(channel, it->second);
-      precision =
-          static_cast<int>(std::llround(-std::log10(it->second.units_conversion_factor)));
+      const sf8 u = it->second.units_conversion_factor;
+      precision = u > 0.0 ? static_cast<int>(std::llround(-std::log10(u))) : 0;
+      // A factor that is no power of ten (precision='step', write_int32)
+      // has no precision to reuse: say so instead of the generic conflict.
+      if (!(u > 0.0) || std::abs(std::pow(10.0, -precision) - u) > 1e-12 * u)
+        throw WriteConflictError(
+            "cannot append to channel " + channel + " with an inferred precision: its "
+            "conversion factor " + detail::shortest_number(u) + " is not a power of ten (written with "
+            "precision='step' or write_int32). Append with precision='step' (data on that "
+            "factor is stored exactly) or with write_int32 at that factor");
     } else {
       precision = infer_precision(data);
     }

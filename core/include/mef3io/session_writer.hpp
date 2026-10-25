@@ -25,8 +25,6 @@ enum class Quantization {
   Counts,   ///< write_int32: the caller's counts, stored as given.
   Decimal,  ///< float data rounded to 10^-precision (the default path).
   Step,     ///< float data that is a whole multiple of the factor: stored exactly.
-  Factor,   ///< float data rounded to a channel's existing non-decimal factor
-            ///< (a precision-step write the data did not fit; see write_float).
 };
 
 struct WriteSummary {
@@ -100,16 +98,21 @@ class SessionWriter {
   /// (detect_step) and EVERY value is verified while it is converted
   /// (quantize_to_step); nothing is stored off its value by more than float64
   /// rounding. On a NEW channel, data that is not a whole multiple of one
-  /// step (filtered, resampled) or whose counts overflow int32 falls back to
-  /// the default (inferred power-of-ten) path for that write. On a channel
-  /// that already has segments — an append, or a new segment — the factor is
-  /// the channel's: the reader scales a whole channel by one factor, so it is
-  /// never changed. Data that is a whole multiple of it is stored exactly;
-  /// otherwise the write falls back to rounding to it (the default path when
-  /// it is a power of ten, else `round(data / factor)`, refused with
-  /// std::invalid_argument before anything is written if a count leaves
-  /// int32). The summary says which happened (`quantization`,
-  /// `step_fallback`).
+  /// step (filtered, resampled), shows too little of one (fewer than 16
+  /// distinct magnitudes in the sample: a DC level, a square wave), or whose
+  /// counts overflow int32 falls back to the default (inferred power-of-ten)
+  /// path for that write. On a channel that already has segments — an
+  /// append, or a new segment — the factor is the channel's: the reader
+  /// scales a whole channel by one factor, so it is never changed. Data that
+  /// is a whole multiple of it is stored exactly; other data is REFUSED
+  /// (WriteConflictError, nothing written) — never rounded. The summary says
+  /// which happened (`quantization`, `step_fallback`).
+  ///
+  /// Every path refuses (std::invalid_argument, nothing written) a value
+  /// whose count would leave int32 instead of wrapping it, and the default
+  /// path refuses (WriteConflictError) an in-segment append to a segment
+  /// whose factor is not a power of ten (written with the step or
+  /// write_int32): use the step or write_int32 there.
   WriteSummary write_float(const std::string& channel, std::span<const sf8> data, si8 start_uutc,
                            sf8 sampling_frequency, Precision precision = {},
                            bool new_segment = false);
@@ -278,8 +281,10 @@ struct StepEstimate {
 /// ignored — so its cost does not grow with the data (only a sample of
 /// nothing but 0 and NaN scans on, for the first non-zero values). The value is snapped
 /// to the step's own float64 value where the sample allows (the shortest
-/// decimal reproducing every sampled value exactly, e.g. 0.195). Only an
-/// estimate: quantize_to_step() decides.
+/// decimal reproducing every sampled value exactly, e.g. 0.195). A sample
+/// with fewer than 16 distinct non-zero magnitudes (a DC level, a square
+/// wave) gives no step: too little evidence. Only an estimate:
+/// quantize_to_step() decides.
 StepEstimate detect_step(std::span<const sf8> data);
 /// Convert @p data to counts of @p step in one pass, verifying every value:
 /// false (and @p why) as soon as one finite value is not a whole multiple

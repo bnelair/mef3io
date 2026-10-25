@@ -138,6 +138,18 @@ new identifiers, other programs' private data cleared, provenance
   upgrading deletes that session's old-named snapshot (exactly that file, and
   only if it is a mef3io snapshot) and builds a new one.
 
+## Float writes never wrap a count beyond int32
+
+Before, a float write whose value needed a count outside int32 at the
+conversion factor stored a wrapped, wrong value silently (an append of
+`3.0e6` to a channel at factor 0.001 read back as `-1294967.296`). Now every
+float write (`Writer.write`, `MefWriter.write_data`, C++ `write_float`)
+refuses it with `ValueError` / `std::invalid_argument` and writes nothing,
+and an infinite value is refused the same way. The inferred precision now
+requires both ends of the data to fit (it used to accept data where only one
+end overflowed, as mef_tools did), so a default write of one-sided large
+data picks a smaller precision instead of wrapping.
+
 ## Smaller files for data from an amplifier: `precision="step"` (#81)
 
 `Writer.write(..., precision="step")` (also `MefWriter.write_data`) finds the
@@ -153,15 +165,18 @@ unchanged.
   `counts * step`, and within float64 rounding otherwise. The whole write was
   faster than the default one in our measurements (10 million samples:
   0.36 s against 0.57 s).
-- Data not on one step (filtered, resampled, noise), or whose counts would not
-  fit int32, is written with the default path, with a new
+- Data not on one step (filtered, resampled, noise), with too few distinct
+  values to establish one (a DC level, a square wave), or whose counts would
+  not fit int32, is written with the default path, with a new
   `StepFallbackWarning`.
 - A channel keeps one conversion factor: appends and new segments with
-  `"step"` use the channel's factor, exactly when the data fits it and
-  rounded to it otherwise (with the warning).
+  `"step"` store data on the channel's factor exactly, and refuse
+  (`WriteConflictError`, nothing written) data off it rather than round it.
+  A default-precision append to a channel whose factor is not a power of ten
+  is refused with a message saying to use `"step"` or `write_int32`.
 - The write summary has three new keys for every write:
-  `units_conversion_factor`, `quantization` (`"step"`, `"decimal"`,
-  `"factor"` or `"int32"`) and `step_fallback`. C++:
+  `units_conversion_factor`, `quantization` (`"step"`, `"decimal"` or
+  `"int32"`) and `step_fallback`. C++:
   `SessionWriter::write_float` takes a `Precision` (an `int` still works;
   `Precision::detect_step()` for the step), `WriteSummary` gains the same
   fields, plus `detect_step` / `quantize_to_step`. Not in the C ABI or MATLAB.

@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "mef3io/session_writer.hpp"
+#include "number_text.hpp"
 
 namespace mef3io {
 namespace {
@@ -46,6 +47,11 @@ constexpr sf8 kMaxCount = 2147483647.0;
 // only steers the estimate; the strict test is kStepRelTol, applied to the
 // snapped step on the sample and then to every value.
 constexpr sf8 kCoarseTol = 1e-6;
+
+// Distinct non-zero magnitudes a sample must show before a step is adopted.
+constexpr std::size_t kMinDistinct = 16;
+constexpr const char* kNoStep =
+    "the values are not whole multiples of one step whose counts fit int32";
 
 constexpr std::size_t kHead = 65536;
 constexpr std::size_t kWindows = 16;
@@ -96,17 +102,6 @@ Fit evaluate(const std::vector<sf8>& mags, sf8 c) {
     }
   }
   return f;
-}
-
-// The shortest "%.Ng" spelling of x that reads back as x (0.195, not
-// 0.19500000000000001), for messages.
-std::string shortest(sf8 x) {
-  char buf[40];
-  for (int d = 1; d <= 17; ++d) {
-    std::snprintf(buf, sizeof(buf), "%.*g", d, x);
-    if (std::strtod(buf, nullptr) == x) break;
-  }
-  return buf;
 }
 
 sf8 round_significant(sf8 x, int digits) {
@@ -163,6 +158,16 @@ StepEstimate detect_step(std::span<const sf8> data) {
     return out;
   }
   if (mags.empty()) return out;  // nothing but 0 and NaN: no step, and none needed
+  // Minimum evidence (#149 review): a DC level, a square wave or a handful
+  // of levels "has" a step (the level itself), and since a channel keeps its
+  // first factor, adopting it would make every later write refuse. Too few
+  // distinct magnitudes to establish a step: the default path.
+  if (mags.size() < kMinDistinct) {
+    out.reason = "the sample holds only " + std::to_string(mags.size()) +
+                 " distinct non-zero magnitude(s), too few to establish a step (" +
+                 std::to_string(kMinDistinct) + " needed)";
+    return out;
+  }
   const sf8 maxabs = mags.back();
   const sf8 min_step = maxabs / kMaxCount;  // finer and the counts overflow int32
 
@@ -179,20 +184,23 @@ StepEstimate detect_step(std::span<const sf8> data) {
     if (r > kCoarseTol * step + kStepRelTol * u) {
       step = real_gcd(step, r, min_step);
       if (step == 0.0) {
-        out.reason = "the values are not whole multiples of one step";
+        out.reason = kNoStep;
         return out;
       }
       sum_ku = sum_kk = 0.0;
       next_refit = i + 1;  // refit over everything seen, with the new step
     }
     if (i + 1 == next_refit) {
+      // In units of the step (k and u/step are both <= 2^31), so the sums
+      // cannot overflow however large the magnitudes are (1e300 steps).
       sum_ku = sum_kk = 0.0;
       for (std::size_t j = 0; j <= i; ++j) {
-        const sf8 k = std::round(mags[j] / step);
-        sum_ku += k * mags[j];
+        const sf8 ratio = mags[j] / step;
+        const sf8 k = std::round(ratio);
+        sum_ku += k * ratio;
         sum_kk += k * k;
       }
-      if (sum_kk > 0.0) step = sum_ku / sum_kk;
+      if (sum_kk > 0.0) step *= sum_ku / sum_kk;
       next_refit = std::max<std::size_t>(64, 2 * (i + 1));
     }
   }
@@ -235,7 +243,7 @@ StepEstimate detect_step(std::span<const sf8> data) {
     }
   }
   if (!found) {
-    out.reason = "the values are not whole multiples of one step";
+    out.reason = kNoStep;
     return out;
   }
   out.step = best;
@@ -245,13 +253,17 @@ StepEstimate detect_step(std::span<const sf8> data) {
 bool quantize_to_step(std::span<const sf8> data, sf8 step, std::vector<si4>& counts,
                       std::vector<ui1>& valid, std::string* why) {
   auto fail = [&](std::size_t i, const char* what) {
-    if (why) *why = "the value at index " + std::to_string(i) + " " + what + " " + shortest(step);
+    if (why) *why = "the value at index " + std::to_string(i) + " " + what + " " + detail::shortest_number(step);
     return false;
   };
   // A negative step is a polarity inversion (a foreign channel's factor):
   // the counts change sign, the check below is the same.
   if (step == 0.0 || !std::isfinite(step)) {
     if (why) *why = "the step is not a finite non-zero number";
+    return false;
+  }
+  if (!std::isfinite(1.0 / step)) {  // subnormal: no reciprocal to convert by
+    if (why) *why = "the step " + detail::shortest_number(step) + " is too small (subnormal)";
     return false;
   }
   const std::size_t n = data.size();
@@ -286,5 +298,16 @@ bool quantize_to_step(std::span<const sf8> data, sf8 step, std::vector<si4>& cou
   }
   return true;
 }
+
+namespace detail {
+std::string shortest_number(sf8 x) {
+  char buf[40];
+  for (int d = 1; d <= 17; ++d) {
+    std::snprintf(buf, sizeof(buf), "%.*g", d, x);
+    if (std::strtod(buf, nullptr) == x) break;
+  }
+  return buf;
+}
+}  // namespace detail
 
 }  // namespace mef3io
