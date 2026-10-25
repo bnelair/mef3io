@@ -169,16 +169,17 @@ new identifiers, other programs' private data cleared, provenance
   does not depend on the thread count. The channels, metadata, the lenient
   `problems()` (in the same order) and the strict error (the first in listing
   order, as a serial open meets it) are all the same.
-- **Windowed reads skip segments outside the window** before reading their
-  block index (#110). A segment is skipped when it starts at least a second
-  after the window, or when the span its index covers (learnt the first time
-  a read walks it) misses the window. Repeated one-second reads of a
-  2,400-segment channel went from 3.9 ms to 0.24 ms each.
+- **Repeated windowed reads no longer walk every block index** (#110). For
+  each index it holds in memory, a Reader remembers the time span the index
+  covers, and skips an index that misses the window. The span is forgotten
+  with its index, so the result is always the same as walking it.
+  Repeated one-second reads of a 2,400-segment channel went from 4.7 ms to
+  0.2-0.28 ms each; the first read still walks every index once.
 - **Fixed: `block_envelope` could leave out blocks** of a segment whose
-  metadata states an end time earlier than its data. This happens with files
-  from writers that store a shorter end, and after an interrupted append that
-  was followed by a new segment. It skipped segments by that end time; it now
-  uses the rule above, which never relies on a segment's declared end.
+  metadata states an end time earlier than its data, or a start later than
+  it. This happens with files from writers that store a shorter end, and
+  after an interrupted append that was followed by a new segment. It skipped
+  segments by those times; no metadata time is used to skip any more.
 
 - **Opening a session reads each segment's metadata file with one bounded
   read** of its fixed record size. There is no longer a separate seek to find

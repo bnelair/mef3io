@@ -48,13 +48,11 @@ struct SegmentReader {
   /// Session::index_mu_.
   std::shared_ptr<const std::vector<ui1>> tidx;
   std::uint64_t index_last_used = 0;                // for cache eviction (index_mu_)
-  /// The time span the segment's block index ACTUALLY covers, learnt the
-  /// first time a read walks the index and kept for the Session's life (16
-  /// bytes; it survives index eviction). A later windowed read skips the
-  /// segment when the window misses the span: the same test every entry would
-  /// fail, so nothing a full walk returns is ever lost. The .tmet header's
-  /// END is never used for that (#146 review): it is stale after an
-  /// interrupted append and short in files from other writers.
+  /// The time span the CACHED block index (`tidx`) covers, learnt when a
+  /// read walks it and DROPPED WITH IT on eviction, so it is never older than
+  /// what a walk would read: a windowed read skips walking a cached index
+  /// that holds nothing in the window, and nothing else. No .tmet time is ever
+  /// used to skip (#146: a stale or late start/end silently lost samples).
   /// `span_open` = an entry has no usable count, so the span is unbounded.
   /// Guarded by Session::index_mu_.
   bool span_known = false;
@@ -426,14 +424,13 @@ class Session {
   /// The segment's block index, PINNED: the returned reference keeps the bytes
   /// alive even if another thread evicts them from the cache meanwhile.
   std::shared_ptr<const std::vector<ui1>> segment_index(SegmentReader& seg);
-  /// Whether `seg` certainly holds no block overlapping [lo, hi), from what
-  /// is known WITHOUT reading its index: its learnt span (see SegmentReader),
-  /// and its .tmet start time (a segment starting at least a second after the
-  /// window ends). Never its .tmet end time.
+  /// Whether `seg`'s CACHED index certainly holds no block overlapping
+  /// [lo, hi) (its learnt span; false when not cached or not learnt).
   bool skip_segment(const SegmentReader& seg, si8 lo, si8 hi) const;
-  /// Record the span of `idx` (the segment's whole index) if not known yet.
-  void learn_span(SegmentReader& seg, std::span<const ui1> idx, std::size_t n_entries, si8 rto,
-                  sf8 fs);
+  /// Record the span of `pin` if it is still the cached index and none is
+  /// known yet.
+  void learn_span(SegmentReader& seg, const std::shared_ptr<const std::vector<ui1>>& pin,
+                  std::size_t n_entries, si8 rto, sf8 fs);
   /// Drop the least recently used block indices until the cache fits its
   /// budget.
   ///

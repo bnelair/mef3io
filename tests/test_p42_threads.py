@@ -532,3 +532,32 @@ def test_window_past_a_short_end_written_by_mef_tools(tmp_path):
                  new_segment=True)
     del w
     _assert_window_matches_full_read(path, "ch", START + 40 * SECOND, START + 50 * SECOND, 2560)
+
+
+@pytest.mark.parametrize("negated", [True, False], ids=["negated", "positive"])
+def test_a_late_tmet_start_does_not_hide_the_segment(tmp_path, negated):
+    # #146 round-2 N2: no skip may trust a .tmet START either. Segment 1's
+    # header start is put 100 s after its first block (both sign conventions
+    # a file can store, rto 0); a window at the real data start must still
+    # return it, from read() and from block_envelope().
+    import struct
+
+    path = tmp_path / "late.mefd"
+    fs = 256.0
+    rng = np.random.default_rng(5)
+    s1 = START + 3600 * SECOND
+    with mef3io.Writer(str(path), overwrite=True) as w:
+        w.write("ch", rng.integers(-99, 99, int(10 * fs)).astype(float), START, fs, precision=0)
+        w.write("ch", rng.integers(-99, 99, int(10 * fs)).astype(float), s1, fs, precision=0,
+                new_segment=True)
+    tmet = _seg(path, "ch", 1, ".tmet")
+    raw = bytearray(tmet.read_bytes())
+    late = s1 + 100 * SECOND
+    struct.pack_into("<q", raw, 16, -late if negated else late)
+    struct.pack_into("<I", raw, 0, ext.crc32(bytes(raw[4:1024])))
+    tmet.write_bytes(bytes(raw))
+    with _quiet(mef3io.Reader, str(path)) as r:
+        got = r.read("ch", s1, s1 + 10 * SECOND)
+        assert _finite(got) == 2560
+        env = r.block_envelope("ch", s1, s1 + 10 * SECOND)
+        assert len(env["start_uutc"]) == 1

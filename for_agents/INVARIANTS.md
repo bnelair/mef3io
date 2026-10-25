@@ -251,6 +251,11 @@ PRIVATE `Reader._read_raw(_split=)` -> binding `_n_threads` ->
 `Reader::read_raw_split`. Never expose it publicly (pinned by
 tests/test_p42_threads.py, which also checks the budget is never exceeded).
 
+SKIPPING SEGMENTS in a read or block_envelope uses ONLY the learnt span of
+the CACHED index, dropped with it on eviction. Never a .tmet start or end
+time (stale or wrong in the field; #146 lost samples on both), never a span
+that outlived its index (it hid an append).
+
 THE PARALLEL OPEN must behave like a serial one: `discover_layout` and
 `Session::discover` run their passes with `parallel_try_each` (every item
 runs, each one's exception kept) and assemble IN ORDER, rethrowing the first

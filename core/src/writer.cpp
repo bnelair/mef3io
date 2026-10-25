@@ -250,6 +250,7 @@ fmt::UniversalHeader base_uh(const SegmentSpec& spec, const std::string& ftype, 
 si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec& spec,
                               const std::vector<BlockSpec>& blocks, int n_threads,
                               ui4* out_max_difference_bytes) {
+  check_threads(n_threads);  // before any file is touched
   if (!fs::is_directory(segment_dir)) throw IoError("segment dir does not exist: " + segment_dir);
   const sf8 fs_hz = spec.sampling_frequency;
   const si8 rto = spec.recording_time_offset;
@@ -450,6 +451,7 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
 si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec& spec,
                                const std::vector<BlockSpec>& blocks, int n_threads,
                                ui4* out_max_difference_bytes, AppendIndexCache* cache) {
+  check_threads(n_threads);  // before any file is touched
   if (blocks.empty()) return 0;
   const std::string base = segment_base_name(spec);
   const std::string tmet_path = (fs::path(segment_dir) / (base + ".tmet")).string();

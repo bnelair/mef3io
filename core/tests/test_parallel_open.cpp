@@ -18,6 +18,7 @@
 #include <thread>
 #include <typeinfo>
 #include <atomic>
+#include <cmath>
 #include <stdexcept>
 #include <system_error>
 #include <vector>
@@ -441,11 +442,11 @@ TEST_CASE("a negative thread count is an error everywhere", "[parallel-open]") {
   fsys::remove_all(fsys::temp_directory_path() / "mef3io_par_open_neg_w.mefd");
 }
 
-TEST_CASE("a windowed read skips segments by their learnt index span", "[parallel-open]") {
-  // #110 item 3, done without trusting a .tmet END (stale after an
-  // interrupted append, short from other writers): the first walk learns
-  // each segment's real span, later windows skip by it — even after the
-  // index itself was evicted from the cache.
+TEST_CASE("a windowed read skips walking cached indexes that miss the window",
+          "[parallel-open]") {
+  // #110 item 3, without trusting any .tmet time (#146 review rounds 1-2):
+  // a walk learns the span of the index it walked; while that index stays
+  // cached, a window it misses skips it. No I/O either way.
   const auto dir = (fsys::temp_directory_path() / "mef3io_par_open_span.mefd").string();
   fsys::remove_all(dir);
   {
@@ -456,13 +457,54 @@ TEST_CASE("a windowed read skips segments by their learnt index span", "[paralle
   }
   auto src = std::make_shared<test::CountingSource>(open_session_source(dir));
   Reader r(std::shared_ptr<const SessionSource>(src), "", 1);
-  r.session().set_index_cache_bytes(1);  // every index evicted after each call
   const auto full = r.read("ch");
   src->reset();
   const si8 t = START + 20 * 20'000'000LL + 2'000'000LL;  // inside segment 20 only
   const auto win = r.read("ch", t, t + 1'000'000);
   REQUIRE(win.size() == 256);
   for (double v : win) CHECK(v == 1.0);
-  CHECK(src->calls().read_all == 1);  // segment 20's index, no other
+  CHECK(src->calls().read_all == 0);    // every index cached
+  CHECK(src->calls().read_range == 1);  // segment 20's blocks, no other segment's
+  // Evicted: the spans go with the indexes, and the next window walks again.
+  r.session().set_index_cache_bytes(1);
+  r.read("ch", t, t + 1'000'000);  // trims at its end
+  src->reset();
+  CHECK(r.read("ch", t, t + 1'000'000) == win);
+  CHECK(src->calls().read_all == 40);  // re-read, as on main
+  fsys::remove_all(dir);
+}
+
+TEST_CASE("a segment that grew after its span was learnt is read once evicted",
+          "[parallel-open]") {
+  // #146 round-2 N1: a span outliving its index hid an append forever.
+  const auto dir = (fsys::temp_directory_path() / "mef3io_par_open_grow.mefd").string();
+  fsys::remove_all(dir);
+  std::vector<si4> a(256 * 60);
+  for (std::size_t i = 0; i < a.size(); ++i) a[i] = static_cast<si4>(i % 1000);
+  {
+    SessionWriter w(dir, true);
+    w.write_int32("ch", a, 1.0, START, 256.0, {}, false);  // [0, 60 s)
+  }
+  Reader r(dir, "", 1);
+  REQUIRE(r.read("ch", START + 10'000'000, START + 20'000'000).size() == 2560);
+  {
+    SessionWriter w(dir, false);  // another writer appends [60, 120 s) in place
+    w.write_int32("ch", a, 1.0, START + 60'000'000, 256.0, {}, false);
+  }
+  r.session().set_index_cache_bytes(1);
+  r.read("ch", START + 10'000'000, START + 20'000'000);  // evicts at its end
+  const auto got = r.read("ch", START + 70'000'000, START + 80'000'000);
+  Reader fresh(dir, "", 1);
+  const auto want = fresh.read("ch", START + 70'000'000, START + 80'000'000);
+  REQUIRE(got.size() == want.size());
+  std::size_t finite = 0;
+  for (std::size_t i = 0; i < got.size(); ++i) {
+    CHECK((std::isnan(got[i]) == std::isnan(want[i])));
+    if (!std::isnan(want[i])) {
+      ++finite;
+      CHECK(got[i] == want[i]);
+    }
+  }
+  CHECK(finite == 2560);
   fsys::remove_all(dir);
 }

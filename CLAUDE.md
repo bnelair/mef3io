@@ -725,19 +725,21 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   instead (decrypt → edit → re-encrypt when the section is encrypted), which is
   what the validator's repair path already did.
 - **`block_envelope` (Session/Reader, viewers)** reads ONLY `.tidx` (rchar-
-  pinned in test_p38) and skips segments outside the window before touching
-  their index — `Session::skip_segment`, shared with collect_blocks (#110
-  item 3: a 1-s read of 2400 segments 3.9 ms -> 0.24 ms once warm). Two rules
-  ONLY: (1) the .tmet START is >= 1 s after the window's end (an append never
-  moves a start); (2) the segment's LEARNT index span (`learn_span`: every
-  entry's [start, start + n/fs) by the walks' own expressions, unbounded if
-  any count is 0/NO_ENTRY; kept after eviction, under index_mu_) misses the
-  window — the same test each entry would fail, so provably nothing a walk
-  returns is lost. NEVER skip by a .tmet END: stale after an interrupted
-  append once a new segment follows, = start of the last block for some
-  writers, verbatim caller end_uutc from mef_tools (round-1 review of #146
-  lost samples on all three; test_p42 pins them). A cold windowed read
-  therefore walks the indexes of the segments BEFORE the window once.
+  pinned in test_p38). Skipping (`Session::skip_segment`, shared with
+  collect_blocks; #110 item 3: repeated 1-s reads of 2400 segments 4.7 ms ->
+  0.2-0.28 ms) has ONE rule: the learnt span of the CACHED index
+  (`learn_span`: every entry's [start, start + n/fs) by the walks' own
+  expressions, unbounded if any count is 0/NO_ENTRY; stored only if that pin
+  is still the cached index; DROPPED in trim_index_cache with the index;
+  under index_mu_) misses the window — exactly the test every entry of the
+  cached index would fail, so the result equals walking it, and nothing is
+  read either way. NO METADATA TIME IS EVER USED TO SKIP (correctness over
+  speed, maintainer 2026-10-25): a .tmet END is stale after an interrupted
+  append + new segment, = last block's start for some writers, the caller's
+  end_uutc from mef_tools; a .tmet START can be late (any sign convention);
+  a span outliving its index hid an append forever. #146 review rounds 1-2
+  lost samples on every one; test_p42 + test_parallel_open.cpp pin them. A
+  cold windowed read therefore walks every index once, as before.
   Per-block min/max are the INDEX
   copies (raw counts, scaled by the channel ufact like read()); RED_NAN ->
   NaN. Times come from the index entries, not the RED headers (reading those
