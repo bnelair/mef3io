@@ -221,7 +221,12 @@ tokens split on non-alphanumerics incl. `_`; REFUSE a token EQUAL to an
 identity value of 3+ chars; for subject/location (not the source session
 name) also a 3+-letter value equal to a letter/digit part ("Roe1") or a
 4+-char value inside a token ("JaneRoe"); else NOTE (256-channel montages
-hit "12"/"P3"/"EEG"). The copy name/pseudonym holding an identity value
+hit "12"/"P3"/"EEG"). That rule (`Scanner::channel`, paths via
+`Scanner::path`) is ALSO run by the pre-flight (#143) on each kept channel's
+name and the folder/file names the copy makes from it (segment numbers from
+the .tmet UH; a cut: 0..n-1) -> `channel-name-identity` before any write;
+verify still applies it to what the copy holds (the pre-flight calls the
+verifier's matcher, as text-unremovable does; never the other way round). The copy name/pseudonym holding an identity value
 (3+ substring, shorter whole token; own-name excuse only for <3 chars) is a
 ValueError before any write. Needles: values normalized (trim + collapse
 spaces); subject names + location ALSO word by word (3+ letters) -- but
@@ -251,7 +256,8 @@ with descriptions kept, the kept channels' OWN descriptions read from their
 written; check() passes the clear flags for that. A text callback cannot be
 predicted (verify still checks). `redact_text()` (C++ + Python, #114) = that
 same copy_redactor on caller texts, and refuses whatever the copy would
-(locked source, unknown channel, identity in a name) except dst-exists /
+(locked source, unknown channel, identity in a name, incl. a kept channel's:
+`channel-name-identity`) except dst-exists /
 partial-exists / text-unremovable: no rule mirror in applications. Identity checks run before excusing the copy's own name ("S0012"
 vs copy "S001"). Epoc/Curs id_number: absolute window only (the rto window
 reaches small ints). Redactor: <4 chars = whole tokens, numeric = whole
@@ -292,8 +298,8 @@ unknown or `UnRc` record types: oracle tests must not include them.
 (10) #111 ONE PRE-FLIGHT: `preflight()` in session_copy.cpp makes EVERY check
 decidable before writing (options, paths, source open, records ambiguity,
 inspect plan, password access, inspect blockers, channel selection, shift,
-names, segment numbering from each .tmet UH @48, record files incl. the
-Epoc/Curs id_number window). `anonymize_session` runs it with
+names, segment numbering from each .tmet UH @48, kept channel names (#143),
+record files incl. the Epoc/Curs id_number window). `anonymize_session` runs it with
 collect=false (throws the first, BEFORE any file or progress report);
 `check_anonymize` / `mef3io.anonymize.check` with collect=true. Never add an
 up-front check anywhere else — it would let the two disagree; test_p32

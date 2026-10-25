@@ -1105,8 +1105,10 @@ def test_channel_names_overlapping_identity_are_notes_not_refusals(tmp_path, pro
 
 def test_a_channel_named_with_a_whole_identity_token_is_refused(tmp_path):
     src = _named_session(tmp_path / "p.mefd", ("Jane_C3", "C4"), mef3io.Subject(name_1="Jane"))
-    with pytest.raises(mef3io.WriteConflictError, match="verification"):
+    with pytest.raises(mef3io.WriteConflictError) as exc:   # up front (#143)
         _anon(src, tmp_path / "S001.mefd")
+    assert exc.value.code == "channel-name-identity"
+    assert exc.value.details["channel"] == "Jane_C3"
     assert not (tmp_path / "S001.mefd").exists()
     # excluding it publishes
     rep = _anon(src, tmp_path / "S002.mefd", exclude_channels=["Jane_C3"])
@@ -1171,8 +1173,10 @@ def test_a_comma_separates_numbers(tmp_path):
 def test_a_patient_name_glued_into_a_channel_name_is_refused(tmp_path, channel):
     src = _named_session(tmp_path / "p.mefd", (channel, "C4"),
                          mef3io.Subject(name_1="Jane", name_2="Roe"))
-    with pytest.raises(mef3io.WriteConflictError, match="verification"):
+    with pytest.raises(mef3io.WriteConflictError) as exc:   # up front (#143)
         _anon(src, tmp_path / "S001.mefd")
+    assert exc.value.code == "channel-name-identity"
+    assert exc.value.details["channel"] == channel
     assert not (tmp_path / "S001.mefd").exists()
 
 
@@ -1226,8 +1230,9 @@ def test_a_full_name_in_one_field_is_searched_word_by_word(tmp_path):
 
 def test_roe1_is_refused_when_the_name_is_in_one_field(tmp_path):
     src = _named_session(tmp_path / "p.mefd", ("Roe1", "C4"), mef3io.Subject(name_1="Jane Roe"))
-    with pytest.raises(mef3io.WriteConflictError, match="verification"):
+    with pytest.raises(mef3io.WriteConflictError) as exc:   # up front (#143)
         _anon(src, tmp_path / "S001.mefd")
+    assert exc.value.code == "channel-name-identity"
     assert not (tmp_path / "S001.mefd").exists()
 
 

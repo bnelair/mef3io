@@ -656,6 +656,25 @@ struct Scanner {
     return r;
   }
 
+  /// The rule for a path component of the copy: the channel rule when it is
+  /// derived from a kept channel's name (its folder, its segments, its record
+  /// files), the rewritten-field rule otherwise (the session's own record
+  /// file `session_name`.rdat, anything else).
+  Result path(const std::string& name, const std::string& session_name,
+              const std::set<std::string>& kept) const {
+    const std::string base = name.substr(0, name.rfind('.'));
+    if (base == session_name) return text(base);
+    // "<ch>.timd", "<ch>.rdat": the base itself; "<ch>-NNNNNN.segd" and the
+    // segment's files: the base without its segment number. The base is
+    // tried first, so a channel "LAH-12" owns "LAH-12.timd".
+    if (kept.count(base)) return channel(name);
+    const auto dash = base.rfind('-');
+    if (dash != std::string::npos && all_digits(base.substr(dash + 1)) &&
+        kept.count(base.substr(0, dash)))
+      return channel(name);
+    return text(name);
+  }
+
   /// The rule for a field the copy rewrites.
   Result text(const std::string& value) const {
     const std::string h = scan_folded(value);
@@ -2174,19 +2193,7 @@ class Verifier {
   /// record file.
   void path_component(const std::string& name, const std::string& loc) {
     ++rep_.text_fields_checked;
-    const std::string base = name.substr(0, name.rfind('.'));
-    if (base == dst_.session_name()) {
-      report(scan_.text(base), loc, "path");
-      return;
-    }
-    std::string owner = base;  // "<ch>-NNNNNN" -> "<ch>"
-    const auto dash = base.rfind('-');
-    if (dash != std::string::npos && all_digits(base.substr(dash + 1))) owner = base.substr(0, dash);
-    if (!kept_.count(owner)) {
-      report(scan_.text(name), loc, "path");
-      return;
-    }
-    report(scan_.channel(name), loc, "path");
+    report(scan_.path(name, dst_.session_name(), kept_), loc, "path");
   }
 
   void set_kept(std::set<std::string> k) { kept_ = std::move(k); }
@@ -3850,6 +3857,55 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
         continue;
       }
       pf.segment_numbers[seg.tmet] = folder_number;
+    }
+  }
+  // ---- kept channel names (#143) ------------------------------------------
+  // A kept channel's name stays verbatim: in its folder and file names, its
+  // universal headers' channel_name and the Seiz entries naming it. The
+  // copy's verification applies the channel-name rule (Scanner::channel) to
+  // all of them; whatever it would refuse is refused HERE, before anything
+  // is written, on the names the copy will produce (segments numbered as
+  // above; a cut renumbers from 0, so 0..n-1 covers what it can keep). The
+  // verifier still makes its own call on what the copy actually holds.
+  if (an && dst_named) {
+    const Scanner scan = build_scanner(plan, pf.new_name, an->clear_subject, an->clear_location,
+                                       pf.excluded, pf.kept, pf.pseudonym);
+    std::map<std::string, std::vector<int>> numbers;  // per kept data channel
+    for (const auto& c : plan.layout.channels) {
+      if (!pf.kept.count(c.name)) continue;
+      auto& n = numbers[c.name];
+      for (std::size_t i = 0; i < c.segments.size(); ++i) {
+        if (o.time_range) {
+          n.push_back(static_cast<int>(i));
+        } else if (const auto it = pf.segment_numbers.find(c.segments[i].tmet);
+                   it != pf.segment_numbers.end()) {
+          n.push_back(it->second);
+        }
+      }
+    }
+    for (const auto& ch : pf.kept) {
+      ctl.check();
+      std::vector<std::string> names = {ch, ch + ".timd", ch + ".rdat", ch + ".ridx"};
+      for (int number : numbers[ch]) {
+        const std::string stem = canonical_segment_stem(ch, number);
+        for (const char* ext : {".segd", ".tmet", ".tidx", ".tdat", ".rdat", ".ridx"})
+          names.push_back(stem + ext);
+      }
+      for (const auto& name : names) {
+        // The bare name: its channel_name fields and Seiz entries (verify's
+        // name rule for a kept name); the rest: verify's path rule.
+        const Scanner::Result r =
+            name == ch ? scan.channel(name) : scan.path(name, pf.new_name, pf.kept);
+        if (r.refuse.empty()) continue;
+        add(RefusalKind::WriteConflict, "channel-name-identity",
+            "kept channel " + ch + ": " +
+                (name == ch ? std::string("its name, which the copy keeps,")
+                            : "the folder or file name " + name + " the copy makes for it") +
+                " contains " + r.refuse +
+                "; leave the channel out (exclude_channels) for this copy",
+            ch, "channels");
+        break;  // one refusal per channel
+      }
     }
   }
   for (const auto& ch : pf.kept) {

@@ -87,6 +87,26 @@ new identifiers, other programs' private data cleared, provenance
   caller that used it as a pre-check for a shifted copy should call
   `anonymize.check(..., shift_us=...)` instead.
 
+## A kept channel named after the patient is refused before copying
+
+A kept channel whose name holds the patient's name or ID, the recording
+location or the original session name (in a form the copy's check refuses:
+"Roe" or "Jane_C3" for the patient Jane Roe, "Roe1", "JaneRoe") used to pass
+`anonymize.check` and was refused only by the copy's verification, after
+every block had been copied (`verify-failed`). It is now refused **before
+anything is written**, by `check`, `anonymize_session` and `redact_text`
+alike, with the new code **`channel-name-identity`**
+(`WriteConflictError`, `details["channel"]` = the channel). The pre-flight
+applies the verification's own channel-name rule to each kept channel's
+name and to the folder and file names the copy makes from it (#143).
+Overlaps that the rule only notes ("12" in "LAH12", "P3", a session called
+"EEG" vs "EEG1") still pass. Leave such a channel out with
+`exclude_channels`. Transforms are unaffected.
+
+- **Migration:** code that caught `verify-failed` for this case now gets
+  `channel-name-identity`, raised as the same `WriteConflictError`, before
+  the copy starts.
+
 ## Faster
 
 - **Opening a session reads each segment's metadata file with one bounded
