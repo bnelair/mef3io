@@ -56,6 +56,7 @@ class TarSource : public SessionSource {
   bool exists(const std::string& rel) const override;
   std::uint64_t file_size(const std::string& rel) const override;
   std::vector<ui1> read_all(const std::string& rel) const override;
+  std::vector<ui1> read_head(const std::string& rel, std::size_t max_bytes) const override;
   std::vector<ui1> read_range(const std::string& rel, std::size_t offset,
                               std::size_t length) const override;
   std::string describe(const std::string& rel) const override;
@@ -70,6 +71,11 @@ class TarSource : public SessionSource {
   std::string root_;                        // stripped member prefix ("" if none)
   std::map<std::string, TarMember> files_;  // root-relative
   std::set<std::string> dirs_;              // root-relative; always contains ""
+  /// dir -> its immediate children, sorted by name (a name that is both a
+  /// directory and a file is listed once, as the directory). Built once in
+  /// the constructor so list_dir costs O(log dirs + children), not a scan of
+  /// the whole archive per call (an open lists every channel folder).
+  std::map<std::string, std::vector<SourceDirEntry>> children_;
 };
 
 /// Pack a session directory into a single uncompressed tar archive and return

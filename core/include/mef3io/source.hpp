@@ -31,6 +31,17 @@ class SessionSource {
   virtual bool exists(const std::string& rel) const = 0;
   virtual std::uint64_t file_size(const std::string& rel) const = 0;
   virtual std::vector<ui1> read_all(const std::string& rel) const = 0;
+  /// The first min(file size, max_bytes) bytes of a file, in ONE request:
+  /// a short file returns what it has (not an error), so a caller's own size
+  /// check reports it exactly as it would after read_all. Used for the
+  /// fixed-length .tmet record, whose loader never looks past
+  /// METADATA_FILE_BYTES — on a network share every request is a round trip
+  /// (#141). The default reads the whole file and truncates.
+  virtual std::vector<ui1> read_head(const std::string& rel, std::size_t max_bytes) const {
+    auto bytes = read_all(rel);
+    if (bytes.size() > max_bytes) bytes.resize(max_bytes);
+    return bytes;
+  }
   /// Read exactly [offset, offset+length) of a file. Used to fetch only the
   /// RED blocks a windowed read needs, rather than the whole .tdat.
   virtual std::vector<ui1> read_range(const std::string& rel, std::size_t offset,
@@ -55,6 +66,7 @@ class DirectorySource : public SessionSource {
   bool exists(const std::string& rel) const override;
   std::uint64_t file_size(const std::string& rel) const override;
   std::vector<ui1> read_all(const std::string& rel) const override;
+  std::vector<ui1> read_head(const std::string& rel, std::size_t max_bytes) const override;
   std::vector<ui1> read_range(const std::string& rel, std::size_t offset,
                               std::size_t length) const override;
   std::string describe(const std::string& rel) const override;

@@ -1606,8 +1606,8 @@ class Copier {
       if (!lrto && (window_ || keep) && record_offset_dependent(r))
         refuse(RefusalKind::WriteConflict, "time-range-offset-disputed",
                "record " + std::to_string(i) + " of " + where +
-                   " stores its time against a recording-time offset its segments disagree on, "
-                   "so whether it lies in time_range is unknown",
+                   " stores its time against a recording-time offset its segments disagree on "
+                   "(or that cannot be read), so whether it lies in time_range is unknown",
                channel, "time_range");
       if (window_ && !record_in_window(r, rto, window_->first, window_->second)) {
         ++rep_.records_outside_window;
@@ -2849,7 +2849,8 @@ class Verifier {
       if ((o_.time_range || keep_time) && !lrto && record_offset_dependent(r)) {
         problem(drel, "records",
                 "a source record's time is stored against a recording-time offset its "
-                "segments disagree on, so whether a cut keeps it is unknown");
+                "segments disagree on (or that cannot be read), so whether a cut keeps it is "
+                "unknown");
         return;
       }
       if (o_.time_range && !record_in_window(r, r_rto, o_.time_range->first, o_.time_range->second))
@@ -3882,8 +3883,11 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
         if (record_offset_dependent(f.records[i])) {
           add(RefusalKind::WriteConflict, "time-range-offset-disputed",
               "record " + std::to_string(i) + " of " + where +
-                  " stores its time against a recording-time offset its segments disagree on, "
-                  "so whether it lies in time_range is unknown; copy it without time_range",
+                  " stores its time against a recording-time offset " +
+                  (plan.rto_status == "disputed"
+                       ? std::string("its segments disagree on")
+                       : std::string("that cannot be read")) +
+                  ", so whether it lies in time_range is unknown; copy it without time_range",
               channel, "time_range");
           break;
         }

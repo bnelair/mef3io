@@ -333,7 +333,7 @@ with a shift; a copy that keeps the times never meets them.
 | `no-channels-left` | `ValueError` | check | The selection leaves no channel. |
 | `time-range-invalid` | `ValueError` | check | `time_range` does not start before it ends. |
 | `time-range-empty` | `ValueError` | check | No channel of the copy has samples inside `time_range`. |
-| `time-range-offset-disputed` | `WriteConflictError` | check | A cut (`time_range`) of a session whose segments disagree on the recording-time offset: a channel- or session-level annotation file stores a time against that offset, so whether it lies in the window is unknown (the Reader refuses to read such a file too). Copy it without `time_range`. Each segment's data and its own annotations are placed by that segment's offset, so they are not affected. |
+| `time-range-offset-disputed` | `WriteConflictError` | check | A cut (`time_range`) of a session whose segments disagree on the recording-time offset, or whose offset cannot be read (the message says which): a channel- or session-level annotation file stores a time against that offset, so whether it lies in the window is unknown (the Reader refuses to read such a file too). Copy it without `time_range`. Each segment's data and its own annotations are placed by that segment's offset, so they are not affected. |
 | `shift-below-floor` | `ValueError` | check | *(shift only)* The shift is smaller than the recording's span plus one day. |
 | `shift-not-positive` | `ValueError` | check | *(shift only)* The shift moves a time to 1970 or before (a block index, data header or block time: only in the copy pass). |
 | `rename-name-mismatch` | `ValueError` | check | `rename=False` and the destination is not named after the source. |

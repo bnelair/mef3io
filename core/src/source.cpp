@@ -44,6 +44,19 @@ std::vector<ui1> DirectorySource::read_all(const std::string& rel) const {
   return buf;
 }
 
+std::vector<ui1> DirectorySource::read_head(const std::string& rel, std::size_t max_bytes) const {
+  // Open + one read: no seek to the end for the size (read_all's tellg), so
+  // the fixed-length .tmet costs one request whatever padding follows it.
+  const std::string path = join(rel);
+  std::ifstream f(path, std::ios::binary);
+  if (!f) throw IoError("cannot open file: " + path);
+  std::vector<ui1> buf(max_bytes);
+  f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(max_bytes));
+  if (f.bad()) throw IoError("read failed: " + path);
+  buf.resize(static_cast<std::size_t>(f.gcount()));  // short file: what it has
+  return buf;
+}
+
 std::vector<ui1> DirectorySource::read_range(const std::string& rel, std::size_t offset,
                                              std::size_t length) const {
   const std::string path = join(rel);

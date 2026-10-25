@@ -46,6 +46,10 @@ class Reader {
   Reader(const std::string& mefd_path, std::string password = "", int n_threads = 0,
          bool strict = true)
       : session_(mefd_path, std::move(password), strict), n_threads_(n_threads) {}
+  /// Open through an existing source (see the matching Session constructor).
+  Reader(std::shared_ptr<const SessionSource> source, std::string password = "",
+         int n_threads = 0, bool strict = true)
+      : session_(std::move(source), std::move(password), strict), n_threads_(n_threads) {}
 
   /// Segments that could not be read. Always empty in strict mode, where such
   /// a segment throws instead. Non-empty means parts of this session read back

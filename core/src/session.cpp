@@ -40,6 +40,13 @@ Session::Session(const std::string& mefd_path, std::string password, bool strict
   discover();
 }
 
+Session::Session(std::shared_ptr<const SessionSource> source, std::string password, bool strict)
+    : mefd_path_(source ? source->describe("") : std::string()), source_(std::move(source)),
+      password_(std::move(password)), strict_(strict) {
+  if (!source_) throw std::invalid_argument("Session: null source");
+  discover();
+}
+
 void Session::discover() {
   // The layout rules live in session_layout.hpp, shared with inspect_session.
   auto layout = detail::discover_layout(*source_);
@@ -67,7 +74,11 @@ TimeSeriesMetadata& Session::segment_metadata(SegmentReader& seg) {
   // Locked anyway: it is never reset, so the reference stays valid after.
   std::lock_guard<std::mutex> lock(state_mu_);
   if (!seg.metadata) {
-    auto bytes = source_->read_all(seg.tmet_path);
+    // ONE bounded request: .tmet is a fixed-length record and the loader
+    // never looks past METADATA_FILE_BYTES (foreign padding after it is
+    // ignored, as the bounded body CRC requires). A short file comes back
+    // short and fails the loader's size check exactly as before (#141).
+    auto bytes = source_->read_head(seg.tmet_path, fmt::METADATA_FILE_BYTES);
     seg.metadata = load_time_series_metadata(bytes, password_);
   }
   return *seg.metadata;

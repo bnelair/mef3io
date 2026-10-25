@@ -542,3 +542,16 @@ def test_keep_mode_verify_catches_a_planted_name_and_a_foreign_region(tmp_path, 
     assert not rep.ok
     assert any(p.field == "universal header protected region" for p in rep.problems), \
         rep.summary()
+
+
+def test_an_offset_that_cannot_be_read_is_named_as_such(tmp_path):
+    # Level-1 password: section 3 (the offset) stays locked. check() lists
+    # every refusal, including the cut's, which must say why it cannot place
+    # the records: the offset cannot be read (not "segments disagree").
+    src = _rich_session(tmp_path / "jane_roe.mefd", password=True)
+    rep = mef3io.anonymize.check(src, tmp_path / "K.mefd", password="pw-one",
+                                 time_range=(START, START + 30 * SECOND))
+    assert rep.codes[0] == "password-level1-only"
+    cut = [r for r in rep.refusals if r.code == "time-range-offset-disputed"]
+    assert cut and all("cannot be read" in r.message and "disagree" not in r.message
+                       for r in cut), rep.summary()
