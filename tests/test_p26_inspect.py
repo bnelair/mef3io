@@ -215,7 +215,7 @@ def test_identity_table_has_a_fixed_shape(tmp_path):
 def test_inspect_never_reads_a_tdat(tmp_path, read_index):
     path = tmp_path / "big.mefd"
     rng = np.random.default_rng(0)
-    with mef3io.Writer(str(path), durability="fast") as w:
+    with mef3io.Writer(str(path)) as w:
         for i in range(20):  # incompressible: the .tdat is ~the raw size
             w.write_int32("ch1", rng.integers(-(2**30), 2**30, int(FS * 600), dtype=np.int32),
                           0.1, START + i * 600 * SECOND, FS)

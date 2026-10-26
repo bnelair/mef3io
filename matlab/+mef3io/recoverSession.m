@@ -5,9 +5,9 @@ function [summary, nSegments] = recoverSession(path, opts)
 %   summary = mef3io.recoverSession(sessionPath, Apply=true)
 %   [summary, n] = mef3io.recoverSession(sessionPath, Apply=true, Backup=false)
 %
-%   This is the counterpart to Durability='fast' (the default for
-%   mef3io.Writer): without the flush barriers, an unclean shutdown can leave
-%   the block index and the data file disagreeing. Two shapes, treated
+%   This is the counterpart to mef3io.Writer's write path, which flushes
+%   only each segment's .tmet: a power cut during an append can leave the
+%   block index and the data file disagreeing. Two shapes, treated
 %   differently because one has lost data and the other has not:
 %
 %     index ahead of data - entries reference bytes that never landed. Those

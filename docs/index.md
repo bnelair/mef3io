@@ -19,7 +19,7 @@ version number.
 !!! tip "Long recordings"
     These files run for days to months and reach tens of gigabytes **per
     channel**. [Long recordings](long_recordings.md) covers the append
-    workload, the `durability` knob, and what is guaranteed at that scale;
+    workload, what an append flushes, and what is guaranteed at that scale;
     [Validation & repair](validation.md#recovery-after-an-interrupted-write)
     covers recovering a session after an interrupted write.
 

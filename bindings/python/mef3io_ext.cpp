@@ -1654,7 +1654,6 @@ NB_MODULE(_mef3io, m) {
                    [](const mef3io::SessionWriter& w) { return w.legacy_password_segments(); })
       .def("set_threads", &mef3io::SessionWriter::set_threads)
       .def("threads", &mef3io::SessionWriter::threads)
-          .def("set_durable", &mef3io::SessionWriter::set_durable, nb::arg("durable"))
       .def(
           "set_metadata",
           [](mef3io::SessionWriter& w, nb::dict d) {

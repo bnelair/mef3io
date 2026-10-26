@@ -4,6 +4,8 @@
 // These lived in duplicate in writer.cpp and validate.cpp, and drifted: the
 // repair path fsynced and preserved mode/owner while the append — which writes
 // the SAMPLES, not just declarations — did neither. One copy, one contract.
+// (Since 2.0 the writer itself flushes only a replaced `.tmet`; repair,
+// rename, recovery and the copies keep their own flush rules.)
 //
 // Not a public header: it is included by .cpp files inside core/src only.
 #pragma once
@@ -33,6 +35,13 @@ namespace mef3io::detail {
 
 namespace fsys = std::filesystem;
 
+/// TEST HOOK: when set, called with the path of every flush `fsync_file`
+/// attempts (successful or not). Lets a test pin WHICH files a write path
+/// flushes — the writer may flush only the `.tmet` it replaces — without
+/// patching the OS. Set it only while no other thread writes; the observer
+/// itself must be thread-safe (several channels may be written at once).
+inline void (*fsync_observer)(const std::string& path) = nullptr;
+
 /// Flush a file's contents all the way to stable storage.
 ///
 /// A rename is ORDERED, not durable: without this a power cut can leave the
@@ -47,11 +56,13 @@ namespace fsys = std::filesystem;
 /// carry the write right and fails with ERROR_ACCESS_DENIED without it —
 /// unlike POSIX, where fsync on an O_RDONLY descriptor is perfectly legal.
 /// Opening for read cost nothing on Linux and macOS and made every flush on
-/// Windows a no-op that reported failure: `durability="full"` threw on the
-/// first append, and the paths that ignore the result — `durability="fast"`
-/// and the recovery backups — silently had no durability at all. Do not
-/// "simplify" this back to GENERIC_READ.
+/// Windows a no-op that reported failure: 1.x's `durability="full"` threw on
+/// the first append, and the paths that ignore the result — then
+/// `durability="fast"`, still the recovery backups — silently had no
+/// durability at all. The writer's `.tmet` flush (fsync_file_or_throw) relies
+/// on this today. Do not "simplify" this back to GENERIC_READ.
 [[nodiscard]] inline bool fsync_file(const std::string& path, std::string* why = nullptr) {
+  if (fsync_observer) fsync_observer(path);
 #ifdef _WIN32
   const auto fail = [&](const char* what) {
     if (why) {

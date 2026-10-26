@@ -206,6 +206,13 @@ ABI shim (later) converts to codes. Bindings map to Python exceptions.
   under-declaring truncates the buffer it decodes into. The read path never consults these fields — it
   sizes from each block's own header — so older or foreign declarations stay
   readable. See `docs/mef3_format.md` and `docs/legacy_comparison.md`.
+- **Durability: one barrier.** An append extends `.tdat`/`.tidx` in place and
+  patches their headers without flushing; only the `.tmet` is written to a
+  temp file, flushed and renamed over the original, since a short `.tmet`
+  makes the whole session fail to open. A power cut can therefore tear the
+  last append of a segment, which the validator detects and `recover_session`
+  repairs. There is no option (2.0 removed `durability=`); see
+  `docs/long_recordings.md`.
 - Writes never touch caches; a cached open detects the change (see §6).
 
 ### 4.6 Threading

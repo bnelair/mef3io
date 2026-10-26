@@ -179,27 +179,6 @@ class SessionWriter {
   /// The thread count as set (0 = automatic).
   int threads() const { return n_threads_.load(std::memory_order_relaxed); }
 
-  /// Flush appends to stable storage. **Default false.**
-  ///
-  /// These files are built by appending for days to months, so the append is
-  /// the hot path and the barriers cost ~2.5x on it. The default therefore
-  /// favours throughput, matching what every MEF writer before this one did —
-  /// meflib performs no flushing at all.
-  ///
-  /// What that costs on an unclean shutdown: the ORDER in which the `.tdat`,
-  /// `.tidx` and `.tmet` updates reach the disk is no longer enforced, so a
-  /// crash can leave the index referencing data that never landed, or blocks
-  /// present in `.tdat` that the index never got to mention, or a torn tail on
-  /// either. Every one of those is DETECTED by `validate()` and REPAIRED by
-  /// `recover_session()`, which rebuilds missing index entries from the RED
-  /// block headers — so the failure mode is "run recover after an unclean
-  /// shutdown", not "lose the recording".
-  ///
-  /// Set true for the strict contract: each append becomes all-or-nothing
-  /// across the three files, at the cost of ~3 flushes per channel per append.
-  void set_durable(bool d) { durable_ = d; }
-  bool durable() const { return durable_; }
-
   // Session-wide subject/descriptive metadata written into every channel's
   // section 2 (descriptive/acquisition) and section 3 (subject) on write.
   // Set before writing; ignored for channels already on disk.
@@ -285,7 +264,6 @@ class SessionWriter {
   SessionMetadata metadata_;
   si8 block_length_override_ = 0;
   std::atomic<int> n_threads_{0};
-  bool durable_ = false;
   std::map<std::string, ChannelState> channels_;
 };
 

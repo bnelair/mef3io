@@ -52,6 +52,34 @@ notes at release time. These changes target **2.0.0** (breaking).
 
 See [Threads](../threads.md) for the rule.
 
+## Breaking: the `durability` option is removed (migration)
+
+- **`Writer(durability=)` and `MefWriter(durability=)` are gone**, with no
+  deprecation period: passing it raises `TypeError` (before anything is
+  written, so `overwrite=True` never removes a session first). Also removed:
+  C++ `SessionWriter::set_durable` / `durable()` and `SegmentSpec::durable`,
+  the C ABI's `mef3io_writer_set_durable`, the MEX command
+  `writer_set_durable`, and MATLAB's `Writer(Durability=)` (now an
+  unknown-option error). Drop the argument; there is nothing to replace it
+  with.
+- **What every write now does**: an append flushes exactly one thing — each
+  segment's `.tmet`, before it is renamed over the previous one, because a
+  short `.tmet` would make the whole session fail to open. Nothing else is
+  flushed (1.x's default `"fast"` still flushed the two headers an append
+  patches; that is gone too). A fresh write flushes nothing.
+- **What a power cut can now do**: leave the *last* append of a segment
+  torn — a short `.tdat` or `.tidx` tail, an index pointing past the data,
+  blocks the index never listed, or a stale header count. With
+  `durability="full"` 1.x prevented these; now they can happen whatever you
+  pass. `validate_session` detects each one and
+  `recover_session` (`python -m mef3io recover SESSION --apply`,
+  `mef3io.recoverSession` in MATLAB) repairs it. Earlier appends are never at
+  risk: nothing rewrites them. If you relied on `"full"`, run `recover` after
+  every unclean shutdown.
+- **Faster appends**: measured on ext4, a 128-channel append of 10-minute
+  blocks takes 2.5–2.8 s, against 3.8 s with 1.x's default and 6.0–6.5 s with
+  `"full"` (see [Long recordings](../long_recordings.md#durability-and-what-it-costs)).
+
 ## New
 
 - **One thread rule, everywhere.** An object's `n_threads` is how many threads

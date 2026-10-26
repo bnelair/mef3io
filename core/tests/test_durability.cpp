@@ -1,24 +1,29 @@
 // mef3io — the durability barriers themselves.
 //
 // `fsync_file` is the one place the library's crash guarantee actually lives,
-// and most of its callers IGNORE the result: `durability="fast"` and the
-// recovery backups flush best-effort, so a platform where the flush never
-// works reports nothing at all. That is exactly how it shipped broken on
-// Windows — FlushFileBuffers requires a GENERIC_WRITE handle, the code opened
-// with GENERIC_READ, and every flush failed. `durability="full"` threw on the
-// first append; the best-effort paths silently had no durability whatsoever.
+// and some callers IGNORE the result (the recovery backups flush best-effort),
+// so a platform where the flush never works reports nothing at all. That is
+// exactly how it shipped broken on Windows in 1.x — FlushFileBuffers requires
+// a GENERIC_WRITE handle, the code opened with GENERIC_READ, and every flush
+// failed: `durability="full"` threw on the first append, the best-effort
+// paths silently had no durability whatsoever. Since 2.0 the writer's one
+// barrier — the replaced `.tmet` — goes through the same primitive.
 //
-// These tests are deliberately about the PRIMITIVE, not about a session. A
-// round trip cannot see this: the bytes land either way on an orderly shutdown.
+// Most of these tests are about the PRIMITIVE, not a session: a round trip
+// cannot see this, the bytes land either way on an orderly shutdown. The last
+// ones pin WHICH files a write flushes, through the `fsync_observer` hook.
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
+#include <vector>
 #include <string>
 #include <system_error>
 
 #include "../src/durability.hpp"
+#include "mef3io/session_writer.hpp"
 
 namespace fs = std::filesystem;
 using namespace mef3io;
@@ -129,4 +134,87 @@ TEST_CASE("replace_file publishes over an existing target", "[durability]") {
   }
   REQUIRE(got == "new");
 
+}
+
+namespace {
+
+// Every flush fsync_file attempts while a FlushLog is alive. Several channels
+// can be written at once, hence the mutex.
+std::mutex g_flush_mu;
+std::vector<std::string> g_flushed;
+
+struct FlushLog {
+  FlushLog() {
+    std::lock_guard<std::mutex> lk(g_flush_mu);
+    g_flushed.clear();
+    detail::fsync_observer = [](const std::string& p) {
+      std::lock_guard<std::mutex> lk2(g_flush_mu);
+      g_flushed.push_back(p);
+    };
+  }
+  ~FlushLog() { detail::fsync_observer = nullptr; }
+  FlushLog(const FlushLog&) = delete;
+  FlushLog& operator=(const FlushLog&) = delete;
+  std::vector<std::string> take() {
+    std::lock_guard<std::mutex> lk(g_flush_mu);
+    auto out = g_flushed;
+    g_flushed.clear();
+    return out;
+  }
+};
+
+bool ends_with(const std::string& s, const std::string& suffix) {
+  return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+}  // namespace
+
+// 2.0 removed the `durability` option. What stays is ONE barrier: the .tmet
+// temp file is flushed before it is renamed over the original, because a short
+// .tmet published by the rename makes the whole session fail to open. Nothing
+// else a write touches is flushed — torn .tdat/.tidx tails are recover_session's
+// job. Pinned here per file, since no round trip can tell the difference.
+TEST_CASE("a write flushes only the .tmet it replaces, before the rename", "[durability]") {
+  const Scratch dir("writer_flush");
+  const auto session = (dir.dir / "s.mefd").string();
+  const si8 start = 1577836800000000;
+  const sf8 rate = 256.0;
+  std::vector<si4> a(2560);
+  for (std::size_t i = 0; i < a.size(); ++i) a[i] = static_cast<si4>(i % 997) - 400;
+  const si8 step = static_cast<si8>(a.size() / rate * 1e6);
+  const char* channels[] = {"ch1", "ch2", "ch3"};
+
+  FlushLog log;
+  {
+    SessionWriter w(session, true);
+    for (const char* ch : channels) w.write_int32(ch, a, 0.5, start, rate);
+    // A FRESH write flushes nothing: there is nothing underneath it to lose.
+    REQUIRE(log.take().empty());
+
+    // An append through the SAME writer (cached index path): exactly one flush
+    // per channel, of the .tmet temp file, i.e. before the rename publishes it.
+    for (const char* ch : channels) w.write_int32(ch, a, 0.5, start + step, rate);
+    auto got = log.take();
+    REQUIRE(got.size() == 3);
+    for (const auto& p : got) {
+      INFO(p);
+      REQUIRE(ends_with(p, ".tmet.mef3io-tmp"));
+    }
+    // A forced new segment creates fresh files: still nothing to flush.
+    w.write_int32("ch1", a, 0.5, start + 2 * step, rate, {}, /*new_segment=*/true);
+    REQUIRE(log.take().empty());
+  }
+  {
+    // A REOPENED writer appends through the slow path (walks the index once):
+    // the same one barrier, nothing on the .tdat or .tidx.
+    SessionWriter w(session, false);
+    w.write_int32("ch2", a, 0.5, start + 2 * step, rate);
+    auto got = log.take();
+    REQUIRE(got.size() == 1);
+    REQUIRE(ends_with(got[0], ".tmet.mef3io-tmp"));
+    REQUIRE(got[0].find("ch2.timd") != std::string::npos);
+  }
+  // The temp file is gone: it was renamed over the .tmet.
+  for (const auto& e : fs::recursive_directory_iterator(dir.dir))
+    REQUIRE_FALSE(ends_with(e.path().string(), ".mef3io-tmp"));
 }

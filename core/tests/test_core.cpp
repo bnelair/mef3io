@@ -754,10 +754,10 @@ TEST_CASE("Report::ok is false when nothing was examined") {
   fsys::remove_all(dir);
 }
 
-TEST_CASE("C ABI exposes durability and recovery for the MATLAB binding") {
+TEST_CASE("C ABI exposes append and recovery for the MATLAB binding") {
   // The MATLAB binding goes through the flat C ABI, so parity with Python has
-  // to be tested here — there is no MATLAB on CI. Covers the two entry points
-  // added for it: the durability knob and recovery.
+  // to be tested here — there is no MATLAB on CI. (2.0 removed the durability
+  // knob, mef3io_writer_set_durable; an append flushes only the .tmet.)
   namespace fsys = std::filesystem;
   const auto dir = fsys::temp_directory_path() / "mef3io_c_api_durability.mefd";
   fsys::remove_all(dir);
@@ -769,11 +769,8 @@ TEST_CASE("C ABI exposes durability and recovery for the MATLAB binding") {
 
   mef3io_writer* w = nullptr;
   REQUIRE(mef3io_writer_open(dir.string().c_str(), 1, "", "", &w) == 0);
-  // Both settings must be accepted and must produce a readable session.
-  REQUIRE(mef3io_writer_set_durable(w, 0) == 0);       // "fast" — the default
   REQUIRE(mef3io_writer_write_int32(w, "ch1", a.data(), nullptr, static_cast<int64_t>(a.size()),
                                     0.5, 1577836800000000LL, 256.0, 0, nullptr) == 0);
-  REQUIRE(mef3io_writer_set_durable(w, 1) == 0);       // "full"
   REQUIRE(mef3io_writer_write_int32(w, "ch1", a.data(), nullptr, static_cast<int64_t>(a.size()),
                                     0.5, 1577836800000000LL + 15625000LL, 256.0, 0, nullptr) == 0);
   mef3io_writer_close(w);

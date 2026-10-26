@@ -625,8 +625,8 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   appends, windowed reads): watch GROWTH (must stay ~1.00), write/read
   AMPLIFICATION and duty cycle. It validates + dry-run recovers at the end
   and exits non-zero on either failure. Measured there: 1.6x faster per
-  block than mef_tools, in a file 1.8x smaller, growth 1.00x — WITH the
-  durability barriers the legacy stack does not have.
+  block than mef_tools, in a file 1.8x smaller, growth 1.00x — measured WITH
+  1.x's full durability barriers (2.0 keeps only the .tmet one).
 - **EVERY potentially long binding call RELEASES THE GIL** (#79). Opening is
   where all the metadata parsing happens (64 ch x 60 seg: a 616 ms open froze
   every other Python thread for 613 ms). Reads/writes and the session-level
@@ -717,19 +717,16 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   caller that reopens its Writer per block is a natural Python pattern and
   the rewrite was ~47x write amplification for a 10-min block against a
   month-long index. `test_an_append_never_rewrites_the_index_or_the_data`
-  pins it for BOTH durability settings, self-calibrating against actual
-  file growth. (2) `durability="fast"` (`Writer(durability=)`) drops the
-  barriers. NOTE this is the DEFAULT (changed 2026-09-21) and it is NOT an
-  "atomic writes" story: `.tdat` and `.tidx` are extended IN PLACE, so without
-  barriers a crash can leave a torn tail on either, an index referencing data
-  that never landed, or blocks the index never mentioned. Only `.tmet` is
-  published by rename. Every one of those is detectable (`index.block-offsets`,
+  pins it, self-calibrating against actual file growth. (2) NO DURABILITY
+  OPTION since 2.0 (see the next gotcha): it is NOT an "atomic writes" story:
+  `.tdat` and `.tidx` are extended IN PLACE unflushed, so a power cut can
+  leave a torn tail on either, an index referencing data that never landed,
+  or blocks the index never mentioned. Only `.tmet` is published by a
+  flushed rename. Every one of those is detectable (`index.block-offsets`,
   `index.data-coverage`, the body CRCs, `header.entry-count`) and fixed by
-  `recover_session`, which is what makes the default defensible — the failure
-  mode is "run recover after an unclean shutdown", and an EARLIER append is
-  never at risk because nothing rewrites it. Measured on the real workload
-  (24 h x 16 ch @ 512 Hz): 1.6x faster per block than mef_tools even with
-  `durability="full"`, because the encode parallelises. (3) `recover_session` (core/src/
+  `recover_session` — the failure mode is "run recover after an unclean
+  shutdown", and an EARLIER append is never at risk because nothing rewrites
+  it. (3) `recover_session` (core/src/
   recover.cpp, `python -m mef3io recover`) is the ONLY thing that may touch
   the index or data — repair_session never does, which is what keeps it safe
   on anything. Index-ahead-of-data drops entries; data-ahead-of-index
@@ -753,32 +750,40 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   only on truncation, rebuilt blocks, or a stale .tdat entry count — a
   header-only fix keeps it. At rto 0 the .tmet stays byte-identical. (4) Docs: `docs/long_recordings.md`, `docs/validation.md`,
   `for_agents/INVARIANTS.md`.
-- **Durability is scoped, deliberately** (`core/src/durability.hpp`, shared by
-  writer.cpp and validate.cpp — they had drifted, and the path writing SAMPLES
-  was less careful than the one rewriting declarations). Three barriers are
-  load-bearing on APPEND and must not be removed for speed: fsync the `.tdat`
-  BEFORE writing the `.tidx` that points at those bytes (otherwise a power cut
-  leaves an index running past the real end of the data file — a state the
-  in-process rollback cannot reach, because the process is gone); fsync the
-  appended `.tidx` before patching its header; and fsync the `.tmet` temp
-  file before renaming it over the original (a rename is ORDERED, not durable, so otherwise it can publish a name over bytes
-  still in cache, and a short `.tmet` throws from the metadata loader and kills
-  the WHOLE session). Two things are deliberately NOT fsynced: a FRESH write
-  (nothing underneath to lose — a crash leaves an incomplete session either
-  way), and the DIRECTORY entry after a rename (losing the rename just keeps
-  the previous complete, consistent file, which is worth more than keeping the
-  last append). Cost on ext4, measured: fresh write unaffected (~80 MB/s); an
-  append pays ~3 fsyncs per channel, so a 128-channel append is ~5 s where the
-  fresh write is ~0.4 s. That is the price of not corrupting a clinical
-  archive; do not "optimise" it away without replacing the guarantee.
+- **Durability: ONE barrier, no option** (`core/src/durability.hpp`, shared by
+  writer.cpp, validate.cpp, recover/rename/copies — they had drifted once).
+  Maintainer decision 2026-10-25 (2.0): the `durability` option is REMOVED
+  everywhere (Python Writer/MefWriter -> TypeError, C++ `set_durable` /
+  `SegmentSpec::durable`, C ABI `mef3io_writer_set_durable`, MEX, MATLAB
+  `Durability=`). The writer flushes EXACTLY ONE thing: the `.tmet` temp file
+  before renaming it over the original (`write_file_atomic`, only when
+  REPLACING — i.e. on append). THAT BARRIER STAYS — its history: a rename is
+  ORDERED, not durable, so without it a power cut can publish the new name
+  over bytes still in cache, and a SHORT `.tmet` throws from the metadata
+  loader and kills the WHOLE session (not one segment) — the one torn state
+  recover_session cannot be relied on to undo. Dropped in 2.0: the `.tdat`
+  fsync before the `.tidx` that points at it, the `.tidx` fsync before its
+  header patch, and the header-patch flushes (1.x's default "fast" was
+  documented as "no flushes" but still flushed both patched headers
+  best-effort — 2 fsyncs/channel). Never flushed: a FRESH write (nothing
+  underneath to lose) and the DIRECTORY entry after the rename (losing it
+  keeps the previous complete file). Measured on ext4, 128 ch x 10-min
+  256 Hz append: 1.x full 6.0-6.5 s, 1.x fast 3.8 s, 2.0 2.5-2.8 s, no flush
+  at all 0.74 s (~15 ms/channel for the .tmet). Pinned per file by the
+  `detail::fsync_observer` test hook (core/tests/test_durability.cpp: fresh
+  write 0 flushes; cached + reopened append = one `.tmet.mef3io-tmp` per
+  channel; new segment 0). Repair, rename, recovery and the copies keep their
+  OWN flush rules — only the WRITER's option went.
   THE FLUSH IS THREE DIFFERENT CALLS with three different rules, and the
   platform differences are load-bearing: Linux `fdatasync`, macOS
   `F_FULLFSYNC` (with an ENOTSUP fallback), Windows `FlushFileBuffers`.
   **Windows requires the handle to carry GENERIC_WRITE** — unlike POSIX, where
   fsync on an O_RDONLY descriptor is legal — and opening for read there fails
-  ERROR_ACCESS_DENIED. That shipped: `durability="full"` threw on the first
-  append, and the callers that IGNORE the result (`durability="fast"`, the
-  recovery backups) silently had no durability at all, which is the worse half.
+  ERROR_ACCESS_DENIED. That shipped (1.x): `durability="full"` threw on the
+  first append, and the callers that IGNORE the result (then
+  `durability="fast"`, still the recovery backups) silently had no durability
+  at all, which is the worse half. The 2.0 `.tmet` barrier uses the same
+  primitive (`fsync_file_or_throw`), so this still matters.
   Use `CreateFileW`, not `CreateFileA`, or a non-ASCII session path cannot be
   opened. A round trip can never catch this class of bug — the bytes land
   either way on an orderly shutdown — so the primitive is tested directly in

@@ -683,12 +683,6 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     mef3io_writer_close(w);
     return;
   }
-  if (cmd == "writer_set_durable") {
-    need_args(nrhs, 3, "writer_set_durable");
-    check(mef3io_writer_set_durable(get_writer(prhs[1]),
-                                    get_int(prhs[2], "durable")));
-    return;
-  }
   if (cmd == "writer_set_units") {
     need_args(nrhs, 3, "writer_set_units");
     check(mef3io_writer_set_units(get_writer(prhs[1]),

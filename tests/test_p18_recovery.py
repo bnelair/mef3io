@@ -1,7 +1,8 @@
 """P18 gate: crash recovery after an interrupted write.
 
-`durability="fast"` trades the ordering barriers for speed, so a power cut can
-leave a segment's index and data disagreeing. That trade is only reasonable
+An append flushes only the `.tmet` before its rename (2.0 removed the
+`durability` option and the other barriers), so a power cut can leave a
+segment's index and data disagreeing. That trade is only reasonable
 because the disagreement is detectable and repairable — this is the suite that
 says so.
 
@@ -37,7 +38,7 @@ TSI = 56
 def _session(tmp_path, chunks=6, n=2000):
     path = tmp_path / "s.mefd"
     rng = np.random.default_rng(3)
-    w = mef3io.Writer(str(path), durability="fast")
+    w = mef3io.Writer(str(path))
     for i in range(chunks):
         w.write_int32("ch1", rng.integers(-9000, 9000, n, dtype=np.int32), 0.5,
                       START + int(i * n / FS * 1e6), FS)
@@ -160,63 +161,38 @@ def test_recovery_refuses_a_tar_archive(tmp_path):
         mef3io.recover_session(archive, apply=True)
 
 
-def test_fast_is_the_default_and_full_is_opt_in(tmp_path):
-    """The default changed to "fast" deliberately (2026-09-21).
+def test_the_durability_option_is_gone(tmp_path):
+    """2.0 removed `durability=` (Writer, MefWriter): passing it is a TypeError,
+    raised before the constructor can remove an `overwrite=True` session.
 
-    These files are built by appending for days to months, so the append is the
-    hot path and the barriers cost ~2.5x on it. Pinned because flipping it back
-    silently would be a performance regression nobody would attribute, and
-    flipping it the other way silently would weaken a documented guarantee.
+    Every append now takes one path: only the `.tmet` is flushed before its
+    rename (pinned per file in core/tests/test_durability.cpp); the torn tails
+    a power cut can leave are what the rest of this suite recovers.
     """
     import inspect
 
-    assert inspect.signature(mef3io.Writer.__init__).parameters["durability"].default == "fast"
     from mef3io.compat import MefWriter
 
-    assert inspect.signature(MefWriter.__init__).parameters["durability"].default == "fast"
+    assert "durability" not in inspect.signature(mef3io.Writer.__init__).parameters
+    assert "durability" not in inspect.signature(MefWriter.__init__).parameters
 
-    # Both settings must produce a session that reads back identically — the
-    # knob buys crash behaviour, not different output.
-    rng = np.random.default_rng(17)
-    x = rng.integers(-9000, 9000, 3000, dtype=np.int32)
-    got = {}
-    for durability in ("fast", "full"):
-        path = tmp_path / f"{durability}.mefd"
-        w = mef3io.Writer(str(path), durability=durability)
-        w.write_int32("ch1", x, 0.5, START, FS)
-        w.write_int32("ch1", x, 0.5, START + int(3000 / FS * 1e6), FS)   # append
-        w.close()
-        assert mef3io.Validator(str(path)).validate().ok
-        with mef3io.Reader(str(path)) as r:
-            got[durability] = r.read("ch1")
-    np.testing.assert_array_equal(got["fast"], got["full"])
-
-
-def test_an_unknown_durability_does_not_destroy_the_session_first(tmp_path):
-    """`overwrite=True` removes the existing session in the constructor.
-
-    Validating the option afterwards meant a typo could delete a good session
-    and only then raise, which is the worst possible order for a mistake that
-    is purely a typo.
-    """
     path = tmp_path / "s.mefd"
     w = mef3io.Writer(str(path))
-    w.write_int32("ch1", np.arange(2000, dtype=np.int32), 0.5, START, FS)
+    x = np.arange(2000, dtype=np.int32)
+    w.write_int32("ch1", x, 0.5, START, FS)
+    w.write_int32("ch1", x, 0.5, START + int(2000 / FS * 1e6), FS)   # append
     w.close()
+    assert mef3io.Validator(str(path)).validate().ok
     before = sorted(p.name for p in Path(path).rglob("*") if p.is_file())
-    assert before
 
-    with pytest.raises(ValueError, match="durability"):
-        mef3io.Writer(str(path), overwrite=True, durability="sometimes")
+    for durability in ("fast", "full"):
+        with pytest.raises(TypeError, match="durability"):
+            mef3io.Writer(str(path), overwrite=True, durability=durability)
+        with pytest.raises(TypeError, match="durability"):
+            MefWriter(str(path), overwrite=True, durability=durability)
     assert sorted(p.name for p in Path(path).rglob("*") if p.is_file()) == before, (
-        "the session was destroyed before the option was validated"
+        "the session was destroyed by a rejected argument"
     )
-
-    from mef3io.compat import MefWriter
-
-    with pytest.raises(ValueError, match="durability"):
-        MefWriter(str(path), overwrite=True, durability="sometimes")
-    assert sorted(p.name for p in Path(path).rglob("*") if p.is_file()) == before
 
 
 def test_recovery_refuses_an_index_that_fails_its_own_crc(tmp_path):
@@ -293,11 +269,12 @@ def _set_rto(path, rto):
 
 def _crashed_append(tmp_path, rto, lose_index=True):
     """Six appends; the .tmet (and, with lose_index, the index) of the last
-    three never landed — what `durability="fast"` can leave after a crash."""
+    three never landed — what a power cut mid-append can leave (the .tmet's
+    rename itself is not flushed, so the old one survives)."""
     path = tmp_path / "s.mefd"
     rng = np.random.default_rng(3)
     n = 2000
-    with mef3io.Writer(str(path), durability="fast") as w:
+    with mef3io.Writer(str(path)) as w:
         for i in range(6):
             w.write_int32("ch1", rng.integers(-9000, 9000, n, dtype=np.int32), 0.5,
                           START + int(i * n / FS * 1e6), FS)

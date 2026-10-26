@@ -90,21 +90,25 @@ from measured.
 ## 4. Durability is scoped deliberately, and meflib has none
 
 meflib does **no** durability work: its single `fflush` is "to update stat
-structure after write", not a barrier. mef3io's `durability="full"` is
-stronger.
+structure after write", not a barrier.
 
-Load-bearing on append with `durability="full"`, do not remove for speed:
-- the `.tdat` is flushed **before** the `.tidx` that references those bytes;
-- the appended `.tidx` is flushed before its header is patched, and the
-  `.tmet` temp file before it is renamed over the original.
+2.0 removed the writer's `durability` option (Python, C++, C ABI, MATLAB,
+compat). ONE barrier stays and must not be removed for speed: the `.tmet`
+temp file is flushed before it is renamed over the original
+(`write_file_atomic` in writer.cpp). A rename is ordered, not durable; without
+the flush a power cut can publish a SHORT `.tmet`, which throws from the
+metadata loader and takes the WHOLE SESSION down — the one outcome
+`recover_session` cannot be relied on to undo. Pinned per file by the
+`fsync_observer` hook in core/tests/test_durability.cpp.
 
-Deliberately skipped: a fresh write (nothing underneath to lose) and the
-directory entry after a rename (losing the rename keeps the previous complete
-file). The DEFAULT is `durability="fast"`, which drops the barriers. That is
-NOT atomic: `.tdat` and `.tidx` are extended in place, so a crash can leave a
-torn tail, or an index ahead of or behind the data; only `.tmet` is published
-by rename. Every such state is detectable and fixed by `recover_session`,
-which is what makes the default defensible.
+Nothing else a write does is flushed: not a fresh write (nothing underneath
+to lose), not the directory entry after the rename (losing it keeps the
+previous complete file), not the `.tdat`/`.tidx` extended in place, not the
+headers patched in place. So a power cut can leave the LAST append of a
+segment torn — a short tail, an index ahead of or behind the data, a stale
+header count. Every such state is detectable and fixed by `recover_session`,
+and nothing rewrites an earlier append. Repair, rename, recovery and the
+copies keep their OWN flush rules (durability.hpp primitives, unchanged).
 
 ## 5. Repair rewrites declarations; recovery may touch the index
 

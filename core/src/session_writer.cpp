@@ -670,7 +670,6 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   spec.password_1 = password_1_;
   spec.password_2 = password_2_;
   spec.metadata = metadata_;
-  spec.durable = durable_;
   // Only a NEW segment takes the session's offset; an append keeps the one
   // already in the segment it extends (append_time_series_segment).
   if (!append) spec.recording_time_offset = new_segment_rto(channel, st);

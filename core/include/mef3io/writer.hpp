@@ -93,24 +93,6 @@ struct SegmentSpec {
   /// it must be a true maximum, since a reader allocates its difference buffer
   /// from the result and an under-declaration truncates that buffer.
   ui4 known_difference_bytes = 0;
-  /// Flush to stable storage at the points that keep a segment self-consistent.
-  ///
-  /// true — the `.tdat` body is flushed BEFORE the `.tidx` that references
-  /// it, the appended `.tidx` before its header is patched, and the `.tmet`
-  /// temp file before it is renamed over the original. A power cut then
-  /// leaves the segment consistent, with the last append either fully
-  /// present or fully absent. (`SegmentSpec` defaults to true, but
-  /// `SessionWriter` defaults to non-durable — call `set_durable(true)` — and
-  /// the Python `Writer` to `durability="fast"`, i.e. false.)
-  ///
-  /// false — no flushes. `.tdat` and `.tidx` are extended IN PLACE, so a
-  /// crash can leave a torn tail on either, or an index referencing `.tdat`
-  /// bytes that never landed; only `.tmet` is published by rename. Every such
-  /// state is detectable (`index.block-offsets`, `index.data-coverage`, the
-  /// body CRCs) and repairable (`recover_session`), which is what makes the
-  /// trade a reasonable one to offer. It is the durability meflib gives —
-  /// which is none.
-  bool durable = true;
 };
 
 /// Largest RED block, in samples, that the format can describe: a block's

@@ -19,10 +19,10 @@
 //   headers carry the sample count, byte count, start time and discontinuity
 //   flag, which is everything an index entry needs.
 //
-// With `durability="full"` (the default) an append cannot leave either state:
-// the `.tdat` is flushed before the `.tidx` that references it. They are
-// reachable with `durability="fast"`, which is what makes that trade a
-// reasonable one to offer.
+// Both are reachable after a power cut during an append: the writer flushes
+// only the `.tmet` before its rename, never the `.tdat`/`.tidx` it extends in
+// place (2.0 removed the `durability` option). This function is what makes
+// that trade safe; only the last append of a segment can be affected.
 #pragma once
 
 #include <string>

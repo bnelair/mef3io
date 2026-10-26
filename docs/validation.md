@@ -411,15 +411,16 @@ for s in report.segments:
 
 ### When you should need it
 
-With `durability="full"` an append cannot leave either shape: the
-`.tdat` is flushed before the `.tidx` that references it. Recovery exists for
-`durability="fast"` (see
-[Long recordings](long_recordings.md#the-durability-knob)), for storage that
-lied about a flush, and for sessions produced by tools that make no ordering
-guarantee at all — which includes the reference C library.
+After a power cut or OS crash during an append. The writer flushes only each
+segment's `.tmet` before renaming it (a short `.tmet` would make the whole
+session fail to open); the `.tdat` and `.tidx` it extends in place are not
+flushed, so the last append of a segment can be left in either shape (see
+[Long recordings](long_recordings.md#durability-and-what-it-costs)). Recovery
+also covers sessions produced by tools that make no ordering guarantee at all
+— which includes the reference C library.
 
-If you run `durability="fast"` in production, run `recover` as a routine step
-after any unclean shutdown rather than only when something looks wrong.
+Run `recover` as a routine step after any unclean shutdown rather than only
+when something looks wrong.
 
 ## When a file is damaged: what a read does about it
 

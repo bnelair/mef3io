@@ -1,5 +1,5 @@
 ---
-description: "Recording for days to months in MEF 3.0 with mef3io: appends that cost only the new data, durability settings, and recovery after a crash."
+description: "Recording for days to months in MEF 3.0 with mef3io: appends that cost only the new data, what is flushed, and recovery after a crash."
 ---
 
 # Long recordings: days to months
@@ -48,96 +48,64 @@ CRC-checks every segment's `.tmet` once per Writer (about 1.4–1.8 s and
 ## Durability, and what it costs
 
 An append updates four things across three files: the `.tdat` body, the `.tidx`
-entries, the `.tdat` header, and the `.tmet` declarations. mef3io orders them
-with real barriers:
+entries, the `.tdat` header, and the `.tmet` declarations. It flushes **exactly
+one** of them to stable storage: the `.tmet` is written to a temp file,
+flushed, and only then renamed over the previous one. A rename is ordered but
+not durable, so without that flush a power cut could publish the new name over
+bytes still in cache — a short `.tmet`, which makes the **whole session** fail
+to open, not just one segment. That barrier stays, whatever it costs.
 
-- the `.tdat` body is flushed **before** the `.tidx` that points at those bytes
-  is written — otherwise a power cut can leave an index running past the real
-  end of the data file, which no in-process rollback can repair;
-- the appended `.tidx` is flushed before its header is patched, and the `.tmet`
-  is written to a temp file, flushed, then renamed, so a crash leaves either
-  the old `.tmet` or the new one, never a torn one.
+Nothing else is flushed. The `.tdat` and `.tidx` are extended **in place**
+(rewriting either whole would be `O(session)`), and the headers patched in
+place, without a barrier between them. So a power cut or OS crash mid-append
+(a crash of only the *process* is harmless — the OS still writes what it was
+given) can leave the **last append of a segment** torn:
 
-Two things are deliberately **not** flushed: a fresh write (there is nothing
-underneath to lose — a crash leaves an incomplete session either way), and the
-directory entry after a rename (losing the rename keeps the previous complete
-file, which is worth more than keeping the last append).
-
-!!! note "This is stronger than the reference implementation"
-    meflib does no durability work at all. Its single `fflush` is explicitly
-    *"to update stat structure after write"* — a stdio flush so `fstat` reports
-    the right size, not a barrier. There is no `fsync`, no `fdatasync`, no
-    `FlushFileBuffers`, and it writes files directly rather than through a
-    temp-and-rename. A session written by the legacy stack has no crash
-    guarantee; one written by mef3io does.
-
-The cost is latency, not throughput: roughly three `fdatasync` calls per channel
-per append, each a disk round trip. On ext4 that is about 8 ms each, so an
-append is ~2.5× slower than one with no barriers — and a fresh write is
-unaffected.
-
-In the units that matter it is small. The **duty cycle** — time spent committing
-divided by the wall-clock duration of the data committed — is what decides
-whether a writer keeps up with a live acquisition:
-
-| channels | block | commit | duty cycle |
-|---|---|---|---|
-| 64 @ 250 Hz | 60 s | 2.15 s | 3.6 % |
-| 128 @ 256 Hz | 10 min | ~5 s | ~0.8 % |
-
-With 5–20 minute blocks there is one to two orders of magnitude of headroom.
-
-### The `durability` knob
-
-**`durability="fast"` is the default.** These files are built by appending for
-days to months, so the append is the hot path, and the barriers cost ~2.5x on
-it. It matches what every MEF writer before this one did — the reference C
-library flushes nothing at all.
-
-```python
-w = mef3io.Writer(path)                          # fast: the default
-w = mef3io.Writer(path, durability="full")       # add the barriers
-```
-
-Be precise about what fast gives up. The `.tdat` and `.tidx` are extended **in
-place** (rewriting either whole would be `O(session)`), so this is *not* a
-temp-and-rename story for them: without the barriers, a crash mid-append can
-leave a torn tail on either file, an index referencing data that never landed,
-or blocks in `.tdat` the index never got to mention. Only the `.tmet` is
-published by atomic rename.
-
-What makes that an acceptable trade rather than a footgun is that **every one
-of those states is detectable and repairable**:
-
-| state after a crash | detected by | repaired by |
+| state after a power cut | detected by | repaired by |
 |---|---|---|
 | index references bytes that never landed | `index.block-offsets` | `recover_session` drops the entries |
 | blocks in `.tdat` the index never mentioned | `index.data-coverage` | `recover_session` rebuilds them from the RED headers |
 | torn tail on either file | the body CRCs | `recover_session` drops the fragment |
 | stale universal-header counts | `header.entry-count` | `recover_session`, then `repair_session` |
+| the `.tmet` rename lost (old `.tmet` kept) | the checks above | `recover_session` |
 
 So the failure mode is **"run `recover` after an unclean shutdown"**, not "lose
 the recording" — and data committed by an *earlier* append is never at risk,
-because nothing rewrites it.
+because nothing rewrites it. A fresh write flushes nothing at all: there is
+nothing underneath it to lose, and a crash leaves an incomplete session either
+way.
 
-Choose `durability="full"` when an unclean shutdown must need no operator
-action at all. It makes each append all-or-nothing across the three files.
+!!! note "Changed in 2.0"
+    1.x had a `durability=` option (`"fast"`, the default, or `"full"`, which
+    also flushed the `.tdat` before the `.tidx` that points at it and the
+    `.tidx` before its header). 2.0 removed it: every write takes the path
+    above, and passing `durability=` raises `TypeError`. The torn states the
+    extra barriers prevented are exactly the ones `recover_session` repairs.
 
-Measured, 8 channels × 10-minute blocks, against the legacy stack:
+!!! note "Still more than the reference implementation"
+    meflib does no durability work at all. Its single `fflush` is explicitly
+    *"to update stat structure after write"* — a stdio flush so `fstat` reports
+    the right size, not a barrier. There is no `fsync`, no `fdatasync`, no
+    `FlushFileBuffers`, and it writes files directly rather than through a
+    temp-and-rename, so a power cut can leave it a short `.tmet`.
 
-| | per append | vs meflib |
+The cost is one `fdatasync` per channel per append. Measured on ext4, 128
+channels × 10-minute blocks at 256 Hz, one `Writer` held open (median of five
+appends, three runs each):
+
+| | per append (128 channels) | flushes per channel |
 |---|---|---|
-| mef_tools / meflib (single-threaded, no barriers) | 289 ms | 1.00× |
-| mef3io `durability="full"`, 1 thread | 586 ms | 0.49× |
-| mef3io `durability="full"`, all cores | 354 ms | 0.82× |
-| mef3io `durability="fast"`, 1 thread | 399 ms | 0.73× |
-| **mef3io `durability="fast"`, all cores** | **229 ms** | **1.26×** |
+| 1.x `durability="full"` | 6.0–6.5 s | 5 (data, index, both headers, `.tmet`) |
+| 1.x `durability="fast"` (the old default) | 3.8–3.9 s | 2 (both headers, best-effort) |
+| **2.0** | **2.5–2.8 s** | **1** (the `.tmet`) |
+| no flush at all (for reference, not shipped) | 0.74 s | 0 |
 
-The encode dominates, and mef3io parallelises it where meflib cannot — so
-`durability="fast"` with threads is *faster* than the reference implementation.
-What it gives up is the flush ordering: after an unclean shutdown a file can
-end in a torn tail, which the validator detects and `recover_session` fixes
-(see [The durability knob](#the-durability-knob)).
+(1.x's `"fast"` was documented as flushing nothing, but it still flushed the
+two headers each append patches, best-effort; 2.0 drops those too.) The
+remaining `.tmet` flush is about 15 ms per channel. In the units that matter
+it is small: the **duty cycle** — time spent committing divided by the
+wall-clock duration of the data committed — is 2.7 s / 600 s ≈ 0.45 % here, so
+with 5–20 minute blocks there are two orders of magnitude of headroom.
 
 ## Recovering from an interrupted write
 

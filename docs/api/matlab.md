@@ -67,17 +67,17 @@ empty and silent on a healthy session.
 
 ## Durability and recovery
 
-`mef3io.Writer` takes `Durability` (`'fast'`, the default, or `'full'`),
-matching the Python `durability=` argument. These files are built by appending
-for days to months, so the append is the hot path; `'fast'` performs no flushes,
-as every MEF writer before this one did.
+`mef3io.Writer` has no durability option (2.0 removed `Durability`, as
+Python removed `durability=`): an append flushes only each segment's `.tmet`
+before renaming it, so a power cut can leave the last append of a segment
+torn (see [Long recordings](../long_recordings.md#durability-and-what-it-costs)).
 
 `mef3io.recoverSession` is the counterpart — it makes a session's block index
 and data agree again after an unclean shutdown, rebuilding missing index
 entries from the RED block headers. Dry run unless `Apply=true`.
 
 ```matlab
-w = mef3io.Writer(p, Overwrite=true, Durability='fast');   % the default
+w = mef3io.Writer(p, Overwrite=true);
 w.writeInt32('ch1', counts, 0.1, t0, 512);
 delete(w)
 

@@ -741,9 +741,10 @@ def recover_session(
       flag, which is everything an index entry needs. Only blocks whose CRC
       verifies are indexed; a torn tail is not a block.
 
-    With the default ``durability="full"`` an append cannot leave either state.
-    They are reachable with ``durability="fast"``, which is what makes that
-    trade a reasonable one to offer.
+    Both are reachable after a power cut or OS crash during an append: the
+    writer flushes only each segment's ``.tmet`` before renaming it, not the
+    ``.tdat`` or ``.tidx`` it extends in place, and this function is what makes
+    that trade safe. Only the last append of a segment can be affected.
 
     Parameters
     ----------

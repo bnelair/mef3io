@@ -117,9 +117,11 @@ w.write_int32("ch2", counts, /*ufact=*/0.01, start_uutc, 256.0, valid_mask);
 w.write_records("ch1", {{.type = "Note", .time = t, .text = "marker"}});
 ```
 
-A `SessionWriter` is non-durable by default (no flushes, like the Python
-`durability="fast"`); call `w.set_durable(true)` for the flush barriers
-described in [Long recordings](long_recordings.md#the-durability-knob).
+An append flushes only each segment's `.tmet` before renaming it over the old
+one; the `.tdat` and `.tidx` are extended unflushed, and `recover_session`
+repairs a torn last append after a power cut (see
+[Long recordings](long_recordings.md#durability-and-what-it-costs)). 2.0
+removed `set_durable`.
 
 Appends are validated against the on-disk segment (fs, conversion factor,
 start after the segment end) and throw `WriteConflictError` on violation.

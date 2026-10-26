@@ -421,14 +421,6 @@ int mef3io_writer_set_block_length(mef3io_writer* w, int64_t samples_per_block);
 int mef3io_writer_set_threads(mef3io_writer* w, int n_threads);
 /* The thread count as set (0 = automatic). */
 int mef3io_writer_threads(mef3io_writer* w, int* out);
-/* Flush appends to stable storage. 0 (the DEFAULT) does not: these files are
- * built by appending for days to months, so the append is the hot path, and
- * the barriers cost ~2.5x on it. An unclean shutdown can then leave the index
- * and the data disagreeing — detected by validation and repaired by
- * mef3io_recover_session, which rebuilds missing index entries from the RED
- * block headers. Non-zero makes each append all-or-nothing across the three
- * files, with no recovery step needed. */
-int mef3io_writer_set_durable(mef3io_writer* w, int durable);
 
 /* Segment metadata the writer could not use: .tmet files it could not read
  * while choosing a recording-time offset, and empty segment directories it

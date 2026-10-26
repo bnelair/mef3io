@@ -46,9 +46,9 @@ delete(w);                                            % or let it go out of scop
 an existing session is reopened for appending), `Password1`/`Password2`
 (both required for encryption), `Units`, `BlockLength`, `Threads` (encode
 threads, `0` = automatic; `w.setThreads(n)` / `w.threads()` later),
-`Metadata` (below) and `Durability` (`'fast'`, the default, or `'full'`; see
-[Long recordings](long_recordings.md)). After an unclean shutdown with
-`'fast'`, `mef3io.recoverSession(path)` reports what is wrong (a dry run) and
+and `Metadata` (below). 2.0 removed `Durability`: an append flushes only each
+segment's `.tmet` (see [Long recordings](long_recordings.md)). After an unclean
+shutdown, `mef3io.recoverSession(path)` reports what is wrong (a dry run) and
 `mef3io.recoverSession(path, Apply=true)` fixes it.
 
 - **`write(channel, data, startUutc, fs, Precision=-1, NewSegment=false)`** —

@@ -33,7 +33,7 @@ with mef3io.Writer("session.mefd", overwrite=True, units="uV") as w:
 ```
 
 `Writer(path, overwrite=False, password1="", password2="", units=None,
-block_length=None, n_threads=0, metadata=None, durability="fast")`
+block_length=None, n_threads=0, metadata=None)`
 
 - `overwrite=True` deletes an existing session first. With
   `overwrite=False`, an existing session is **reopened for appending** —
@@ -87,10 +87,12 @@ block_length=None, n_threads=0, metadata=None, durability="fast")`
   appends.
 - `metadata=` sets subject and acquisition fields (see
   [Session metadata](#session-metadata-subject-acquisition)).
-- `durability="fast"` (the default) writes without flushing to disk;
-  `durability="full"` adds the flushes that make an append survive a power
-  cut. After an unclean shutdown in fast mode, run `recover_session`. See
-  [Long recordings](long_recordings.md).
+- Durability: an append flushes only each segment's `.tmet` before its
+  rename (a short `.tmet` would make the whole session fail to open). A power
+  cut mid-append can leave the last append of a segment torn; run
+  `recover_session` after an unclean shutdown. See
+  [Long recordings](long_recordings.md#durability-and-what-it-costs). (2.0
+  removed `durability=`; passing it raises `TypeError`.)
 - `block_length` overrides the RED block size (default: `fs` samples for
   fs ≥ 5000, else `10*fs`, at least 1). A block can hold at most
   858 993 396 samples (`mef3io._mef3io.MAX_BLOCK_SAMPLES`: its byte size is a
