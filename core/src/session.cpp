@@ -556,39 +556,45 @@ std::vector<Record> Session::read_records(std::optional<std::string> channel,
   return out;
 }
 
-BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8> t0_opt,
-                                  std::optional<si8> t1_opt, const Control& ctl) {
+BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8> t0,
+                                  std::optional<si8> t1, const Control& ctl) {
+  return fetch_blocks(channel, select_blocks(channel, t0, t1, ctl), ctl);
+}
+
+BlockSelection Session::select_blocks(const std::string& channel, std::optional<si8> t0_opt,
+                                      std::optional<si8> t1_opt, const Control& ctl) {
   auto it = channels_.find(channel);
   if (it == channels_.end()) throw std::out_of_range("no such channel: " + channel);
   Channel& ch = it->second;
 
-  BlockJobs out;
-  out.sampling_frequency = ch.info.sampling_frequency;
+  BlockSelection out;
   const si8 t0 = t0_opt.value_or(ch.info.start_time);
   const si8 t1 = t1_opt.value_or(ch.info.end_time + 1);
   const sf8 fs = ch.info.sampling_frequency;
 
   for (auto& seg : ch.segments) {
-    // Between segments, OUTSIDE with_segment: a cancellation is not a damaged
-    // segment, and (Cancelled being no std::exception) a lenient session could
-    // not contain it anyway. Nothing has been appended for this segment yet, so
-    // there is nothing to roll back; the caller discards `out` whole. No span
-    // into the index cache is held here, so trimming on the way out is safe.
+    // Between segments: a cancellation is not a damaged segment, and
+    // (Cancelled being no std::exception) a lenient session could not contain
+    // it anyway. The caller discards `out` whole. No span into the index cache
+    // is held here, so trimming on the way out is safe.
     if (ctl.cancel && ctl.cancel->cancelled()) {
       trim_index_cache();
       throw Cancelled();
     }
-    const std::size_t mark_buf = out.buffers.size(), mark_job = out.jobs.size(),
-                      mark_mm = out.mismatches.size();
-    if (!with_segment(channel, seg, [&] {
+    if (segment_failed(seg)) continue;  // with_segment would skip it too
+    BlockSelection::Segment sel;
+    sel.seg = &seg;
+    try {
     auto& md = segment_metadata(seg);
     // #110 item 3: a segment whose CACHED index holds nothing in the window is
     // not walked again (no I/O either way: the index is in memory).
-    if (skip_segment(seg, t0, t1)) return;
+    if (skip_segment(seg, t0, t1)) continue;
     const si8 rto = segment_rto(md);
-    crypto::AccessKeys keys = crypto::validate_password(
+    sel.rto = rto;
+    sel.keys = crypto::validate_password(
         password_, md.universal_header.level_1_password_validation_field,
         md.universal_header.level_2_password_validation_field);
+    sel.units_conversion_factor = md.section2.units_conversion_factor;
 
     const auto idx_pin = segment_index(seg);  // keeps the bytes alive for this call
     const std::span<const ui1> idx(*idx_pin);
@@ -597,7 +603,6 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
 
     // Determine whether any block in this segment is in range before loading
     // the (potentially large) .tdat.
-    std::vector<fmt::TimeSeriesIndex> hits;
     for (std::size_t i = 0; i < n_entries; ++i) {
       auto e = fmt::TimeSeriesIndex::parse(
           idx.subspan(fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES,
@@ -619,12 +624,12 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
         // index's word alone, before the header — the copy that is actually
         // CRC-protected — could contradict it. Keep it and let the header
         // decide; the disagreement is reported like any other.
-        hits.push_back(e);
+        sel.hits.push_back(e);
         continue;
       }
       si8 bend = bstart + static_cast<si8>(std::llround(e.number_of_samples * 1e6 / fs));
       if (bend <= t0 || bstart >= t1) continue;
-      hits.push_back(e);
+      sel.hits.push_back(e);
     }
     // KNOWN LIMIT: a WINDOWED read still tests the window against the index's
     // time and count, because a block has to be fetched before its header can
@@ -634,8 +639,41 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
     // whenever such a block IS fetched, which is what tells a caller the index
     // is untrustworthy; a full pass (`Validator`, or a read with no window) is
     // the way to see all of it.
-    if (hits.empty()) return;  // `return` from the per-segment lambda, not `continue`
+    } catch (const std::exception&) {
+      // Raised (strict) or contained (lenient) by fetch_blocks when it gets
+      // here, after every earlier segment's data: a serial walk's order.
+      sel.hits.clear();
+      sel.error = std::current_exception();
+      out.segments.push_back(std::move(sel));
+      if (strict_) {
+        out.will_fail = true;
+        break;  // a serial walk stops at the first failure
+      }
+      continue;
+    }
+    if (!sel.hits.empty()) out.segments.push_back(std::move(sel));
+  }
+  // Safe point: nothing holds a span into a cached index.
+  trim_index_cache();
+  return out;
+}
 
+BlockJobs Session::fetch_blocks(const std::string& channel, BlockSelection&& selection,
+                                const Control& ctl) {
+  auto it = channels_.find(channel);
+  if (it == channels_.end()) throw std::out_of_range("no such channel: " + channel);
+  BlockJobs out;
+  out.sampling_frequency = it->second.info.sampling_frequency;
+
+  for (auto& sel : selection.segments) {
+    if (ctl.cancel && ctl.cancel->cancelled()) throw Cancelled();
+    SegmentReader& seg = *sel.seg;
+    const std::size_t mark_buf = out.buffers.size(), mark_job = out.jobs.size(),
+                      mark_mm = out.mismatches.size();
+    if (!with_segment(channel, seg, [&] {
+    if (sel.error) std::rethrow_exception(sel.error);
+    const auto& hits = sel.hits;
+    const si8 rto = sel.rto;
     // Needed blocks are normally contiguous in the file, so read one byte
     // range covering them rather than the whole (huge) .tdat — but do NOT
     // trust the index to be sorted: compute the true min/max span and check
@@ -663,9 +701,9 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
       job.block_bytes = e.block_bytes;
       job.index_start_uutc = to_user_time(e.start_time, rto);
       job.index_number_of_samples = e.number_of_samples;
-      job.units_conversion_factor = md.section2.units_conversion_factor;
+      job.units_conversion_factor = sel.units_conversion_factor;
       job.segment_number = seg.segment_number;
-      job.keys = keys;
+      job.keys = sel.keys;
 
       // The RED block header is the authority for WHERE this block's samples
       // go and HOW MANY there are; the index only chose the byte range. Both
@@ -695,10 +733,6 @@ BlockJobs Session::collect_blocks(const std::string& channel, std::optional<si8>
       out.mismatches.resize(mark_mm);
     }
   }
-  // Safe point: the operation is finished, so nothing holds a span into a
-  // cached index. The index is ~2% of the data, so an unbounded cache grows
-  // to several GB on a session of a few hundred gigabytes.
-  trim_index_cache();
   return out;
 }
 

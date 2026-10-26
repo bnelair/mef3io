@@ -13,6 +13,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <typeinfo>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -289,4 +291,73 @@ TEST_CASE("multi-channel read time with a per-request delay", "[.read-many-bench
     }
     fsys::remove_all(dir);
   }
+}
+
+namespace {
+std::string first_file(const std::string& dir, const std::string& ch, int seg,
+                       const std::string& ext) {
+  char buf[16];
+  std::snprintf(buf, sizeof buf, "%06d", seg);
+  const std::string stem = ch + "-" + buf;
+  return dir + "/" + ch + ".timd/" + stem + ".segd/" + stem + ext;
+}
+template <class F>
+std::string error_of(F&& fn) {
+  try {
+    fn();
+  } catch (const std::exception& e) {
+    return std::string(typeid(e).name()) + ": " + e.what();
+  }
+  return "";
+}
+}  // namespace
+
+TEST_CASE("read_many: the lowest failing channel in list order wins, across stages",
+          "[read-many]") {
+  // `mixed` fails while DECODING (a block's payload is corrupt: CRC), `gappy`
+  // while reading its INDEX (segment 1's .tidx is truncated). A loop raises
+  // whichever comes first in the list; so must the list read.
+  const auto dir = write_session("mef3io_read_many_stages.mefd");
+  {
+    std::fstream f(first_file(dir, "mixed", 0, ".tdat"),
+                   std::ios::in | std::ios::out | std::ios::binary);
+    f.seekp(1024 + 304 + 20);
+    const char junk[4] = {'\x55', '\x2a', '\x13', '\x77'};
+    f.write(junk, 4);
+  }
+  fsys::resize_file(first_file(dir, "gappy", 1, ".tidx"), 1024 + 56 + 10);
+  for (int t : {1, 2, 8}) {
+    Reader r(dir, "", t);
+    const auto mixed = error_of([&] { r.read("mixed"); });
+    const auto gappy = error_of([&] { r.read("gappy"); });
+    REQUIRE(!mixed.empty());
+    REQUIRE(!gappy.empty());
+    REQUIRE(mixed != gappy);
+    CHECK(error_of([&] { r.read_many({"mixed", "gappy"}); }) == mixed);
+    CHECK(error_of([&] { r.read_many({"gappy", "mixed"}); }) == gappy);
+    CHECK(error_of([&] { r.read_many({"plain", "late", "mixed", "gappy"}); }) == mixed);
+    CHECK(error_of([&] { r.read_many({"plain", "gappy", "late", "mixed"}); }) == gappy);
+  }
+  fsys::remove_all(dir);
+}
+
+TEST_CASE("read_many stops early: a damaged first channel fetches no data", "[read-many]") {
+  const auto dir = write_session("mef3io_read_many_early.mefd");
+  fsys::resize_file(first_file(dir, "gappy", 0, ".tidx"), 1024 + 56 + 10);
+  for (int t : {1, 2, 8}) {
+    auto src = std::make_shared<test::CountingSource>(open_session_source(dir));
+    Reader r(std::shared_ptr<const SessionSource>(src), "", t);
+    src->reset();
+    CHECK_THROWS_AS(r.read("gappy"), FormatError);
+    const auto single = src->calls();
+    src->reset();
+    CHECK_THROWS_AS(r.read_many({"gappy", "mixed", "late", "plain", "mixed", "late"}),
+                    FormatError);
+    const auto many = src->calls();
+    CHECK(single.read_range == 0);
+    CHECK(many.read_range == 0);  // no channel's data was fetched
+    // at most the indexes of the channels already in flight
+    CHECK(many.read_all <= single.read_all + static_cast<long>(t) * 2);
+  }
+  fsys::remove_all(dir);
 }

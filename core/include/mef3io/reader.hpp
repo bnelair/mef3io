@@ -169,21 +169,27 @@ class Reader {
   /// (same grid, NaN gaps, per-segment scaling, refusals), so the result is
   /// byte-identical to stacking per-channel reads, at any thread count.
   ///
-  /// One call does the work of the whole list: every channel's index and
-  /// data reads are issued concurrently on this Reader's threads (file
-  /// access, threads() as for the open), then ONE decode pool runs over all
-  /// blocks of all channels. `ctl.cancel` and `ctl.progress` cover the whole
-  /// call (progress: compressed bytes of every block decoded, all channels).
+  /// One call does the work of the whole list: every channel's block index
+  /// is read concurrently on this Reader's threads (file access, threads()
+  /// as for the open), then the data a GROUP of channels at a time (as many
+  /// as the file-access threads), each group's blocks decoded by ONE pool
+  /// and its compressed bytes freed before the next group: the peak beside
+  /// the result is one group's compressed window. `ctl.cancel` and
+  /// `ctl.progress` cover the whole call (progress: compressed bytes of every
+  /// block in the window, all channels, one constant total).
   ///
   /// @param t0,t1  unset = the earliest start / latest end of the listed
   ///               channels (for one channel, read()'s defaults).
-  /// @throws std::invalid_argument  `channels` is empty, or the channels do
-  ///         not all share one sampling frequency (exact equality: one grid
-  ///         for every row). Read each rate in its own call.
+  /// @throws std::invalid_argument  `channels` is empty, a channel's rate is
+  ///         not finite, or the channels do not all share one sampling
+  ///         frequency (exact equality: one grid for every row). Read each
+  ///         rate in its own call. (One channel: no rate rule, as read().)
   /// @throws std::out_of_range  an unknown channel (checked, with the rates,
   ///         before anything is read).
-  /// Errors raised while reading are those of the first channel, in list
-  /// order, that fails — what a loop of read() calls raises.
+  /// Errors raised while reading are those of the lowest failing channel in
+  /// list order, whatever stage it failed in (index, data, factor, decode):
+  /// what a loop of read() calls raises. Nothing is started for a channel
+  /// after one known to fail.
   ChannelRows<sf8> read_many(const std::vector<std::string>& channels,
                              std::optional<si8> t0 = std::nullopt,
                              std::optional<si8> t1 = std::nullopt, const Control& ctl = {});

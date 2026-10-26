@@ -422,11 +422,14 @@ def test_multireader_lists_equal_the_merged_reader(tmp_path):
                     assert np.array_equal(env_r[ch][k], env_m[ch][k], equal_nan=True)
         assert _quiet(mr.read, "A", dtype="float32").tobytes() == \
             _quiet(r.read, "A", dtype="float32").tobytes()
-        # progress: one monotone sequence over the list
+        # progress: one monotone sequence over the list, ONE constant total,
+        # (total, total) exactly once, at the end
         calls = []
         _quiet(mr.read, ["A", "B", "C"], progress=lambda d, t: calls.append((d, t)))
-        assert calls and all(a[0] <= b[0] and a[1] <= b[1] for a, b in zip(calls, calls[1:]))
-        assert calls[-1][0] == calls[-1][1]
+        assert calls and len({t for _, t in calls}) == 1
+        assert all(a[0] < b[0] for a, b in zip(calls, calls[1:]))
+        assert calls[0][0] == 0 and calls[-1][0] == calls[-1][1]
+        assert sum(1 for d, t in calls if d == t) == 1
 
 
 def test_multireader_refuses_like_a_reader(tmp_path):
@@ -463,3 +466,118 @@ def test_get_data_list_equals_the_per_channel_loop(session, tmp_path):
                 assert g.dtype == w_.dtype and g.tobytes() == w_.tobytes()
         assert _quiet(mr.get_data, names[0]).tobytes() == raw.read(names[0]).tobytes()
         assert _quiet(mr.get_data, []) == []
+
+
+# --- review round 1 -------------------------------------------------------------
+
+def _tmet_patch(tmet, offset, value):
+    import struct
+    raw = bytearray(Path(tmet).read_bytes())
+    struct.pack_into("<d", raw, offset, value)
+    struct.pack_into("<I", raw, 4, m.crc32(bytes(raw[UH:METADATA_FILE_BYTES])))
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH])))
+    Path(tmet).write_bytes(bytes(raw))
+
+
+def _err(fn):
+    try:
+        fn()
+    except Exception as e:  # noqa: BLE001 - compared below
+        return type(e), str(e)
+    return None
+
+
+@pytest.mark.parametrize("n_threads", [1, 2, 8])
+def test_the_lowest_failing_channel_wins_across_stages(tmp_path, n_threads):
+    """mixed fails while DECODING (a corrupt block payload: CRC), gappy while
+    reading its INDEX (a truncated .tidx): the list raises what the loop does."""
+    path = _build(tmp_path / "stages.mefd")
+    tdat = sorted(glob.glob(f"{path}/mixed.timd/*/*.tdat"))[0]
+    raw = bytearray(Path(tdat).read_bytes())
+    raw[UH + 304 + 20:UH + 304 + 24] = b"\x55\x2a\x13\x77"
+    Path(tdat).write_bytes(bytes(raw))
+    tidx = sorted(glob.glob(f"{path}/gappy.timd/*/*.tidx"))[1]
+    with open(tidx, "r+b") as f:
+        f.truncate(UH + ENT + 10)
+    with mef3io.Reader(str(path), n_threads=n_threads) as r:
+        mixed, gappy = _err(lambda: r.read("mixed")), _err(lambda: r.read("gappy"))
+        assert mixed and gappy and mixed != gappy
+        assert _err(lambda: _quiet(r.read, ["mixed", "gappy"])) == mixed
+        assert _err(lambda: _quiet(r.read, ["gappy", "mixed"])) == gappy
+        assert _err(lambda: _quiet(r.read, ["late", "mixed", "gappy"])) == mixed
+
+
+@pytest.mark.skipif(not Path("/proc/self/io").exists(), reason="needs /proc/self/io")
+def test_a_refused_first_channel_stops_the_call_early(tmp_path):
+    path = tmp_path / "early.mefd"
+    names = [f"c{i}" for i in range(12)]
+    with mef3io.Writer(str(path), overwrite=True) as w:
+        rng = np.random.default_rng(1)
+        for ch in names:
+            w.write_int32(ch, rng.integers(-30000, 30000, 120_000).astype(np.int32), 1.0,
+                          START, FS)
+    for tmet in glob.glob(f"{path}/c0.timd/*/*.tmet"):
+        _tmet_patch(tmet, UFACT_OFFSET, float("nan"))
+
+    def rchar():
+        for line in Path("/proc/self/io").read_text().splitlines():
+            if line.startswith("rchar:"):
+                return int(line.split()[1])
+
+    def cost(fn):
+        with mef3io.Reader(str(path), n_threads=2) as r:  # cold index cache
+            before = rchar()
+            with pytest.raises(mef3io.FormatError):
+                fn(r)
+            return rchar() - before
+
+    single = cost(lambda r: r.read("c0"))
+    many = cost(lambda r: r.read(names))
+    data = sum(p.stat().st_size for p in path.rglob("*.tdat"))
+    idx = sum(p.stat().st_size for p in path.rglob("*.tidx"))
+    # c0 and at most its group (n_threads = 2 channels) fetched data
+    assert many <= 2 * single + idx + 65536, (many, single, data)
+    assert many < data / 3
+
+
+def test_a_single_channel_with_an_unusable_rate_reads_as_before(tmp_path):
+    path = tmp_path / "rate.mefd"
+    with mef3io.Writer(str(path), overwrite=True) as w:
+        w.write("a", np.zeros(1000), START, FS)
+        w.write("b", np.zeros(1000), START, FS)
+    for tmet in glob.glob(f"{path}/b.timd/*/*.tmet"):
+        _tmet_patch(tmet, 1024 + 1536 + 6160, float("nan"))
+    with mef3io.Reader(str(path)) as r:
+        assert _quiet(r.read, "b").size == 0  # as on main: no multi-channel text
+        assert _quiet(r.read, "b", dtype="float32").size == 0
+        for names in (["a", "b"], ["b", "b"], ["b", "a"]):
+            with pytest.raises(ValueError, match="b has no usable sampling rate .nan Hz."):
+                r.read(names)
+
+
+def test_get_data_rows_are_independent_arrays(session):
+    mr = mef3io.MefReader(str(session))
+    got = _quiet(mr.get_data, [0, 0, "jitter", "late"], START, START + 5 * SECOND)
+    assert len(got) == 4 and got[0] is not got[1]
+    for i in range(4):
+        assert got[i].base is None or got[i].flags.owndata
+        for j in range(i + 1, 4):
+            assert not np.shares_memory(got[i], got[j])
+    got[0][:] = 1
+    assert not np.all(got[1] == 1)
+
+
+def test_get_data_errors_follow_the_requested_order(tmp_path):
+    path = tmp_path / "order.mefd"
+    with mef3io.Writer(str(path), overwrite=True) as w:
+        w.write("a", np.zeros(3000), START, 256.0)
+        w.write("b", np.zeros(3000), START, 512.0)
+        w.write("c", np.zeros(3000), START, 256.0)
+    for ch in ("b", "c"):
+        tidx = sorted(glob.glob(f"{path}/{ch}.timd/*/*.tidx"))[0]
+        with open(tidx, "r+b") as f:
+            f.truncate(UH + 10)
+    raw = m.Reader(str(path))
+    b = _err(lambda: raw.read("b"))
+    mr = mef3io.MefReader(str(path))
+    assert _err(lambda: mr.get_data(["a", "b", "c"])) == b

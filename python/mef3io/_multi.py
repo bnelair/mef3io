@@ -26,6 +26,7 @@ from ._cancel import CancelToken, Cancelled, _hooks
 from ._reader import (Reader, UnscaledSamplesWarning, _Announced, _channels_argument,
                       _check_threads, _effective_factor, _float32_argument, _flush,
                       _format_error, _one_rate_message, _unscaled_warning_text,
+                      _unusable_rate_message,
                       _unusable_factor_message, _usable_factor)
 from ._warnings import MefWarning, emit as _emit, identity_of as _identity_of
 
@@ -849,7 +850,10 @@ class MultiReader:
         same defaults). Here it reads the channels one after the other, each
         with the whole budget, so it returns what a Reader of the merged
         session returns but without the Reader's concurrent multi-channel
-        speed-up; ``progress`` is one sequence for the whole call.
+        speed-up. ``progress`` is one sequence with one constant total for the
+        whole call, counted in units of channels (``total = 2**20`` per listed
+        channel, each channel's share advancing with its own decoded bytes),
+        not in bytes as for one channel.
         """
         names = _channels_argument(channel)
         float32 = _float32_argument(dtype)
@@ -867,30 +871,37 @@ class MultiReader:
         start, end = first["start_time"], first["end_time"]
         for ch in names:
             info = self.info(ch)
-            if not info["sampling_frequency"] == fs0:
-                raise ValueError(_one_rate_message(names[0], fs0, ch, info["sampling_frequency"]))
+            fs = info["sampling_frequency"]
+            if not math.isfinite(fs):
+                raise ValueError(_unusable_rate_message(ch, fs))
+            if fs != fs0:
+                raise ValueError(_one_rate_message(names[0], fs0, ch, fs))
             start, end = min(start, info["start_time"]), max(end, info["end_time"])
         t0 = start if t0 is None else t0
         t1 = end if t1 is None else t1
-        # One progress sequence for the call: each channel's (done, total)
-        # on top of the channels before it.
+        # ONE progress sequence with ONE constant total for the call. The
+        # bytes each channel will decode are known only when its read starts,
+        # so the list is reported in units of channels: total = UNIT per
+        # channel, channel i at i * UNIT + its own done/total share.
+        unit = 1 << 20
         report = None
-        base, last = [0, 0], [0, 0]
+        state = {"i": 0, "last": -1}
         if progress is not None:
             def report(d, t):
-                last[0], last[1] = d, t
-                return progress(base[0] + d, base[1] + t)
+                frac = 1.0 if t == 0 else min(d / t, 1.0)
+                done = state["i"] * unit + (unit if frac >= 1.0 else int(frac * unit))
+                if done <= state["last"]:
+                    return None
+                state["last"] = done
+                return progress(done, unit * len(names))
         rows, unscaled = [], []
-        for ch in names:
-            last[:] = [0, 0]
+        for i, ch in enumerate(names):
+            state["i"] = i
             out, u = self._read_one(ch, t0, t1, cancel, report)
-            base[0] += last[0]
-            base[1] += last[1]
             rows.append(out)
             if u:
                 unscaled.append(ch)
-        n = max(_llround(float(int(t1) - int(t0)) * fs0 / 1e6), 0)
-        out = np.stack(rows) if rows else np.empty((0, n))
+        out = np.stack(rows)
         for ch in dict.fromkeys(unscaled):
             self._warn_unscaled(ch, stacklevel=3)
         return out.astype(np.float32) if float32 else out

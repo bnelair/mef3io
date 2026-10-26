@@ -363,6 +363,12 @@ def _one_rate_message(first: str, fs0: float, name: str, fs: float) -> str:
             "(one call per rate)")
 
 
+def _unusable_rate_message(name: str, fs: float) -> str:
+    # Reader's text exactly (read_many_impl in reader.cpp).
+    return (f"read: channel {name} has no usable sampling rate ({format(fs, '.17g')} Hz), "
+            "so it cannot share a multi-channel read's grid; read it on its own")
+
+
 def _float32_argument(dtype) -> bool:
     """``dtype=`` of a read: True for float32, False for float64 (the default)."""
     if dtype is None:
@@ -608,6 +614,11 @@ class Reader:
           ``segment`` is then the file's path, and ``segment_number`` is -1 for
           a session- or channel-level file (``channel`` is ``""`` at session
           level).
+
+        Segments that fail during a read (a damaged index or data extent) are
+        added when the read meets them. A multi-channel :meth:`read` reads its
+        channels concurrently, so the entries it adds for different channels
+        can come in any order (one channel's stay in segment order).
 
         Check it before trusting a read from a lenient Reader: a skipped
         segment's samples come back as NaN, exactly like a genuine gap, so the

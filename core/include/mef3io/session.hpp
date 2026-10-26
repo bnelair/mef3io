@@ -193,6 +193,35 @@ struct BlockJobs {
   std::vector<BlockCopyMismatch> mismatches;
 };
 
+/// INTERNAL (Reader): the blocks one channel's window needs, chosen from the
+/// block indexes alone, nothing fetched from any .tdat yet. collect_blocks()
+/// = select_blocks() + fetch_blocks(); split so a multi-channel read can walk
+/// every channel's index first (and size its progress) and then fetch the
+/// data a few channels at a time.
+struct BlockSelection {
+  struct Segment {
+    SegmentReader* seg = nullptr;
+    si8 rto = 0;
+    crypto::AccessKeys keys;
+    sf8 units_conversion_factor = 1.0;
+    std::vector<fmt::TimeSeriesIndex> hits;  // selected entries, in index order
+    /// The walk's failure for this segment. Raised by fetch_blocks when it
+    /// reaches the segment, so errors keep the order of a serial walk that
+    /// fetched each segment's data right after reading its index.
+    std::exception_ptr error;
+  };
+  std::vector<Segment> segments;
+  /// Strict session and a walk failed: fetch_blocks will throw.
+  bool will_fail = false;
+  /// Compressed bytes of every selected block.
+  std::uint64_t bytes() const {
+    std::uint64_t n = 0;
+    for (const auto& s : segments)
+      for (const auto& e : s.hits) n += e.block_bytes;
+    return n;
+  }
+};
+
 // One RED block's index entry with absolute (user) times resolved.
 struct BlockIndexEntry {
   si8 start_uutc = 0;
@@ -389,6 +418,16 @@ class Session {
   // a cancelled call throws Cancelled and returns nothing.
   BlockJobs collect_blocks(const std::string& channel, std::optional<si8> t0 = std::nullopt,
                            std::optional<si8> t1 = std::nullopt, const Control& ctl = {});
+
+  /// INTERNAL: the index half of collect_blocks (see BlockSelection). Reads
+  /// only block indexes; `ctl.cancel` is checked before each segment.
+  BlockSelection select_blocks(const std::string& channel, std::optional<si8> t0,
+                               std::optional<si8> t1, const Control& ctl = {});
+  /// INTERNAL: the data half: each selected segment's byte extent in one read,
+  /// in segment order, raising (strict) or containing (lenient) the walk's
+  /// stored failures there.
+  BlockJobs fetch_blocks(const std::string& channel, BlockSelection&& selection,
+                         const Control& ctl = {});
 
   // Section-2 size declarations the session leaves unset, across every channel
   // and segment. Free at this point: every segment's metadata was parsed when

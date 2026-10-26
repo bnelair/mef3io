@@ -4,7 +4,10 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <atomic>
 #include <exception>
+#include <memory>
+#include <mutex>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -240,63 +243,97 @@ void Reader::read_many_impl(const std::vector<std::string>& channels, std::optio
                             std::optional<si8> t1_opt, const Control& ctl, Alloc&& alloc) {
   if (channels.empty())
     throw std::invalid_argument("read: no channels given (pass at least one name)");
+  const std::size_t n_ch = channels.size();
   // Arguments first, before any file is touched: every name must exist and
   // every channel must share one sampling frequency — one grid for all rows.
+  // One channel is read() exactly as before: no rate rule.
   const ChannelInfo& c0 = session_.channel_info(channels.front());
   const sf8 fs = c0.sampling_frequency;
   si8 start = c0.start_time, end = c0.end_time;
   for (const auto& name : channels) {
     const ChannelInfo& ci = session_.channel_info(name);
-    if (!(ci.sampling_frequency == fs))
-      throw std::invalid_argument(
-          "read: a multi-channel read needs ONE sampling rate for all its channels, but " +
-          channels.front() + " is sampled at " + rate_text(fs) + " Hz and " + name + " at " +
-          rate_text(ci.sampling_frequency) + " Hz; read channels of different rates in "
-          "separate calls (one call per rate)");
+    if (n_ch > 1) {
+      if (!std::isfinite(ci.sampling_frequency))
+        throw std::invalid_argument(
+            "read: channel " + name + " has no usable sampling rate (" +
+            rate_text(ci.sampling_frequency) +
+            " Hz), so it cannot share a multi-channel read's grid; read it on its own");
+      if (ci.sampling_frequency != fs)
+        throw std::invalid_argument(
+            "read: a multi-channel read needs ONE sampling rate for all its channels, but " +
+            channels.front() + " is sampled at " + rate_text(fs) + " Hz and " + name + " at " +
+            rate_text(ci.sampling_frequency) + " Hz; read channels of different rates in "
+            "separate calls (one call per rate)");
+    }
     start = std::min(start, ci.start_time);
     end = std::max(end, ci.end_time);
   }
   const si8 t0 = t0_opt.value_or(start);
   const si8 t1 = t1_opt.value_or(end);
   const si8 n = std::max<si8>(grid_count(t1, t0, fs), 0);
-  const std::size_t n_ch = channels.size();
   // Read once: a set_threads() from another thread applies to the next call.
   const int threads = session_.threads();
 
-  // Phase 1, file access: every channel's index and data reads at once on
-  // the Reader's threads (Work::Io, as the open: a request is a round trip,
-  // whatever the number of cores). Each channel still reads only its own
-  // byte extents (collect_blocks). One channel = serial, as read() was.
-  std::vector<Plan> plans(n_ch);
-  const auto errors = parallel_try_each(
-      n_ch, threads,
-      [&](std::size_t i) {
-        plans[i] = plan_blocks(session_.collect_blocks(channels[i], t0, t1, ctl), t0, fs, n);
-      },
-      Work::Io);
-  // The error a loop of read() calls raises: the first channel's, in order,
-  // whether from its reads or from its factors (refused before decoding).
-  for (std::size_t i = 0; i < n_ch; ++i) {
-    if (errors[i]) std::rethrow_exception(errors[i]);
-    refuse_unusable_factors(plans[i], channels[i]);
-  }
-
-  // Phase 2, ONE decode pool over every block of every channel. Blocks of
-  // different channels write different rows; within a channel the plan's
-  // pieces are disjoint — so no two jobs ever write the same slot.
-  struct Ref {
-    std::size_t ch, job;
+  // ERRORS: the one raised is the lowest failing channel's in LIST order,
+  // whatever stage it failed in (index, data, factor, decode) — what a loop
+  // of read() raises. `limit` = the lowest channel known to fail; nothing is
+  // started for a channel above it (it cannot change the outcome), so a
+  // damaged first channel stops the call early. Channels below it still run
+  // to the end: one of them may fail too, and its error wins.
+  std::atomic<std::size_t> limit{n_ch};
+  std::vector<std::exception_ptr> errors(n_ch);
+  std::unique_ptr<std::atomic<bool>[]> failed(new std::atomic<bool>[n_ch]);
+  for (std::size_t i = 0; i < n_ch; ++i) failed[i].store(false);
+  std::mutex error_mu;
+  auto lower_limit = [&](std::size_t i) {
+    std::size_t cur = limit.load();
+    while (i < cur && !limit.compare_exchange_weak(cur, i)) {
+    }
   };
-  std::vector<Ref> work;
+  auto fail = [&](std::size_t i) {
+    {
+      std::lock_guard<std::mutex> lock(error_mu);
+      if (!errors[i]) errors[i] = std::current_exception();
+    }
+    failed[i].store(true);
+    lower_limit(i);
+  };
+  auto skipped = [&](std::size_t i) { return i > limit.load() || failed[i].load(); };
+
+  // A LIST first walks every channel's block index at once (file access on
+  // the Reader's threads, Work::Io: a request is a round trip, whatever the
+  // number of cores). That sizes the progress for the whole call, and a
+  // channel whose index is damaged stops every channel after it before any
+  // data is fetched. One channel skips this: collect_blocks does both halves.
+  std::vector<BlockSelection> selection(n_ch);
+  std::vector<std::uint64_t> selected_bytes(n_ch, 0);
   std::uint64_t total = 0;
-  for (std::size_t i = 0; i < n_ch; ++i)
-    for (std::size_t j = 0; j < plans[i].jobs.jobs.size(); ++j)
-      if (plans[i].count[j] != 0) {
-        work.push_back({i, j});
-        total += plans[i].jobs.jobs[j].block_bytes;
-      }
-  detail::ProgressReporter progress(ctl, ctl.progress ? total : 0);
-  progress.start();
+  if (n_ch > 1) {
+    parallel_for(
+        n_ch, threads,
+        [&](std::size_t i) {
+          if (skipped(i)) return;
+          try {
+            selection[i] = session_.select_blocks(channels[i], t0, t1, ctl);
+            selected_bytes[i] = selection[i].bytes();
+            // Its stored error is raised when its data is fetched (the order
+            // of a serial walk), but nothing after it matters any more.
+            if (selection[i].will_fail) lower_limit(i);
+          } catch (...) {
+            fail(i);
+          }
+        },
+        Work::Io);
+    for (std::size_t i = 0; i < n_ch; ++i) total += selected_bytes[i];
+  }
+  // Progress (compressed bytes): a list's total is every selected block,
+  // known now and constant; one channel's is the blocks it will decode,
+  // known once they are fetched (as read() always reported it).
+  std::optional<detail::ProgressReporter> progress;
+  if (n_ch > 1) {
+    progress.emplace(ctl, ctl.progress ? total : 0);
+    progress->start();
+  }
 
   // The output: `alloc` returns n_ch * n slots and says whether they already
   // hold NaN. If not (a multi-channel read: one fresh buffer of up to GBs),
@@ -309,25 +346,93 @@ void Reader::read_many_impl(const std::vector<std::string>& channels, std::optio
     parallel_for(n_ch, threads, [&](std::size_t i) {
       std::fill(base + i * row_len, base + (i + 1) * row_len, std::numeric_limits<T>::quiet_NaN());
     });
-  std::vector<char> unscaled(work.size(), 0);  // one slot per job: no race
-  parallel_for(work.size(), threads, [&](std::size_t w) {
-    ctl.check();  // between blocks; see read_raw_impl
-    const Plan& p = plans[work[w].ch];
-    const BlockJob& job = p.jobs.jobs[work[w].job];
-    // A factor not set (0, NO_ENTRY) gives the raw counts.
-    const sf8 uf = effective_units_conversion_factor(job.units_conversion_factor);
-    T* row = base + work[w].ch * row_len;
-    bool any = false;
-    decode_job(p, work[w].job, [&](si8 idx, si4 v) {
-      row[idx] = static_cast<T>(static_cast<sf8>(v) * uf);
-      any = true;
+
+  // Then the data, a GROUP of channels at a time (as many as the Reader's
+  // file-access threads): fetch the group's byte extents at once, then ONE
+  // decode pool over every block of the group. A group's compressed blocks
+  // are freed when it is decoded, so the peak beside the output is one
+  // group's window of compressed data, never the whole list's.
+  const std::size_t group =
+      n_ch == 1 ? 1 : std::max<std::size_t>(1, resolve_threads(threads, Work::Io));
+  std::vector<char> unscaled(n_ch, 0);
+  for (std::size_t g0 = 0; g0 < n_ch && g0 <= limit.load(); g0 += group) {
+    const std::size_t g1 = std::min(n_ch, g0 + group);
+    std::vector<Plan> plans(g1 - g0);
+    parallel_for(
+        g1 - g0, threads,
+        [&](std::size_t k) {
+          const std::size_t i = g0 + k;
+          if (skipped(i)) return;
+          try {
+            BlockJobs jobs = n_ch == 1
+                                 ? session_.collect_blocks(channels[i], t0, t1, ctl)
+                                 : session_.fetch_blocks(channels[i], std::move(selection[i]), ctl);
+            plans[k] = plan_blocks(std::move(jobs), t0, fs, n);
+            // Refused BEFORE decoding, as read() refuses it (NaN, inf).
+            refuse_unusable_factors(plans[k], channels[i]);
+          } catch (...) {
+            fail(i);
+          }
+        },
+        Work::Io);
+
+    // ONE decode pool over every block of the group. Blocks of different
+    // channels write different rows; within a channel the plan's pieces are
+    // disjoint — so no two jobs ever write the same slot.
+    struct Ref {
+      std::size_t k, job;
+    };
+    std::vector<Ref> work;
+    for (std::size_t k = 0; k < plans.size(); ++k) {
+      if (skipped(g0 + k)) continue;
+      for (std::size_t j = 0; j < plans[k].jobs.jobs.size(); ++j)
+        if (plans[k].count[j] != 0) work.push_back({k, j});
+    }
+    if (n_ch == 1) {
+      if (failed[0].load()) break;
+      // read()'s progress: the blocks that will actually be decoded.
+      progress.emplace(ctl, ctl.progress ? decode_bytes(plans[0]) : 0);
+      progress->start();
+    }
+    std::vector<char> wrote(work.size(), 0);  // one slot per job: no race
+    parallel_for(work.size(), threads, [&](std::size_t w) {
+      const std::size_t i = g0 + work[w].k;
+      if (skipped(i)) return;
+      try {
+        ctl.check();  // between blocks; see read_raw_impl
+        const Plan& p = plans[work[w].k];
+        const BlockJob& job = p.jobs.jobs[work[w].job];
+        // A factor not set (0, NO_ENTRY) gives the raw counts.
+        const sf8 uf = effective_units_conversion_factor(job.units_conversion_factor);
+        T* row = base + i * row_len;
+        bool any = false;
+        decode_job(p, work[w].job, [&](si8 idx, si4 v) {
+          row[idx] = static_cast<T>(static_cast<sf8>(v) * uf);
+          any = true;
+        });
+        if (any && job.units_conversion_factor == 0.0) wrote[w] = 1;
+        progress->add(job.block_bytes);
+      } catch (...) {
+        fail(i);
+      }
     });
-    if (any && job.units_conversion_factor == 0.0) unscaled[w] = 1;
-    progress.add(job.block_bytes);
-  });
-  progress.finish();
-  for (std::size_t w = 0; w < work.size(); ++w)
-    if (unscaled[w]) session_.note_unscaled(channels[work[w].ch]);
+    for (std::size_t w = 0; w < work.size(); ++w)
+      if (wrote[w]) unscaled[g0 + work[w].k] = 1;
+    // A list counts every selected block: the ones not decoded (shadowed,
+    // outside the grid, a lenient segment skipped) are done now too.
+    if (n_ch > 1)
+      for (std::size_t k = 0; k < plans.size(); ++k) {
+        if (skipped(g0 + k)) continue;
+        const std::uint64_t decoded = decode_bytes(plans[k]);
+        if (selected_bytes[g0 + k] > decoded) progress->add(selected_bytes[g0 + k] - decoded);
+      }
+  }  // the group's plans, and its compressed blocks, are freed here
+
+  const std::size_t first_failed = limit.load();
+  if (first_failed < n_ch) std::rethrow_exception(errors[first_failed]);
+  if (progress) progress->finish();
+  for (std::size_t i = 0; i < n_ch; ++i)
+    if (unscaled[i]) session_.note_unscaled(channels[i]);
 }
 
 namespace {

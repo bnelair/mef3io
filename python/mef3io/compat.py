@@ -153,18 +153,29 @@ class MefReader:
         # and a window: the legacy API takes any mix of rates, and an unset
         # stamp means each channel's OWN start/end, which is what the backend
         # defaults to for one channel. So the values are those of the
-        # per-channel loop this replaced, row for row.
+        # per-channel loop this replaced, row for row, and every row is its
+        # OWN array (a copy: no row shares memory with another, and keeping
+        # one does not keep its group's buffer alive), as before.
         groups: dict = {}
-        for ch in picked:
+        for pos, ch in enumerate(picked):
             info = self._r.info(ch)
             a = info["start_time"] if t_stamp1 is None else t_stamp1
             b = info["end_time"] if t_stamp2 is None else t_stamp2
-            groups.setdefault((info["sampling_frequency"], a, b), []).append(ch)
-        rows = {}
-        for (_, a, b), names in groups.items():
-            for ch, row in zip(names, self._r.read_many(names, a, b)):
-                rows[ch] = row
-        return [rows[ch] for ch in picked]
+            groups.setdefault((info["sampling_frequency"], a, b), []).append(pos)
+        out: list = [None] * len(picked)
+        try:
+            for (_, a, b), positions in groups.items():
+                block = self._r.read_many([picked[p] for p in positions], a, b)
+                for k, pos in enumerate(positions):
+                    out[pos] = block[k].copy()
+                del block
+        except Exception:
+            # The error the per-channel loop raised: the first channel, in
+            # the order asked for, that fails (groups are read by rate).
+            for ch in picked:
+                self._r.read(ch, t_stamp1, t_stamp2)
+            raise
+        return out
 
     def block_envelope(self, channel: str, t_stamp1=None, t_stamp2=None) -> dict:
         """Per-block minimum and maximum from the block index alone.

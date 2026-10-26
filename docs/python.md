@@ -350,12 +350,26 @@ X = r.read(["Fp1", "Fp2", "F3", "F4"], t0, t1)   # shape (4, N)
   refused before anything is read.
 - Without `t0`/`t1` the window runs from the earliest start to the latest
   end of the listed channels.
-- It is much faster than a loop: every channel's index and data reads are in
-  flight at once on the Reader's threads, and one decode pool works through
-  every block of every channel ([benchmarks](benchmarks.md#reading-many-channels-at-once)).
-  `cancel=` stops the whole call; `progress=` is one sequence over all the
-  channels' blocks. On error, the exception is the one a loop of single
-  reads would raise first (the first failing channel in list order).
+- It is much faster than a loop: every channel's block index is read at
+  once on the Reader's threads, then the data a group of channels at a time
+  (as many channels as the Reader's file-access threads), with one decode
+  pool over every block of the group
+  ([benchmarks](benchmarks.md#reading-many-channels-at-once)). `cancel=`
+  stops the whole call; `progress=` is one sequence with one constant total
+  (the compressed bytes of every block in the window, all channels).
+- **Errors** are the ones a loop of single reads raises: the first failing
+  channel in list order, whatever went wrong (its index, its data, its
+  conversion factor or a damaged block). Nothing is started for channels
+  after a channel known to fail, so a damaged first channel fails the call
+  about as fast as reading it alone. With `strict=False`, segments skipped
+  during the read are added to `problems` as each channel meets them, so
+  entries of different channels can come in any order.
+- **Memory:** the result (8 bytes per sample, 4 with float32, for every
+  channel), plus the compressed blocks of one group of channels at a time
+  (each group's are freed once it is decoded): about 2 bytes per sample for
+  typical iEEG, times the window, times the group size (`n_threads`
+  channels; automatic = the number of cores, at least 8). A loop of single
+  reads stacked with `np.stack` needs the result twice.
 - `read_raw` stays one channel per call.
 
 **`dtype="float32"`** (any spelling `numpy.dtype` accepts) returns float32,
@@ -760,7 +774,9 @@ warn_declarations=True, strict=True)`
 - `read(list_of_channels, dtype=...)` and `block_envelope(list)` follow the
   Reader's rules and return what a Reader of the merged session returns. A
   MultiReader reads the listed channels one after the other, each with its
-  whole budget, so it does not get the Reader's multi-channel speed-up.
+  whole budget, so it does not get the Reader's multi-channel speed-up. Its
+  `progress` for a list has one constant total too, counted in units of
+  channels (2^20 per listed channel) rather than bytes.
 
 Where it cannot be the same as a merged session:
 
@@ -1145,7 +1161,8 @@ the legacy stack are measured and documented in the
 [comparison](legacy_comparison.md). `get_data` with a list of channels reads
 them with the multi-channel `read` (one call per sampling rate and window;
 unset stamps keep meaning each channel's own start and end), so the arrays
-are the same as before, only faster.
+are the same as before, only faster: each one its own array, and on an error
+the exception of the first failing channel in the order asked for.
 
 Metadata works both the legacy and the modern way on `MefWriter`: mutate the
 `section3_dict` / `section2_ts_dict` (e.g.

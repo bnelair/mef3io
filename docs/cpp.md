@@ -41,11 +41,13 @@ std::vector<float> x4 = r.read_f32("ch1", t0, t1);   // == float(read()), half t
 
 // Several channels of ONE sampling rate in one call: row-major, one row of
 // n = x.size() / names.size() samples per name, each byte-identical to
-// read() of that channel. File access for all channels runs concurrently on
-// the Reader's threads, then one decode pool over every block. Mixed rates
-// or an empty list throw std::invalid_argument, an unknown name
-// std::out_of_range, before any request. Unset t0/t1 = the union of the
-// channels' spans. read_many_f32 = the float32 form.
+// read() of that channel. Every index is read concurrently on the Reader's
+// threads, then the data a group of channels at a time with one decode pool
+// per group (each group's compressed bytes freed before the next). Mixed or
+// non-finite rates or an empty list throw std::invalid_argument, an unknown
+// name std::out_of_range, before any request; a read error is the lowest
+// failing channel's in list order. Unset t0/t1 = the union of the channels'
+// spans. read_many_f32 = the float32 form.
 std::vector<std::string> names = {"ch1", "ch2", "ch3"};
 std::vector<double> rows = r.read_many(names, t0, t1);
 

@@ -81,14 +81,17 @@ See [Threads](../threads.md) for the rule.
   row is byte-identical to `read()` of that channel alone (same grid, NaN
   gaps, per-segment scaling, warnings, errors); the channels must share one
   sampling rate (`ValueError` otherwise: read each rate in its own call).
-  All channels' file reads run at once on the Reader's threads and one decode
-  pool works through every block of every channel: with 20 ms per file
-  request (a slow share, simulated), 209 channels x 10 minutes read in 1.2 s
-  on 16 threads instead of 13.8 s for a loop; locally about 2x faster from 16
-  threads, and 3.7x faster than a Python loop with `np.stack`
+  Every channel's index is read at once on the Reader's threads, then the
+  data a group of channels at a time with one decode pool per group: with
+  20 ms per file request (a slow share, simulated), 209 channels x 10 minutes
+  read in 1.2 s on 16 threads instead of 13.5 s for a loop; locally 1.3-1.9x
+  faster from 4 threads on, and 2.9x faster than a Python loop with
+  `np.stack` on 16 threads
   ([benchmarks](../benchmarks.md#reading-many-channels-at-once)). `cancel=`
   and `progress=` cover the whole call. Without `t0`/`t1` the window is the
-  union of the listed channels' spans.
+  union of the listed channels' spans. An error is the one a loop raises
+  (the first failing channel in list order), and nothing is started for the
+  channels after a channel known to fail.
 - **`dtype="float32"`** on `read` (one channel or many): the float64 value
   rounded to the nearest float32, exactly `read(...).astype(numpy.float32)`,
   in half the memory.
