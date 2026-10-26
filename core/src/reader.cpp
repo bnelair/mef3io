@@ -7,29 +7,14 @@
 #include <map>
 #include <utility>
 
+#include "mef3io/errors.hpp"
 #include "mef3io/parallel.hpp"
 #include "mef3io/red.hpp"
 
 namespace mef3io {
 namespace {
-// Number of output samples of a window [t0, t1) (the C ABI's
-// mef3io_reader_n_samples mirrors it). Its argument is never negative.
-si8 grid_count(si8 t1, si8 t0, sf8 fs) {
-  return static_cast<si8>(std::llround(static_cast<sf8>(t1 - t0) * fs / 1e6));
-}
-
-// Output slot of a sample (or block start) at absolute uUTC `t`: the nearest
-// slot of the [t0, fs) grid, a TIE going to the EARLIER slot whatever the
-// sign of t - t0 (#129). So slot 0 holds the first sample at or after t0.
-// std::llround rounds halves away from zero: the block holding t0 (negative
-// offset) went one way and every later block (positive offset) the other,
-// leaving one slot no block claimed -- a NaN at the first block boundary of
-// any window starting exactly half a sample off the grid (at 500 Hz, every
-// millisecond time ending in 1 ms). One rule for every block keeps
-// consecutive blocks exactly their length apart.
-si8 grid_slot(si8 t, si8 t0, sf8 fs) {
-  return static_cast<si8>(std::ceil(static_cast<sf8>(t - t0) * fs / 1e6 - 0.5));
-}
+using detail::grid_count;
+using detail::grid_slot;
 
 // Half-open output ranges claimed by one block, and the set already claimed by
 // blocks that win over it. `covered` holds disjoint, merged intervals keyed by
@@ -70,11 +55,12 @@ void claim_range(IntervalMap& covered, si8 b, si8 e,
 
 RawData Reader::read_raw(const std::string& channel, std::optional<si8> t0,
                          std::optional<si8> t1, const Control& ctl) {
-  return read_raw_split(channel, t0, t1, session_.threads(), ctl);
+  return read_raw_impl(channel, t0, t1, session_.threads(), ctl, false);
 }
 
-RawData Reader::read_raw_split(const std::string& channel, std::optional<si8> t0_opt,
-                               std::optional<si8> t1_opt, int n_threads, const Control& ctl) {
+RawData Reader::read_raw_impl(const std::string& channel, std::optional<si8> t0_opt,
+                              std::optional<si8> t1_opt, int n_threads, const Control& ctl,
+                              bool in_units) {
   const ChannelInfo& ci = session_.channel_info(channel);
   const sf8 fs = ci.sampling_frequency;
   const si8 t0 = t0_opt.value_or(ci.start_time);
@@ -130,6 +116,14 @@ RawData Reader::read_raw_split(const std::string& channel, std::optional<si8> t0
     }
   }
 
+  // A read in units refuses an invalid factor (NaN, inf) BEFORE decoding. A
+  // factor that is not set (0) is read as 1 instead (see read()).
+  if (in_units)
+    for (std::size_t j = 0; j < n_jobs; ++j)
+      if (count[j] != 0 && !usable_units_conversion_factor(jobs.jobs[j].units_conversion_factor))
+        throw FormatError(
+            unusable_factor_message(channel, jobs.jobs[j].units_conversion_factor, "read_raw()"));
+
   // Progress counts the compressed bytes of the blocks that will actually be
   // decoded. Summed only when someone is listening: zero cost otherwise.
   std::uint64_t decode_bytes = 0;
@@ -139,6 +133,7 @@ RawData Reader::read_raw_split(const std::string& channel, std::optional<si8> t0
   detail::ProgressReporter progress(ctl, decode_bytes);
   progress.start();
 
+  std::vector<si8> n_decoded_of(n_jobs, 0);  // one slot per job: no race
   parallel_for(n_jobs, threads, [&](std::size_t j) {
     // A block that owns no output — fully shadowed by a later one, or trimmed
     // away by the window — cannot affect the result, so don't decode it.
@@ -151,6 +146,7 @@ RawData Reader::read_raw_split(const std::string& channel, std::optional<si8> t0
     std::span<const ui1> block(jobs.buffers[job.buffer_index].data() + job.offset, job.block_bytes);
     auto decoded = red::decode_block(block, job.keys);
     const si8 n_decoded = static_cast<si8>(decoded.samples.size());
+    n_decoded_of[j] = n_decoded;
     for (std::size_t p = first[j]; p < first[j] + count[j]; ++p) {
       for (si8 idx = pieces[p].first; idx < pieces[p].second; ++idx) {
         const si8 k = idx - idx0[j];
@@ -162,17 +158,52 @@ RawData Reader::read_raw_split(const std::string& channel, std::optional<si8> t0
     progress.add(job.block_bytes);
   });
   progress.finish();
+
+  // Factor spans (#150), from the pieces each block actually filled: the
+  // slots it owns, cut to the samples it decoded. Pieces are disjoint, so in
+  // order of start they are the valid slots in order.
+  struct Filled {
+    si8 b, e;
+    sf8 f;
+  };
+  std::vector<Filled> filled;
+  for (std::size_t j = 0; j < n_jobs; ++j)
+    for (std::size_t p = first[j]; p < first[j] + count[j]; ++p) {
+      const si8 b = pieces[p].first;
+      const si8 e = std::min(pieces[p].second, idx0[j] + n_decoded_of[j]);
+      if (b < e) filled.push_back({b, e, jobs.jobs[j].units_conversion_factor});
+    }
+  std::sort(filled.begin(), filled.end(),
+            [](const Filled& a, const Filled& b) { return a.b < b.b; });
+  for (const auto& f : filled) {
+    if (!out.factor_spans.empty() &&
+        same_units_conversion_factor(out.factor_spans.back().units_conversion_factor, f.f))
+      out.factor_spans.back().end_index = f.e;
+    else
+      out.factor_spans.push_back(FactorSpan{f.b, f.e, f.f});
+  }
+  if (out.factor_spans.size() == 1)
+    out.units_conversion_factor = out.factor_spans.front().units_conversion_factor;
+  else if (out.factor_spans.size() > 1)
+    out.units_conversion_factor.reset();
   return out;
 }
 
 std::vector<sf8> Reader::read(const std::string& channel, std::optional<si8> t0,
                               std::optional<si8> t1, const Control& ctl) {
-  RawData raw = read_raw(channel, t0, t1, ctl);
-  const sf8 uf = raw.units_conversion_factor;
+  RawData raw = read_raw_impl(channel, t0, t1, session_.threads(), ctl, true);
   const sf8 nan = std::numeric_limits<sf8>::quiet_NaN();
-  std::vector<sf8> out(raw.samples.size());
-  for (std::size_t i = 0; i < out.size(); ++i)
-    out[i] = raw.valid[i] ? static_cast<sf8>(raw.samples[i]) * uf : nan;
+  std::vector<sf8> out(raw.samples.size(), nan);
+  // Each sample by its own segment's factor (#150); every valid slot lies in
+  // exactly one span. A factor not set (0, NO_ENTRY) gives the raw counts.
+  for (const auto& sp : raw.factor_spans) {
+    if (sp.units_conversion_factor == 0.0) session_.note_unscaled(channel);
+    const sf8 uf = effective_units_conversion_factor(sp.units_conversion_factor);
+    for (si8 i = sp.start_index; i < sp.end_index; ++i) {
+      const auto k = static_cast<std::size_t>(i);
+      if (raw.valid[k]) out[k] = static_cast<sf8>(raw.samples[k]) * uf;
+    }
+  }
   return out;
 }
 

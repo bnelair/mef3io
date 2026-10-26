@@ -65,7 +65,7 @@ def _declaration_session(path):
 def test_every_warning_class_is_a_mef_warning():
     for cls in (mef3io.SessionDeclarationWarning, mef3io.UnreadableSegmentWarning,
                 mef3io.BlockCopyWarning, mef3io.LegacyPasswordWarning,
-                mef3io.PasswordInteropWarning):
+                mef3io.PasswordInteropWarning, mef3io.UnscaledSamplesWarning):
         assert issubclass(cls, mef3io.MefWarning)
         assert issubclass(cls, UserWarning)  # what every release so far raised
     w = mef3io.SessionDeclarationWarning("text")  # how warnings.warn builds one

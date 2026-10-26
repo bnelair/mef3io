@@ -372,7 +372,7 @@ core/tests/test_tar.cpp, tests/test_p11_tar.py, tar block in
 matlab/test_mef3io.m.
 
 Warm-start snapshot cache (`python/mef3io/cache.py`, `Reader(cache=)`, cache
-format 6, #64). RULE: a snapshot only makes sense if it is SMALL and CHEAPER
+format 7, #64; 7 = info ufact None when segments differ, #150). RULE: a snapshot only makes sense if it is SMALL and CHEAPER
 than reading the original — both are test-pinned in tests/test_p22_cache_
 snapshot.py (size flat from 10 to 500 segments/channel; the cached open reads
 fewer bytes AND opens fewer files than a plain open at 10/150/500; a fresh
@@ -862,10 +862,41 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   lost samples on every one; test_p42 + test_parallel_open.cpp pin them. A
   cold windowed read therefore walks every index once, as before.
   Per-block min/max are the INDEX
-  copies (raw counts, scaled by the channel ufact like read()); RED_NAN ->
+  copies (raw counts, scaled by the block's OWN SEGMENT's ufact like read(),
+  #150; swapped when negative; unset ufact = counts, NaN/inf refused); RED_NAN ->
   NaN. Times come from the index entries, not the RED headers (reading those
   would mean touching .tdat); read() places by the header copy, which agrees
   on any consistent file. Python + C++ only (no C ABI/MATLAB yet).
+- **Conversion factors are PER SEGMENT (#150).** Section 2 of each segment
+  stores its own units_conversion_factor and one channel may mix them
+  (`new_segment=True` with another precision, foreign recorders; meflib's
+  channel aggregate is NO_ENTRY = 0.0 then, meflib.c:5494/6176, pymef shows
+  it). NEVER scale by a channel-level value: `BlockJob` carries its segment's
+  factor, `read()` scales by `RawData::factor_spans`, block_envelope and the
+  copy's native min/max use the segment's, `read_runs` splits runs where it
+  changes. `ChannelInfo`/`RawData::units_conversion_factor` are
+  `std::optional` (nullopt = differ; Python None; C ABI/MATLAB NaN).
+  `factor_spans` are CANONICAL (valid slots grouped into maximal runs of one
+  factor, first valid to last valid + 1) so a MultiReader can rebuild the
+  merged session's exactly. MAINTAINER DECISION (#151): a factor NOT SET
+  (0 = NO_ENTRY, meflib/pymef template default, so real files have it) is
+  read as 1 (`effective_units_conversion_factor`): read(), block_envelope,
+  MultiReader and compat get_data return the RAW COUNTS, the core records
+  the channel (`Session::unscaled_channels`, under state_mu_) and Python
+  emits ONE `UnscaledSamplesWarning` per Reader/MultiReader and channel
+  (`_announced` "unscaled"); spans/info/segments keep the STORED 0. NaN/inf
+  are invalid: REFUSED by read()/block_envelope (FormatError, before
+  decoding; block_envelope decides by read()'s window + grid
+  (`detail::grid_slot`) and throws OUTSIDE with_segment so a lenient
+  session never marks the segment failed); read_raw/toc still give counts.
+  C ABI/MATLAB: raw counts, no warning yet. `mef3io_reader_segment_table`
+  = every segment's info/provenance/factor from ONE segment map (the MEX
+  uses it; per-index loops were O(n^2)). pymef oracle in test_p44:
+  its session_md arrays point into memory close() frees — copy them first.
+  C ABI: `mef3io_reader_segment_units_conversion_factor`,
+  `mef3io_reader_read_raw_factors` + `mef3io_factor_span` (no struct grew).
+  Tests: tests/test_p44_segment_factors.py, Catch2 "per-segment conversion
+  factors".
 - **Grid placement ties (#129).** `reader.cpp` has TWO roundings and they
   must stay different: `grid_count` (window length, `llround`, argument never
   negative; the C ABI's `mef3io_reader_n_samples` mirrors it) and
@@ -1224,8 +1255,12 @@ constructor). read() DROPS the parts' collected BlockCopyWarnings (Reader.read
 never emits one); read_raw emits them. Errors MultiReader raises itself use
 Reader's exact text. Refused on open (ValueError): rate differs,
 overlapping data (merge's rule: spans first, block_envelope only where spans
-meet, half-sample tolerance). Different ufact: read scales each recording by
-its own, read_raw refuses. Sub-readers are opened with the private
+meet, half-sample tolerance). Different ufact (#150): as a Reader, read
+scales by the parts' read_raw `units_conversion_factors` spans (per-slot
+factor via the owner array), read_raw returns the canonical spans rebuilt
+over the combined window (== the merged session's), and refuses an unusable
+factor with Reader's exact text (`_unusable_factor_message` in _reader.py
+mirrors `unusable_factor_message` in session.cpp). Sub-readers are opened with the private
 `Reader(_defer_warnings=True)` and their warnings re-emitted by the
 MultiReader at ITS caller; Reader's `_read_raw`/`_records` collect warnings
 into a `pending` list for the same reason (`_flush` emits them).

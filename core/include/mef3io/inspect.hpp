@@ -55,6 +55,9 @@ struct InspectSegment {
   std::optional<si8> start_sample, number_of_samples, number_of_blocks;
   /// As DECLARED in section 2 (legacy writers leave 0 here even with gaps).
   std::optional<si8> number_of_discontinuities;
+  /// Section 2's units_conversion_factor, as stored (0 = MEF's "no entry");
+  /// nullopt when section 2 is locked or the segment could not be read.
+  std::optional<sf8> units_conversion_factor;
   /// "none" (no offset), "applied" (meflib's recording-time offset is set),
   /// "locked" (section 3 is encrypted and the password does not open it) or
   /// "unknown" (the segment could not be read: lenient mode, or a segment
@@ -81,6 +84,9 @@ struct InspectGap {
 
 struct InspectChannel {
   std::string name;
+  /// From the first segment whose section 2 is readable. The conversion
+  /// factor is nullopt also when the readable segments store different ones
+  /// (#150; each segment's is in InspectSegment::units_conversion_factor).
   std::optional<sf8> sampling_frequency, units_conversion_factor;
   std::optional<std::string> units_description;
   /// Section 2's free-text channel description, as the first segment whose

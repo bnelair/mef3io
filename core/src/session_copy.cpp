@@ -1354,8 +1354,11 @@ class Copier {
       m.maximum_contiguous_blocks = st->max_contiguous_blocks;
       m.maximum_contiguous_block_bytes = st->max_contiguous_block_bytes;
       m.maximum_contiguous_samples = st->max_contiguous_samples;
-      m.maximum_native_sample_value = native_max_ * m.units_conversion_factor;
-      m.minimum_native_sample_value = native_min_ * m.units_conversion_factor;
+      // This segment's own factor (#150); a negative one turns the largest
+      // count into the smallest value (as the writer, pymef3_file.c:972).
+      const sf8 uf = m.units_conversion_factor;
+      m.maximum_native_sample_value = (uf >= 0.0 ? native_max_ : native_min_) * uf;
+      m.minimum_native_sample_value = (uf >= 0.0 ? native_min_ : native_max_) * uf;
       m.serialize_derived_fields(s2);
     }
     write<si1>(s1, 0, out_.encrypt ? fmt::LEVEL_1_ENCRYPTION : -fmt::LEVEL_1_ENCRYPTION);

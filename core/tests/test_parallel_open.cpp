@@ -83,7 +83,7 @@ std::string describe(const Session& s) {
   o.precision(17);
   for (const auto& name : s.channels()) {
     const auto& i = s.channel_info(name);
-    o << name << " fs=" << i.sampling_frequency << " uf=" << i.units_conversion_factor
+    o << name << " fs=" << i.sampling_frequency << " uf=" << i.units_conversion_factor.value_or(-12345.0)
       << " u=" << i.units_description << " t=" << i.start_time << ".." << i.end_time
       << " n=" << i.number_of_samples << " rto=" << i.recording_time_offset
       << " segs=" << i.n_segments << " gmt=" << i.gmt_offset << " sd=" << i.session_description

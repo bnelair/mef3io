@@ -319,7 +319,14 @@ warning once per session, not once per process.
 
 Float64 samples on the uniform fs grid over `[t0, t1)` (whole channel by
 default): `N = round((t1 - t0) * fs / 1e6)` samples, discontinuity gaps
-filled with NaN, values scaled by the conversion factor. Windowed reads
+filled with NaN, each value scaled by the conversion factor of the segment
+it comes from (segments of one channel may store different ones). A segment
+whose factor is not set (0, MEF's "no entry": what meflib's and pymef's
+templates hold until a writer sets it) reads as its **raw stored counts**
+(factor 1), with one `mef3io.UnscaledSamplesWarning` per Reader and channel;
+before 2.0 it read back as zeros. A factor that is NaN or infinite is
+invalid and refused with `mef3io.FormatError` (`read_raw` still returns the
+counts). Windowed reads
 fetch only the needed bytes — cheap on huge sessions. `cancel=` /
 `progress=`: see [Cancelling and progress](#cancelling-and-progress). The
 thread count is the Reader's `n_threads`; there is no per-call override
@@ -328,11 +335,33 @@ thread count is the Reader's `n_threads`; there is no per-call override
 ### `read_raw(channel, t0=None, t1=None, *, cancel=None, progress=None)`
 
 Dict with the stored `samples` (int32), a `valid` mask (0 in gaps),
-`start_uutc`, `sampling_frequency`, `units_conversion_factor`.
+`start_uutc`, `sampling_frequency`, `units_conversion_factor`,
+`units_conversion_factors`. Each segment stores its own conversion factor,
+so the counts of a window spanning segments with different factors mean
+different things: `units_conversion_factors` lists where each applies, as
+dicts with `start_index`, `end_index` (half-open sample indices) and
+`units_conversion_factor` — one per run of valid samples sharing a factor,
+sorted, from its first valid sample to just past its last:
+
+```python
+raw = r.read_raw("ch1", t0, t1)
+x = np.full(len(raw["samples"]), np.nan)
+for s in raw["units_conversion_factors"]:
+    x[s["start_index"]:s["end_index"]] = raw["samples"][s["start_index"]:s["end_index"]] * s["units_conversion_factor"]
+x[raw["valid"] == 0] = np.nan      # == r.read("ch1", t0, t1)
+```
+
+There is one span for an ordinary window and none when nothing in it is
+valid. Factors are as stored: a span with factor `0` is a segment whose
+factor is not set (`read()` returns those counts unscaled). `units_conversion_factor` is that one span's factor, `None` when the
+window holds samples of segments with different factors, and `info()`'s
+value when nothing is valid.
 
 ### `info(channel)`
 
-Dict: `sampling_frequency`, `units_conversion_factor`, `units_description`,
+Dict: `sampling_frequency`, `units_conversion_factor` (`None` when the
+channel's segments store different factors; `segments()` gives each
+segment's), `units_description`,
 `start_time`, `end_time`, `number_of_samples` (stored samples — gaps are not
 counted, so a gridded read usually returns more), `recording_time_offset`,
 `n_segments`, `section3_available`, and the section-3 subject fields
@@ -343,7 +372,8 @@ level-2 access).
 
 `segments` maps what data is where — one dict per segment with
 `start_time`/`end_time`, `start_sample`, `number_of_samples`,
-`number_of_blocks`, `path`, and `provenance` (which mef3io versions created
+`number_of_blocks`, `units_conversion_factor` (the segment's own; `0.0` is
+MEF's "no entry"), `path`, and `provenance` (which mef3io versions created
 and last modified the segment and which operations it has been through; `None`
 for files from another writer or from mef3io before 1.2; see the
 [provenance region](mef3_format.md#provenance-region-mef3io-12-frozen-format)) — from metadata only (nothing decoded), so it is
@@ -366,8 +396,13 @@ env["min"], env["max"]                            # float64, in the channel's un
 - The resolution is the block length: mef3io writes 10-second blocks by
   default (1-second blocks at 5 kHz and above); other writers choose their
   own. A day of one channel in 10-second blocks is 8,640 rows.
-- Values are scaled like `read()`. A block whose writer left its extremes
-  unset gives NaN.
+- Values are scaled like `read()`: each block by its own segment's
+  conversion factor, swapped for a negative one (a factor not set reads as
+  the counts, with the same warning), with the same refusal of a NaN or
+  infinite factor for the blocks `read()` of the same window would take
+  samples from (read's grid rule; `toc()` returns the counts). A block of
+  such a segment that the read would not touch gets NaN. A block whose writer left its
+  extremes unset gives NaN.
 - Gaps are absent rows: compare `end_uutc` with the next `start_uutc`.
 - `toc()` returns the same blocks for the whole channel as one dict each,
   unscaled; `block_envelope` is the one to use for drawing.
@@ -662,7 +697,8 @@ warn_declarations=True, strict=True)`
   the session description are combined over every recording (also those
   without the channel), so `info()` and `metadata` agree; `metadata` is a
   `mef3io.Metadata` built the same way. A difference raises one
-  `MultiReaderDifferenceWarning` on open naming the fields, never their
+  `MultiReaderDifferenceWarning` on open naming the fields (not
+  `units_conversion_factor`: reads scale each segment by its own factor), never their
   values; each recording's own values are in `r.metadata_by_source` (and
   `r.paths` lists the recordings in time order). Different patient names or
   IDs can mean the recordings are not the same patient's.
@@ -684,11 +720,6 @@ warn_declarations=True, strict=True)`
 
 Where it cannot be the same as a merged session:
 
-- A channel stored with **different units-conversion factors** in different
-  recordings: `read()` scales each recording's samples by its own factor;
-  `read_raw()` refuses a window that touches recordings with different
-  factors (one factor cannot describe those counts), and `info()` gives
-  `None` for the factor.
 - Recordings that take turns keep their own segments: `merge_sessions`
   splits a segment around the other recording's data, a MultiReader does
   not, so `segments()` and `n_segments` can be smaller.
