@@ -210,7 +210,7 @@ def test_validator_has_no_way_to_write(tmp_path):
     # The WHOLE surface, not a blocklist of four names. A blocklist is
     # defeated by spelling: `repair_session`, `rewrite`, `heal`, `correct` and
     # a `repair=True` keyword on validate() would all have passed it, which
-    # makes the "test-pinned" claim in CLAUDE.md untrue.
+    # makes the "test-pinned" claim in for_agents/notes/validate-repair-recover.md untrue.
     public = {n for n in dir(mef3io.Validator) if not n.startswith("_")}
     assert public == {"available_checks", "check", "describe_check", "validate"}, public
 

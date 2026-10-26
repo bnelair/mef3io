@@ -303,7 +303,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
           const sf8 fs = md.section2_available ? md.section2.sampling_frequency : 0.0;
           const std::span<const ui1> all(idx);
           // Legacy writers left .tidx (and .tdat) universal-header times
-          // non-negated (CLAUDE.md); under an offset that is ambiguous too.
+          // non-negated (for_agents/notes/format-gotchas.md); under an offset that is ambiguous too.
           // The .tdat header is never checked: inspect never opens a .tdat.
           const auto idx_uh = fmt::UniversalHeader::parse(all);
           for (si8 t : {idx_uh.start_time, idx_uh.end_time})

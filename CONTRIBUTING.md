@@ -40,7 +40,7 @@ snapshot. Use `dev_build.sh` and rerun it after every C++ change.
 MATLAB binding: `run('matlab/build_mex.m')` then
 `run('matlab/test_mef3io.m')` (needs a C++20 compiler via `mex -setup C++`).
 
-More context: [`CLAUDE.md`](CLAUDE.md) (architecture + format gotchas),
+More context: [`CLAUDE.md`](CLAUDE.md) (index; architecture + format gotchas live in `for_agents/notes/`),
 [`docs/`](https://bnelair.github.io/mef3io/) (guides, format reference,
 design).
 

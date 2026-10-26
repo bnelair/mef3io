@@ -6,7 +6,7 @@
 // applied and the value is already absolute (remove_recording_time_offset,
 // meflib.c:7660-7675). UUTC_NO_ENTRY is a sentinel, never a time.
 //
-// This rule is the single most error-prone one in the format (CLAUDE.md:
+// This rule is the single most error-prone one in the format (for_agents/notes/format-gotchas.md:
 // "Times are stored NEGATED on disk", "Sign conventions are MIXED WITHIN ONE
 // FILE"), so it lives here once and every reader/writer/validator uses it. Do
 // not re-derive it locally.
