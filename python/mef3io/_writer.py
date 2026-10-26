@@ -267,23 +267,27 @@ class Writer:
     metadata : mef3io.Metadata or dict, optional
         Session-wide subject/acquisition metadata written to every channel.
         Also settable later via :meth:`set_metadata` (before writing).
+    wait_for_disk : bool, optional
+        ``False`` (default): :meth:`write` returns once its data is handed to
+        the operating system; :meth:`flush` and :meth:`close` wait for the
+        disk. ``True``: every :meth:`write` returns only when its own data is
+        on disk (one combined wait per call). See `When is my data on disk?
+        <https://bnelair.github.io/mef3io/long_recordings/#when-is-my-data-on-disk>`_.
 
     Notes
     -----
-    **Durability.** An append flushes exactly one thing to stable storage:
-    each segment's ``.tmet``, before it is renamed over the previous one
-    (a short ``.tmet`` would make the whole session fail to open). A
-    channel's first segment, and any new segment or channel in a session that
-    already held data when this Writer opened it, also flushes its three
-    fresh files before each is renamed in.
-    The ``.tdat`` and ``.tidx`` are extended in place without flushing, so a
-    power cut or OS crash mid-append can leave the **last** append of a
-    segment in any mix of old and new bytes; :func:`mef3io.recover_session`
-    with ``apply=True`` restores a valid session holding every sample whose
-    bytes reached the disk. Earlier appends are never at risk: nothing
-    rewrites them. An append raises if the ``.tmet`` flush fails. The
-    ``durability=`` argument of 1.x was removed in 2.0 (passing it raises
-    ``TypeError``).
+    **When is my data on disk?** By default :meth:`write` returns once its
+    data is handed to the operating system. Only each segment's ``.tmet`` is
+    flushed before it is published (a short ``.tmet`` would make the whole
+    session fail to open). :meth:`flush` and :meth:`close` (also leaving a
+    ``with`` block) return only when everything written so far is on disk,
+    in one combined wait. With ``wait_for_disk=True`` every write returns
+    only when its own data is on disk. A power cut before that can leave the
+    last append of a segment torn; :func:`mef3io.recover_session` with
+    ``apply=True`` restores a valid session holding every sample whose bytes
+    reached the disk. Earlier appends are never at risk: nothing rewrites
+    them. A write raises if a flush it waits for fails. The ``durability=``
+    argument of 1.x was removed in 2.0 (passing it raises ``TypeError``).
 
     Examples
     --------
@@ -301,6 +305,7 @@ class Writer:
         block_length: Optional[int] = None,
         n_threads: int = 0,
         metadata=None,
+        wait_for_disk: bool = False,
     ):
         from . import _mef3io
 
@@ -325,6 +330,7 @@ class Writer:
 
         self._n_threads = _check_threads(n_threads)
         self._impl.set_threads(self._n_threads)
+        self._impl.set_wait_for_disk(bool(wait_for_disk))
         if metadata is not None:
             self.set_metadata(metadata)
 
@@ -359,10 +365,24 @@ class Writer:
             self._impl.set_threads(value)
         self._n_threads = value
 
+    def flush(self) -> None:
+        """Return only when everything this Writer has written so far is on
+        disk: every file it created or extended since the last flush, in ONE
+        combined wait (not one per channel). Raises ``OSError``/``RuntimeError``
+        when the system reports the flush failed. :meth:`close` does the same.
+        See `When is my data on disk?
+        <https://bnelair.github.io/mef3io/long_recordings/#when-is-my-data-on-disk>`_.
+        """
+        if self._impl is not None:
+            self._impl.flush()
+
     def close(self) -> None:
-        """Finalize and release the writer. Called automatically on
-        context-manager exit."""
-        self._impl = None
+        """Flush (see :meth:`flush`), then release the writer. Called
+        automatically on context-manager exit. Returns only when everything
+        written is on disk."""
+        impl, self._impl = self._impl, None
+        if impl is not None:
+            impl.flush()
 
     def write(
         self,

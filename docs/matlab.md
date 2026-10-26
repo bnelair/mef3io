@@ -46,8 +46,12 @@ delete(w);                                            % or let it go out of scop
 an existing session is reopened for appending), `Password1`/`Password2`
 (both required for encryption), `Units`, `BlockLength`, `Threads` (encode
 threads, `0` = automatic; `w.setThreads(n)` / `w.threads()` later),
-and `Metadata` (below). 2.0 removed `Durability`: an append flushes only each
-segment's `.tmet` (see [Long recordings](long_recordings.md)). After an unclean
+`Metadata` (below) and `WaitForDisk` (default false: a write returns once its
+data is handed to the operating system; true: once it is on disk).
+`w.flush()` returns only when everything written so far is on disk, in one
+combined wait, and `delete(w)` does the same (see
+[When is my data on disk?](long_recordings.md#when-is-my-data-on-disk); 2.0
+removed `Durability`). After an unclean
 shutdown, `mef3io.recoverSession(path)` reports what is wrong (a dry run) and
 `mef3io.recoverSession(path, Apply=true)` fixes it.
 

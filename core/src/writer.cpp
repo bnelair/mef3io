@@ -61,7 +61,7 @@ using detail::replace_file;
 using detail::fsync_file_or_throw;
 
 void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
-                       bool flush_new = false) {
+                       bool flush_new = false, std::vector<fs::path> flush_with = {}) {
   const fs::path target(path);
   const fs::path tmp = target.parent_path() / (target.filename().string() + ".mef3io-tmp");
   std::error_code ignored;
@@ -78,11 +78,15 @@ void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
   // fixed by `recover_session`.
   //
   // A FRESH file is flushed only when the caller says so (`flush_new`,
-  // SegmentSpec::flush_new_files): a channel's first segment, or any new
-  // segment in a session that already held data. A zero-length .tmet, .tidx
-  // or .tdat — the classic outcome of renaming an unflushed file to a NEW
-  // name — fails the strict open of the WHOLE session (review of #153).
-  // Later segments of a session the writer created are left to recovery.
+  // SegmentSpec::flush_new_metadata): a channel's first segment (or a new
+  // segment in a session that already held data). A zero-length .tmet — the
+  // classic outcome of renaming an unflushed file to a NEW name — fails the
+  // strict open of the WHOLE session, and a first segment has no previous
+  // .tmet to rebuild it from. Its short .tidx/.tdat are recovery's job.
+  //
+  // `flush_with` (wait_for_disk): the other files of this write are flushed
+  // TOGETHER with the temp file, in one combined wait (flush_files), before
+  // the rename — the .tmet then never declares data that is not on disk.
   const bool replacing = fs::exists(target, ignored);
   fs::remove(tmp, ignored);
   try {
@@ -95,7 +99,12 @@ void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
     // Flush the CONTENT before the rename, but not the directory entry after
     // it. Losing the rename is harmless: the old file is still there, complete
     // and consistent, which is worth more than keeping the last append.
-    if (replacing || flush_new) fsync_file_or_throw(tmp.string());
+    if (!flush_with.empty()) {
+      flush_with.push_back(tmp);
+      detail::flush_files(flush_with);
+    } else if (replacing || flush_new) {
+      fsync_file_or_throw(tmp.string());
+    }
     replace_file(tmp, target);
   } catch (...) {
     fs::remove(tmp, ignored);
@@ -122,8 +131,9 @@ std::array<ui1, 16> random_uuid() {
   return u;
 }
 
-void write_file(const std::string& path, const std::vector<ui1>& bytes, bool flush_new = false) {
-  write_file_atomic(path, bytes, flush_new);
+void write_file(const std::string& path, const std::vector<ui1>& bytes, bool flush_new = false,
+                std::vector<fs::path> flush_with = {}) {
+  write_file_atomic(path, bytes, flush_new, std::move(flush_with));
 }
 
 // Same, for `.tmet` — a FIXED-length record. The body CRC must be bounded by
@@ -473,37 +483,15 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     // explicitly so the fixed-length rule holds for every .tmet we write.
     finalize_metadata_crcs(file);
     const std::string tmet_path = (fs::path(segment_dir) / (base + ".tmet")).string();
-    if (!spec.flush_new_files) {
-      write_file(tmet_path, file);
-    } else {
-      // A segment is visible to readers only through its .tmet (one missing
-      // is skipped; one SHORT fails the strict open of the whole session). So
-      // the .tdat and .tidx above went out unflushed, the .tmet goes to a
-      // temp file, all three are flushed in ONE batch (flush_files: one
-      // syncfs per file system on Linux, per file elsewhere), and only then
-      // is the .tmet renamed into place: no visible file of this segment can
-      // be short after a power cut.
-      const fs::path tmp = tmet_path + ".mef3io-tmp";
-      std::error_code ignored;
-      fs::remove(tmp, ignored);
-      try {
-        {
-          std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-          if (!f) throw IoError("cannot open for write: " + tmp.string());
-          f.write(reinterpret_cast<const char*>(file.data()),
-                  static_cast<std::streamsize>(file.size()));
-          if (!f) throw IoError("write failed: " + tmp.string());
-          finish_stream(f, tmp.string());
-        }
-        detail::flush_files({fs::path(segment_dir) / (base + ".tdat"),
-                             fs::path(segment_dir) / (base + ".tidx"), tmp});
-        if (detail::fsync_observer) detail::fsync_observer("batch:" + tmp.string());
-        replace_file(tmp, tmet_path);
-      } catch (...) {
-        fs::remove(tmp, ignored);
-        throw;
-      }
-    }
+    // A segment is visible only through its .tmet (one missing is skipped,
+    // one SHORT fails the strict open of the whole session), so the .tmet is
+    // written last and renamed into place: flushed first for a channel's
+    // first segment (flush_new_metadata), and together with the .tdat and
+    // .tidx in wait_for_disk mode.
+    std::vector<fs::path> with;
+    if (spec.wait_for_disk)
+      with = {fs::path(segment_dir) / (base + ".tdat"), fs::path(segment_dir) / (base + ".tidx")};
+    write_file(tmet_path, file, spec.flush_new_metadata, std::move(with));
   }
 
   if (out_max_difference_bytes) *out_max_difference_bytes = max_difference_bytes;
@@ -1021,7 +1009,11 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     patched_tdat_header = true;
     overwrite_file_prefix(tdat_path, new_tdat_uh);
     wrote_tmet = true;
-    write_file(tmet_path, new_tmet);  // flushed before the rename — the one barrier
+    // Flushed before the rename — the one barrier; with wait_for_disk, in ONE
+    // combined wait with the data and index just extended.
+    std::vector<fs::path> with;
+    if (spec.wait_for_disk) with = {fs::path(tdat_path), fs::path(tidx_path)};
+    write_file(tmet_path, new_tmet, false, std::move(with));
   } catch (...) {
     if (cache) cache->valid = false;  // the file may no longer match the summary
     std::string rollback_error;

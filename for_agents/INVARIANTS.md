@@ -93,31 +93,36 @@ meflib does **no** durability work: its single `fflush` is "to update stat
 structure after write", not a barrier.
 
 2.0 removed the writer's `durability` option (Python, C++, C ABI, MATLAB,
-compat). ONE barrier stays and must not be removed for speed: the `.tmet`
-temp file is flushed before it is renamed over the original
-(`write_file_atomic` in writer.cpp). A rename is ordered, not durable; without
-the flush a power cut can publish a SHORT `.tmet`, which throws from the
-metadata loader and takes the WHOLE SESSION down — the one outcome
-`recover_session` cannot be relied on to undo. Pinned per file by the
-`fsync_observer` hook in core/tests/test_durability.cpp.
+compat). What replaces it (maintainer decision, #153; user docs:
+docs/long_recordings.md "When is my data on disk?"):
 
-A NEW segment or channel in a session that held data when the Writer opened
-it flushes its three fresh files in ONE batch (`flush_files`) and only then
-renames its `.tmet` into place (`SegmentSpec::flush_new_files`; a segment is
-visible only through its `.tmet`): a zero-length `.tidx`/`.tdat`/`.tmet` there fails the
-strict open of the whole session; so does a channel's FIRST segment in any
-session (once per channel). Not later segments of a session the Writer
-created (a conversion writes thousands); there recovery rebuilds a lost
-`.tmet` from the previous segment's, and removes a last segment whose files
-are short and whose data holds no block. Recovery repairs ONLY segments it
-reports — never a healthy segment's findings. Nothing else a write does is flushed: not
-later segments of a self-created session, not the directory entry after the rename (losing it keeps the
-previous complete file), not the `.tdat`/`.tidx` extended in place, not the
-headers patched in place. So a power cut can leave the LAST append of a
-segment torn — a short tail, an index ahead of or behind the data, a stale
-header count. Every such state is detectable and fixed by `recover_session`,
-and nothing rewrites an earlier append. Repair, rename, recovery and the
-copies keep their OWN flush rules (durability.hpp primitives, unchanged).
+- `write()` returns once the data is handed to the OS. ONE barrier stays and
+  must not be removed for speed: a `.tmet` is flushed before it is renamed
+  into place — on every append, and for a channel's first segment (any
+  session) or a new segment/channel in a session that existed when the
+  Writer opened it (`SegmentSpec::flush_new_metadata`). A rename is ordered,
+  not durable; without the flush a power cut can publish a SHORT `.tmet`,
+  which takes the WHOLE SESSION down (a missing one only hides its segment),
+  and a first segment has no previous `.tmet` to rebuild it from.
+- `flush()` / `close()` (and the destructor) wait for EVERY file written since
+  the last flush in ONE combined wait (`flush_files`: one syncfs per file
+  system on Linux, all files concurrently elsewhere) — never one wait per
+  channel in sequence.
+- `wait_for_disk=True`: each write's files in one combined wait BEFORE its
+  `.tmet` is published.
+
+Nothing else is flushed by default: not `.tdat`/`.tidx`, not later segments of
+a self-created session, not the directory entry after a rename, not headers
+patched in place. So a power cut can leave the LAST append of a segment torn,
+or a new segment's files short. Every such state is detected and fixed by
+`recover_session` (pinned state by state in tests/test_p46_crash_states.py):
+a short `.tidx` is rebuilt from the `.tdat` blocks, a lost later-segment
+`.tmet` from the previous segment's, a dataless last segment is removed.
+Recovery repairs ONLY segments it reports — never a healthy segment's
+findings — and nothing rewrites an earlier append. Repair, rename, recovery
+and the copies keep their OWN flush rules (durability.hpp primitives).
+Pinned per file and per batch by the `fsync_observer` / `flush_batch_observer`
+hooks in core/tests/test_durability.cpp.
 
 ## 5. Repair rewrites declarations; recovery may touch the index
 

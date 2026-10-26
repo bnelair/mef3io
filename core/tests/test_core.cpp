@@ -771,8 +771,11 @@ TEST_CASE("C ABI exposes append and recovery for the MATLAB binding") {
   REQUIRE(mef3io_writer_open(dir.string().c_str(), 1, "", "", &w) == 0);
   REQUIRE(mef3io_writer_write_int32(w, "ch1", a.data(), nullptr, static_cast<int64_t>(a.size()),
                                     0.5, 1577836800000000LL, 256.0, 0, nullptr) == 0);
+  REQUIRE(mef3io_writer_flush(w) == 0);                 // everything so far on disk
+  REQUIRE(mef3io_writer_set_wait_for_disk(w, 1) == 0);  // each write waits for its own
   REQUIRE(mef3io_writer_write_int32(w, "ch1", a.data(), nullptr, static_cast<int64_t>(a.size()),
                                     0.5, 1577836800000000LL + 15625000LL, 256.0, 0, nullptr) == 0);
+  REQUIRE(mef3io_writer_flush(nullptr) != 0);
   mef3io_writer_close(w);
 
   // A healthy session needs no recovery, and a dry run writes nothing.

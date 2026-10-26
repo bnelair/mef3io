@@ -123,10 +123,12 @@ w.write_int32("ch2", counts, /*ufact=*/0.01, start_uutc, 256.0, valid_mask);
 w.write_records("ch1", {{.type = "Note", .time = t, .text = "marker"}});
 ```
 
-An append flushes only each segment's `.tmet` before renaming it over the old
-one; the `.tdat` and `.tidx` are extended unflushed, and `recover_session`
-repairs a torn last append after a power cut (see
-[Long recordings](long_recordings.md#durability-and-what-it-costs)). 2.0
+A write returns once its data is handed to the operating system (each
+segment's `.tmet` is flushed before it is published). `w.flush()` returns only
+when everything written so far is on disk, in one combined wait, and the
+destructor does the same (call `flush()` to see a failure).
+`w.set_wait_for_disk(true)` makes every write wait for its own data. See
+[When is my data on disk?](long_recordings.md#when-is-my-data-on-disk); 2.0
 removed `set_durable`.
 
 Appends are validated against the on-disk segment (fs, conversion factor,

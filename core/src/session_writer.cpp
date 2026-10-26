@@ -15,6 +15,7 @@
 #include "mef3io/metadata.hpp"
 #include "mef3io/source.hpp"
 #include "mef3io/writer.hpp"
+#include "durability.hpp"
 #include "mef3io/time.hpp"
 #include "last_segment.hpp"
 #include "clamp.hpp"
@@ -464,6 +465,30 @@ void SessionWriter::write_records(std::optional<std::string> channel,
     if (created_dir) fs::remove_all(dir, ec);
     throw;
   }
+  const std::vector<fs::path> files = {fs::path(dir) / (base + ".rdat"),
+                                       fs::path(dir) / (base + ".ridx")};
+  if (wait_for_disk_)
+    detail::flush_files(files);
+  else
+    unflushed_.insert(files.begin(), files.end());
+}
+
+SessionWriter::~SessionWriter() {
+  try {
+    flush();
+  } catch (...) {
+    // A destructor cannot report it; flush() before closing does.
+  }
+}
+
+void SessionWriter::flush() {
+  if (unflushed_.empty()) return;
+  std::vector<fs::path> files;
+  std::error_code ec;
+  for (const auto& f : unflushed_)
+    if (fs::exists(f, ec)) files.push_back(f);
+  detail::flush_files(files);  // ONE combined wait for all of them
+  unflushed_.clear();
 }
 
 si8 SessionWriter::block_length_for(sf8 fs) const {
@@ -675,17 +700,18 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   // Only a NEW segment takes the session's offset; an append keeps the one
   // already in the segment it extends (append_time_series_segment).
   if (!append) spec.recording_time_offset = new_segment_rto(channel, st);
-  // Fresh files flushed in one batch before the .tmet is renamed in:
+  // A new segment's .tmet is flushed before it is renamed in (its .tdat and
+  // .tidx are not: a short one is rebuilt by recovery from the data):
+  //  * a channel's FIRST segment, in any session (once per channel): a short
+  //    .tmet fails the strict open of the whole session and has no previous
+  //    segment's .tmet to be rebuilt from;
   //  * any new segment or channel in a session that held data when this
-  //    writer opened it — a zero-length file there fails the strict open of
-  //    everything already recorded;
-  //  * a channel's FIRST segment, in any session (once per channel): it has
-  //    no previous segment a lost .tmet could be rebuilt from.
+  //    writer opened it.
   // NOT a later segment in a session this writer created: a conversion
-  // writes thousands of those (3 flushes each took a 2400-segment channel to
-  // minutes), and recovery rebuilds a lost .tmet there from the previous
-  // segment's, or removes a segment whose data never landed.
-  if (!append) spec.flush_new_files = session_preexisted_ || st.n_segments == 0;
+  // writes thousands of those, and recovery rebuilds a lost .tmet there from
+  // the previous segment's. flush()/close()/wait_for_disk cover the rest.
+  if (!append) spec.flush_new_metadata = session_preexisted_ || st.n_segments == 0;
+  spec.wait_for_disk = wait_for_disk_;
 
   // Only pass on a maximum this writer measured itself. A segment adopted from
   // disk leaves the flag false, so the append bounds the blocks it cannot see
@@ -726,6 +752,14 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
     st.index_cache = AppendIndexCache{};
   }
   st.max_difference_bytes = std::max(st.max_difference_bytes, written_difference_bytes);
+
+  if (!wait_for_disk_) {
+    // Owed to the next flush() / close(): this write's files. (In
+    // wait_for_disk mode they were flushed before the .tmet was published.)
+    const std::string stem = fs::path(seg_dir).stem().string();
+    for (const char* ext : {".tdat", ".tidx", ".tmet"})
+      unflushed_.insert(fs::path(seg_dir) / (stem + ext));
+  }
 
   st.sampling_frequency = fs;
   st.units_conversion_factor = ufact;

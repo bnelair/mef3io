@@ -245,8 +245,9 @@ dp = fullfile(sessionDir, 'matlab_append_recover.mefd');
 w = mef3io.Writer(dp, Overwrite=true);
 w.writeInt32('ch1', durCounts, 0.5, start, fs);
 delete(w);
-w = mef3io.Writer(dp);                                   % reopened: appends
-w.writeInt32('ch1', durCounts, 0.5, start + durStep, fs);
+w = mef3io.Writer(dp, WaitForDisk=true);                 % reopened: appends
+w.writeInt32('ch1', durCounts, 0.5, start + durStep, fs); % returns once on disk
+w.flush();                                               % nothing left: returns at once
 delete(w);
 
 r = mef3io.Reader(dp);

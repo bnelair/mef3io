@@ -93,15 +93,17 @@ struct SegmentSpec {
   /// it must be a true maximum, since a reader allocates its difference buffer
   /// from the result and an under-declaration truncates that buffer.
   ui4 known_difference_bytes = 0;
-  /// Fresh segment only: write the new `.tdat` and `.tidx`, the `.tmet` to a
-  /// temp file, flush all three in ONE batch (`flush_files`: one syncfs on
-  /// Linux, per file elsewhere), then rename the `.tmet` into place — a
-  /// segment is visible only through its `.tmet`. Set by `SessionWriter` for a
-  /// channel's FIRST segment (nothing to rebuild a lost .tmet from) and for
-  /// any new segment in a session that already held data, where a zero-length
-  /// file left by a power cut would fail the strict open of the whole
-  /// session. An APPEND always flushes its `.tmet` (only).
-  bool flush_new_files = false;
+  /// Fresh segment only: flush the new `.tmet` before it is renamed into
+  /// place. Set by `SessionWriter` for a channel's FIRST segment (and any new
+  /// segment in a session that already held data): a short `.tmet` fails the
+  /// strict open of the whole session, and a first segment has no previous
+  /// `.tmet` recovery could rebuild it from. (An APPEND always flushes its
+  /// `.tmet`.)
+  bool flush_new_metadata = false;
+  /// Every file this write touched (.tdat, .tidx, .tmet) is flushed in ONE
+  /// combined wait (`flush_files`) before the `.tmet` is renamed into place,
+  /// so the call returns only when its data is on disk.
+  bool wait_for_disk = false;
 };
 
 /// Largest RED block, in samples, that the format can describe: a block's

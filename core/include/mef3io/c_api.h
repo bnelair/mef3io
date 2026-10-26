@@ -470,6 +470,13 @@ int mef3io_writer_set_block_length(mef3io_writer* w, int64_t samples_per_block);
 int mef3io_writer_set_threads(mef3io_writer* w, int n_threads);
 /* The thread count as set (0 = automatic). */
 int mef3io_writer_threads(mef3io_writer* w, int* out);
+/* Return only when everything this writer has written so far is on disk, in
+ * ONE combined wait (since 2.0). mef3io_writer_close does the same but cannot
+ * report a failure: call this first to see one. */
+int mef3io_writer_flush(mef3io_writer* w);
+/* Opt-in (default 0): non-zero makes every write return only when its own
+ * data is on disk (since 2.0). */
+int mef3io_writer_set_wait_for_disk(mef3io_writer* w, int on);
 
 /* Segment metadata the writer could not use: .tmet files it could not read
  * while choosing a recording-time offset, and empty segment directories it

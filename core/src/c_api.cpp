@@ -773,6 +773,16 @@ int mef3io_writer_set_threads(mef3io_writer* w, int n_threads) {
   return guarded([&] { w->impl.set_threads(n_threads); });
 }
 
+int mef3io_writer_flush(mef3io_writer* w) {
+  if (!w) return fail_argument("NULL argument");
+  return guarded([&] { w->impl.flush(); });
+}
+
+int mef3io_writer_set_wait_for_disk(mef3io_writer* w, int on) {
+  if (!w) return fail_argument("NULL argument");
+  return guarded([&] { w->impl.set_wait_for_disk(on != 0); });
+}
+
 int mef3io_writer_threads(mef3io_writer* w, int* out) {
   if (!w || !out) return fail_argument("NULL argument");
   return guarded([&] { *out = w->impl.threads(); });

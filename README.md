@@ -82,6 +82,8 @@ signal[1000:1500] = np.nan               # a gap: NaN is stored as missing data
 with mef3io.Writer("session.mefd", overwrite=True, units="uV") as w:
     w.write("eeg1", signal, start, fs=fs)
     w.write_annotations([{"time": start, "text": "recording start"}], channel="eeg1")
+# leaving the block waits until everything is on disk (w.flush() does it mid-way):
+# https://bnelair.github.io/mef3io/long_recordings/#when-is-my-data-on-disk
 
 with mef3io.Reader("session.mefd") as r:
     print(r.channels)                     # ['eeg1']

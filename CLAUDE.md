@@ -779,56 +779,66 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   only on truncation, rebuilt blocks, or a stale .tdat entry count — a
   header-only fix keeps it. At rto 0 the .tmet stays byte-identical. (4) Docs: `docs/long_recordings.md`, `docs/validation.md`,
   `for_agents/INVARIANTS.md`.
-- **Durability: ONE barrier, no option** (`core/src/durability.hpp`, shared by
-  writer.cpp, validate.cpp, recover/rename/copies — they had drifted once).
-  Maintainer decision 2026-10-25 (2.0): the `durability` option is REMOVED
-  everywhere (Python Writer/MefWriter -> TypeError, C++ `set_durable` /
-  `SegmentSpec::durable`, C ABI `mef3io_writer_set_durable`, MEX, MATLAB
-  `Durability=`). The writer flushes EXACTLY ONE thing: the `.tmet` temp file
-  before renaming it over the original (`write_file_atomic`, only when
-  REPLACING — i.e. on append). THAT BARRIER STAYS — its history: a rename is
-  ORDERED, not durable, so without it a power cut can publish the new name
-  over bytes still in cache, and a SHORT `.tmet` throws from the metadata
-  loader and kills the WHOLE session (not one segment) — the one torn state
-  recover_session cannot be relied on to undo. Dropped in 2.0: the `.tdat`
-  fsync before the `.tidx` that points at it, the `.tidx` fsync before its
-  header patch, and the header-patch flushes (1.x's default "fast" was
-  documented as "no flushes" but still flushed both patched headers
-  best-effort — 2 fsyncs/channel, and since fdatasync is per FILE that also
-  made the appended data/index durable before the .tmet: dropping it is what
-  made ".tmet newer than its data" the common crash state, hence recovery's
-  declaration step). ALSO flushed: a NEW segment or channel in a session that
-  held data when the SessionWriter opened it (`session_preexisted_`), and a
-  channel's FIRST segment in any session (`n_segments == 0`, once per
-  channel: nothing to rebuild its .tmet from) — NOT later segments of a
-  self-created session ("channel already has a segment" made test_p31's
-  2400-segment fixture take 200 s: 3 fsyncs per segment kills conversions;
-  recovery rebuilds their lost .tmet instead) — all three fresh files in
-  ONE batch (`detail::flush_files`: one syncfs on Linux, per file elsewhere;
-  the .tmet sits in a temp file and is renamed in only AFTER the batch — a
-  segment is visible only through its .tmet, a missing one is skipped, a
-  SHORT one fails the strict open) (`SegmentSpec::flush_new_files`), since a
-  zero-length new .tidx/.tdat/.tmet fails the strict open of the WHOLE
-  session (verified). Unflushed new segments of a self-created session:
-  recovery REBUILDS a lost .tmet (see recover_session above), and REMOVES a
-  channel's last segment whose files are missing/short and whose .tdat holds
-  no CRC-valid block (moved to the backup, empty .timd too).
-  Never flushed: later segments of a self-created session and the
-  DIRECTORY entry after a rename (losing it keeps the previous complete file).
-  Cost of the first-segment flush: a fresh 128-ch session's first write
-  0.85 s -> 5.0 s with 3 fdatasyncs per channel, 3.6 s with the per-call
-  batch (per-call syncfs; a .tmet-only fdatasync measured 2.2 s). Reaching
-  ~0.85 s needs ONE batch across calls, i.e. delayed visibility (open
-  question to the maintainer, 2026-10-26). Reopened new segment, 128 ch:
-  5.1 s -> 4.2-4.4 s.
-  An append now THROWS if the .tmet flush fails (1.x fast ignored it). Measured on ext4, 128 ch x 10-min
-  256 Hz append: 1.x full 6.0-6.5 s, 1.x fast 3.8 s, 2.0 2.5-2.8 s, no flush
-  at all 0.74 s (~15 ms/channel for the .tmet). Pinned per file by the
-  `detail::fsync_observer` test hook (core/tests/test_durability.cpp: fresh
-  session = 3 per channel (first segments), later new segment there 0; cached + reopened append = one `.tmet.mef3io-tmp` per
-  channel; new segment / new channel in an existing session = 3; a failed
-  append's rollback publishes the restored .tidx flushed). Repair, rename, recovery and the copies keep their
-  OWN flush rules — only the WRITER's option went.
+- **When data is on disk: flush()/close()/wait_for_disk; ONE default barrier**
+  (`core/src/durability.hpp`, shared by writer.cpp, validate.cpp,
+  recover/rename/copies — they had drifted once). History: 2.0 REMOVED the
+  `durability` option everywhere (Python Writer/MefWriter -> TypeError, C++
+  `set_durable`/`SegmentSpec::durable`, C ABI `mef3io_writer_set_durable`, MEX,
+  MATLAB `Durability=`). Maintainer decision 2026-10-26 (#153), user-facing
+  section docs/long_recordings.md "When is my data on disk?":
+  (1) DEFAULT `write()` returns once the data is handed to the OS. It flushes
+  only the `.tmet` before its rename: on EVERY append (write_file_atomic,
+  REPLACING) and for a channel's FIRST segment in any session plus any new
+  segment/channel in a session that existed when the SessionWriter opened it
+  (`SegmentSpec::flush_new_metadata`, `session_preexisted_ || n_segments==0`)
+  — the .tmet only, not the .tdat/.tidx. THAT BARRIER STAYS — history: a
+  rename is ORDERED, not durable, so without it a power cut can publish the
+  new name over bytes still in cache, and a SHORT `.tmet` throws from the
+  metadata loader and kills the WHOLE session (a MISSING .tmet only hides its
+  segment — verified); a first segment has no previous .tmet to rebuild from.
+  (2) `flush()` (Python Writer/MefWriter, C++ SessionWriter, C ABI
+  `mef3io_writer_flush`, MATLAB `w.flush()`): returns when EVERY file the
+  writer created or extended since the last flush is on disk, ONE combined
+  wait (`unflushed_` set -> `detail::flush_files`: one syncfs per FS on Linux,
+  `flush_each_concurrently` (<=16 threads) + folder fsyncs elsewhere).
+  close()/`with`/the destructor/`mef3io_writer_close`/MATLAB delete flush too
+  (destructor and C close swallow a failure; Python close() raises it).
+  (3) OPT-IN `wait_for_disk` (`Writer(wait_for_disk=True)`, MefWriter,
+  `set_wait_for_disk`, C ABI `mef3io_writer_set_wait_for_disk`, MATLAB
+  `WaitForDisk`): each write's .tdat/.tidx/.tmet temp in ONE flush_files batch
+  BEFORE the .tmet rename (so the .tmet never declares data not on disk);
+  records (.rdat/.ridx) likewise. A single caller's calls are sequential, so
+  one call's wait CANNOT overlap the next call's work (a background flusher
+  would not help: write() must not return before its own data is on disk);
+  the batched alternative is default + flush() per round.
+  Measured ext4, 128 ch x 10-min 256 Hz rounds: default 2.2-2.3 s, +flush()
+  per round 2.5-2.6 s, wait_for_disk 3.6-3.7 s (1.x full 6.0-6.5 s, 1.x fast
+  3.8 s, no flush at all 0.74 s); fresh session first write 2.4-2.5 s (0.85 s
+  with no flush); reopened new segment x128 2.55 s. Rejected on the way:
+  flushing all three first-segment files (5.0 s fresh), per-call
+  flush_files batch of them (3.6 s), cross-call deferred .tmet publication
+  (~0.9 s est., but readers would not see new channels until close: the
+  maintainer objected to write() returning before data is on disk without an
+  explicit way to wait — hence flush()). 1.x's default "fast" was documented
+  as "no flushes" but flushed both patched headers best-effort (fdatasync per
+  FILE: it made appended data/index durable before the .tmet; dropping it is
+  why ".tmet newer than its data" is the common crash state — recovery
+  handles it). Never flushed by default: .tdat/.tidx, later segments of a
+  self-created session, the DIRECTORY entry after a rename. A write /
+  flush() / close() THROWS if a flush fails (1.x fast ignored it). Recovery
+  for what the default leaves: short first-segment .tidx (or zeroed .tdat
+  header) REBUILT from the .tdat blocks under a header synthesized from the
+  segment's .tmet (`synthesize_header`); lost later-segment .tmet rebuilt
+  from the previous segment's (+ .tidx from data); dataless last segment
+  removed. Pinned: core/tests/test_durability.cpp (`fsync_observer` per
+  file, `flush_batch_observer` per batch: fresh session = 1 .tmet flush per
+  channel, later self-created segment 0, reopened new segment/channel 1,
+  append 1; flush() = ONE batch with every .tdat/.tidx/.tmet/.rdat/.ridx,
+  destructor = one batch; wait_for_disk = one batch per write naming the
+  .tmet TEMP (proves flush-before-publish); flush_each_concurrently 8 x
+  100 ms < 400 ms; rollback .tidx flushed), tests/test_p46_crash_states.py,
+  test_p18 (API), test_p31 (flush releases the GIL). Repair, rename,
+  recovery and the copies keep their OWN flush rules.
   THE FLUSH IS THREE DIFFERENT CALLS with three different rules, and the
   platform differences are load-bearing: Linux `fdatasync`, macOS
   `F_FULLFSYNC` (with an ENOTSUP fallback), Windows `FlushFileBuffers`.

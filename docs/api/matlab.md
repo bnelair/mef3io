@@ -67,10 +67,10 @@ empty and silent on a healthy session.
 
 ## Durability and recovery
 
-`mef3io.Writer` has no durability option (2.0 removed `Durability`, as
-Python removed `durability=`): an append flushes only each segment's `.tmet`
-before renaming it, so a power cut can leave the last append of a segment
-torn (see [Long recordings](../long_recordings.md#durability-and-what-it-costs)).
+`mef3io.Writer` takes `WaitForDisk` (default false) and has `flush()`,
+matching Python's `wait_for_disk=` and `Writer.flush()`; `delete(w)` flushes
+like Python's `close()`. 2.0 removed `Durability` (see
+[When is my data on disk?](../long_recordings.md#when-is-my-data-on-disk)).
 
 `mef3io.recoverSession` is the counterpart — it makes a session's block index
 and data agree again after an unclean shutdown, rebuilding missing index

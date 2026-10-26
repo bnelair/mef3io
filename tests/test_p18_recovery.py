@@ -468,3 +468,41 @@ def test_only_the_last_segment_metadata_is_read_on_a_healthy_session(tmp_path):
     finally:
         for t in tmets:
             t.chmod(0o644)
+
+
+def test_flush_close_and_wait_for_disk(tmp_path):
+    """When data is on disk (2.0): write() returns once the data is handed to
+    the OS; flush()/close() wait for everything written; wait_for_disk=True
+    makes each write wait for its own data. Which files are flushed when is
+    pinned in core/tests/test_durability.cpp; here: the API and that every
+    mode writes the same session."""
+    import inspect
+
+    from mef3io.compat import MefWriter
+
+    assert inspect.signature(mef3io.Writer.__init__).parameters["wait_for_disk"].default is False
+    assert inspect.signature(MefWriter.__init__).parameters["wait_for_disk"].default is False
+    x = np.arange(4000, dtype=np.int32) - 2000
+    got = {}
+    for mode in ("default", "flush", "wait"):
+        path = tmp_path / f"{mode}.mefd"
+        w = mef3io.Writer(str(path), wait_for_disk=(mode == "wait"))
+        w.write_int32("ch1", x, 0.5, START, FS)
+        w.write_int32("ch1", x, 0.5, START + int(4000 / FS * 1e6), FS)
+        if mode == "flush":
+            w.flush()
+            w.flush()                     # nothing new: returns at once
+        w.close()
+        w.close()                         # idempotent
+        w.flush()                         # after close: a no-op
+        assert mef3io.Validator(str(path)).validate().ok
+        with mef3io.Reader(str(path)) as r:
+            got[mode] = r.read("ch1")
+    np.testing.assert_array_equal(got["default"], got["flush"])
+    np.testing.assert_array_equal(got["default"], got["wait"])
+
+    mw = MefWriter(str(tmp_path / "compat.mefd"), overwrite=True, wait_for_disk=True)
+    mw.write_data(x.astype(float), "ch1", START, FS, precision=0)
+    mw.flush()
+    mw.close()
+    assert mef3io.Validator(str(tmp_path / "compat.mefd")).validate().ok

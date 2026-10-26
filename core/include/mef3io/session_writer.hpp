@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <optional>
 #include <span>
 #include <string>
@@ -86,6 +87,26 @@ class SessionWriter {
   /// @param password_2  level-2 password (required with password_1 to encrypt).
   SessionWriter(const std::string& mefd_path, bool overwrite = false, std::string password_1 = "",
                 std::string password_2 = "");
+  /// Flushes what is still unflushed (flush()), swallowing a failure: call
+  /// flush() yourself to see one.
+  ~SessionWriter();
+  SessionWriter(const SessionWriter&) = delete;
+  SessionWriter& operator=(const SessionWriter&) = delete;
+
+  /// Return only when EVERYTHING this writer has written so far is on disk:
+  /// every file it created or extended since the last flush, in ONE combined
+  /// wait (one syncfs per file system on Linux; elsewhere the per-file
+  /// flushes run concurrently). Without it (and without wait_for_disk) a
+  /// write returns once its data is handed to the operating system; see
+  /// docs/long_recordings.md, "When is my data on disk?".
+  /// @throws IoError when the system reports the flush failed.
+  void flush();
+
+  /// Opt-in: every write returns only when ITS OWN data is on disk. The
+  /// files of that write (.tdat, .tidx, .tmet; .rdat/.ridx for records) are
+  /// flushed in one combined wait before its .tmet is published. Default off.
+  void set_wait_for_disk(bool on) { wait_for_disk_ = on; }
+  bool wait_for_disk() const { return wait_for_disk_; }
 
   /// Primitive path: int32 counts stored verbatim with a conversion factor
   /// (e.g. amplifier V/bit).
@@ -265,6 +286,8 @@ class SessionWriter {
   si8 block_length_override_ = 0;
   std::atomic<int> n_threads_{0};
   bool session_preexisted_ = false;  // the folder existed (not overwritten) at open
+  bool wait_for_disk_ = false;
+  std::set<std::filesystem::path> unflushed_;  // written since the last flush()
   std::map<std::string, ChannelState> channels_;
 };
 

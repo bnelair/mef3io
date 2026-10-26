@@ -206,16 +206,16 @@ ABI shim (later) converts to codes. Bindings map to Python exceptions.
   under-declaring truncates the buffer it decodes into. The read path never consults these fields — it
   sizes from each block's own header — so older or foreign declarations stay
   readable. See `docs/mef3_format.md` and `docs/legacy_comparison.md`.
-- **Durability: one barrier.** An append extends `.tdat`/`.tidx` in place and
-  patches their headers without flushing; only the `.tmet` is written to a
-  temp file, flushed and renamed over the original, since a short `.tmet`
-  makes the whole session fail to open (a channel's first segment, and a new
-  segment or channel in a session that held data, flush their three fresh
-  files likewise). A power cut can
-  therefore tear the last append of a segment in any mix of old and new
-  bytes; `recover_session(apply=True)` restores a valid session from each
-  (index and data itself, declarations through `repair_session`). There is
-  no option (2.0 removed `durability=`); see `docs/long_recordings.md`.
+- **When data is on disk.** `write()` returns once the data is handed to the
+  operating system; only a `.tmet` is flushed before it is renamed into place
+  (every append, and a channel's first segment), since a short `.tmet` makes
+  the whole session fail to open. `flush()` and `close()` wait for everything
+  written so far in one combined wait (one `syncfs` on Linux); the opt-in
+  `wait_for_disk=True` makes each write wait for its own files. A power cut
+  before a flush can tear the last append of a segment;
+  `recover_session(apply=True)` restores a valid session (index and data
+  itself, declarations through `repair_session`). See
+  `docs/long_recordings.md`, "When is my data on disk?".
 - Writes never touch caches; a cached open detects the change (see §6).
 
 ### 4.6 Threading

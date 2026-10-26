@@ -344,3 +344,80 @@ def test_a_healthy_legacy_session_is_left_byte_for_byte(tmp_path):
     assert after == before
     assert not Path(str(path) + ".repair-backup").exists()
     assert not Path(str(path) + ".recover-backup").exists()
+
+
+# A channel's FIRST segment: only its .tmet is flushed when written (once per
+# channel), so after a power cut its .tidx and .tdat can be anything from
+# empty to complete. (tidx, tdat) state -> what recovery must leave.
+FIRST_SEGMENT_STATES = [
+    ("tidx-empty", "empty", "full"),
+    ("tidx-short", "short", "full"),
+    ("tidx-header-zeroed", "zeroed", "full"),
+    ("tidx-empty-tdat-torn", "empty", "torn"),
+    ("tidx-empty-tdat-header-zeroed", "empty", "header-zeroed"),
+    ("both-empty", "empty", "empty"),
+]
+
+
+@pytest.mark.parametrize("state", FIRST_SEGMENT_STATES, ids=[s[0] for s in FIRST_SEGMENT_STATES])
+def test_a_first_segment_with_a_lost_index_is_rebuilt_from_its_data(tmp_path, state):
+    _, tidx_state, tdat_state = state
+    path = tmp_path / "s.mefd"
+    with mef3io.Writer(str(path), block_length=BLOCK) as w:
+        w.write_int32("ch1", OLD, 1.0, START, FS)
+        w.write_int32("ch2", NEW, 1.0, START, FS)       # the channel under test
+    seg = next(Path(path).glob("ch2.timd/*.segd"))
+    tidx, tdat = next(seg.glob("*.tidx")), next(seg.glob("*.tdat"))
+    t, d = tidx.read_bytes(), tdat.read_bytes()
+    tidx.write_bytes({"empty": b"", "short": t[:500], "zeroed": bytes(1024) + t[1024:]}[tidx_state])
+    tdat.write_bytes({"full": d, "empty": b"", "torn": d[: 1024 + (len(d) - 1024) // 2],
+                      "header-zeroed": bytes(1024) + d[1024:]}[tdat_state])
+
+    dry = mef3io.recover_session(str(path))
+    assert dry.segments and not dry.skipped, dry.summary()
+    rep = mef3io.recover_session(str(path), apply=True)
+    assert not rep.skipped, rep.summary()
+    assert mef3io.Validator(str(path)).validate().ok
+    with mef3io.Reader(str(path)) as r:
+        np.testing.assert_array_equal(r.read("ch1"), OLD.astype(float))
+        if tdat_state == "empty":
+            assert "ch2" not in r.channels      # nothing landed: removed
+            have = 0
+        else:
+            got = r.read("ch2")
+            if tdat_state == "torn":
+                assert 0 < len(got) < len(NEW) and len(got) % BLOCK == 0
+            else:
+                assert len(got) == len(NEW)
+            np.testing.assert_array_equal(got, NEW[: len(got)].astype(float))
+            have = len(got)
+    again = mef3io.recover_session(str(path))
+    assert again.nothing_to_do, again.summary()
+    # The recorder re-sends what is missing.
+    with mef3io.Writer(str(path), block_length=BLOCK) as w:
+        if have < len(NEW):
+            w.write_int32("ch2", NEW[have:], 1.0, START + int(have / FS * 1e6), FS)
+    assert mef3io.Validator(str(path)).validate().ok
+    with mef3io.Reader(str(path)) as r:
+        np.testing.assert_array_equal(r.read("ch2"), NEW.astype(float))
+
+
+def test_a_later_segment_with_tmet_and_index_lost_is_rebuilt(tmp_path):
+    """A long-lived Writer's later segment is not flushed at all: its .tmet
+    AND .tidx can both be lost while the data landed. The .tmet is rebuilt
+    from the previous segment's, the index from the data."""
+    path = tmp_path / "s.mefd"
+    with mef3io.Writer(str(path), block_length=BLOCK) as w:
+        w.write_int32("ch1", OLD, 1.0, START, FS)
+        w.write_int32("ch1", NEW, 1.0, T_NEW, FS, new_segment=True)
+    with mef3io.Reader(str(path)) as r:
+        want = r.read("ch1")
+    seg = sorted(Path(path).glob("ch1.timd/*.segd"))[-1]
+    next(seg.glob("*.tmet")).write_bytes(b"")
+    next(seg.glob("*.tidx")).write_bytes(b"")
+    rep = mef3io.recover_session(str(path), apply=True)
+    assert not rep.skipped, rep.summary()
+    assert mef3io.Validator(str(path)).validate().ok
+    with mef3io.Reader(str(path)) as r:
+        np.testing.assert_array_equal(r.read("ch1"), want)
+    assert mef3io.recover_session(str(path)).nothing_to_do

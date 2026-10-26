@@ -11,6 +11,9 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
+#include <mutex>
+#include <thread>
 #include <filesystem>
 #include <span>
 #include <fstream>
@@ -41,6 +44,11 @@ namespace fsys = std::filesystem;
 /// patching the OS. Set it only while no other thread writes; the observer
 /// itself must be thread-safe (several channels may be written at once).
 inline void (*fsync_observer)(const std::string& path) = nullptr;
+
+/// TEST HOOK: called with the files of every flush_files batch, before the
+/// batch's one combined wait (syncfs on Linux; elsewhere the per-file flushes
+/// run concurrently, and each also reaches fsync_observer).
+inline void (*flush_batch_observer)(const std::vector<fsys::path>& files) = nullptr;
 
 /// Flush a file's contents all the way to stable storage.
 ///
@@ -247,12 +255,43 @@ inline void write_all_atomic(const std::string& path, std::span<const ui1> bytes
   if (flush) fsync_directory(target.parent_path());
 }
 
-/// Flush many files written without a flush, and their folders, in one
-/// batch. Linux: one syncfs per file system (flushing thousands of headers
-/// one fsync at a time took ~20 ms each, 38 minutes for a 64-channel x
-/// 600-segment rename). Elsewhere: each file, then each folder.
+/// Flush every file CONCURRENTLY (up to 16 at a time), so the waits
+/// overlap instead of adding up; throws the first failure. The per-file
+/// path of flush_files on systems without syncfs.
+inline void flush_each_concurrently(const std::vector<fsys::path>& files) {
+  std::vector<fsys::path> unique;
+  for (const auto& f : files)
+    if (std::find(unique.begin(), unique.end(), f) == unique.end()) unique.push_back(f);
+  std::mutex mu;
+  std::string first_error;
+  std::atomic<std::size_t> next{0};
+  const auto worker = [&] {
+    for (std::size_t i; (i = next.fetch_add(1)) < unique.size();) {
+      std::string why;
+      if (!fsync_file(unique[i].string(), &why)) {
+        std::lock_guard<std::mutex> lk(mu);
+        if (first_error.empty())
+          first_error = unique[i].string() + (why.empty() ? "" : " (" + why + ")");
+      }
+    }
+  };
+  const std::size_t n = std::min<std::size_t>(16, unique.size());
+  std::vector<std::thread> pool;
+  for (std::size_t t = 1; t < n; ++t) pool.emplace_back(worker);
+  worker();
+  for (auto& t : pool) t.join();
+  if (!first_error.empty())
+    throw IoError("could not flush to disk, the write is not durable: " + first_error);
+}
+
+/// Flush many files written without a flush, and their folders, in ONE
+/// combined wait. Linux: one syncfs per file system (flushing thousands of
+/// headers one fsync at a time took ~20 ms each, 38 minutes for a 64-channel
+/// x 600-segment rename). Elsewhere: every file concurrently
+/// (flush_each_concurrently), then every folder.
 inline void flush_files(const std::vector<fsys::path>& files) {
   if (files.empty()) return;
+  if (flush_batch_observer) flush_batch_observer(files);
 #if defined(__linux__)
   std::vector<dev_t> done;
   for (const auto& f : files) {
@@ -270,12 +309,11 @@ inline void flush_files(const std::vector<fsys::path>& files) {
     done.push_back(s.st_dev);
   }
 #else
+  flush_each_concurrently(files);
   std::vector<fsys::path> dirs;
-  for (const auto& f : files) {
-    fsync_file_or_throw(f.string());
+  for (const auto& f : files)
     if (std::find(dirs.begin(), dirs.end(), f.parent_path()) == dirs.end())
       dirs.push_back(f.parent_path());
-  }
   for (const auto& d : dirs) fsync_directory(d);
 #endif
 }

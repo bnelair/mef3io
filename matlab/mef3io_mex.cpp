@@ -785,6 +785,17 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
                                          get_int64(prhs[2], "block_length")));
     return;
   }
+  if (cmd == "writer_flush") {
+    need_args(nrhs, 2, "writer_flush");
+    check(mef3io_writer_flush(get_writer(prhs[1])));
+    return;
+  }
+  if (cmd == "writer_set_wait_for_disk") {
+    need_args(nrhs, 3, "writer_set_wait_for_disk");
+    check(mef3io_writer_set_wait_for_disk(get_writer(prhs[1]),
+                                          get_int(prhs[2], "on")));
+    return;
+  }
   if (cmd == "writer_set_threads") {
     need_args(nrhs, 3, "writer_set_threads");
     check(mef3io_writer_set_threads(get_writer(prhs[1]),

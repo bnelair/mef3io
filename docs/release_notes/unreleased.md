@@ -52,7 +52,7 @@ notes at release time. These changes target **2.0.0** (breaking).
 
 See [Threads](../threads.md) for the rule.
 
-## Breaking: the `durability` option is removed (migration)
+## Breaking: the `durability` option is replaced by flush() / wait_for_disk (migration)
 
 - **`Writer(durability=)` and `MefWriter(durability=)` are gone**, with no
   deprecation period: passing it raises `TypeError` (before anything is
@@ -60,39 +60,52 @@ See [Threads](../threads.md) for the rule.
   C++ `SessionWriter::set_durable` / `durable()` and `SegmentSpec::durable`,
   the C ABI's `mef3io_writer_set_durable`, the MEX command
   `writer_set_durable`, and MATLAB's `Writer(Durability=)` (now an
-  unknown-option error). Drop the argument; there is nothing to replace it
-  with.
-- **What every write now does**: an append flushes exactly one thing — each
-  segment's `.tmet`, before it is renamed over the previous one, because a
-  short `.tmet` would make the whole session fail to open. Nothing else is
-  flushed (1.x's default `"fast"` still flushed the two headers an append
-  patches, and with them the appended data and index; that is gone too, so
-  the `.tmet` can now reach the disk BEFORE the data it describes). A new
-  segment or channel in a session that already held data when the Writer
-  opened it, and every channel's first segment in any session, flushes its
-  three fresh files in one batch before its `.tmet` is renamed into place (a
-  short file there would fail the strict open of the whole session).
-  Measured on ext4: the first write of a fresh 128-channel session went from
-  0.85 s to 3.6 s (one batch per channel, once); appends are unaffected.
-- **What a power cut can now do**: leave the *last* append of a segment in
-  any mix of old and new bytes — the `.tmet` newer or older than the data and
-  index, the `.tidx` header and entries from different writes (the index then
-  fails its CRC), entries pointing at data that never landed, a torn `.tdat`
-  tail, stale header counts. **`recover_session` now repairs every one of
-  them by itself** (`python -m mef3io recover SESSION --apply`,
-  `mef3io.recoverSession(path, Apply=true)` in MATLAB), leaving a session that
-  validates clean and holds every sample whose bytes reached the disk; a
-  recorder can then re-send what was lost. Earlier appends are never at risk:
-  nothing rewrites them. Run `recover --apply` after every unclean shutdown.
-  The per-state table is in [Long recordings](../long_recordings.md#durability-and-what-it-costs).
-- **An append fails if the `.tmet` flush fails.** 1.x's default ignored flush
-  errors; now the OS error is raised (`IoError` / `RuntimeError`) rather than
-  the write claiming a durability it does not have. The flush cost was
-  measured on ext4 only; macOS (`F_FULLFSYNC`) and Windows
+  unknown-option error).
+- **When is my data on disk?** (new section in
+  [Long recordings](../long_recordings.md#when-is-my-data-on-disk)):
+  - `write()` returns once its data is handed to the operating system;
+  - **new `Writer.flush()`** returns only when everything the Writer wrote so
+    far is on disk, in ONE combined wait for all channels (C++
+    `SessionWriter::flush`, C ABI `mef3io_writer_flush`, MATLAB `w.flush()`,
+    `MefWriter.flush()`);
+  - **`close()` (and leaving a `with` block) now flushes too** — it returns
+    only when everything is on disk, and raises if the flush fails (the C++
+    destructor and `mef3io_writer_close` flush but cannot report a failure:
+    call `flush()` first);
+  - **new opt-in `Writer(wait_for_disk=True)`**: every `write()` returns only
+    when its own data is on disk (one combined wait per call; C++
+    `set_wait_for_disk`, C ABI `mef3io_writer_set_wait_for_disk`, MATLAB
+    `WaitForDisk=true`, `MefWriter(wait_for_disk=True)`).
+  Migrating from 1.x: `durability="fast"` → nothing (the default);
+  `durability="full"` → `wait_for_disk=True`, or the default plus `flush()`
+  at the points that must survive a power cut (cheaper).
+- **What the default write still flushes**: each append's `.tmet` before it
+  replaces the old one, and the `.tmet` of a channel's first segment (or of a
+  new segment or channel in a session that already held data) — a short
+  `.tmet` would make the whole session fail to open. Nothing else (1.x's
+  default `"fast"` still flushed the two headers an append patches, and with
+  them the appended data and index; that is gone, so the `.tmet` can now
+  reach the disk BEFORE the data it describes).
+- **What a power cut can do before a flush**: leave the *last* append of a
+  segment in any mix of old and new bytes — the `.tmet` newer or older than
+  the data and index, the `.tidx` header and entries from different writes,
+  entries pointing at data that never landed, a torn `.tdat` tail, stale
+  header counts, a new segment's `.tidx`/`.tdat` empty. **`recover_session`
+  repairs every one of them by itself** (`python -m mef3io recover SESSION
+  --apply`, `mef3io.recoverSession(path, Apply=true)` in MATLAB), leaving a
+  session that validates clean and holds every sample whose bytes reached the
+  disk; a recorder can then re-send what was lost. Earlier appends are never
+  at risk: nothing rewrites them. The per-state table is in
+  [Long recordings](../long_recordings.md#durability-and-what-it-costs).
+- **A write, `flush()` or `close()` fails if a flush it waits for fails.**
+  1.x's default ignored flush errors; now the OS error is raised. The flush
+  cost was measured on ext4 only; macOS (`F_FULLFSYNC`) and Windows
   (`FlushFileBuffers`) are unmeasured and typically slower per call.
-- **Faster appends**: measured on ext4, a 128-channel append of 10-minute
-  blocks takes 2.5–2.8 s, against 3.8 s with 1.x's default and 6.0–6.5 s with
-  `"full"` (see [Long recordings](../long_recordings.md#durability-and-what-it-costs)).
+- **Measured** (ext4, 128 channels × 10-minute blocks at 256 Hz): a round of
+  appends takes 2.2–2.3 s by default, 2.5–2.6 s with one `flush()` per round,
+  3.6–3.7 s with `wait_for_disk=True` — against 3.8 s with 1.x's default and
+  6.0–6.5 s with `"full"`. A fresh session's first write: 2.4–2.5 s
+  (0.85 s with no flush at all).
 
 ## Recovery covers every crash state (behaviour change)
 
@@ -118,7 +131,9 @@ See [Threads](../threads.md) for the rule.
   re-derived. A channel's last segment whose files are missing, empty or
   short and whose data holds no block is REMOVED (moved to the backup). A
   channel's first segment with a lost `.tmet` is skipped with advice; its
-  files are now flushed when written (once per channel).
+  `.tmet` is now flushed when written (once per channel). A short or empty
+  `.tidx` (or a zeroed `.tdat` header) is REBUILT from the CRC-checked blocks
+  in `.tdat`, under a header taken from the segment's `.tmet`.
 - **`python -m mef3io recover --apply` no longer runs a session-wide repair**
   afterwards, and `--no-repair` is gone: recovery re-derives the declarations
   of exactly the segments it reports (the dry run lists the check ids), and a
