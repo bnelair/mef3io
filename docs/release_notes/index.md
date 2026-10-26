@@ -6,6 +6,7 @@ Newest first.
 | Version | Released | Main changes |
 |---|---|---|
 | [Unreleased](unreleased.md) | — | — |
+| [2.0.0](2.0.0.md) | 2026-10-26 | breaking: one `n_threads` per object and a parallel open, `durability=` replaced by `flush()` / `wait_for_disk`; multi-channel reads, per-segment conversion factors, `anonymize_session` keeps times by default, `precision="step"`, clamped out-of-range samples, recovery for every crash state |
 | [1.6.0](1.6.0.md) | 2026-10-22 | `MultiReader`: several recordings read as one |
 | [1.5.1](1.5.1.md) | 2026-10-21 | `Reader.block_envelope`: per-block min/max from the block index alone, for viewers |
 | [1.5.0](1.5.0.md) | 2026-10-20 | `transform_session` (modified copies), cut with `time_range=`, `merge_sessions`, `rename_session` and name checks, safer anonymized text, a read starting half a sample off the grid no longer returns a NaN (#129) |

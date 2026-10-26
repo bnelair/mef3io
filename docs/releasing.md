@@ -14,6 +14,20 @@ The repo-root **`VERSION`** file is the only place the version lives:
 CI asserts `mef3io.__version__ == VERSION`, and git tags mirror the file —
 they are created by the release trigger, so they cannot drift.
 
+## Versioning
+
+mef3io follows semantic versioning:
+
+- **patch** (`X.Y.Z+1`): fixes only; no new API, nothing a caller must change;
+- **minor** (`X.Y+1.0`): new features, and deprecations that keep the old
+  behaviour working;
+- **major** (`X+1.0.0`): removals and incompatible changes.
+
+A deprecated feature warns for at least one minor release before a major
+release removes it. 2.0.0 is the exception: the maintainer decided to remove
+the per-call `n_threads` argument and `durability=` directly, without a
+deprecation period (see the [2.0.0 notes](release_notes/2.0.0.md)).
+
 ## Releasing
 
 ### Before the release: revise the documentation (required)

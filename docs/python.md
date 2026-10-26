@@ -172,9 +172,8 @@ How it works, and what it guarantees:
   can adding an offset that is not a multiple of the step (`counts * 0.195
   + 0.05` is on a 0.005 step); that step is then found and the data is
   stored exactly — losslessly, but not always smaller than the default.
-- **A channel keeps one conversion factor.** The reader scales a whole
-  channel by the factor of its first segment (per-segment factors are
-  [#150](https://github.com/bnelair/mef3io/issues/150)), so once a channel
+- **A channel keeps one conversion factor** for new data (older segments
+  may differ; the reader scales each segment by its own). So once a channel
   has data (an append, or `new_segment=True`), `"step"` stores new data on
   the channel's factor: exactly when the data is a whole multiple of it,
   and otherwise **not at all** — the write raises `WriteConflictError` and
@@ -675,7 +674,9 @@ segment's times are resolved with its own offset.
 - **Section 3 locked** (the level-1 password, or none on an encrypted
   session): the offset cannot be read, so times are resolved **assuming
   offset 0**, as a `Reader` does, and flagged `offset_assumed_zero=True` on
-  the session, the channel, the segment and each record concerned, with an
+  the session, the channel, the segment and each record concerned (only
+  where a stored time was negated, that is relative to the offset; a time
+  stored as an absolute value needs no assumption and is not flagged), with an
   `offset-assumed-zero` warning. mef3io and pymef always write offset 0, so
   these times are right for almost every file. Under meflib's deprecated date
   masking they are the masked times, which is what meflib meant a level-1

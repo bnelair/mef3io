@@ -294,7 +294,9 @@ class SessionSummary:
         same session does emit it).
     offset_assumed_zero : bool
         Some time here assumes recording-time offset 0 because a section 3
-        is locked (level-1 password, or none). The same flag is on every
+        is locked (level-1 password, or none). Only a time stored negated
+        (relative to the offset) needs the assumption; absolute stored times
+        do not set it. The same flag is on every
         channel, segment and record it concerns. mef3io and pymef always
         write offset 0, so such times are right for almost every file; under
         meflib's deprecated date masking they are the masked times, which is

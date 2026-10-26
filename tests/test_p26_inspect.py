@@ -593,6 +593,27 @@ def test_an_assumed_offset_next_to_a_read_one_makes_the_gaps_uncertain(tmp_path)
     assert mef3io.inspect(plain, "pw1").channel("ch2").gaps_certain
 
 
+def test_a_locked_segment_with_only_absolute_times_keeps_gaps_certain(tmp_path):
+    """#96: a locked segment whose times are all absolute assumes nothing, so
+    next to a segment whose non-zero offset was read the gaps stay certain."""
+    enc = _write(tmp_path / "e.mefd", password1="pw1", password2="pw2", records=False)
+    plain = _write(tmp_path / "p.mefd", records=False)
+    _set_rto(plain, THREE_DAYS, channel="ch1")
+    seg0 = sorted(Path(plain).glob("ch1.timd/*.segd"))[0]
+    shutil.rmtree(seg0)
+    shutil.copytree(sorted(Path(enc).glob("ch1.timd/*.segd"))[0], seg0)
+    for tmet in seg0.glob("*.tmet"):
+        raw = bytearray(tmet.read_bytes())
+        for off in (16, 24):
+            stored = struct.unpack_from("<q", raw, off)[0]
+            struct.pack_into("<q", raw, off, -stored)
+        struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH_BYTES])))
+        tmet.write_bytes(bytes(raw))
+    c = mef3io.inspect(plain, "pw1").channel("ch1")
+    assert not any(g.offset_assumed_zero for g in c.segments[:1])
+    assert c.gaps_certain
+
+
 def test_a_locked_segment_with_absolute_times_is_not_flagged(tmp_path):
     """Round 6: the flag marks what the assumption TOUCHED. Universal-header
     times stored non-negative are absolute whatever the offset; a channel can
