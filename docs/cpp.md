@@ -37,6 +37,19 @@ const mef3io::ChannelInfo& ci = r.info("ch1");     // fs, ufact, times, counts,
 // raw counts (factor 1; session().unscaled_channels() lists them); NaN /
 // inf throws FormatError.
 std::vector<double> x = r.read("ch1", t0, t1);
+std::vector<float> x4 = r.read_f32("ch1", t0, t1);   // == float(read()), half the memory
+
+// Several channels of ONE sampling rate in one call: row-major, one row of
+// n = x.size() / names.size() samples per name, each byte-identical to
+// read() of that channel. Every index is read concurrently on the Reader's
+// threads, then the data a group of channels at a time with one decode pool
+// per group (each group's compressed bytes freed before the next). Mixed or
+// non-finite rates or an empty list throw std::invalid_argument, an unknown
+// name std::out_of_range, before any request; a read error is the lowest
+// failing channel's in list order. Unset t0/t1 = the union of the channels'
+// spans. read_many_f32 = the float32 form.
+std::vector<std::string> names = {"ch1", "ch2", "ch3"};
+std::vector<double> rows = r.read_many(names, t0, t1);
 
 // Or the raw form: int32 counts + validity mask (0 in gaps), and
 // raw.factor_spans: which factor applies to which samples. ci.units_conversion_factor
@@ -47,6 +60,7 @@ mef3io::RawData raw = r.read_raw("ch1", t0, t1);
 auto segs = r.segments("ch1");    // per-segment map: what data is where
 auto toc  = r.toc("ch1");         // per-RED-block index entries
 auto env  = r.block_envelope("ch1", t0, t1);  // per-block min/max, index only
+auto envs = r.block_envelope_many(names, t0, t1);  // one per name, indexes read concurrently
 auto recs = r.records("ch1");     // ch1's channel- + segment-level annotations
 // r.records() = session level; r.records("ch1", 0) = segment 0 only;
 // r.records(std::nullopt, std::nullopt, mef3io::Session::RecordLevels::All) = all.
@@ -68,7 +82,10 @@ checks, every `.tmet` read and parse) and decoding. `0` = automatic
 (`mef3io::resolve_threads` in `parallel.hpp`: hardware concurrency for CPU
 work, at least 8 for file access), `1` = no extra threads. The open's result,
 its strict-mode error and `problems()` are the same at every count. There is
-no per-call count: `read`/`read_raw` take `(channel, t0, t1, ctl)`. See
+no per-call count: `read`/`read_raw` take `(channel, t0, t1, ctl)`,
+`read_many` `(channels, t0, t1, ctl)`; a multi-channel read uses the count
+for its concurrent file access (as the open does: automatic = at least 8)
+and for its one decode pool. See
 [Threads](threads.md).
 
 `Reader` wraps `mef3io::Session` (`session.hpp`), which exposes the lower
@@ -216,13 +233,15 @@ ctl.cancel = &token;                     // not owned; must outlive the call
 ctl.progress = [](std::uint64_t done, std::uint64_t total) { /* bytes */ };
 
 try {
-  auto x = reader.read("ch1", t0, t1, mef3io::Reader::kUseDefaultThreads, ctl);
+  auto x = reader.read("ch1", t0, t1, ctl);
 } catch (const mef3io::Cancelled&) {
   // superseded
 }
 ```
 
-Taking it: `Reader::read` / `read_raw`, `Session::collect_blocks`,
+Taking it: `Reader::read` / `read_f32` / `read_many` / `read_many_f32` /
+`read_raw` (a multi-channel read: one cancel and one progress sequence for
+the whole call), `Session::collect_blocks`,
 `archive_session`, `extract_session`, `inspect_session`, `validate_session`,
 `repair_session`, `recover_session`, `anonymize_session`,
 `check_anonymize` and `verify_anonymized`. The guarantees are the ones in the

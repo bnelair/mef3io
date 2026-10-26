@@ -334,6 +334,56 @@ def _format_error(message: str) -> Exception:
     return FormatError(message)
 
 
+def _channels_argument(channel, what: str = "read"):
+    """``None`` for one channel name (a str); else the list of names.
+
+    A multi-channel read (#90) takes a list or tuple of names; anything else
+    is a TypeError, an empty list a ValueError (there is no grid to return).
+    """
+    if isinstance(channel, str):
+        return None
+    if isinstance(channel, (list, tuple)):
+        names = list(channel)
+        if not names:
+            raise ValueError(f"{what}: no channels given (pass at least one name)")
+        for c in names:
+            if not isinstance(c, str):
+                raise TypeError(f"{what}: channel names must be str, not {type(c).__name__}")
+        return [str(c) for c in names]
+    raise TypeError(f"{what}: channel must be a str or a list/tuple of str, "
+                    f"not {type(channel).__name__}")
+
+
+def _one_rate_message(first: str, fs0: float, name: str, fs: float) -> str:
+    # Reader's text exactly (read_many_impl in reader.cpp; C++ prints the
+    # rates with 17 significant digits), so a MultiReader raises the same words.
+    return ("read: a multi-channel read needs ONE sampling rate for all its channels, but "
+            f"{first} is sampled at {format(fs0, '.17g')} Hz and {name} at "
+            f"{format(fs, '.17g')} Hz; read channels of different rates in separate calls "
+            "(one call per rate)")
+
+
+def _unusable_rate_message(name: str, fs: float) -> str:
+    # Reader's text exactly (read_many_impl in reader.cpp).
+    return (f"read: channel {name} has no usable sampling rate ({format(fs, '.17g')} Hz), "
+            "so it cannot share a multi-channel read's grid; read it on its own")
+
+
+def _float32_argument(dtype) -> bool:
+    """``dtype=`` of a read: True for float32, False for float64 (the default)."""
+    if dtype is None:
+        raise TypeError("dtype must be float64 or float32, not None")
+    try:
+        dt = np.dtype(dtype)
+    except TypeError:
+        raise TypeError(f"dtype must be float64 or float32, not {dtype!r}") from None
+    if dt == np.float64:
+        return False
+    if dt == np.float32:
+        return True
+    raise ValueError(f"dtype must be float64 or float32, not {dt}")
+
+
 def _check_threads(value) -> int:
     """An ``n_threads`` value: an int >= 0 (0 = automatic)."""
     if isinstance(value, bool):
@@ -565,6 +615,11 @@ class Reader:
           a session- or channel-level file (``channel`` is ``""`` at session
           level).
 
+        Segments that fail during a read (a damaged index or data extent) are
+        added when the read meets them. A multi-channel :meth:`read` reads its
+        channels concurrently, so the entries it adds for different channels
+        can come in any order (one channel's stay in segment order).
+
         Check it before trusting a read from a lenient Reader: a skipped
         segment's samples come back as NaN, exactly like a genuine gap, so the
         array alone cannot tell you data is missing.
@@ -718,30 +773,49 @@ class Reader:
 
     def read(
         self,
-        channel: str,
+        channel,
         t0: Optional[int] = None,
         t1: Optional[int] = None,
         *,
+        dtype="float64",
         cancel: Optional["CancelToken"] = None,
         progress: Optional[Callable[[int, int], object]] = None,
     ) -> np.ndarray:
-        """Read float64 samples on the uniform sampling grid.
+        """Read samples in units on the uniform sampling grid.
 
         Parameters
         ----------
-        channel : str
-            Channel name.
+        channel : str or list of str
+            A channel name, or a list (or tuple) of names for a
+            MULTI-CHANNEL read: one call returns a 2-D array with one row per
+            name, in the order given (duplicates allowed). Every row equals
+            :meth:`read` of that channel alone over the same window, value
+            for value and NaN for NaN. The channels must share ONE sampling
+            rate (they share one grid): mixed rates raise ``ValueError``;
+            read each rate in its own call. All channels' file reads run
+            concurrently on this Reader's threads and one decode pool works
+            through every block of every channel, which is much faster than a
+            loop of single reads (see the benchmarks page).
         t0, t1 : int or float, optional
             Half-open time window ``[t0, t1)`` in uUTC. Defaults span the whole
-            channel. The number of samples returned is
+            channel (for a list: from the earliest start to the latest end of
+            the listed channels). The number of samples returned is
             ``round((t1 - t0) * fs / 1e6)``.
+        dtype : {"float64", "float32"}, optional
+            The output type (any spelling ``numpy.dtype`` accepts). float32 is
+            the float64 value rounded to the nearest float32, exactly
+            ``read(...).astype(numpy.float32)``, in half the memory: about 7
+            significant digits (relative error at most 2**-24), so counts up
+            to 2**24 in magnitude stay exact with factor 1. Gaps stay NaN.
         cancel : CancelToken, optional
             Stop the read from another thread: it is checked before each
             segment is fetched and before each block is decoded, and a
             cancelled read raises :class:`Cancelled` and returns nothing.
+            For a list it stops the whole call.
         progress : callable, optional
             ``progress(done, total)`` — compressed bytes of the blocks being
-            decoded. Called at a bounded rate, possibly from a decode worker
+            decoded (for a list: of every channel, one sequence for the whole
+            call). Called at a bounded rate, possibly from a decode worker
             thread (with the GIL held for the call only), never concurrently.
             If it raises, the read stops and the exception propagates.
             Reads on one Reader may run from several threads at once (also
@@ -751,7 +825,8 @@ class Reader:
         Returns
         -------
         numpy.ndarray
-            1-D float64 array on the sampling grid. Discontinuity gaps are
+            For a name: a 1-D array on the sampling grid; for a list: a 2-D
+            array of shape ``(len(channel), n)``. Discontinuity gaps are
             filled with ``NaN``; each value is scaled by the units-conversion
             factor of the segment it comes from (segments of one channel may
             store different ones). A segment whose factor is not set (``0``,
@@ -760,6 +835,10 @@ class Reader:
 
         Raises
         ------
+        ValueError
+            An empty list, or channels of different sampling rates.
+        IndexError
+            An unknown channel (for a list: checked before anything is read).
         mef3io.FormatError
             A sample in the window comes from a segment whose factor is
             invalid: NaN or infinite. Nothing is decoded; :meth:`read_raw`
@@ -767,17 +846,25 @@ class Reader:
 
         See Also
         --------
-        read_raw : the unscaled int32 form with an explicit validity mask.
+        read_raw : the unscaled int32 form with an explicit validity mask
+            (one channel per call).
         """
+        names = _channels_argument(channel)
+        float32 = _float32_argument(dtype)
         impl = self._ensure_impl()
         hooks = _hooks(cancel, progress)
-        if hooks and self._backend_name != "cpp":
-            raise NotImplementedError("cancel=/progress= need the C++ backend")
+        if (hooks or names is not None or float32) and self._backend_name != "cpp":
+            raise NotImplementedError(
+                "cancel=/progress=, dtype= and multi-channel reads need the C++ backend")
         # The thread count is the Reader's (n_threads); there is no per-call
         # override (removed in 2.0, see the threads guide).
-        out = impl.read(channel, t0, t1, **hooks)
+        if names is None:
+            out = impl.read(channel, t0, t1, float32=float32, **hooks)
+        else:
+            out = impl.read_many(names, t0, t1, float32=float32, **hooks)
         pending: list = []
-        self._note_unscaled(channel, pending)
+        for ch in ([channel] if names is None else dict.fromkeys(names)):
+            self._note_unscaled(ch, pending)
         _flush(pending, stacklevel=2)
         return out
 
@@ -888,7 +975,7 @@ class Reader:
         """
         return self._ensure_impl().segments(channel)
 
-    def block_envelope(self, channel: str, t0: Optional[int] = None,
+    def block_envelope(self, channel, t0: Optional[int] = None,
                        t1: Optional[int] = None) -> dict:
         """Minimum and maximum of every data block, from the block index alone.
 
@@ -899,8 +986,12 @@ class Reader:
 
         Parameters
         ----------
-        channel : str
-            Channel name.
+        channel : str or list of str
+            Channel name, or a list (or tuple) of names: then the result is a
+            dict keyed by channel name (in the order given, duplicates once),
+            each value the dict one name returns. The indices of all listed
+            channels are read concurrently on this Reader's threads; still
+            index only. Any mix of sampling rates is fine here.
         t0, t1 : int, optional
             Window in uUTC, ``[t0, t1)``; a block is returned when it overlaps
             the window. ``None`` (default) means the start or end of the
@@ -937,8 +1028,12 @@ class Reader:
             segment that the read would not touch (one overlapping the
             window by less than half a sample) gets NaN ``min``/``max``.
         """
+        names = _channels_argument(channel, "block_envelope")
         pending: list = []
-        out = self._block_envelope(channel, t0, t1, pending)
+        if names is None:
+            out = self._block_envelope(channel, t0, t1, pending)
+        else:
+            out = self._block_envelope_many(names, t0, t1, pending)
         _flush(pending, stacklevel=2)
         return out
 
@@ -947,6 +1042,13 @@ class Reader:
         out = self._ensure_impl().block_envelope(channel, t0, t1)
         self._note_unscaled(channel, pending)
         return out
+
+    def _block_envelope_many(self, names, t0, t1, pending: list) -> dict:
+        unique = list(dict.fromkeys(names))
+        parts = self._ensure_impl().block_envelope_many(unique, t0, t1)
+        for ch in unique:
+            self._note_unscaled(ch, pending)
+        return dict(zip(unique, parts))
 
     def toc(self, channel: str) -> list[dict]:
         """Block-level table of contents, for seeking and viewers.

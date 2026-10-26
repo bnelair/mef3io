@@ -253,6 +253,8 @@ with mef3io.Reader("session.mefd") as r:          # password="..." if encrypted
     r.channels                                    # list[str]
     info = r.info("ch1")
     x  = r.read("ch1", t0, t1)                    # float64, NaN gaps
+    X  = r.read(["ch1", "ch2", "ch3"], t0, t1)    # 2-D: one row per channel, one call
+    x4 = r.read("ch1", t0, t1, dtype="float32")   # float32 output
     xi = r.read_raw("ch1", t0, t1)                # int32 + validity mask
     r.segments("ch1")                             # per-segment map
     r.toc("ch1")                                  # block-level index
@@ -313,7 +315,7 @@ for w in caught:
 of them. Python's `"default"` (and `"module"`) filter action shows each
 warning once per session, not once per process.
 
-### `read(channel, t0=None, t1=None, *, cancel=None, progress=None)`
+### `read(channel, t0=None, t1=None, *, dtype="float64", cancel=None, progress=None)`
 
 Float64 samples on the uniform fs grid over `[t0, t1)` (whole channel by
 default): `N = round((t1 - t0) * fs / 1e6)` samples, discontinuity gaps
@@ -329,6 +331,54 @@ fetch only the needed bytes — cheap on huge sessions. `cancel=` /
 `progress=`: see [Cancelling and progress](#cancelling-and-progress). The
 thread count is the Reader's `n_threads`; there is no per-call override
 (removed in 2.0).
+
+**Several channels in one call.** Pass a list (or tuple) of channel names and
+`read` returns a 2-D array, one row per name in the order given (a name may
+repeat):
+
+```python
+X = r.read(["Fp1", "Fp2", "F3", "F4"], t0, t1)   # shape (4, N)
+```
+
+- Every row is exactly what `read()` of that channel alone returns over the
+  same window, value for value and NaN for NaN: the same grid, gaps, per-segment
+  scaling, warnings and errors. The tests compare the bytes, at every thread
+  count, on gappy, jittered, overlapping-block and mixed-factor channels.
+- The channels must share **one sampling rate** (one grid for every row).
+  Mixed rates raise `ValueError`; read each rate in its own call. Unknown
+  names (`IndexError`), an empty list (`ValueError`) and mixed rates are
+  refused before anything is read.
+- Without `t0`/`t1` the window runs from the earliest start to the latest
+  end of the listed channels.
+- It is much faster than a loop: every channel's block index is read at
+  once on the Reader's threads, then the data a group of channels at a time
+  (as many channels as the Reader's file-access threads), with one decode
+  pool over every block of the group
+  ([benchmarks](benchmarks.md#reading-many-channels-at-once)). `cancel=`
+  stops the whole call; `progress=` is one sequence with one constant total
+  (the compressed bytes of every block in the window, all channels).
+- **Errors** are the ones a loop of single reads raises: the first failing
+  channel in list order, whatever went wrong (its index, its data, its
+  conversion factor or a damaged block). Nothing is started for channels
+  after a channel known to fail, so a damaged first channel fails the call
+  about as fast as reading it alone. With `strict=False`, segments skipped
+  during the read are added to `problems` as each channel meets them, so
+  entries of different channels can come in any order.
+- **Memory:** the result (8 bytes per sample, 4 with float32, for every
+  channel), plus the compressed blocks of one group of channels at a time
+  (each group's are freed once it is decoded): about 2 bytes per sample for
+  typical iEEG, times the window, times the group size (`n_threads`
+  channels; automatic = the number of cores, at least 8). A loop of single
+  reads stacked with `np.stack` needs the result twice.
+- `read_raw` stays one channel per call.
+
+**`dtype="float32"`** (any spelling `numpy.dtype` accepts) returns float32,
+also for one channel: each value is the float64 value rounded to the nearest
+float32, exactly `read(...).astype(numpy.float32)`, without the float64 array
+in between. float32 keeps about 7 significant digits (relative error at most
+2^-24); integer counts up to 2^24 = 16,777,216 in magnitude stay exact with
+factor 1. Gaps stay NaN. `"float64"` is the default; anything else is a
+`ValueError`.
 
 ### `read_raw(channel, t0=None, t1=None, *, cancel=None, progress=None)`
 
@@ -379,6 +429,12 @@ cheap even for huge, gap-riddled sessions. `toc` is the finer per-RED-block
 view (start time, sample counts, extrema, discontinuity flags).
 
 ### `block_envelope(channel, t0=None, t1=None)`
+
+`channel` may also be a list of names: the result is then a dict keyed by
+channel name (in the order given, a repeated name once), each value the dict
+one name returns, `{"ch1": {"start_uutc": ..., "min": ..., ...}, ...}`. The
+channels' indexes are read concurrently on the Reader's threads; it is still
+index only, and any mix of sampling rates is fine (there is no shared grid).
 
 The minimum and maximum of every data block overlapping `[t0, t1)`, read from
 the block index alone: no signal is decoded and segments outside the window
@@ -715,6 +771,12 @@ warn_declarations=True, strict=True)`
 - Each recording's own warnings (declarations, unreadable segments, ...) are
   emitted once, on open, with `w.message.path` naming that recording.
 - `cache=` takes `"auto"` or one cache path per recording.
+- `read(list_of_channels, dtype=...)` and `block_envelope(list)` follow the
+  Reader's rules and return what a Reader of the merged session returns. A
+  MultiReader reads the listed channels one after the other, each with its
+  whole budget, so it does not get the Reader's multi-channel speed-up. Its
+  `progress` for a list has one constant total too, counted in units of
+  channels (2^20 per listed channel) rather than bytes.
 
 Where it cannot be the same as a merged session:
 
@@ -1096,7 +1158,11 @@ int32 primitive path, in-segment appends), `write_annotations`,
 `get_annotations`, plus the legacy writer knobs (`mef_block_len`,
 `get_mefblock_len`, `max_nans_written`, `record_offset`). Differences from
 the legacy stack are measured and documented in the
-[comparison](legacy_comparison.md).
+[comparison](legacy_comparison.md). `get_data` with a list of channels reads
+them with the multi-channel `read` (one call per sampling rate and window;
+unset stamps keep meaning each channel's own start and end), so the arrays
+are the same as before, only faster: each one its own array, and on an error
+the exception of the first failing channel in the order asked for.
 
 Metadata works both the legacy and the modern way on `MefWriter`: mutate the
 `section3_dict` / `section2_ts_dict` (e.g.
@@ -1117,8 +1183,8 @@ reopen of an existing session) scans the tree and parses every segment's
 metadata in C++, on the Reader's threads, while other Python threads keep
 running. So a GUI can open a large session on a worker thread without
 freezing its event loop, and several sessions can be opened at once on
-different threads. `toc`, `segments`, `records` and
-`Writer.write_annotations` release the GIL as well.
+different threads. `toc`, `segments`, `records`, `block_envelope`, the
+multi-channel `read` and `Writer.write_annotations` release the GIL as well.
 
 **Sharing one `Reader`:** reads, `toc`, `segments`, `block_envelope` and
 `records` on one `Reader` may run at once, also on a `Reader` opened with

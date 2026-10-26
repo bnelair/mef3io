@@ -17,6 +17,11 @@ workload (5 ch × 5 h @ 512 Hz, plain + encrypted); its twin
 MEX — run both on one machine to compare the bindings (results in
 [docs/legacy_comparison.md](../docs/legacy_comparison.md)).
 
+`read_many_benchmark.py` times a window of many channels read with one
+multi-channel `Reader.read([...])` against a loop of single reads and a
+caller-side thread pool (results in
+[docs/benchmarks.md](../docs/benchmarks.md#reading-many-channels-at-once)).
+
 `mef_benchmark.py` compares three MEF-3 / ephys storage backends on the same
 synthetic recording:
 

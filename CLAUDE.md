@@ -830,6 +830,48 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   NaN. Times come from the index entries, not the RED headers (reading those
   would mean touching .tdat); read() places by the header copy, which agrees
   on any consistent file. Python + C++ only (no C ABI/MATLAB yet).
+- **Multi-channel reads (#90; part of #68).** `Reader::read_many` /
+  `read_many_f32` (-> `ChannelRows<T>`: one uninitialized `new T[]`
+  row-major buffer, handed to numpy as 2-D with NO copy) and `read_f32`; ONE
+  implementation `read_many_impl<T>` serves read() too (one channel, a
+  std::vector NaN-filled at assign; its path, error and progress are main's:
+  collect_blocks, plan, factor refusal, then progress = decode bytes).
+  Arguments FIRST, before any request: empty -> invalid_argument; each name
+  channel_info -> out_of_range; for a LIST only (one channel has no rate rule
+  — a NaN-rate single read returns empty as before) a non-finite rate, then
+  a rate != the first's -> invalid_argument (MultiReader mirrors both texts:
+  `_one_rate_message`, `_unusable_rate_message`, rates as %.17g). Unset
+  t0/t1 = union of the channels' spans. `collect_blocks` = `select_blocks`
+  (index only; a segment's walk error is STORED in the BlockSelection and
+  raised/contained by `fetch_blocks` when it reaches that segment, so the
+  serial order of errors and lenient problems() is unchanged; strict stops
+  the walk at the first error, `will_fail`) + `fetch_blocks` (data). A list:
+  (A) select every channel on Work::Io threads (progress total = every
+  selected block's bytes, constant; blocks not decoded are added after each
+  group); (B) groups of resolve_threads(n, Io) channels: fetch + plan +
+  factor refusal per channel on Io threads, then ONE parallel_for over the
+  group's (channel, job) pairs, plans freed per group (peak = one group's
+  compressed window). ERRORS = the LOWEST failing channel in list order
+  across all stages: per-channel exception slot + atomic `limit` (lowest
+  known to fail, incl. a select `will_fail`); nothing starts for i > limit,
+  channels below it run on (pinned in test_read_many.cpp: corrupt block of
+  an earlier channel beats a later truncated .tidx; a damaged first channel
+  fetches no data). Each slot = T(double(count) * its job's effective factor)
+  = read_raw's spans applied (spans merge only EQUAL factors); float32 =
+  static_cast of that double = numpy astype. Rows' NaN fill runs in parallel
+  (serial first touch was 0.53 of 0.79 s). `block_envelope_many` =
+  per-channel block_envelope on Work::Io threads, first error in list
+  order. Python: `read(str|list|tuple, dtype=)` (2-D for a list;
+  `_channels_argument` / `_float32_argument`); `block_envelope(list)` -> dict
+  keyed by name (duplicates once). MultiReader: a LOOP of its own single
+  reads (budget pinned in test_p42), progress in UNITS OF CHANNELS (2^20
+  each, constant total), warnings after success; equals the merged Reader
+  (test_p45). compat get_data(list): grouped by (fs, resolved t0, t1) ->
+  read_many, each row COPIED (own array), on any error re-run as the old
+  per-channel loop so the error is the first in the requested order.
+  read_raw stays single-channel; C ABI/MATLAB not yet. Tests:
+  tests/test_p45_read_many.py, core/tests/test_read_many.cpp, GIL in
+  test_p31; bench "[.read-many-bench]" + benchmarks/read_many_benchmark.py.
 - **Conversion factors are PER SEGMENT (#150).** Section 2 of each segment
   stores its own units_conversion_factor and one channel may mix them
   (`new_segment=True` with another precision, foreign recorders; meflib's
