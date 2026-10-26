@@ -87,6 +87,18 @@ void back_up_file(const fsys::path& file, const fsys::path& root, const std::str
   (void)detail::fsync_file(dest.string());
 }
 
+/// A destination that does not exist yet: `dest`, else `dest.1`, `dest.2`, ...
+/// A backup is never replaced or deleted.
+fsys::path free_backup_name(const fsys::path& dest) {
+  std::error_code ec;
+  if (!fsys::exists(dest, ec)) return dest;
+  for (int i = 1;; ++i) {
+    fsys::path d = dest;
+    d += "." + std::to_string(i);
+    if (!fsys::exists(d, ec)) return d;
+  }
+}
+
 void back_up_bytes(const fsys::path& root, const std::string& rel, std::span<const ui1> bytes) {
   const fsys::path dest = root / rel;
   std::error_code ec;
@@ -1392,16 +1404,16 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
         last && detail::segment_number_of(last->stem().string()) != p.segment_number)
       channels_to_stamp.insert(p.channel_dir);
   }
-  // Dataless segments cut off by a power cut (see the scan): moved to the
-  // backup; a channel folder left without segments
-  // goes with them — it held no sample.
+  // Dataless segments cut off by a power cut (see the scan) are moved to the
+  // backup; a channel folder left without segments goes with them (it held
+  // no sample). An earlier backup of the same name is never replaced: a free
+  // name is picked instead.
   for (const auto& rm : removals) {
     std::error_code ec;
     if (backup) {
       report.backup_root = backup_root.string();
-      const fsys::path dest = backup_root / rm.channel / rm.dir.filename();
+      const fsys::path dest = free_backup_name(backup_root / rm.channel / rm.dir.filename());
       fsys::create_directories(dest.parent_path());
-      fsys::remove_all(dest, ec);
       fsys::rename(rm.dir, dest, ec);
     }
     if (ec) {
@@ -1416,8 +1428,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
     if (!any && !ec) {
       if (backup) {
         // Keep whatever else the folder held (channel records) in the backup.
-        const fsys::path dest = backup_root / rm.channel / "channel-folder";
-        fsys::remove_all(dest, ec);
+        const fsys::path dest = free_backup_name(backup_root / rm.channel / "channel-folder");
         fsys::rename(rm.channel_dir, dest, ec);
       }
       if (!ec)
