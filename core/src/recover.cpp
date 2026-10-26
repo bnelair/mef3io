@@ -238,7 +238,34 @@ struct TmetRebuild {
   fsys::path path;
   std::vector<ui1> bytes;
   bool existed = false;  ///< a (short) file was there: backed up before replacing
+  fsys::path adopted_from;  ///< a complete `.tmet.mef3io-tmp` published as the .tmet: removed after
 };
+
+/// A complete, CRC-valid, loadable `<name>.tmet.mef3io-tmp` — what a
+/// wait_for_disk write flushed before renaming it into place, left behind when
+/// the rename did not survive a power cut. Returns its bytes (record length,
+/// provenance stamped Recovery) or empty. Never throws.
+std::vector<ui1> adoptable_tmet_temp(const fsys::path& tmet, const std::string& password) {
+  try {
+    const fsys::path tmp = tmet.parent_path() / (tmet.filename().string() + ".mef3io-tmp");
+    std::error_code ec;
+    if (!fsys::exists(tmp, ec)) return {};
+    std::vector<ui1> file = read_all(tmp);
+    if (file.size() < fmt::METADATA_FILE_BYTES) return {};
+    file.resize(fmt::METADATA_FILE_BYTES);
+    (void)load_time_series_metadata(file, password);  // CRC + access must hold
+    auto uh = fmt::UniversalHeader::parse(file);
+    fmt::provenance::stamp_modified(uh, fmt::provenance::Operation::Recovery);
+    uh.serialize(file);
+    byteio::write<ui4>(file, 0,
+                       crc::calculate(std::span<const ui1>(file).subspan(
+                           4, fmt::UNIVERSAL_HEADER_BYTES - 4)));
+    (void)load_time_series_metadata(file, password);
+    return file;
+  } catch (const std::exception&) {
+    return {};
+  }
+}
 
 /// Rebuild a NON-FIRST segment's lost .tmet (missing, empty or short — a new
 /// segment whose .tmet rename landed before its bytes, after a power cut).
@@ -602,18 +629,30 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
           std::vector<std::string> done;
           try {
             if (sz_tmet < fmt::METADATA_FILE_BYTES) {
+              if (auto adopted = adoptable_tmet_temp(tmet_path, password); !adopted.empty()) {
+                tmet_rebuild = TmetRebuild{tmet_path, std::move(adopted),
+                                           sz_tmet > 0 || fsys::exists(tmet_path),
+                                           tmet_path.parent_path() /
+                                               (tmet_path.filename().string() + ".mef3io-tmp")};
+                done.push_back(std::string("the .tmet was ") +
+                               (sz_tmet ? "shorter than a metadata record"
+                                        : (fsys::exists(tmet_path) ? "empty" : "missing")) +
+                               ": " + (apply ? "published" : "would be published") +
+                               " from its complete, CRC-valid .tmet.mef3io-tmp (a write whose "
+                               "rename did not reach the disk)");
+              } else {
               if (sd.prev.empty())
                 throw FormatError("the .tmet of a channel's first segment is lost, and there is "
                                   "no previous segment's .tmet to rebuild it from");
               auto rebuilt = rebuild_tmet(sd.prev / (sd.prev.stem().string() + ".tmet"), tdat,
                                           tidx, segment_number, password);
               tmet_rebuild = TmetRebuild{tmet_path, std::move(rebuilt),
-                                         sz_tmet > 0 || fsys::exists(tmet_path)};
+                                         sz_tmet > 0 || fsys::exists(tmet_path), {}};
               done.push_back(std::string("the .tmet was ") +
                              (sz_tmet ? "shorter than a metadata record"
                                       : (fsys::exists(tmet_path) ? "empty" : "missing")) +
                              ": " + (apply ? "rebuilt" : "would be rebuilt") +
-                             " from the previous segment's .tmet and this segment's own files");
+                             " from the previous segment's .tmet and this segment's own files");}
             }
             // A header source of THIS segment for whatever else is lost.
             std::vector<ui1> source;
@@ -678,8 +717,8 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
     std::uint64_t data_size = 0;
     std::ifstream data_in;
     try {
-      index_bytes = read_all(tidx);
       std::error_code ec;
+      if (fsys::exists(tidx, ec)) index_bytes = read_all(tidx);  // a lost one is rebuilt
       data_size = static_cast<std::uint64_t>(fsys::file_size(tdat, ec));
       if (ec) throw IoError("cannot stat " + tdat.string() + ": " + ec.message());
       // Unbuffered: every read is exactly the bytes asked for (a buffered
@@ -855,7 +894,27 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
     std::uint64_t offset = kept == 0 ? fmt::UNIVERSAL_HEADER_BYTES
                                      : static_cast<std::uint64_t>(last_kept.file_offset +
                                                                   last_kept.block_bytes);
-    si8 next_sample = kept == 0 ? 0 : last_kept.start_sample + last_kept.number_of_samples;
+    // Sample numbering is CHANNEL-wide (the writer numbers across segments): a
+    // segment whose index is rebuilt from its first block continues from the
+    // start sample its own .tmet declares (the previous segment's end for a
+    // later segment), not from 0 — an append after it, or recovery of a later
+    // torn append, would otherwise meet a numbering seam.
+    si8 next_sample = 0;
+    if (kept > 0) {
+      next_sample = last_kept.start_sample + last_kept.number_of_samples;
+    } else if (offset < data_size) {
+      try {
+        std::vector<ui1> record;
+        if (tmet_rebuild) {
+          record = tmet_rebuild->bytes;
+        } else {
+          std::ifstream in(seg / (base + ".tmet"), std::ios::binary);
+          record = read_range(in, 0, fmt::METADATA_FILE_BYTES);
+        }
+        const si8 declared = load_time_series_metadata(record, password).section2.start_sample;
+        if (declared > 0) next_sample = declared;
+      } catch (const std::exception&) { /* unreadable: number from 0 as before */ }
+    }
     fmt::RedBlockHeader header;
     while (offset < data_size) {
       // Each candidate block is read whole to verify its CRC, so this is the
@@ -895,6 +954,31 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
     try {
       data_head = read_range(data_in, 0, fmt::UNIVERSAL_HEADER_BYTES);
     } catch (const std::exception&) { /* handled by the size check above */ }
+    // A .tdat header that is not a .tdat header at all (zeroed pages of a
+    // full-size file: the header page never reached the disk) is REPLACED by
+    // one taken from this segment's .tmet — type, names, segment number, level
+    // UUID — not just re-sealed, or the validator would call a header of
+    // zeros "ok". A header that only fails its CRC but still says "tdat" keeps
+    // its fields and is re-sealed as before.
+    if (data_header_override.empty() && data_head.size() >= fmt::UNIVERSAL_HEADER_BYTES &&
+        fmt::UniversalHeader::parse(data_head).file_type_string != "tdat") {
+      std::vector<ui1> source;
+      if (tmet_rebuild) {
+        source.assign(tmet_rebuild->bytes.begin(),
+                      tmet_rebuild->bytes.begin() + fmt::UNIVERSAL_HEADER_BYTES);
+      } else {
+        std::ifstream in(seg / (base + ".tmet"), std::ios::binary);
+        source = read_range(in, 0, fmt::UNIVERSAL_HEADER_BYTES);
+        if (!header_crc_ok(source)) source.clear();
+      }
+      if (!source.empty()) {
+        data_header_override = synthesize_header(source, "tdat");
+        data_head = data_header_override;
+        pre_action += std::string(pre_action.empty() ? "" : "; ") +
+                      "the .tdat header was not a data-file header (zeroed or foreign): " +
+                      (apply ? "rebuilt" : "would be rebuilt") + " from this segment's .tmet";
+      }
+    }
     const si8 data_count = data_head.size() >= fmt::UNIVERSAL_HEADER_BYTES
                                ? byteio::read<si8>(data_head, 32)
                                : 0;
@@ -1124,6 +1208,10 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
       back_up_file(tr.path, backup_root, rel);
     }
     write_all(tr.path, tr.bytes);
+    if (!tr.adopted_from.empty()) {
+      std::error_code ignored;
+      fsys::remove(tr.adopted_from, ignored);  // its content is the .tmet now
+    }
     const fsys::path channel_dir = tr.path.parent_path().parent_path();
     if (const auto last = detail::last_segment_dir(channel_dir);
         last && *last != tr.path.parent_path())

@@ -99,13 +99,20 @@ void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
     // Flush the CONTENT before the rename, but not the directory entry after
     // it. Losing the rename is harmless: the old file is still there, complete
     // and consistent, which is worth more than keeping the last append.
-    if (!flush_with.empty()) {
+    const bool wait = !flush_with.empty();
+    if (wait) {
       flush_with.push_back(tmp);
       detail::flush_files(flush_with);
     } else if (replacing || flush_new) {
       fsync_file_or_throw(tmp.string());
     }
     replace_file(tmp, target);
+    // wait_for_disk: the PUBLISHED name must be durable before the write
+    // returns too, or a power cut right after leaves the data and the
+    // complete temp file but no `.tmet` (an invisible segment). One more
+    // combined wait: Linux syncfs commits the rename; elsewhere the file and
+    // the folders up to the session's parent are flushed.
+    if (wait) detail::flush_files({target});
   } catch (...) {
     fs::remove(tmp, ignored);
     throw;

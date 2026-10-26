@@ -72,7 +72,13 @@ from ._reader import (  # noqa: E402
 )
 from ._multi import MultiReader, MultiReaderDifferenceWarning  # noqa: E402
 from ._warnings import MefWarning  # noqa: E402
-from ._writer import ClampedSamplesWarning, StepFallbackWarning, Writer, password_interop_issue  # noqa: E402
+from ._writer import (  # noqa: E402
+    ClampedSamplesWarning,
+    StepFallbackWarning,
+    Writer,
+    WriterFlushWarning,
+    password_interop_issue,
+)
 from .metadata import Acquisition, Metadata, Subject  # noqa: E402
 from .validate import (  # noqa: E402
     Check,
@@ -129,6 +135,7 @@ __all__ = [
     "SessionOperationWarning",
     "MultiReaderDifferenceWarning",
     "StepFallbackWarning",
+    "WriterFlushWarning",
     "ClampedSamplesWarning",
     "MefError", "FormatError", "CrcError", "PasswordError", "IoError",
     "WriteConflictError",

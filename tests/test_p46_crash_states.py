@@ -356,6 +356,11 @@ FIRST_SEGMENT_STATES = [
     ("tidx-empty-tdat-torn", "empty", "torn"),
     ("tidx-empty-tdat-header-zeroed", "empty", "header-zeroed"),
     ("both-empty", "empty", "empty"),
+    # Round 3: a MISSING index is rebuilt like an empty one, and a zeroed .tdat
+    # header on a full-size segment is rebuilt, not just re-sealed.
+    ("tidx-missing", "missing", "full"),
+    ("tidx-missing-tdat-torn", "missing", "torn"),
+    ("tdat-header-zeroed-index-intact", "intact", "header-zeroed"),
 ]
 
 
@@ -369,7 +374,11 @@ def test_a_first_segment_with_a_lost_index_is_rebuilt_from_its_data(tmp_path, st
     seg = next(Path(path).glob("ch2.timd/*.segd"))
     tidx, tdat = next(seg.glob("*.tidx")), next(seg.glob("*.tdat"))
     t, d = tidx.read_bytes(), tdat.read_bytes()
-    tidx.write_bytes({"empty": b"", "short": t[:500], "zeroed": bytes(1024) + t[1024:]}[tidx_state])
+    if tidx_state == "missing":
+        tidx.unlink()
+    else:
+        tidx.write_bytes({"empty": b"", "short": t[:500], "intact": t,
+                          "zeroed": bytes(1024) + t[1024:]}[tidx_state])
     tdat.write_bytes({"full": d, "empty": b"", "torn": d[: 1024 + (len(d) - 1024) // 2],
                       "header-zeroed": bytes(1024) + d[1024:]}[tdat_state])
 
@@ -378,6 +387,12 @@ def test_a_first_segment_with_a_lost_index_is_rebuilt_from_its_data(tmp_path, st
     rep = mef3io.recover_session(str(path), apply=True)
     assert not rep.skipped, rep.summary()
     assert mef3io.Validator(str(path)).validate().ok
+    if tdat_state == "header-zeroed":
+        head = next(seg.glob("*.tdat")).read_bytes()[:1024]
+        assert head[8:12] == b"tdat", "the zeroed header must be rebuilt, not just re-sealed"
+        tm = next(seg.glob("*.tmet")).read_bytes()[:1024]
+        # names come from the segment's .tmet (the file UUID is new, offset 836)
+        assert head[52:960] != bytes(908) and head[52:830] == tm[52:830]
     with mef3io.Reader(str(path)) as r:
         np.testing.assert_array_equal(r.read("ch1"), OLD.astype(float))
         if tdat_state == "empty":
@@ -421,3 +436,109 @@ def test_a_later_segment_with_tmet_and_index_lost_is_rebuilt(tmp_path):
     with mef3io.Reader(str(path)) as r:
         np.testing.assert_array_equal(r.read("ch1"), want)
     assert mef3io.recover_session(str(path)).nothing_to_do
+
+
+def test_a_tmet_lost_to_a_rename_is_adopted_from_its_complete_temp_file(tmp_path):
+    """wait_for_disk flushes `.tmet.mef3io-tmp` BEFORE renaming it, so a power
+    cut right after write() returns can leave data, index and the complete temp
+    file but no `.tmet`. Even a channel's first segment (nothing earlier to
+    rebuild from) is recovered by publishing that file."""
+    path = tmp_path / "s.mefd"
+    with mef3io.Writer(str(path), block_length=BLOCK, wait_for_disk=True) as w:
+        w.write_int32("ch1", OLD, 1.0, START, FS)
+        w.write_int32("ch2", NEW, 1.0, START, FS)
+    seg = next(Path(path).glob("ch2.timd/*.segd"))
+    tmet = next(seg.glob("*.tmet"))
+    tmet.rename(str(tmet) + ".mef3io-tmp")           # the rename was lost
+    dry = mef3io.recover_session(str(path))
+    assert dry.segments and not dry.skipped, dry.summary()
+    assert "mef3io-tmp" in dry.segments[0].action
+    rep = mef3io.recover_session(str(path), apply=True)
+    assert not rep.skipped, rep.summary()
+    assert tmet.exists() and not Path(str(tmet) + ".mef3io-tmp").exists()
+    assert mef3io.Validator(str(path)).validate().ok
+    with mef3io.Reader(str(path)) as r:
+        np.testing.assert_array_equal(r.read("ch2"), NEW.astype(float))
+    assert mef3io.recover_session(str(path)).nothing_to_do
+
+
+def test_an_incomplete_temp_file_is_not_adopted(tmp_path):
+    path = tmp_path / "s.mefd"
+    with mef3io.Writer(str(path), block_length=BLOCK) as w:
+        w.write_int32("ch1", OLD, 1.0, START, FS)
+        w.write_int32("ch2", NEW, 1.0, START, FS)
+    seg = next(Path(path).glob("ch2.timd/*.segd"))
+    tmet = next(seg.glob("*.tmet"))
+    data = tmet.read_bytes()
+    tmet.unlink()
+    Path(str(tmet) + ".mef3io-tmp").write_bytes(data[:5000])   # torn temp file
+    rep = mef3io.recover_session(str(path), apply=True)
+    assert rep.skipped and not tmet.exists()          # first segment: nothing to rebuild from
+
+
+def _entry_start_samples(tidx):
+    b = tidx.read_bytes()[UH:]
+    return [int.from_bytes(b[i + 16:i + 24], "little", signed=True) for i in range(0, len(b), TSI)]
+
+
+def test_a_rebuilt_index_numbers_samples_channel_wide(tmp_path):
+    """A later segment's rebuilt index continues the channel's sample numbering
+    (its .tmet says where it starts), so a later append and the recovery of a
+    torn append after it meet no seam."""
+    path = tmp_path / "s.mefd"
+    with mef3io.Writer(str(path), block_length=BLOCK) as w:
+        w.write_int32("ch1", OLD, 1.0, START, FS)
+        w.write_int32("ch1", NEW, 1.0, T_NEW, FS, new_segment=True)
+    seg = sorted(Path(path).glob("ch1.timd/*.segd"))[-1]
+    tidx = next(seg.glob("*.tidx"))
+    before = _entry_start_samples(tidx)
+    assert before[0] == len(OLD)
+    tidx.write_bytes(b"")
+    rep = mef3io.recover_session(str(path), apply=True)
+    assert not rep.skipped, rep.summary()
+    assert _entry_start_samples(tidx) == before
+    assert mef3io.Validator(str(path)).validate().ok
+
+    # carry on appending, then tear that append and recover it
+    more = _samples(int(10 * FS), 3)
+    t_more = T_NEW + int(NEW_S * 1e6)
+    tdat = next(seg.glob("*.tdat"))
+    size_before = tdat.stat().st_size
+    with mef3io.Writer(str(path), block_length=BLOCK) as w:
+        w.write_int32("ch1", more, 1.0, t_more, FS)
+    assert mef3io.Validator(str(path)).validate().ok
+    assert _entry_start_samples(tidx)[-1] > before[-1]
+    full = tdat.read_bytes()
+    tdat.write_bytes(full[: size_before + (len(full) - size_before) // 2])   # torn append
+    rep = mef3io.recover_session(str(path), apply=True)
+    assert not rep.skipped, rep.summary()
+    assert mef3io.Validator(str(path)).validate().ok
+    with mef3io.Reader(str(path)) as r:
+        got = r.read("ch1")
+    assert len(got) >= len(OLD) + len(NEW)
+    np.testing.assert_array_equal(got[: len(OLD)], OLD.astype(float))
+    np.testing.assert_array_equal(got[len(OLD): len(OLD) + len(NEW)], NEW.astype(float))
+
+
+def test_an_unclosed_writer_that_cannot_flush_warns_instead_of_losing_the_error(tmp_path):
+    """A destructor cannot raise: the failure becomes a WriterFlushWarning."""
+    import gc
+    import warnings
+
+    class Failing:
+        def flush(self):
+            raise OSError("injected: disk gone")
+
+    path = tmp_path / "s.mefd"
+    w = mef3io.Writer(str(path))
+    real = w._impl
+    w._impl = Failing()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        del w
+        gc.collect()
+    ours = [c for c in caught if issubclass(c.category, mef3io.WriterFlushWarning)]
+    assert len(ours) == 1
+    assert "injected" in str(ours[0].message) and str(path) not in str(ours[0].message)
+    assert ours[0].message.path == str(path)
+    del real

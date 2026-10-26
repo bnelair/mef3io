@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "mef3io/errors.hpp"
 #include "mef3io/parallel.hpp"
 #include "mef3io/records.hpp"
 #include "mef3io/types.hpp"
@@ -99,7 +100,10 @@ class SessionWriter {
   /// flushes run concurrently). Without it (and without wait_for_disk) a
   /// write returns once its data is handed to the operating system; see
   /// docs/long_recordings.md, "When is my data on disk?".
-  /// @throws IoError when the system reports the flush failed.
+  /// @throws IoError when the system reports the flush failed. The FIRST
+  /// failure is remembered and every later flush() rethrows it: the OS
+  /// reports a write error once, so a retry would claim data that is gone
+  /// (run recover_session).
   void flush();
 
   /// Opt-in: every write returns only when ITS OWN data is on disk. The
@@ -288,6 +292,9 @@ class SessionWriter {
   bool session_preexisted_ = false;  // the folder existed (not overwritten) at open
   bool wait_for_disk_ = false;
   std::set<std::filesystem::path> unflushed_;  // written since the last flush()
+  std::optional<std::string> flush_failure_;   // first failed flush (sticky)
+  void remember_flush_failure(const IoError& e);
+  void flush_recording_failure(const std::vector<std::filesystem::path>& files);
   std::map<std::string, ChannelState> channels_;
 };
 

@@ -830,12 +830,32 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   header) REBUILT from the .tdat blocks under a header synthesized from the
   segment's .tmet (`synthesize_header`); lost later-segment .tmet rebuilt
   from the previous segment's (+ .tidx from data); dataless last segment
-  removed. Pinned: core/tests/test_durability.cpp (`fsync_observer` per
+  removed. ROUND 3 (review of 4269ef9): (a) wait_for_disk flushes the
+  PUBLISHED .tmet after the rename too (`flush_files({target})` in
+  write_file_atomic: a second batch per write) — before, a power cut right
+  after write() left data + a flushed `.tmet.mef3io-tmp` and no `.tmet`;
+  every touched file is ALSO added to `unflushed_` in every mode so
+  flush()/close() cover them. Recovery ADOPTS a complete CRC-valid
+  `<seg>.tmet.mef3io-tmp` when the `.tmet` is missing/short
+  (`adoptable_tmet_temp`, provenance Recovery, temp removed). (b) non-Linux
+  `flush_files` flushes each file's folders up 4 levels (.segd .timd .mefd
+  parent); `fsync_directory` = F_FULLFSYNC (macOS, fsync fallback) / a
+  FILE_FLAG_BACKUP_SEMANTICS handle + FlushFileBuffers (Windows; NTFS often
+  refuses, the refusal is ignored there and documented) and returns bool.
+  (c) A failed flush is STICKY (`flush_failure_`, also set by a failed
+  wait_for_disk flush inside write()): flush()/close() rethrow it forever, the
+  destructor skips (a retry only looks like success). (d) Recovery: a MISSING
+  .tidx = empty; a .tdat header whose type is not "tdat" on a full-size
+  segment is replaced by `synthesize_header` (not re-sealed); a rebuilt index
+  numbers samples from the segment's .tmet start_sample (channel-wide).
+  (e) Python `Writer.__del__`/`MefWriter.__del__` flush with the GIL
+  released and emit `WriterFlushWarning` on failure (`_flush_on_collect`).
+  Pinned: core/tests/test_durability.cpp (`fsync_observer` per
   file, `flush_batch_observer` per batch: fresh session = 1 .tmet flush per
   channel, later self-created segment 0, reopened new segment/channel 1,
   append 1; flush() = ONE batch with every .tdat/.tidx/.tmet/.rdat/.ridx,
-  destructor = one batch; wait_for_disk = one batch per write naming the
-  .tmet TEMP (proves flush-before-publish); flush_each_concurrently 8 x
+  destructor = one batch; wait_for_disk = TWO batches per write (the .tmet TEMP before
+  publish, the published .tmet after), sticky-failure cases; flush_each_concurrently 8 x
   100 ms < 400 ms; rollback .tidx flushed), tests/test_p46_crash_states.py,
   test_p18 (API), test_p31 (flush releases the GIL). Repair, rename,
   recovery and the copies keep their OWN flush rules.

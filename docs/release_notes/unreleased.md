@@ -97,6 +97,23 @@ See [Threads](../threads.md) for the rule.
   disk; a recorder can then re-send what was lost. Earlier appends are never
   at risk: nothing rewrites them. The per-state table is in
   [Long recordings](../long_recordings.md#durability-and-what-it-costs).
+- **A failed flush is remembered.** After one failed flush, every later
+  `flush()`/`close()` of that writer raises again (C++, C ABI, MATLAB,
+  Python): the OS reports a write error once, so a retry that "succeeded"
+  would claim data that is gone. An unclosed Python `Writer` that cannot flush
+  when it is garbage-collected emits a `WriterFlushWarning` (the flush now
+  runs with the GIL released).
+- **`wait_for_disk=True` also makes the published `.tmet` durable** before
+  `write()` returns (one more combined wait after the rename), and
+  `flush()`/`close()` cover every file and new folder a write touched in
+  every mode. macOS flushes folders with `F_FULLFSYNC`; Windows flushes them
+  through a directory handle where NTFS allows it (see
+  [long recordings](../long_recordings.md#durability-and-what-it-costs)).
+- **Recovery:** publishes a complete, CRC-valid `.tmet.mef3io-tmp` when the
+  `.tmet` is lost (even a channel's first segment); rebuilds a MISSING
+  `.tidx` like an empty one; replaces a zeroed `.tdat` header on a full-size
+  segment instead of re-sealing it; and numbers a rebuilt index's samples
+  channel-wide.
 - **A write, `flush()` or `close()` fails if a flush it waits for fails.**
   1.x's default ignored flush errors; now the OS error is raised. The flush
   cost was measured on ext4 only; macOS (`F_FULLFSYNC`) and Windows

@@ -394,7 +394,12 @@ TEST_CASE("wait_for_disk: each write returns after ITS files, in one batch", "[d
     for (const char* ch : {"ch1", "ch2"}) {
       w.write_int32(ch, a, 0.5, start + k * step, rate);
       auto got = batches.take();
-      REQUIRE(got.size() == 1);  // returned only after its own batch
+      // Two waits per write: its files (with the .tmet temp file) BEFORE the
+      // rename, then the PUBLISHED .tmet (and its folders) AFTER it — a power
+      // cut right after write() must not lose the name.
+      REQUIRE(got.size() == 2);
+      REQUIRE(got[1].size() == 1);
+      REQUIRE(ends_with(got[1][0], ".tmet"));
       REQUIRE(got[0].size() == 3);
       REQUIRE(count_suffix(got[0], ".tdat") == 1);
       REQUIRE(count_suffix(got[0], ".tidx") == 1);
@@ -402,8 +407,50 @@ TEST_CASE("wait_for_disk: each write returns after ITS files, in one batch", "[d
       for (const auto& p : got[0]) REQUIRE(p.find(std::string(ch) + ".timd") != std::string::npos);
     }
   }
+  // flush()/close() cover what a write touched in EVERY mode (the folders
+  // it created are made durable with the files).
   w.flush();
-  REQUIRE(batches.take().empty());  // nothing left over
+  auto left = batches.take();
+  REQUIRE(left.size() == 1);
+  REQUIRE(count_suffix(left[0], ".tmet") == 2);
+  w.flush();
+  REQUIRE(batches.take().empty());
+}
+
+TEST_CASE("a failed flush is sticky: a retry cannot report success", "[durability]") {
+  const Scratch dir("sticky");
+  const auto session = (dir.dir / "s.mefd").string();
+  std::vector<si4> a(2560, 3);
+  SessionWriter w(session, true);
+  w.write_int32("ch1", a, 0.5, 1577836800000000, 256.0);
+  detail::flush_batch_observer = [](const std::vector<fs::path>&) {
+    throw IoError("could not flush to disk, the write is not durable: injected");
+  };
+  REQUIRE_THROWS_AS(w.flush(), IoError);
+  detail::flush_batch_observer = nullptr;  // the disk "recovers"
+  // The OS reports a writeback error once; a retry would succeed and lie.
+  try {
+    w.flush();
+    FAIL("a later flush() must rethrow the first failure");
+  } catch (const IoError& e) {
+    REQUIRE(std::string(e.what()).find("injected") != std::string::npos);
+    REQUIRE(std::string(e.what()).find("earlier flush failed") != std::string::npos);
+  }
+  REQUIRE_THROWS_AS(w.flush(), IoError);  // and every time after
+}
+
+TEST_CASE("a failed wait_for_disk flush inside a write is sticky too", "[durability]") {
+  const Scratch dir("sticky_wait");
+  const auto session = (dir.dir / "s.mefd").string();
+  std::vector<si4> a(2560, 3);
+  SessionWriter w(session, true);
+  w.set_wait_for_disk(true);
+  detail::flush_batch_observer = [](const std::vector<fs::path>&) {
+    throw IoError("could not flush to disk, the write is not durable: injected");
+  };
+  REQUIRE_THROWS_AS(w.write_int32("ch1", a, 0.5, 1577836800000000, 256.0), IoError);
+  detail::flush_batch_observer = nullptr;
+  REQUIRE_THROWS_AS(w.flush(), IoError);
 }
 
 TEST_CASE("flush_each_concurrently overlaps the waits", "[durability]") {

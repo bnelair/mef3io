@@ -19,6 +19,42 @@ from ._warnings import MefWarning
 _INT32_MIN, _INT32_MAX = -(2**31), 2**31 - 1
 
 
+class WriterFlushWarning(MefWarning):
+    """A :class:`Writer` that was never closed could not flush when it was
+    garbage-collected.
+
+    Only :meth:`Writer.close`, :meth:`Writer.flush` and ``with`` can raise;
+    a destructor cannot, so this warning is all it can say. Data written since
+    the last successful flush may not be on disk: run ``recover`` on the
+    session. ``w.message.path`` is the session; ``details`` is ``[reason]``.
+    """
+
+
+def _flush_on_collect(impl, path) -> None:
+    """Flush an UNCLOSED writer from its ``__del__``: with the GIL released (the
+    binding's flush does that) so a slow disk does not stall every other
+    thread inside the garbage collector, and a failure becomes a
+    :class:`WriterFlushWarning` instead of being lost in the C++ destructor."""
+    try:
+        impl.flush()
+    except Exception as e:  # noqa: BLE001 - a destructor must not raise
+        try:
+            from ._warnings import emit
+
+            emit(
+                WriterFlushWarning,
+                f"an unclosed Writer could not flush its data to disk ({e}); "
+                "data written since the last successful flush may be lost: "
+                "run recover on the session. Close the Writer (or use `with`) "
+                "to get this as an exception.",
+                path=path,
+                details=[str(e)],
+                stacklevel=1,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+
 class StepFallbackWarning(MefWarning):
     """``Writer.write(..., precision="step")`` on a NEW channel could not use a step.
 
@@ -347,6 +383,12 @@ class Writer:
     def __exit__(self, *exc) -> None:
         self.close()
 
+    def __del__(self) -> None:
+        impl = getattr(self, "_impl", None)
+        if impl is not None:
+            self._impl = None
+            _flush_on_collect(impl, getattr(self, "_path", None))
+
     @property
     def n_threads(self) -> int:
         """How many threads this Writer may use (``0`` = automatic).
@@ -369,7 +411,9 @@ class Writer:
         """Return only when everything this Writer has written so far is on
         disk: every file it created or extended since the last flush, in ONE
         combined wait (not one per channel). Raises ``OSError``/``RuntimeError``
-        when the system reports the flush failed. :meth:`close` does the same.
+        when the system reports the flush failed, and keeps raising it on every
+        later call (a retry would otherwise claim data that is gone).
+        :meth:`close` does the same.
         See `When is my data on disk?
         <https://bnelair.github.io/mef3io/long_recordings/#when-is-my-data-on-disk>`_.
         """

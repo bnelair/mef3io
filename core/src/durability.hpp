@@ -151,16 +151,50 @@ inline void fsync_file_or_throw(const std::string& path) {
                   (why.empty() ? "" : " (" + why + ")"));
 }
 
-/// A rename is only durable once the DIRECTORY entry is flushed too. Windows
-/// exposes no directory handle to flush and does not need one.
-inline void fsync_directory(const fsys::path& dir) {
+/// A rename (or a new file/folder) is only durable once the DIRECTORY entry is
+/// flushed too. Returns false when the flush failed; `why` gets the OS error.
+///  * Linux: fsync on the directory.
+///  * macOS: F_FULLFSYNC (the drive's cache too), falling back to fsync where
+///    the file system does not implement it.
+///  * Windows: FlushFileBuffers on a directory handle (FILE_FLAG_BACKUP_SEMANTICS,
+///    GENERIC_WRITE). NTFS commonly refuses it (ERROR_ACCESS_DENIED) because it
+///    journals directory metadata itself; the call is made and a refusal is
+///    reported as false, which flush_files treats as "nothing more can be
+///    done" on Windows (documented in long_recordings.md).
+inline bool fsync_directory(const fsys::path& dir, std::string* why = nullptr) {
 #ifndef _WIN32
   const int fd = ::open(dir.string().c_str(), O_RDONLY);
-  if (fd < 0) return;
-  ::fsync(fd);
-  ::close(fd);
+  if (fd < 0) {
+    if (why) *why = "cannot open folder: " + std::error_code(errno, std::generic_category()).message();
+    return false;
+  }
+  bool ok;
+#if defined(__APPLE__)
+  ok = ::fcntl(fd, F_FULLFSYNC) != -1;
+  if (!ok && (errno == ENOTSUP || errno == EOPNOTSUPP || errno == EINVAL)) ok = ::fsync(fd) == 0;
 #else
-  (void)dir;
+  ok = ::fsync(fd) == 0;
+#endif
+  const int saved = errno;
+  ::close(fd);
+  if (!ok && why) *why = "fsync of folder: " + std::error_code(saved, std::generic_category()).message();
+  return ok;
+#else
+  const std::wstring wide = dir.wstring();
+  HANDLE h = CreateFileW(wide.c_str(), GENERIC_WRITE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+  if (h == INVALID_HANDLE_VALUE) {
+    if (why) *why = "cannot open folder for flushing";
+    return false;
+  }
+  const bool ok = FlushFileBuffers(h) != 0;
+  if (!ok && why) {
+    const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
+    *why = "FlushFileBuffers on a folder: " + ec.message();
+  }
+  CloseHandle(h);
+  return ok;
 #endif
 }
 
@@ -310,11 +344,30 @@ inline void flush_files(const std::vector<fsys::path>& files) {
   }
 #else
   flush_each_concurrently(files);
+  // Every folder a flushed file lives in AND the folders above it that this
+  // session may have just created (.segd -> .timd -> .mefd -> the .mefd's
+  // parent): a new folder's own entry is in its parent, which no file flush
+  // reaches. Four levels cover a segment file; a record file just flushes a
+  // level or two more than it needs.
   std::vector<fsys::path> dirs;
-  for (const auto& f : files)
-    if (std::find(dirs.begin(), dirs.end(), f.parent_path()) == dirs.end())
-      dirs.push_back(f.parent_path());
-  for (const auto& d : dirs) fsync_directory(d);
+  for (const auto& f : files) {
+    fsys::path d = f.parent_path();
+    for (int level = 0; level < 4 && !d.empty(); ++level, d = d.parent_path()) {
+      if (std::find(dirs.begin(), dirs.end(), d) == dirs.end()) dirs.push_back(d);
+      if (d == d.parent_path()) break;
+    }
+  }
+  for (const auto& d : dirs) {
+    std::string why;
+#ifdef _WIN32
+    // NTFS may refuse a folder flush; nothing further can be done there.
+    (void)fsync_directory(d, &why);
+#else
+    if (!fsync_directory(d, &why))
+      throw IoError("could not flush to disk, the write is not durable: " + d.string() +
+                    (why.empty() ? "" : " (" + why + ")"));
+#endif
+  }
 #endif
 }
 

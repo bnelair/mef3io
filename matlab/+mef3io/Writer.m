@@ -104,7 +104,8 @@ classdef Writer < handle
             %
             % One combined wait for every file this Writer created or
             % extended since the last flush. delete(w) does the same, but
-            % cannot report a failure; call flush() first to see one.
+            % cannot report a failure; call flush() first to see one. A failed
+            % flush is remembered: every later flush() raises it again.
             % Mirrors Python's Writer.flush().
             mef3io_mex('writer_flush', obj.h);
         end

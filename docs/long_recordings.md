@@ -49,7 +49,8 @@ CRC-checks every segment's `.tmet` once per Writer (about 1.4–1.8 s and
 
 Writing to a file and the data being *on the disk* are two different moments.
 The operating system keeps what a program writes in memory and stores it a
-little later — usually within half a minute. If the computer loses power in
+little later — until the operating system writes it out, typically up to
+about 30 seconds on Linux (other systems may wait longer). If the computer loses power in
 between, what was still in memory is lost. mef3io lets you choose when to wait
 for the disk:
 
@@ -57,8 +58,8 @@ for the disk:
 |---|---|---|
 | `w.write(...)` (default) | the data is handed to the operating system | 2.2–2.3 s per round of 128 appends |
 | `w.flush()` | **everything** this `Writer` wrote so far is on disk — one combined wait for all channels | about 0.3 s more per round |
-| `w.close()`, or leaving a `with` block | the same as `flush()`, then the `Writer` is closed | about 0.6–0.85 s at the end |
-| `Writer(..., wait_for_disk=True)`, then `w.write(...)` | **that write's** data is on disk | 3.6–3.7 s per round (1.x `durability="full"`: 6.0–6.5 s) |
+| `w.close()`, or leaving a `with` block | the same as `flush()`, then the `Writer` is closed: everything this `Writer` wrote is on disk, **including the new files' names and folders** | about 0.6–0.85 s at the end |
+| `Writer(..., wait_for_disk=True)`, then `w.write(...)` | **that write's** data is on disk, **and so is its published `.tmet`** (the segment is visible after a power cut); `flush()`/`close()` still make the new folders durable on every system | 3.6–3.7 s per round (1.x `durability="full"`: 6.0–6.5 s) |
 
 ```python
 with mef3io.Writer("recording.mefd") as w:   # leaving the block waits for the disk
@@ -69,8 +70,8 @@ with mef3io.Writer("recording.mefd") as w:   # leaving the block waits for the d
 ```
 
 - **Default.** `write()` is as fast as it can be. If the power fails, the most
-  recent writes — at most the last half minute or so — may be lost or left
-  half-written. Earlier data is never at risk: nothing rewrites it.
+  recent writes — until the OS writes them out, typically up to about 30
+  seconds on Linux — may be lost or left half-written. Earlier data is never at risk: nothing rewrites it.
 - **`flush()` / `close()`.** Call `flush()` whenever you want a point after
   which everything written so far survives a power cut, for example after
   each round of channels. It waits once for all of them together, so it costs
@@ -95,7 +96,14 @@ cut could stop the **whole session** from opening:
   `Writer` opened it.
 
 A failed flush is an error: `write()`, `flush()` and `close()` raise instead
-of claiming the data is safe.
+of claiming the data is safe. **A failure is remembered**: after one failed
+flush every later `flush()`/`close()` of that `Writer` raises again (the
+operating system reports a write error only once and then marks the pages
+clean, so a retry that "succeeded" would claim data that is gone). Data
+written since the last successful flush may be lost: run `recover`. A `Writer`
+that is garbage-collected without being closed flushes in its destructor and,
+if that fails, emits a `WriterFlushWarning` (only `close()`, `flush()` and
+`with` can raise).
 
 ## Durability, and what it costs
 
@@ -122,10 +130,25 @@ recovery rebuilds what a power cut takes from them.
 `flush()`, `close()` and `wait_for_disk=True` add the rest (see
 [When is my data on disk?](#when-is-my-data-on-disk)): `flush()` and `close()`
 wait for every file the `Writer` created or extended since the last flush in
-ONE combined wait — one `syncfs` per file system on Linux, every file at once
-on macOS and Windows; `wait_for_disk=True` does that for the files of each
-write before its `.tmet` is published, so the `.tmet` never describes data
-that is not on disk.
+ONE combined wait — one `syncfs` per file system on Linux (which also covers
+every new folder and every rename), every file at once on macOS and Windows;
+`wait_for_disk=True` does that for the files of each write before its `.tmet`
+is published, so the `.tmet` never describes data that is not on disk, and
+once more after the rename, so the published name is on disk when `write()`
+returns.
+
+What covers the **new folders** (`.mefd`, `.timd`, `.segd`) on each system:
+
+- **Linux:** `syncfs` — folders and renames included.
+- **macOS:** every file with `F_FULLFSYNC` (plain `fsync` where the file
+  system lacks it), then each folder from the file's own up to the session's
+  parent with `F_FULLFSYNC` (fallback `fsync`).
+- **Windows:** every file with `FlushFileBuffers`, then each folder the same
+  way through a directory handle. NTFS journals folder entries itself and often
+  refuses a flush on a folder handle (access denied); mef3io makes the call and
+  treats a refusal as "nothing more can be done there". On Windows the new
+  folder entries are therefore as durable as NTFS makes them, not more — this
+  is the one platform difference that cannot be removed.
 
 Nothing else is flushed. The `.tdat` and `.tidx` are extended **in place**
 (rewriting either whole would be `O(session)`), and their headers patched in
@@ -146,7 +169,9 @@ sample whose bytes reached the disk (pinned state by state in
 | the data, not the index | the appended samples read as NaN | indexes the CRC-valid blocks from their RED headers |
 | part of the data (a torn `.tdat`) | | keeps every whole, CRC-valid block, drops the fragment |
 | a later segment's `.tmet` empty or short, its data and index landed (a long-lived `Writer`'s new segment) | the strict open of the whole session fails | rebuilds the `.tmet` from the previous segment's (everything constant along the channel, byte for byte) plus this segment's own files (number, times, level UUID, start sample, native extremes), then re-derives its declarations; backed up, stamped Recovery |
-| a first (or any) segment's `.tidx` empty, short or with a zeroed header, its `.tmet` flushed | the segment's read fails | rebuilds the index from the CRC-checked blocks in `.tdat` under a header taken from the `.tmet` (a zeroed `.tdat` header likewise); every whole block is kept |
+| a first (or any) segment's `.tidx` missing, empty, short or with a zeroed header, its `.tmet` flushed | the segment's read fails | rebuilds the index from the CRC-checked blocks in `.tdat` under a header taken from the `.tmet`, numbering samples channel-wide from the `.tmet`'s start sample; every whole block is kept |
+| a `.tdat` header zeroed on a full-size segment (the header page never landed) | the header says nothing (type, segment number, names) | replaces it with one built from the segment's `.tmet` (not just re-sealed) |
+| a segment's `.tmet` missing but a complete, CRC-valid `.tmet.mef3io-tmp` beside it (a `wait_for_disk` write whose rename was lost) | the segment is invisible | publishes that file (backed up if a short `.tmet` was there; stamped Recovery) |
 | a later segment's `.tmet` AND `.tidx` lost, its data landed | the strict open of the whole session fails | rebuilds both: the `.tmet` from the previous segment's, the index from the data |
 | a new segment's files empty, its data never landed | the strict open of the whole session fails | removes the segment (it holds no sample; moved to the backup) |
 
@@ -168,9 +193,11 @@ Limits, stated exactly:
   conversion), and only the last append otherwise (a few hundred KB at
   10-minute appends). Damage further back than that window is not looked for.
 - A channel's FIRST segment whose `.tmet` is lost has nothing to be rebuilt
-  from. Its `.tmet` is flushed when written, so only another writer's session
-  or a disk that lied about a flush gets there: recovery skips the segment and
-  says so, and the session opens with `strict=False`.
+  from — unless a complete, CRC-valid `.tmet.mef3io-tmp` is beside it (what
+  `wait_for_disk` flushed before a rename that did not survive): recovery then
+  publishes that file. Otherwise (another writer's session, or a disk that
+  lied about a flush) recovery skips the segment and says so, and the session
+  opens with `strict=False`.
 - Recovery repairs only the segments it reports. A healthy segment's own
   findings (a legacy writer's declarations, for example) are left to
   `python -m mef3io repair`, by explicit check id.

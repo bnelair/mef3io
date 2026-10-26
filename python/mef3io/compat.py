@@ -411,3 +411,11 @@ class MefWriter:
         w, self._w = self._w, None
         if w is not None:
             w.flush()
+
+    def __del__(self):
+        w = getattr(self, "_w", None)
+        if w is not None:
+            self._w = None
+            from ._writer import _flush_on_collect
+
+            _flush_on_collect(w, getattr(self, "_path", None))

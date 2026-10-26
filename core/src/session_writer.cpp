@@ -467,13 +467,17 @@ void SessionWriter::write_records(std::optional<std::string> channel,
   }
   const std::vector<fs::path> files = {fs::path(dir) / (base + ".rdat"),
                                        fs::path(dir) / (base + ".ridx")};
-  if (wait_for_disk_)
-    detail::flush_files(files);
-  else
-    unflushed_.insert(files.begin(), files.end());
+  // Always owed to flush()/close() too (the folders they live in with them);
+  // wait_for_disk additionally waits now.
+  unflushed_.insert(files.begin(), files.end());
+  if (wait_for_disk_) flush_recording_failure(files);
 }
 
 SessionWriter::~SessionWriter() {
+  // After a failed flush the data may already be lost (the OS reports a
+  // writeback error once): a retry in a destructor would only look like
+  // success, and the failure was reported by the call that hit it.
+  if (flush_failure_) return;
   try {
     flush();
   } catch (...) {
@@ -481,13 +485,35 @@ SessionWriter::~SessionWriter() {
   }
 }
 
+void SessionWriter::remember_flush_failure(const IoError& e) {
+  // A wait_for_disk write whose flush failed: same stickiness as flush().
+  if (!flush_failure_ && std::string(e.what()).find("could not flush to disk") != std::string::npos)
+    flush_failure_ = e.what();
+}
+
+void SessionWriter::flush_recording_failure(const std::vector<fs::path>& files) {
+  try {
+    detail::flush_files(files);
+  } catch (const IoError& e) {
+    if (!flush_failure_) flush_failure_ = e.what();
+    throw;
+  }
+}
+
 void SessionWriter::flush() {
+  // STICKY: the first failed flush is remembered and rethrown by every later
+  // flush()/close(). The OS reports a writeback error once and marks the pages
+  // clean, so a retry that "succeeds" would claim data that is gone.
+  if (flush_failure_)
+    throw IoError(*flush_failure_ +
+                  " (an earlier flush failed: data written since the last successful flush may "
+                  "be lost; run recover_session)");
   if (unflushed_.empty()) return;
   std::vector<fs::path> files;
   std::error_code ec;
   for (const auto& f : unflushed_)
     if (fs::exists(f, ec)) files.push_back(f);
-  detail::flush_files(files);  // ONE combined wait for all of them
+  flush_recording_failure(files);  // ONE combined wait for all of them
   unflushed_.clear();
 }
 
@@ -722,8 +748,13 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   if (append) {
     // fs / conversion-factor / start-time conflicts are validated against the
     // on-disk metadata inside append_time_series_segment.
-    append_time_series_segment(seg_dir, spec, blocks, n_threads_.load(), &written_difference_bytes,
-                               &st.index_cache);
+    try {
+      append_time_series_segment(seg_dir, spec, blocks, n_threads_.load(),
+                                 &written_difference_bytes, &st.index_cache);
+    } catch (const IoError& e) {
+      remember_flush_failure(e);
+      throw;
+    }
   } else {
     // Everything that can refuse runs BEFORE a directory exists: a refused
     // write must leave the tree exactly as it was. A directory left behind
@@ -736,6 +767,14 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
     fs::create_directories(seg_dir);
     try {
       write_time_series_segment(seg_dir, spec, blocks, n_threads_.load(), &written_difference_bytes);
+    } catch (const IoError& e) {
+      remember_flush_failure(e);
+      std::error_code ec;
+      if (created_timd)
+        fs::remove_all(timd, ec);
+      else if (created_segd)
+        fs::remove_all(seg_dir, ec);
+      throw;
     } catch (...) {
       std::error_code ec;
       if (created_timd)
@@ -753,9 +792,9 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   }
   st.max_difference_bytes = std::max(st.max_difference_bytes, written_difference_bytes);
 
-  if (!wait_for_disk_) {
-    // Owed to the next flush() / close(): this write's files. (In
-    // wait_for_disk mode they were flushed before the .tmet was published.)
+  {
+    // Owed to the next flush() / close() in EVERY mode (wait_for_disk too:
+    // the folders this write created are made durable with them).
     const std::string stem = fs::path(seg_dir).stem().string();
     for (const char* ext : {".tdat", ".tidx", ".tmet"})
       unflushed_.insert(fs::path(seg_dir) / (stem + ext));
