@@ -318,6 +318,64 @@ Overlaps that the rule only notes ("12" in "LAH12", "P3", a session called
   upgrading deletes that session's old-named snapshot (exactly that file, and
   only if it is a mef3io snapshot) and builds a new one.
 
+## Float writes never wrap a count beyond int32: out-of-range samples are clamped
+
+Before, a float write whose value needed a count outside int32 at the
+conversion factor stored a wrapped, wrong value silently (an append of
+`3.0e6` to a channel at factor 0.001 read back as `-1294967.296`), and an
+infinite value wrapped the same way.
+
+Now every float write (`Writer.write`, `MefWriter.write_data`, C++
+`write_float`), with the default precision or `precision="step"`, stores
+such a sample, and `+inf`/`-inf`, as the nearest storable value:
+`±(2**31 - 1)` counts, meflib's own `RED_POSITIVE_INFINITY` /
+`RED_NEGATIVE_INFINITY`, which is also what meflib's encoder clamps to. The
+write succeeds; one out-of-range artifact (say a saturation spike in an
+append) no longer costs the chunk. The write summary gains `clamped` and
+`clamped_infinite` (C++ `WriteSummary::clamped` / `clamped_infinite`), and
+a write that clamped anything emits ONE `ClampedSamplesWarning` (a
+`MefWarning`; counts only in its text, `details` per channel). `NaN` is
+unchanged: a gap, never clamped. If you prefer to mark such samples as
+missing, replace them with `NaN` before writing.
+
+The inferred precision now requires both ends of the data to fit (it used
+to accept data where only one end overflowed, as mef_tools did), so a
+default write of one-sided large data picks a smaller precision instead of
+needing a clamp, and `+-inf` no longer drags the inferred precision to 0
+(it is ignored there, like NaN). `precision="step"` ignores `+-inf` when
+estimating the step too.
+
+## Smaller files for data from an amplifier: `precision="step"` (#81)
+
+`Writer.write(..., precision="step")` (also `MefWriter.write_data`) finds the
+data's own quantization step, such as an amplifier's 0.195 µV per count, and
+stores the original counts with that step as the conversion factor. One hour
+at 512 Hz of 16-bit counts × 0.195: 1.52 MB instead of 6.03 MB with the
+default path, the same as `write_int32` of the counts. Opt-in; the default is
+unchanged.
+
+- The step is estimated from a fixed-size sample (about 10 ms on 50 million
+  samples) and every value is checked during the conversion the write makes
+  anyway: a value stored on its step reads back exactly when the data was
+  `counts * step`, and within float64 rounding otherwise. The whole write was
+  faster than the default one in our measurements (10 million samples:
+  0.36 s against 0.57 s).
+- Data not on one step (filtered, resampled, noise), with too few distinct
+  values to establish one (a DC level, a square wave), or whose counts would
+  not fit int32, is written with the default path, with a new
+  `StepFallbackWarning`.
+- A channel keeps one conversion factor: appends and new segments with
+  `"step"` store data on the channel's factor exactly, and refuse
+  (`WriteConflictError`, nothing written) data off it rather than round it.
+  A default-precision append to a channel whose factor is not a power of ten
+  is refused with a message saying to use `"step"` or `write_int32`.
+- The write summary has three new keys for every write:
+  `units_conversion_factor`, `quantization` (`"step"`, `"decimal"` or
+  `"int32"`) and `step_fallback`. C++:
+  `SessionWriter::write_float` takes a `Precision` (an `int` still works;
+  `Precision::detect_step()` for the step), `WriteSummary` gains the same
+  fields, plus `detect_step` / `quantize_to_step`. Not in the C ABI or MATLAB.
+
 ## Fixed
 
 - **A channel whose segments store different conversion factors read back

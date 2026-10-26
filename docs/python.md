@@ -118,7 +118,102 @@ discontinuity gaps that read back as NaN. Values are quantized to int32
 counts as `round(data * 10**precision)` with the conversion factor
 `10**-precision` kept in metadata; `precision=-1` infers it from the data
 (and on appends reuses the segment's stored precision so appends can never
-conflict).
+conflict). `precision="step"` stores the data on its own quantization step
+instead (below).
+
+#### `precision="step"`: the smallest files for data from an amplifier
+
+Data that came from an analog-to-digital converter is `counts * step`: an
+amplifier with 0.195 µV per count produces only multiples of 0.195. The
+default path cannot see that and stores powers of ten: at precision 3 every
+sample is `counts * 195`, so the differences between neighbouring samples
+are 195 times larger than they need to be, and RED, which stores those
+differences, needs far more bytes for them. With `precision="step"` the
+writer finds the step and stores the original counts with the step as the
+conversion factor:
+
+```python
+s = w.write("ch1", data, start_uutc, fs=512.0, precision="step")
+s["quantization"], s["units_conversion_factor"]   # ('step', 0.195)
+```
+
+Measured on one hour at 512 Hz of 16-bit counts × 0.195 µV: the default
+path writes 6.03 MB and `"step"` 1.52 MB, the same as `write_int32` of the
+original counts with factor 0.195. The default path stays the default;
+`"step"` is opt-in.
+
+How it works, and what it guarantees:
+
+- **The step is estimated from a fixed-size sample** (the first 65,536
+  values and 16 windows of 2,048 spread through the rest; NaN ignored), so
+  finding it costs the same on any length: about 10 ms on 50 million
+  samples. The estimate is snapped to the step's own float64 value, so
+  `0.195`, `0.1`, `1e-3/3` or a binary step like `10e6 / 2**24` is stored as
+  that exact number.
+- **Every value is checked while it is converted** (the conversion pass
+  every write makes anyway, not a second read). A value stored this way
+  reads back as `count * step`, which is exactly the value written when the
+  data was computed as `counts * step` in float64; in every other case it
+  is within float64 rounding (at most 64 × 2⁻⁵² relative). There is no third
+  case: data that is not a whole multiple of one step is not stored on a
+  step.
+- **Data that is not on a step falls back to the default path** for that
+  write, with a `StepFallbackWarning`: filtered or resampled data, noise,
+  or a step whose counts would not fit in int32. So does data that shows
+  too little of a step to trust it: fewer than 16 distinct magnitudes in
+  the sample, such as a DC level, a calibration square wave or a handful of
+  levels (the level itself is "a step", and the channel would keep it). The
+  file is then what a default write produces. A filter whose coefficients
+  are short decimals or powers of two can keep data on a finer step, and so
+  can adding an offset that is not a multiple of the step (`counts * 0.195
+  + 0.05` is on a 0.005 step); that step is then found and the data is
+  stored exactly — losslessly, but not always smaller than the default.
+- **A channel keeps one conversion factor.** The reader scales a whole
+  channel by the factor of its first segment (per-segment factors are
+  [#150](https://github.com/bnelair/mef3io/issues/150)), so once a channel
+  has data (an append, or `new_segment=True`), `"step"` stores new data on
+  the channel's factor: exactly when the data is a whole multiple of it,
+  and otherwise **not at all** — the write raises `WriteConflictError` and
+  writes nothing, rather than round the data. Write such data to a new
+  channel, or quantize it yourself and use `write_int32` at the channel's
+  factor.
+
+  **The hazard for long acquisitions: the first chunk decides.** If the
+  first chunk written with `"step"` shows a coarser step than the data
+  really has — only even counts (step 0.39 instead of 0.195), or an
+  amplifier gain changed later to a finer one — every later, finer chunk
+  is refused, for the rest of the channel's life. Nothing is lost or
+  rounded, but the acquisition stops writing that channel. What to do:
+  when you know the amplifier's step, write `write_int32(counts, ufact)`
+  with it from the first chunk (no estimate at all); otherwise make the
+  first chunk long enough to show the real step, and check the first
+  summary's `units_conversion_factor` against what you expect. A channel
+  already locked to a coarse factor can be continued only in a new
+  channel (or by your own quantization at that factor with `write_int32`).
+- **Keep passing `precision="step"` when appending** to a channel written
+  that way (or with `write_int32` at a factor that is not a power of ten).
+  The default `precision=-1` can only reuse a power-of-ten factor and
+  refuses the append with a `WriteConflictError` saying so; the same holds
+  for `MefWriter.write_data`. With `new_segment=True` the default path
+  still infers a new precision, which gives the channel a second factor
+  ([#150](https://github.com/bnelair/mef3io/issues/150)).
+- **No count ever wraps.** A sample whose count would leave int32 at the
+  factor, or `+inf`/`-inf`, is stored as the nearest storable value,
+  `±(2**31 - 1)` counts (meflib's own positive/negative "infinity" values),
+  and the write succeeds. Every float write, step or default, does this; the
+  summary's `clamped` (and `clamped_infinite`) counts them and one
+  `ClampedSamplesWarning` per write says how many. `NaN` is never clamped:
+  it stays a gap. The inferred precision is chosen so both ends of the data
+  fit, so ordinary data never needs a clamp; a typical cause is a
+  saturation artifact in an append to a channel whose factor is fixed.
+
+The returned summary says what happened: `quantization` is `"step"`
+(stored exactly on the factor) or `"decimal"` (rounded to
+`10**-precision`), `step_fallback` is `None` or the reason the step was
+not used, and `clamped` / `clamped_infinite` count the samples stored as
+the nearest storable value. `MefWriter.write_data(..., precision="step")` does the same; Python
+and C++ only (`Precision::detect_step()` in `SessionWriter::write_float`),
+not the C ABI or MATLAB.
 
 The first write to a channel creates segment 0; later writes **append
 in-segment** (extending the existing files, like the legacy writer);
@@ -130,7 +225,8 @@ segment numbers (`ch1-5.segd`) can be appended to; new segments are always
 named `<channel>-NNNNNN`.
 
 Returns a summary dict: `samples_written`, `blocks`, `gaps_skipped`,
-`segment`.
+`segment`, `units_conversion_factor`, `quantization`, `step_fallback`
+(see above; `write_int32` reports `quantization="int32"`).
 
 ### `write_int32(channel, data, ufact, start_uutc, fs, valid=None, new_segment=False)`
 

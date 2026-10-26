@@ -2,7 +2,8 @@
 
 Two write paths:
 - ``write`` — float64 data; NaN marks discontinuities; ``precision`` sets the
-  conversion factor (10**-precision) or is inferred when omitted.
+  conversion factor (10**-precision), is inferred when omitted, or is
+  ``"step"``: the data's own quantization step (#81).
 - ``write_int32`` — the primitive path: integer counts plus a conversion factor
   (e.g. an amplifier's V/bit), stored verbatim.
 """
@@ -13,7 +14,27 @@ from typing import Optional
 
 import numpy as np
 
+from ._warnings import MefWarning
+
 _INT32_MIN, _INT32_MAX = -(2**31), 2**31 - 1
+
+
+class StepFallbackWarning(MefWarning):
+    """``Writer.write(..., precision="step")`` on a NEW channel could not use a step.
+
+    Raised once per such write. The data was still written, with the default
+    (inferred power-of-ten) precision — what a default write stores: the
+    data was not a whole multiple of one step (filtered or resampled data
+    never is), showed too few distinct values to establish one (a DC level,
+    a square wave: fewer than 16 distinct magnitudes in the sample), or its
+    counts would not fit int32. The summary's ``step_fallback`` says which.
+
+    (On a channel that already has data, ``"step"`` never falls back: data
+    off the channel's factor is refused with ``WriteConflictError``.)
+
+    ``w.message.details`` is ``[channel, reason]``; ``w.message.path`` the
+    session.
+    """
 
 
 def _as_int32_counts(data):
@@ -37,6 +58,64 @@ def _as_int32_counts(data):
             f"range and would wrap; rescale them or use write()"
         )
     return np.ascontiguousarray(a, dtype=np.int32)
+
+
+class ClampedSamplesWarning(MefWarning):
+    """A float write stored some samples as the nearest storable value.
+
+    MEF stores int32 counts; a sample whose count at the conversion factor
+    would leave that range, or that is ``+inf``/``-inf``, is stored as the
+    largest count, ``+-(2**31 - 1)`` — meflib's own "positive/negative
+    infinity" values (``RED_POSITIVE_INFINITY``/``RED_NEGATIVE_INFINITY``,
+    meflib.h, which its ``RED_round`` clamps to as well) — so it reads back
+    as ``+-(2**31 - 1) * factor``. The write succeeds; nothing wraps. Typical
+    cause: a saturation artifact in an append to a channel whose factor is
+    fine. ``NaN`` is never clamped: it stays a gap.
+
+    Raised once per such write. ``w.message.details`` is
+    ``({"channel": ..., "clamped": n, "infinite": k},)`` (``k`` of the ``n``
+    were infinite); the text carries counts only, never sample values or
+    times. The write summary has the same numbers (``clamped``,
+    ``clamped_infinite``).
+    """
+
+
+def warn_clamped(channel, summary, stacklevel=3, path=None):
+    """One :class:`ClampedSamplesWarning` when a float write clamped samples."""
+    n = summary.get("clamped", 0)
+    if n:
+        from ._warnings import emit
+
+        k = summary.get("clamped_infinite", 0)
+        emit(ClampedSamplesWarning,
+             f"{n} {'sample' if n == 1 else 'samples'} of channel {channel!r} {'was' if n == 1 else 'were'} outside what MEF can store "
+             f"at the conversion factor ({k} of them infinite) and were stored as the "
+             f"nearest storable value.",
+             path=path, details=[{"channel": channel, "clamped": n, "infinite": k}],
+             stacklevel=stacklevel)
+
+
+def _is_step(precision) -> bool:
+    """True for ``precision="step"``; ValueError for any other string."""
+    if isinstance(precision, str):
+        if precision != "step":
+            raise ValueError(
+                f"precision must be an int or 'step', not {precision!r}"
+            )
+        return True
+    return False
+
+
+def warn_step_fallback(channel, summary, stacklevel=3, path=None):
+    """One :class:`StepFallbackWarning` when a ``precision="step"`` write fell back."""
+    reason = summary.get("step_fallback")
+    if reason:
+        from ._warnings import emit
+
+        emit(StepFallbackWarning,
+             f"precision='step': channel {channel!r} was not stored on its own step: "
+             f"{reason}.",
+             path=path, details=[channel, reason], stacklevel=stacklevel)
 
 
 def warn_unreadable_metadata(entries, stacklevel=3, path=None):
@@ -307,7 +386,7 @@ class Writer:
         data: np.ndarray,
         start_uutc: int,
         fs: float,
-        precision: int = -1,
+        precision: "int | str" = -1,
         new_segment: bool = False,
     ) -> dict:
         """Write float data; NaN runs become discontinuity gaps.
@@ -315,6 +394,24 @@ class Writer:
         Values are quantized to int32 counts as ``round(data * 10**precision)``
         with the conversion factor ``10**-precision`` kept in metadata. NaN
         samples are not stored — they read back as ``NaN``.
+
+        ``precision="step"`` (opt-in) stores the data as whole counts of its
+        own quantization step instead — e.g. an amplifier's 0.195 uV per
+        count — which gives much smaller files for data that came from an
+        ADC. The step is estimated from a bounded sample of the data (fast
+        on any length) and every value is checked while it is converted: a
+        value stored this way reads back equal to what was written (exactly,
+        when the data was ``counts * step`` in float64; otherwise within
+        float64 rounding, 64 eps relative). Data that is not on one step
+        (filtered, resampled) falls back to the default path with a
+        :class:`StepFallbackWarning`, as does data showing too few distinct
+        values to establish a step (a DC level, a square wave). A channel
+        keeps the conversion factor of its first segment: on a channel that
+        already has data, ``"step"`` stores data on that factor exactly, and
+        REFUSES data off it (``WriteConflictError``, nothing written) rather
+        than round it. Appending with the default precision to a channel
+        whose factor is not a power of ten (a step, or ``write_int32``) is
+        refused too: keep passing ``"step"``.
 
         Parameters
         ----------
@@ -327,33 +424,52 @@ class Writer:
             Timestamp of the first sample, uUTC.
         fs : float
             Sampling frequency in Hz.
-        precision : int, optional
+        precision : int or "step", optional
             Decimal precision for quantization. ``-1`` (default) infers it from
             the data — or, when appending, reuses the segment's stored
-            precision so the append cannot conflict.
+            precision so the append cannot conflict. ``"step"`` detects the
+            data's own quantization step (see above).
         new_segment : bool, optional
             Force a fresh segment instead of appending in-segment.
 
         Returns
         -------
         dict
-            ``samples_written``, ``blocks``, ``gaps_skipped``, ``segment``.
+            ``samples_written``, ``blocks``, ``gaps_skipped``, ``segment``,
+            ``units_conversion_factor`` (the factor the stored counts carry),
+            ``quantization`` (``"decimal"``: rounded to ``10**-precision``;
+            ``"step"``: stored exactly on the factor) and
+            ``step_fallback`` (``precision="step"`` only: ``None`` when the
+            step was used, else why not), ``clamped`` and
+            ``clamped_infinite`` (samples stored as the nearest storable
+            value; see :class:`ClampedSamplesWarning`).
 
         Raises
         ------
         ValueError
-            If ``fs`` is not a finite number > 0, or ``precision`` makes the
-            conversion factor ``10**-precision`` 0 — checked before anything
-            is written.
-        RuntimeError
-            On an append conflict (fs / conversion-factor mismatch, or data
-            starting before the segment's end).
+            If ``fs`` is not a finite number > 0, ``precision`` makes the
+            conversion factor ``10**-precision`` 0, or is a string other
+            than ``"step"`` — checked before anything is written. (A value
+            whose count would leave int32, or ``+-inf``, is not an error: it
+            is stored as the nearest storable value, counted in the
+            summary's ``clamped`` and reported by
+            :class:`ClampedSamplesWarning`.)
+        WriteConflictError
+            On an append conflict (fs / conversion-factor mismatch, data
+            starting before the segment's end, a default-precision append
+            to a factor that is no power of ten, or ``"step"`` data off the
+            channel's factor). Nothing is written.
         """
+        step = _is_step(precision)
         data = np.atleast_1d(np.ascontiguousarray(data, dtype=np.float64))
         with self._reporting_unreadable_metadata():
-            return self._impl.write_float(
-                channel, data, start_uutc, float(fs), int(precision), bool(new_segment)
+            summary = self._impl.write_float(
+                channel, data, start_uutc, float(fs), -1 if step else int(precision),
+                bool(new_segment), step,
             )
+        warn_step_fallback(channel, summary, path=self._path)
+        warn_clamped(channel, summary, path=self._path)
+        return summary
 
     def write_int32(
         self,
