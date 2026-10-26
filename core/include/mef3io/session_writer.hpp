@@ -40,6 +40,20 @@ struct WriteSummary {
   /// Precision::step() only: empty when the data was stored on its step,
   /// else why it was not (the write then took the fallback path).
   std::string step_fallback;
+  /// Float writes: samples whose count would leave int32 at the factor, or
+  /// +-inf, stored as the nearest storable count +-(2^31 - 1) (meflib's
+  /// RED_POSITIVE/NEGATIVE_INFINITY) instead of wrapping. Includes
+  /// `clamped_infinite`.
+  si8 clamped = 0;
+  /// Of `clamped`, how many were +-inf.
+  si8 clamped_infinite = 0;
+};
+
+/// How many samples a float conversion clamped (see WriteSummary::clamped).
+struct ClampCount {
+  si8 finite = 0;    ///< finite values whose count left int32
+  si8 infinite = 0;  ///< +-inf
+  si8 total() const { return finite + infinite; }
 };
 
 /// The `precision` of a float write: a number of decimals, inferred, or the
@@ -110,8 +124,9 @@ class SessionWriter {
   /// (WriteConflictError, nothing written) — never rounded. The summary says
   /// which happened (`quantization`, `step_fallback`).
   ///
-  /// Every path refuses (std::invalid_argument, nothing written) a value
-  /// whose count would leave int32 instead of wrapping it, and the default
+  /// Every path CLAMPS a value whose count would leave int32, and +-inf, to
+  /// the nearest storable count instead of wrapping it; the write succeeds
+  /// and the summary counts them (`clamped`). The default
   /// path refuses (WriteConflictError) an in-segment append to a segment
   /// whose factor is not a power of ten (written with the step or
   /// write_int32): use the step or write_int32 there.
@@ -276,7 +291,11 @@ class SessionWriter {
 
 // Quantization helpers (exposed for testing / reuse).
 int infer_precision(std::span<const sf8> data);
-std::vector<si4> quantize_to_int32(std::span<const sf8> data, int precision);
+/// round(data * 10^precision) as counts. NaN -> 0 (a gap). A count beyond
+/// int32, or +-inf, is clamped to +-(2^31 - 1) and counted in @p clamped —
+/// never wrapped, never INT32_MIN (RED_NAN).
+std::vector<si4> quantize_to_int32(std::span<const sf8> data, int precision,
+                                   ClampCount* clamped = nullptr);
 
 /// The estimate of detect_step(): the step, or why there is none.
 struct StepEstimate {
@@ -297,14 +316,12 @@ struct StepEstimate {
 StepEstimate detect_step(std::span<const sf8> data);
 /// Convert @p data to counts of @p step in one pass, verifying every value:
 /// false (and @p why) as soon as one finite value is not a whole multiple
-/// within 64 float64 roundings (`|x - double(k) * step| <= 64 eps |x|`) or
-/// its count leaves int32 (INT32_MIN excluded: RED's NaN). NaN -> count 0,
-/// valid 0. A negative @p step (a polarity-inverting factor) is allowed; 0
+/// within 64 float64 roundings (`|x - double(k) * step| <= 64 eps |x|`).
+/// A value ON the step whose count leaves int32, and +-inf, is clamped to
+/// +-(2^31 - 1) and counted in @p clamped. NaN -> count 0, valid 0. A negative @p step (a polarity-inverting factor) is allowed; 0
 /// or non-finite returns false. The outputs are unspecified after a false.
-/// Why quantize_to_step() returned false (for the caller's own message).
-enum class StepMismatch { None, NotMultiple, Overflow, NotFinite, BadStep };
 bool quantize_to_step(std::span<const sf8> data, sf8 step, std::vector<si4>& counts,
                       std::vector<ui1>& valid, std::string* why = nullptr,
-                      StepMismatch* kind = nullptr);
+                      ClampCount* clamped = nullptr);
 
 }  // namespace mef3io

@@ -1632,6 +1632,8 @@ NB_MODULE(_mef3io, m) {
       d["step_fallback"] = nb::none();
     else
       d["step_fallback"] = s.step_fallback;
+    d["clamped"] = s.clamped;
+    d["clamped_infinite"] = s.clamped_infinite;
     return d;
   };
   nb::class_<mef3io::SessionWriter>(m, "SessionWriter")

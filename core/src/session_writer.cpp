@@ -17,6 +17,7 @@
 #include "mef3io/writer.hpp"
 #include "mef3io/time.hpp"
 #include "last_segment.hpp"
+#include "clamp.hpp"
 #include "number_text.hpp"
 
 namespace fs = std::filesystem;
@@ -46,8 +47,10 @@ int infer_precision(std::span<const sf8> data) {
   sf8 sum = 0.0;
   si8 count = 0;
   sf8 prev = std::numeric_limits<sf8>::quiet_NaN();
+  // +-inf is ignored like NaN: it is clamped on write (quantize_to_int32),
+  // and must not drag the precision of the ordinary samples down to 0.
   for (sf8 v : data) {
-    if (!std::isnan(v) && !std::isnan(prev)) {
+    if (std::isfinite(v) && std::isfinite(prev)) {
       sum += std::abs(v - prev);
       ++count;
     }
@@ -63,11 +66,11 @@ int infer_precision(std::span<const sf8> data) {
 
   sf8 dmax = -std::numeric_limits<sf8>::infinity(), dmin = std::numeric_limits<sf8>::infinity();
   for (sf8 v : data)
-    if (!std::isnan(v)) {
+    if (std::isfinite(v)) {
       dmax = std::max(dmax, v);
       dmin = std::min(dmin, v);
     }
-  if (!std::isfinite(dmax)) return 0;  // all NaN
+  if (!std::isfinite(dmax)) return 0;  // nothing finite
 
   sf8 alpha = std::pow(10.0, precision);
   while (!int32_range_ok(dmin, dmax, alpha) && precision != 0) {
@@ -77,33 +80,27 @@ int infer_precision(std::span<const sf8> data) {
   return precision;
 }
 
-std::vector<si4> quantize_to_int32(std::span<const sf8> data, int precision) {
+std::vector<si4> quantize_to_int32(std::span<const sf8> data, int precision,
+                                   ClampCount* clamped) {
   const sf8 scale = std::pow(10.0, precision);
   std::vector<si4> out(data.size());
+  ClampCount c;
   for (std::size_t i = 0; i < data.size(); ++i) {
     if (std::isnan(data[i])) {
       out[i] = 0;  // gap position, not stored
       continue;
     }
     sf8 rounded = std::round(data[i] * scale);  // round(data,prec)*10^prec == round(data*10^prec)
-    // Never wrap: a count outside int32 (or INT32_MIN, RED's NaN) is refused
-    // before anything is written. It used to wrap into a wrong value.
-    if (!(std::abs(rounded) <= static_cast<sf8>(std::numeric_limits<si4>::max()))) {
-      const std::string at = "the value at index " + std::to_string(i);
-      if (!std::isfinite(data[i]))
-        throw std::invalid_argument(at + " is not finite; MEF stores finite samples only "
-                                    "(use NaN for a gap). Nothing was written");
-      throw std::invalid_argument(
-          at + " needs a count beyond int32 at the conversion factor 1e" +
-          std::to_string(-precision) + "; nothing was written. " +
-          (precision > 0 ? std::string("Use a smaller precision, or write_int32 with a "
-                                       "larger factor")
-                         : std::string("It is too large for any precision the float path "
-                                       "uses; scale the data, or use write_int32 with a "
-                                       "larger factor")));
+    // Never wrap (it used to): a count beyond int32, or +-inf, is CLAMPED to
+    // the nearest storable count (detail::clamp_count; maintainer decision,
+    // #149) and counted, so the caller can say so.
+    if (!(std::abs(rounded) <= kMaxStorableCount)) {
+      out[i] = detail::clamp_count(rounded, std::isfinite(data[i]), c);
+      continue;
     }
     out[i] = static_cast<si4>(rounded);
   }
+  if (clamped) *clamped = c;
   return out;
 }
 
@@ -518,16 +515,8 @@ WriteSummary SessionWriter::write_float(const std::string& channel, std::span<co
       hydrate(channel, it->second);
       const sf8 u = it->second.units_conversion_factor;
       std::string why;
-      StepMismatch kind = StepMismatch::None;
-      if (!quantize_to_step(data, u, counts, valid, &why, &kind)) {
-        if (kind == StepMismatch::NotFinite)
-          throw std::invalid_argument(why + "; MEF stores finite samples only (use NaN for a "
-                                      "gap). Nothing was written");
-        if (kind == StepMismatch::Overflow)
-          throw WriteConflictError(
-              "precision='step': " + why + " of channel " + channel + "'s conversion factor; "
-              "nothing was written. The value is too large for the factor this channel keeps: "
-              "write it to a new channel, or scale the data");
+      ClampCount clamped;
+      if (!quantize_to_step(data, u, counts, valid, &why, &clamped)) {
         throw WriteConflictError(
             "precision='step': the data for channel " + channel + " is not stored on the "
             "channel's conversion factor " + detail::shortest_number(u) + " (" + why + "); nothing "
@@ -536,14 +525,19 @@ WriteSummary SessionWriter::write_float(const std::string& channel, std::span<co
       }
       WriteSummary s = write_blocks(channel, counts, valid, u, start_uutc, fs, new_segment);
       s.quantization = Quantization::Step;
+      s.clamped = clamped.total();
+      s.clamped_infinite = clamped.infinite;
       return s;
     } else {
       const StepEstimate est = detect_step(data);
       std::string why = est.reason;
-      if (est.step && quantize_to_step(data, *est.step, counts, valid, &why)) {
+      ClampCount clamped;
+      if (est.step && quantize_to_step(data, *est.step, counts, valid, &why, &clamped)) {
         WriteSummary s =
             write_blocks(channel, counts, valid, *est.step, start_uutc, fs, new_segment);
         s.quantization = Quantization::Step;
+        s.clamped = clamped.total();
+        s.clamped_infinite = clamped.infinite;
         return s;
       }
       // Nothing but 0 and NaN (no reason given): any factor stores that
@@ -574,11 +568,14 @@ WriteSummary SessionWriter::write_float(const std::string& channel, std::span<co
     }
   }
   sf8 ufact = std::pow(10.0, -precision);
-  auto samples = quantize_to_int32(data, precision);
+  ClampCount clamped;
+  auto samples = quantize_to_int32(data, precision, &clamped);
   std::vector<ui1> valid(data.size());
   for (std::size_t i = 0; i < data.size(); ++i) valid[i] = std::isnan(data[i]) ? 0 : 1;
   WriteSummary s = write_blocks(channel, samples, valid, ufact, start_uutc, fs, new_segment);
   s.quantization = Quantization::Decimal;
+  s.clamped = clamped.total();
+  s.clamped_infinite = clamped.infinite;
   s.step_fallback = std::move(step_fallback);
   return s;
 }

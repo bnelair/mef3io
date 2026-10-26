@@ -349,7 +349,7 @@ class MefWriter:
         discont_handler: bool = True,
         reload_metadata: bool = True,
     ):
-        from ._writer import _is_step, warn_step_fallback
+        from ._writer import _is_step, warn_clamped, warn_step_fallback
 
         data = np.atleast_1d(np.asarray(data_write))
         step = _is_step(precision)
@@ -380,6 +380,7 @@ class MefWriter:
                     bool(new_segment), step,
                 )
             warn_step_fallback(channel, summary, path=self._path)
+            warn_clamped(channel, summary, path=self._path)
         return True
 
     def write_annotations(self, annotations, channel: Optional[str] = None):

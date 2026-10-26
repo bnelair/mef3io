@@ -197,15 +197,21 @@ How it works, and what it guarantees:
   for `MefWriter.write_data`. With `new_segment=True` the default path
   still infers a new precision, which gives the channel a second factor
   ([#150](https://github.com/bnelair/mef3io/issues/150)).
-- **No count ever wraps.** Every float write, step or default, refuses a
-  value whose count would leave int32 at the factor (`ValueError`, nothing
-  written), and the inferred precision is chosen so both ends of the data
-  fit. An infinite value is refused the same way.
+- **No count ever wraps.** A sample whose count would leave int32 at the
+  factor, or `+inf`/`-inf`, is stored as the nearest storable value,
+  `±(2**31 - 1)` counts (meflib's own positive/negative "infinity" values),
+  and the write succeeds. Every float write, step or default, does this; the
+  summary's `clamped` (and `clamped_infinite`) counts them and one
+  `ClampedSamplesWarning` per write says how many. `NaN` is never clamped:
+  it stays a gap. The inferred precision is chosen so both ends of the data
+  fit, so ordinary data never needs a clamp; a typical cause is a
+  saturation artifact in an append to a channel whose factor is fixed.
 
 The returned summary says what happened: `quantization` is `"step"`
 (stored exactly on the factor) or `"decimal"` (rounded to
-`10**-precision`), and `step_fallback` is `None` or the reason the step was
-not used. `MefWriter.write_data(..., precision="step")` does the same; Python
+`10**-precision`), `step_fallback` is `None` or the reason the step was
+not used, and `clamped` / `clamped_infinite` count the samples stored as
+the nearest storable value. `MefWriter.write_data(..., precision="step")` does the same; Python
 and C++ only (`Precision::detect_step()` in `SessionWriter::write_float`),
 not the C ABI or MATLAB.
 

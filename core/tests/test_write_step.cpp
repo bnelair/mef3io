@@ -99,9 +99,15 @@ TEST_CASE("quantize_to_step verifies every value") {
   x[9000] += 1e-6;
   REQUIRE_FALSE(quantize_to_step(x, 0.195, k, valid, &why));
   REQUIRE(why.find("index 9000") != std::string::npos);
-  x[9000] = 0.195 * 3e9;  // beyond int32
-  REQUIRE_FALSE(quantize_to_step(x, 0.195, k, valid, &why));
-  REQUIRE(why.find("int32") != std::string::npos);
+  // On the step but beyond int32, and +-inf: clamped, counted, not a failure.
+  x[9000] = 0.195 * 3e9;
+  x[9001] = -std::numeric_limits<sf8>::infinity();
+  ClampCount cl;
+  REQUIRE(quantize_to_step(x, 0.195, k, valid, &why, &cl));
+  REQUIRE(cl.finite == 1);
+  REQUIRE(cl.infinite == 1);
+  REQUIRE(k[9000] == 2147483647);
+  REQUIRE(k[9001] == -2147483647);  // never INT32_MIN (RED_NAN)
 }
 
 TEST_CASE("SessionWriter: precision step stores the counts, falls back otherwise") {
@@ -149,8 +155,17 @@ TEST_CASE("detect_step: too few distinct magnitudes is no step") {
   REQUIRE(e.reason.find("distinct") != std::string::npos);
 }
 
-TEST_CASE("quantize_to_int32 refuses instead of wrapping") {
-  std::vector<sf8> x{1.0, 3.0e6};
-  REQUIRE_THROWS_AS(quantize_to_int32(x, 3), std::invalid_argument);
+TEST_CASE("quantize_to_int32 clamps instead of wrapping") {
+  std::vector<sf8> x{1.0, 3.0e6, -3.0e6, std::numeric_limits<sf8>::infinity(),
+                     std::numeric_limits<sf8>::quiet_NaN()};
+  ClampCount c;
+  const auto k = quantize_to_int32(x, 3, &c);
+  REQUIRE(k[0] == 1000);
+  REQUIRE(k[1] == 2147483647);
+  REQUIRE(k[2] == -2147483647);
+  REQUIRE(k[3] == 2147483647);
+  REQUIRE(k[4] == 0);
+  REQUIRE(c.finite == 2);
+  REQUIRE(c.infinite == 1);
   REQUIRE(infer_precision(std::vector<sf8>{3.0e6, 3.0e6 + 0.001}) <= 2);
 }

@@ -17,7 +17,8 @@ What is pinned here:
 * too little evidence (a DC level, a square wave) adopts no step;
 * appends and new segments: a channel keeps its factor (the reader scales a
   channel by one, #150); data off it is REFUSED, never rounded;
-* no path wraps a count beyond int32: it is refused, nothing written;
+* no path wraps a count beyond int32: such a sample (and +-inf) is CLAMPED to
+  the nearest storable count, counted, and reported by one warning;
 * it is fast (detection on a bounded sample; one verifying pass) and the
   files are much smaller; the legacy stack reads them identically.
 """
@@ -187,36 +188,54 @@ def test_a_value_off_the_step_outside_the_sample_is_caught(tmp_path):
     assert len(fb) == 1
 
 
-def test_int32_overflow_falls_back(tmp_path):
-    # A step whose counts need more than int32 over the sample...
+def test_int32_overflow_in_the_sample_falls_back_and_clamps(tmp_path):
+    # A step whose counts need more than int32 over the sample: no step...
     x = adc_counts(10_000, seed=7) * 0.195
     x[0] = 0.195 * 3_000_000_000
     s, _ = write(tmp_path / "a.mefd", x)
-    assert s["quantization"] == "decimal" and s["step_fallback"]
-    # ...and one outside the sample: the verifying pass catches it.
-    x = adc_counts(1_000_000, seed=8) * 0.195
-    x[_outside_sample(len(x))] = 0.195 * 3_000_000_000
-    assert _mef3io.detect_step(x)["step"] == 0.195
-    s, fb = write(tmp_path / "b.mefd", x)
     assert s["quantization"] == "decimal" and "int32" in s["step_fallback"]
-    assert len(fb) == 1
+    # ...and on the step but outside the sample: stored on the step, the one
+    # value clamped (maintainer decision on #149: clamp + warn).
+    x = adc_counts(1_000_000, seed=8) * 0.195
+    i = _outside_sample(len(x))
+    x[i] = 0.195 * 3_000_000_000
+    assert _mef3io.detect_step(x)["step"] == 0.195
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with mef3io.Writer(str(tmp_path / "b.mefd"), overwrite=True) as w:
+            s = w.write("ch1", x, START, FS, precision="step")
+    assert s["quantization"] == "step" and s["clamped"] == 1 and s["clamped_infinite"] == 0
+    clamped = [c for c in caught if issubclass(c.category, mef3io.ClampedSamplesWarning)]
+    assert len(clamped) == 1
+    assert clamped[0].message.details == ({"channel": "ch1", "clamped": 1, "infinite": 0},)
+    got = mef3io.Reader(str(tmp_path / "b.mefd")).read("ch1")
+    assert got[i] == (2**31 - 1) * 0.195
+    y = x.copy()
+    y[i] = got[i]
+    assert np.array_equal(got, y)
 
 
-def test_infinite_values_are_refused(tmp_path):
-    """No step for inf; the default path then refuses it (it used to store
-    whatever llround(inf) gave)."""
+@pytest.mark.parametrize("precision", ["step", -1, 3])
+def test_infinite_values_are_clamped(tmp_path, precision):
+    """+-inf is stored as the extreme count (never INT32_MIN, RED's NaN); NaN
+    stays a gap. Counted separately as infinite."""
     x = adc_counts(10_000, seed=9) * 0.195
-    x[5] = np.inf
-    assert _mef3io.detect_step(x)["step"] is None
+    x[5], x[6], x[7] = np.inf, -np.inf, np.nan
     p = tmp_path / "s.mefd"
-    with mef3io.Writer(str(p), overwrite=True) as w:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            with pytest.raises(ValueError, match="not finite"):
-                w.write("ch1", x, START, FS, precision="step")
-            with pytest.raises(ValueError, match="not finite"):
-                w.write("ch1", x, START, FS)
-    assert not (p / "ch1.timd").exists()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with mef3io.Writer(str(p), overwrite=True) as w:
+            s = w.write("ch1", x, START, FS, precision=precision)
+    assert s["clamped"] == 2 and s["clamped_infinite"] == 2
+    if precision == "step":
+        assert s["quantization"] == "step"  # inf is no evidence against the step
+    w_ = [c for c in caught if issubclass(c.category, mef3io.ClampedSamplesWarning)]
+    assert len(w_) == 1 and "2 samples of channel" in str(w_[0].message)
+    raw = mef3io.Reader(str(p)).read_raw("ch1")
+    assert raw["samples"][5] == 2**31 - 1 and raw["samples"][6] == -(2**31 - 1)
+    assert raw["valid"][7] == 0
+    got = mef3io.Reader(str(p)).read("ch1")
+    assert np.isnan(got[7]) and got[5] == (2**31 - 1) * s["units_conversion_factor"]
 
 
 def test_only_step_is_accepted_as_a_string(tmp_path):
@@ -498,30 +517,52 @@ def test_even_counts_first_then_odd_counts_are_refused_not_rounded(tmp_path):
 # --- no silent int32 wrap, anywhere (#149 review) --------------------------------
 
 
-def test_no_path_wraps_a_count_beyond_int32(tmp_path):
+@pytest.mark.parametrize("precision", ["step", -1, 3])
+def test_a_saturation_spike_in_an_append_is_clamped(tmp_path, precision):
+    """The mid-acquisition case: one out-of-range sample in an append. The
+    append succeeds, the spike reads back as the clamped extreme, one warning."""
     p = tmp_path / "s.mefd"
     x = np.round(adc_counts(5_000, seed=36) * 0.001, 3)
     with mef3io.Writer(str(p), overwrite=True) as w:
         w.write("ch1", x, START, FS, precision=3)
-    before = _tree(p)
     t1 = START + int(round(len(x) / FS * 1e6))
-    big = np.full(512, 3.0e6 + 0.0004)  # 3e9 counts at 0.001
-    with mef3io.Writer(str(p)) as w:
-        with pytest.raises(mef3io.WriteConflictError, match="int32"):
-            w.write("ch1", big, t1, FS, precision="step")
-        with pytest.raises(ValueError, match="int32"):
-            w.write("ch1", big, t1, FS)  # the default append: used to wrap
-        with pytest.raises(ValueError, match="int32"):
-            w.write("ch1", big, t1, FS, precision=3)
-    assert _tree(p) == before
-    # A fresh default write of one-sided large data picks a precision that
-    # fits instead of wrapping (the inference checked only "both ends").
-    q = tmp_path / "q.mefd"
-    z = 3.0e6 + np.round(np.random.default_rng(37).normal(0, 1, 5000), 3)
-    with mef3io.Writer(str(q), overwrite=True) as w:
-        s = w.write("ch1", z, START, FS)
-    got = mef3io.Reader(str(q)).read("ch1")
-    assert np.max(np.abs(got - z)) <= s["units_conversion_factor"] / 2 + 1e-9
+    y = np.round(adc_counts(5_000, seed=37) * 0.001, 3)
+    y[2500] = 3.0e6  # 3e9 counts at 0.001: on the grid, beyond int32
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with mef3io.Writer(str(p)) as w:
+            s = w.write("ch1", y, t1, FS, precision=precision)
+    assert s["clamped"] == 1 and s["samples_written"] == len(y) and s["segment"] == 0
+    assert len([c for c in caught if issubclass(c.category, mef3io.ClampedSamplesWarning)]) == 1
+    got = mef3io.Reader(str(p)).read("ch1")
+    assert got[len(x) + 2500] == (2**31 - 1) * 0.001
+    expect = np.concatenate([x, y])
+    expect[len(x) + 2500] = got[len(x) + 2500]
+    np.testing.assert_allclose(got, expect, rtol=64 * EPS, atol=0)
+
+
+def test_many_clamps_one_warning_and_ordinary_data_never_clamps(tmp_path):
+    rng = np.random.default_rng(42)
+    x = np.round(rng.normal(0, 50, 50_000), 2)
+    x[rng.choice(len(x), 1000, replace=False)] = 1e300  # saturated
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with mef3io.Writer(str(tmp_path / "a.mefd"), overwrite=True) as w:
+            s = w.write("ch1", x, START, FS, precision=2)
+    assert s["clamped"] == 1000
+    assert len([c for c in caught if issubclass(c.category, mef3io.ClampedSamplesWarning)]) == 1
+    # The inference keeps BOTH ends in range: ordinary data, including
+    # one-sided large data, never needs a clamp.
+    for z in (np.round(rng.normal(0, 50, 50_000), 2),
+              3.0e6 + np.round(rng.normal(0, 1, 50_000), 3),
+              adc_counts(50_000, seed=43) * 0.195):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with mef3io.Writer(str(tmp_path / "b.mefd"), overwrite=True) as w:
+                for ch, prec in (("ch1", -1), ("ch2", "step")):  # a channel keeps one factor
+                    s = w.write(ch, z, START, FS, precision=prec)
+                    assert s["clamped"] == 0
+        assert not [c for c in caught if issubclass(c.category, mef3io.ClampedSamplesWarning)]
 
 
 def test_default_append_to_a_step_channel_is_refused_clearly(tmp_path):
@@ -551,23 +592,3 @@ def test_huge_steps_are_found_and_tiny_ones_say_why(tmp_path):
     x[_outside_sample(len(x)) if len(x) > 70_000 else -1] = -(2.0 ** 31) * 0.195
     s, _ = write(tmp_path / "b.mefd", x)
     assert s["quantization"] == "decimal" and "int32" in s["step_fallback"]
-
-
-def test_int32_refusals_say_what_fits(tmp_path):
-    """Round 2: the message fits the case — precision 0, inf, a channel factor."""
-    p = tmp_path / "s.mefd"
-    with mef3io.Writer(str(p), overwrite=True) as w:
-        with pytest.raises(ValueError, match="too large for any precision") as e:
-            w.write("ch1", np.array([1.0, 3.0e9]), START, FS)  # beyond int32 even at 1e0
-        assert "smaller precision" not in str(e.value)
-        with pytest.raises(ValueError, match="smaller precision"):
-            w.write("ch1", np.array([1.0, 3.0e6]), START, FS, precision=3)
-        with pytest.raises(ValueError, match="not finite"):
-            w.write("ch1", np.array([1.0, np.inf]), START, FS)
-        x = adc_counts(20_000, seed=41) * 0.195
-        w.write("ch1", x, START, FS, precision="step")
-        t1 = START + int(round(len(x) / FS * 1e6))
-        with pytest.raises(ValueError, match="not finite"):
-            w.write("ch1", np.array([0.195, -np.inf]), t1, FS, precision="step")
-        with pytest.raises(mef3io.WriteConflictError, match="too large for the factor"):
-            w.write("ch1", np.array([0.195, 0.195 * 3e9]), t1, FS, precision="step")

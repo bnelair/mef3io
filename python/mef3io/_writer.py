@@ -60,6 +60,41 @@ def _as_int32_counts(data):
     return np.ascontiguousarray(a, dtype=np.int32)
 
 
+class ClampedSamplesWarning(MefWarning):
+    """A float write stored some samples as the nearest storable value.
+
+    MEF stores int32 counts; a sample whose count at the conversion factor
+    would leave that range, or that is ``+inf``/``-inf``, is stored as the
+    largest count, ``+-(2**31 - 1)`` — meflib's own "positive/negative
+    infinity" values (``RED_POSITIVE_INFINITY``/``RED_NEGATIVE_INFINITY``,
+    meflib.h, which its ``RED_round`` clamps to as well) — so it reads back
+    as ``+-(2**31 - 1) * factor``. The write succeeds; nothing wraps. Typical
+    cause: a saturation artifact in an append to a channel whose factor is
+    fine. ``NaN`` is never clamped: it stays a gap.
+
+    Raised once per such write. ``w.message.details`` is
+    ``({"channel": ..., "clamped": n, "infinite": k},)`` (``k`` of the ``n``
+    were infinite); the text carries counts only, never sample values or
+    times. The write summary has the same numbers (``clamped``,
+    ``clamped_infinite``).
+    """
+
+
+def warn_clamped(channel, summary, stacklevel=3, path=None):
+    """One :class:`ClampedSamplesWarning` when a float write clamped samples."""
+    n = summary.get("clamped", 0)
+    if n:
+        from ._warnings import emit
+
+        k = summary.get("clamped_infinite", 0)
+        emit(ClampedSamplesWarning,
+             f"{n} {'sample' if n == 1 else 'samples'} of channel {channel!r} {'was' if n == 1 else 'were'} outside what MEF can store "
+             f"at the conversion factor ({k} of them infinite) and were stored as the "
+             f"nearest storable value.",
+             path=path, details=[{"channel": channel, "clamped": n, "infinite": k}],
+             stacklevel=stacklevel)
+
+
 def _is_step(precision) -> bool:
     """True for ``precision="step"``; ValueError for any other string."""
     if isinstance(precision, str):
@@ -405,15 +440,20 @@ class Writer:
             ``quantization`` (``"decimal"``: rounded to ``10**-precision``;
             ``"step"``: stored exactly on the factor) and
             ``step_fallback`` (``precision="step"`` only: ``None`` when the
-            step was used, else why not).
+            step was used, else why not), ``clamped`` and
+            ``clamped_infinite`` (samples stored as the nearest storable
+            value; see :class:`ClampedSamplesWarning`).
 
         Raises
         ------
         ValueError
             If ``fs`` is not a finite number > 0, ``precision`` makes the
-            conversion factor ``10**-precision`` 0, is a string other than
-            ``"step"``, or a value's count would leave int32 at the factor
-            (it would wrap) — checked before anything is written.
+            conversion factor ``10**-precision`` 0, or is a string other
+            than ``"step"`` — checked before anything is written. (A value
+            whose count would leave int32, or ``+-inf``, is not an error: it
+            is stored as the nearest storable value, counted in the
+            summary's ``clamped`` and reported by
+            :class:`ClampedSamplesWarning`.)
         WriteConflictError
             On an append conflict (fs / conversion-factor mismatch, data
             starting before the segment's end, a default-precision append
@@ -428,6 +468,7 @@ class Writer:
                 bool(new_segment), step,
             )
         warn_step_fallback(channel, summary, path=self._path)
+        warn_clamped(channel, summary, path=self._path)
         return summary
 
     def write_int32(

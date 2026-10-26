@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "mef3io/session_writer.hpp"
+#include "clamp.hpp"
 #include "number_text.hpp"
 
 namespace mef3io {
@@ -118,12 +119,12 @@ StepEstimate detect_step(std::span<const sf8> data) {
   // whatever the length of the data.
   std::vector<sf8> mags;
   mags.reserve(kHead + kWindows * kWindow);
-  bool non_finite = false;
+  // NaN and +-inf are ignored: NaN is a gap, inf is clamped on write and is
+  // no evidence of a step either way.
   auto take = [&](std::size_t b, std::size_t e) {
     for (std::size_t i = b; i < e; ++i) {
       const sf8 v = data[i];
-      if (std::isnan(v)) continue;
-      if (!std::isfinite(v)) non_finite = true;
+      if (!std::isfinite(v)) continue;
       mags.push_back(std::abs(v));
     }
   };
@@ -141,21 +142,16 @@ StepEstimate detect_step(std::span<const sf8> data) {
     if (!mags.empty() && mags.front() == 0.0) mags.erase(mags.begin());  // 0 fits any step
   };
   nonzero();
-  if (mags.empty() && !non_finite) {
+  if (mags.empty()) {
     // A sample of nothing but 0 and NaN (a flat or unconnected start): look
     // on through the data for the first non-zero values. Only this
     // degenerate input pays a scan, and it stops once it has a sample.
     for (std::size_t i = 0; i < n && mags.size() < kHead; ++i) {
       const sf8 v = data[i];
-      if (v != v || v == 0.0) continue;
-      if (!std::isfinite(v)) non_finite = true;
+      if (!std::isfinite(v) || v == 0.0) continue;
       mags.push_back(std::abs(v));
     }
     nonzero();
-  }
-  if (non_finite) {
-    out.reason = "the data holds an infinite value";
-    return out;
   }
   if (mags.empty()) return out;  // nothing but 0 and NaN: no step, and none needed
   // Minimum evidence (#149 review): a DC level, a square wave or a handful
@@ -251,10 +247,9 @@ StepEstimate detect_step(std::span<const sf8> data) {
 }
 
 bool quantize_to_step(std::span<const sf8> data, sf8 step, std::vector<si4>& counts,
-                      std::vector<ui1>& valid, std::string* why, StepMismatch* kind) {
-  if (kind) *kind = StepMismatch::None;
-  auto fail = [&](std::size_t i, const char* what, StepMismatch k) {
-    if (kind) *kind = k;
+                      std::vector<ui1>& valid, std::string* why, ClampCount* clamped) {
+  ClampCount c;
+  auto fail = [&](std::size_t i, const char* what) {
     if (why) *why = "the value at index " + std::to_string(i) + " " + what + " " + detail::shortest_number(step);
     return false;
   };
@@ -262,12 +257,10 @@ bool quantize_to_step(std::span<const sf8> data, sf8 step, std::vector<si4>& cou
   // the counts change sign, the check below is the same.
   if (step == 0.0 || !std::isfinite(step)) {
     if (why) *why = "the step is not a finite non-zero number";
-    if (kind) *kind = StepMismatch::BadStep;
     return false;
   }
   if (!std::isfinite(1.0 / step)) {  // subnormal: no reciprocal to convert by
     if (why) *why = "the step " + detail::shortest_number(step) + " is too small (subnormal)";
-    if (kind) *kind = StepMismatch::BadStep;
     return false;
   }
   const std::size_t n = data.size();
@@ -291,16 +284,23 @@ bool quantize_to_step(std::span<const sf8> data, sf8 step, std::vector<si4>& cou
       continue;
     }
     const sf8 y = x * inv;
-    if (!(std::abs(y) <= kMaxCount)) {  // also an infinite x
-      if (!std::isfinite(x)) return fail(i, "is not finite, at the step", StepMismatch::NotFinite);
-      return fail(i, "needs a count beyond int32 at the step", StepMismatch::Overflow);
+    if (!(std::abs(y) <= kMaxCount)) {
+      // Beyond int32 (or +-inf): CLAMPED to the nearest storable count
+      // (clamp.hpp) — but a finite value must still lie on the step, or the
+      // step is wrong for it and the conversion fails as for any other.
+      if (std::isfinite(x) && std::abs(x - std::round(y) * step) > kStepRelTol * std::abs(x))
+        return fail(i, "is not a whole multiple of the step");
+      out[i] = detail::clamp_count(y, std::isfinite(x), c);
+      ok[i] = 1;
+      continue;
     }
     const sf8 q = (y + kRound) - kRound;
     if (std::abs(x - q * step) > kStepRelTol * std::abs(x))
-      return fail(i, "is not a whole multiple of the step", StepMismatch::NotMultiple);
+      return fail(i, "is not a whole multiple of the step");
     out[i] = static_cast<si4>(q);
     ok[i] = 1;
   }
+  if (clamped) *clamped = c;
   return true;
 }
 

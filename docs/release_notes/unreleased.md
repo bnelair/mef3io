@@ -255,26 +255,32 @@ Overlaps that the rule only notes ("12" in "LAH12", "P3", a session called
   upgrading deletes that session's old-named snapshot (exactly that file, and
   only if it is a mef3io snapshot) and builds a new one.
 
-## Float writes never wrap a count beyond int32, and refuse inf
-
-**An append (or any float write) containing even ONE sample that does not
-fit is now refused as a whole: nothing of that chunk is written and the
-call raises `ValueError`.** Mid-acquisition this means a single
-out-of-range artifact (say a 1e6 uV saturation spike on a channel at factor
-0.001) fails the whole chunk where it used to be stored with that sample
-silently wrapped. The same holds for an infinite value. Catch the error and
-decide what to do with the chunk (for example replace the offending samples
-with NaN, which marks them as a gap).
+## Float writes never wrap a count beyond int32: out-of-range samples are clamped
 
 Before, a float write whose value needed a count outside int32 at the
 conversion factor stored a wrapped, wrong value silently (an append of
-`3.0e6` to a channel at factor 0.001 read back as `-1294967.296`). Now every
-float write (`Writer.write`, `MefWriter.write_data`, C++ `write_float`)
-refuses it with `ValueError` / `std::invalid_argument` and writes nothing,
-and an infinite value is refused the same way. The inferred precision now
-requires both ends of the data to fit (it used to accept data where only one
-end overflowed, as mef_tools did), so a default write of one-sided large
-data picks a smaller precision instead of wrapping.
+`3.0e6` to a channel at factor 0.001 read back as `-1294967.296`), and an
+infinite value wrapped the same way.
+
+Now every float write (`Writer.write`, `MefWriter.write_data`, C++
+`write_float`), with the default precision or `precision="step"`, stores
+such a sample, and `+inf`/`-inf`, as the nearest storable value:
+`±(2**31 - 1)` counts, meflib's own `RED_POSITIVE_INFINITY` /
+`RED_NEGATIVE_INFINITY`, which is also what meflib's encoder clamps to. The
+write succeeds; one out-of-range artifact (say a saturation spike in an
+append) no longer costs the chunk. The write summary gains `clamped` and
+`clamped_infinite` (C++ `WriteSummary::clamped` / `clamped_infinite`), and
+a write that clamped anything emits ONE `ClampedSamplesWarning` (a
+`MefWarning`; counts only in its text, `details` per channel). `NaN` is
+unchanged: a gap, never clamped. If you prefer to mark such samples as
+missing, replace them with `NaN` before writing.
+
+The inferred precision now requires both ends of the data to fit (it used
+to accept data where only one end overflowed, as mef_tools did), so a
+default write of one-sided large data picks a smaller precision instead of
+needing a clamp, and `+-inf` no longer drags the inferred precision to 0
+(it is ignored there, like NaN). `precision="step"` ignores `+-inf` when
+estimating the step too.
 
 ## Smaller files for data from an amplifier: `precision="step"` (#81)
 
