@@ -25,6 +25,9 @@ function [summary, nSegments] = recoverSession(path, opts)
 %   repairs as repair_session - so recovery alone leaves a valid session. An
 %   index that fails its own CRC is rebuilt from the CRC-checked blocks.
 %
+%   Backup=false is accepted but IGNORED since 2.0.1: the backup is always kept
+%   (warning mef3io:backupAlwaysKept).
+%
 %   It is a DRY RUN unless Apply=true, and backs up what it changes to
 %   <session>.recover-backup first - the .tidx, the .tdat's 1024-byte header
 %   and any dropped fragment, never the whole data file, which may be tens of
@@ -46,6 +49,10 @@ function [summary, nSegments] = recoverSession(path, opts)
         opts.Backup (1, 1) logical = true
         opts.Password (1, :) char = ''
     end
+    if ~opts.Backup
+        warning('mef3io:backupAlwaysKept', ...
+            'Backup=false is ignored: a backup is always kept in <session>.recover-backup.');
+    end
     [summary, nSegments] = mef3io_mex('recover_session', path, ...
-        double(opts.Apply), double(opts.Backup), opts.Password);
+        double(opts.Apply), 1, opts.Password);
 end

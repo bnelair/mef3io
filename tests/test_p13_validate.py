@@ -450,12 +450,13 @@ def test_repair_backs_up_before_rewriting(tmp_path):
     assert backups[0].read_bytes() == original
 
 
-def test_backup_can_be_declined(tmp_path):
+def test_backup_cannot_be_declined(tmp_path):
     path = tmp_path / "s.mefd"
     _write(path)
     _patch_s2(_tmet(path), "maximum_difference_bytes", 0)
-    mef3io.repair_session(str(path), ["sizing.difference-bytes"], backup=False)
-    assert not Path(str(path) + ".repair-backup").exists()
+    with pytest.warns(mef3io.BackupAlwaysKeptWarning):
+        mef3io.repair_session(str(path), ["sizing.difference-bytes"], backup=False)
+    assert Path(str(path) + ".repair-backup").exists()
 
 
 # --- damaged input is reported, never repaired ------------------------------
