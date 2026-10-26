@@ -302,6 +302,7 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
       sd["number_of_samples"] = opt_obj(g.number_of_samples);
       sd["number_of_blocks"] = opt_obj(g.number_of_blocks);
       sd["number_of_discontinuities"] = opt_obj(g.number_of_discontinuities);
+      sd["units_conversion_factor"] = opt_obj(g.units_conversion_factor);
       sd["time_offset"] = g.time_offset;
       sd["recording_time_offset"] = opt_obj(g.recording_time_offset);
       sd["offset_assumed_zero"] = g.offset_assumed_zero;
@@ -1554,7 +1555,7 @@ NB_MODULE(_mef3io, m) {
              nb::dict d;
              d["name"] = ci.name;
              d["sampling_frequency"] = ci.sampling_frequency;
-             d["units_conversion_factor"] = ci.units_conversion_factor;
+             d["units_conversion_factor"] = opt_obj(ci.units_conversion_factor);
              d["units_description"] = ci.units_description;
              d["start_time"] = ci.start_time;
              d["end_time"] = ci.end_time;
@@ -1606,6 +1607,7 @@ NB_MODULE(_mef3io, m) {
               nb::dict d;
               d["start_uutc"] = r.start_uutc;
               d["start_sample"] = r.start_sample;
+              d["units_conversion_factor"] = r.units_conversion_factor;
               d["samples"] = vec_to_numpy(std::move(r.samples));
               out.append(d);
             }
@@ -1851,6 +1853,11 @@ NB_MODULE(_mef3io, m) {
           "Record files read so far that the password opened only through the "
           "byte mapping mef3io used up to 1.2.0 (issue #84).")
       .def(
+          "unscaled_channels",
+          [](mef3io::Reader& r) { return r.session().unscaled_channels(); },
+          "Channels read() or block_envelope() returned raw counts for, from a "
+          "segment whose conversion factor is not set (0).")
+      .def(
           "session_identity",
           [](mef3io::Reader& r) {
             return std::vector<std::string>{r.session().location(), r.session().session_name()};
@@ -1877,7 +1884,7 @@ NB_MODULE(_mef3io, m) {
              nb::dict d;
              d["name"] = ci.name;
              d["sampling_frequency"] = ci.sampling_frequency;
-             d["units_conversion_factor"] = ci.units_conversion_factor;
+             d["units_conversion_factor"] = opt_obj(ci.units_conversion_factor);
              d["units_description"] = ci.units_description;
              d["start_time"] = ci.start_time;
              d["end_time"] = ci.end_time;
@@ -1940,7 +1947,16 @@ NB_MODULE(_mef3io, m) {
             nb::dict out;
             out["start_uutc"] = d.start_uutc;
             out["sampling_frequency"] = d.sampling_frequency;
-            out["units_conversion_factor"] = d.units_conversion_factor;
+            out["units_conversion_factor"] = opt_obj(d.units_conversion_factor);
+            nb::list spans;
+            for (const auto& sp : d.factor_spans) {
+              nb::dict e;
+              e["start_index"] = sp.start_index;
+              e["end_index"] = sp.end_index;
+              e["units_conversion_factor"] = sp.units_conversion_factor;
+              spans.append(e);
+            }
+            out["units_conversion_factors"] = spans;
             out["samples"] = vec_to_numpy(std::move(d.samples));
             out["valid"] = vec_to_numpy(std::move(d.valid));
             nb::list mm;
@@ -1977,6 +1993,7 @@ NB_MODULE(_mef3io, m) {
                d["start_sample"] = s.start_sample;
                d["number_of_samples"] = s.number_of_samples;
                d["number_of_blocks"] = s.number_of_blocks;
+               d["units_conversion_factor"] = s.units_conversion_factor;
                d["provenance"] = provenance_dict(s.provenance);
                out.append(d);
              }

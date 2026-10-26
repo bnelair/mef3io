@@ -135,6 +135,7 @@ classdef Reader < handle
 
         function x = read(obj, channel, t0, t1)
             %READ Float64 samples over [t0, t1) uUTC; gaps are NaN.
+            %   Each sample is scaled by its own segment's conversion factor.
             if nargin < 3, t0 = []; end
             if nargin < 4, t1 = []; end
             x = mef3io_mex('reader_read', obj.h, channel, t0, t1);
@@ -142,6 +143,10 @@ classdef Reader < handle
 
         function s = readRaw(obj, channel, t0, t1)
             %READRAW Stored int32 counts plus a validity mask (false in gaps).
+            %   Segments of one channel may store different conversion factors:
+            %   units_conversion_factors lists where each applies (start_index
+            %   and end_index, 1-based, inclusive), and units_conversion_factor
+            %   is NaN when the window holds more than one.
             if nargin < 3, t0 = []; end
             if nargin < 4, t1 = []; end
             s = mef3io_mex('reader_read_raw', obj.h, channel, t0, t1);
@@ -149,6 +154,7 @@ classdef Reader < handle
 
         function s = segments(obj, channel)
             %SEGMENTS Per-segment map: time range, sample range, block count,
+            %   the segment's own units_conversion_factor,
             %   and provenance (created_by / last_modified_by versions, last_operation,
             %   operations, modification_count; [] for a file mef3io did not stamp).
             s = mef3io_mex('reader_segments', obj.h, channel);

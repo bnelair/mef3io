@@ -223,6 +223,69 @@ Overlaps that the rule only notes ("12" in "LAH12", "P3", a session called
 
 ## Changed — check before upgrading (2.0.0)
 
+- **Conversion factors are per segment** (#150). MEF stores the
+  units-conversion factor in each segment's section 2, and segments of one
+  channel may store different ones (a `new_segment=True` write with another
+  `precision`, or a foreign recorder). The API now says so:
+  - `Reader.info(ch)["units_conversion_factor"]` (and `MultiReader.info`) is
+    `None` when the channel's segments store different factors (meflib's
+    channel aggregate reads `NO_ENTRY` there). C++ `ChannelInfo::
+    units_conversion_factor` is a `std::optional`; the C ABI's
+    `mef3io_channel_info` and MATLAB's `info` give NaN.
+  - `Reader.segments(ch)` has each segment's `units_conversion_factor` (C ABI
+    `mef3io_reader_segment_units_conversion_factor`, MATLAB `segments`);
+    `inspect()`'s segment summaries too, and `ChannelSummary.
+    units_conversion_factor` is `None` when they differ.
+  - `read_raw()` gains `units_conversion_factors`: which factor applies to
+    which samples, as `start_index`/`end_index`/`units_conversion_factor`
+    spans. Its `units_conversion_factor` is `None` when the window holds
+    samples of segments with different factors (C++ `RawData::
+    units_conversion_factor` is a `std::optional`, `RawData::factor_spans`
+    the spans; C ABI `mef3io_reader_read_raw_factors`; MATLAB `readRaw`'s
+    `units_conversion_factors`, 1-based and inclusive). Code that computed
+    `samples * units_conversion_factor` must use the spans, or `read()`.
+  - `MultiReader.read_raw()` no longer refuses a window over recordings with
+    different factors: it returns the same spans a `Reader` of the merged
+    session does.
+  - `Session.read_runs()` runs carry `units_conversion_factor` and are split
+    where the factor changes.
+  - The compat `MefReader`'s `ufact` is `[None]` for such a channel, and
+    `get_data` scales each sample by its own segment's factor.
+- **A segment whose conversion factor is not set reads as raw counts, with
+  a warning; NaN or infinite factors are refused.** 0 is MEF's "no entry"
+  for the factor ("not set"). `read()`, `block_envelope()`, `MultiReader`
+  and the compat `MefReader.get_data` now return such a segment's samples
+  as the **raw stored counts** (factor 1) and emit one new
+  `mef3io.UnscaledSamplesWarning` per Reader and channel the first time
+  such a segment is read. Before, they read back as all zeros. In a channel
+  that mixes such a segment with real factors, every segment is scaled by
+  its own (1 for the unset one). `info()`, `segments()` and `read_raw()`'s
+  `units_conversion_factors` keep reporting the stored value (0). A factor
+  that is NaN or infinite is invalid: `read()` and `block_envelope()` raise
+  `mef3io.FormatError` (C ABI `MEF3IO_ERR_FORMAT`) for a window holding such
+  samples, before anything is decoded. `read_raw()` and `toc()` still return
+  the counts, and a lenient Reader does not count it as a damaged segment.
+  The C ABI and MATLAB read unset factors as raw counts too, without a
+  warning (C++: `Session::unscaled_channels()`).
+
+  **Such files exist — check yours (migration).** 0 is what meflib's and
+  pymef's section-2 templates hold until a writer sets the factor
+  (meflib.c:4564; pymef's `MefSession._initialize_tmd2`). So a session
+  written through pymef or by a meflib-based recorder that never set it,
+  or by mef3io before 2.0 with `write_int32(ufact=0)`, stores 0. mef_tools
+  read those as all zeros (`counts * 0`), and so did mef3io before 2.0; now
+  they read as the raw counts, with the warning. mef_tools and mef3io's own
+  writers never store 0 by default (mef_tools writes `10**-precision`, 1.0
+  for precision 0). If you know the real factor, scale the counts yourself:
+
+  ```python
+  raw = r.read_raw("ch1", t0, t1)
+  x = np.where(raw["valid"] == 1, raw["samples"] * known_factor, np.nan)
+  ```
+
+  `r.segments("ch1")` shows which segments store 0
+  (`units_conversion_factor`).
+
 - **Invalid sampling frequencies and conversion factors are refused** (#83).
   Every write path (`Writer.write`, `write_int32`, appends, the C ABI and
   MATLAB) now raises `ValueError` (C++ `std::invalid_argument`, C ABI
@@ -314,6 +377,18 @@ unchanged.
   fields, plus `detect_step` / `quantize_to_step`. Not in the C ABI or MATLAB.
 
 ## Fixed
+
+- **A channel whose segments store different conversion factors read back
+  wrong** (#150). The reader scaled the whole channel by its FIRST segment's
+  factor, so after `write(..., precision=2)` and `write(..., precision=4,
+  new_segment=True)` the second segment read `999.0` where `9.99` was
+  written, without a warning. `read()`, `block_envelope()` and every value
+  derived from them now scale each block by its own segment's factor
+  (negative factors included); pymef agrees (test-pinned on a session with
+  0.01, 0.195 and -0.5 in one channel). Copies (`transform_session` cuts,
+  `anonymize_session`, `merge_sessions`) already kept each segment's factor;
+  a cut segment with a negative factor now declares its section-2 native
+  maximum and minimum the right way round.
 
 - **Appending to a segment folder whose number is not zero-padded**
   (`ch1-5.segd`, as some writers name them) now extends that folder; it used

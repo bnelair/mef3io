@@ -23,7 +23,9 @@ from typing import Callable, Optional
 import numpy as np
 
 from ._cancel import CancelToken, Cancelled, _hooks
-from ._reader import Reader, _check_threads, _flush
+from ._reader import (Reader, UnscaledSamplesWarning, _Announced, _check_threads,
+                      _effective_factor, _flush, _format_error, _unscaled_warning_text,
+                      _unusable_factor_message, _usable_factor)
 from ._warnings import MefWarning, emit as _emit, identity_of as _identity_of
 
 __all__ = ["MultiReader", "MultiReaderDifferenceWarning"]
@@ -245,7 +247,8 @@ class MultiReader:
       agree. Every other field is the value the recordings holding the
       channel agree on. A field they disagree on is ``None`` (a
       :class:`MultiReaderDifferenceWarning` names such fields once, on
-      open). A session description equal to its own recording's name
+      open; not ``units_conversion_factor``, which every read handles per
+      segment). A session description equal to its own recording's name
       (what mef3io and the legacy stack write by default) counts as unset:
       day files named by date do not "disagree" on it, and when every
       recording has only the default it is ``None`` (one recording keeps
@@ -275,13 +278,14 @@ class MultiReader:
       are emitted once, on open, with ``w.message.path`` naming that
       recording, plus one :class:`MultiReaderDifferenceWarning`.
 
+    * Recordings (or segments) that store different units-conversion
+      factors for one channel: as in a :class:`Reader`, :meth:`read` scales
+      each sample by its own segment's factor, :meth:`read_raw` lists where
+      each factor applies (``units_conversion_factors``), and ``info``
+      reports ``None``.
+
     Where it cannot equal a merged session:
 
-    * Recordings that store different units-conversion factors for one
-      channel: :meth:`read` scales each recording's samples by its own factor
-      (a merged session would scale them all by one), :meth:`read_raw`
-      refuses a window that touches recordings with different factors (the
-      counts would mean different things), and ``info`` reports ``None``.
     * A :meth:`read` reads each recording it touches from the window's start,
       so the window's own grid applies with no re-rounding: a recording late
       in a long window allocates int32 counts and a validity byte for the
@@ -317,6 +321,7 @@ class MultiReader:
         self._n_threads = _check_threads(n_threads)
         self._closed = False
         self._lock = threading.Lock()
+        self._announced = _Announced()  # warnings given once (UnscaledSamplesWarning)
         self._segment_maps: dict = {}
         self._declaration_issues_global = None
 
@@ -418,7 +423,12 @@ class MultiReader:
                     combined[key] = self._session_wide[key]  # one rule: every recording
                 else:
                     combined[key] = _agree(vals)
-                    if combined[key] is None and any(v is not None for v in vals):
+                    # Different conversion factors are NOT a difference worth
+                    # a warning (#150): every read scales each segment by its
+                    # own, and a Reader of the merged session gives the same
+                    # None without one.
+                    if (combined[key] is None and key != "units_conversion_factor"
+                            and any(v is not None for v in vals)):
                         differing.add(key)
             self._infos[ch] = combined
             self._check_overlap(ch, ks, infos)
@@ -787,8 +797,32 @@ class MultiReader:
             if owner is not None:
                 owner[i] = best
 
-    def _ufacts(self, channel, touched) -> list:
-        return [self._readers[k].info(channel)["units_conversion_factor"] for k in touched]
+    @staticmethod
+    def _distinct_factors(results) -> list:
+        # The factors the parts' valid samples carry (NaN counted once).
+        seen, out = set(), []
+        for res, _ in results:
+            for sp in res["units_conversion_factors"]:
+                f = sp["units_conversion_factor"]
+                key = "nan" if f != f else f
+                if key not in seen:
+                    seen.add(key)
+                    out.append(f)
+        return out
+
+    @staticmethod
+    def _factor_slots(n, results, owner) -> np.ndarray:
+        # Each slot's factor: the one of the part that owns it (NaN elsewhere).
+        fac = np.full(n, np.nan)
+        for j, (res, _) in enumerate(results):
+            idx = np.flatnonzero(owner == j)
+            if not idx.size:
+                continue
+            fj = np.full(len(res["valid"]), np.nan)
+            for sp in res["units_conversion_factors"]:
+                fj[sp["start_index"]:sp["end_index"]] = sp["units_conversion_factor"]
+            fac[idx] = fj[idx]
+        return fac
 
     def read(
         self,
@@ -811,20 +845,36 @@ class MultiReader:
         fs, t0, n, touched, results = self._gather(channel, t0, t1, cancel, progress)
         # Reader.read never warns (its block-copy detail is read_raw's): the
         # warnings collected with each part are dropped here, not emitted.
-        ufs = self._ufacts(channel, touched)
-        same = len(set(ufs)) <= 1
+        ufs = self._distinct_factors(results)
+        same = len(ufs) <= 1
         samples, valid, owner = self._assemble(channel, fs, t0, n, touched, results,
                                                need_owner=not same)
         if same:
             uf = ufs[0] if ufs else 1.0
-            out = samples.astype(np.float64) * uf
+            if ufs and not _usable_factor(uf):
+                raise _format_error(_unusable_factor_message(channel, uf, "read_raw()"))
+            unscaled = bool(ufs) and uf == 0
+            out = samples.astype(np.float64) * _effective_factor(uf)
         else:
-            out = np.empty(n, dtype=np.float64)
-            for j, uf in enumerate(ufs):
-                m = owner == j
-                out[m] = samples[m].astype(np.float64) * uf
+            fac = self._factor_slots(n, results, owner)
+            bad = (valid != 0) & ~np.isfinite(fac)
+            if bad.any():
+                uf = float(fac[np.flatnonzero(bad)[0]])
+                raise _format_error(_unusable_factor_message(channel, uf, "read_raw()"))
+            zero = (valid != 0) & (fac == 0)
+            unscaled = bool(zero.any())
+            fac[fac == 0] = 1.0  # not set: the raw counts, as Reader.read
+            out = samples.astype(np.float64) * fac
         out[valid == 0] = np.nan
+        if unscaled:
+            self._warn_unscaled(channel, stacklevel=3)
         return out
+
+    def _warn_unscaled(self, channel: str, stacklevel: int) -> None:
+        # Once per MultiReader and channel, as a Reader does.
+        if self._announced.new("unscaled", [channel], lambda c: c):
+            _flush([(UnscaledSamplesWarning, _unscaled_warning_text(channel),
+                     dict(path=self._paths[0], details=channel))], stacklevel=stacklevel)
 
     def _flush_results(self, results) -> None:
         for _, pending in results:
@@ -846,31 +896,33 @@ class MultiReader:
         every recording's, in time order (each ``segment`` is a path, so it
         says which recording).
 
-        Raises
-        ------
-        ValueError
-            The recordings the window touches store the channel with different
-            units-conversion factors, so one factor cannot turn these counts
-            into units. Use :meth:`read`, or read each recording's part.
+        ``units_conversion_factors`` says which factor applies where, over
+        the combined window, exactly as a :class:`Reader` of the merged
+        session gives it.
         """
         self._check_open()
-        fs, t0_, t1_, n, period, touched = self._window(channel, t0, t1)
-        ufs = self._ufacts(channel, touched)
-        if len(set(ufs)) > 1:
-            raise ValueError(
-                f"channel {channel}: the recordings this window touches store different "
-                f"units-conversion factors ({', '.join(f'{u:g}' for u in sorted(set(ufs)))}), "
-                "so their counts cannot share one; use read(), or read_raw() each "
-                "recording's part"
-            )
         fs, t0, n, touched, results = self._gather(channel, t0, t1, cancel, progress)
         self._flush_results(results)
-        if ufs:
-            uf = ufs[0]
-        else:
+        ufs = self._distinct_factors(results)
+        same = len(ufs) <= 1
+        samples, valid, owner = self._assemble(channel, fs, t0, n, touched, results,
+                                               need_owner=not same)
+        vi = np.flatnonzero(valid)
+        spans = []
+        if not vi.size:
             uf = self._infos[channel]["units_conversion_factor"]
-            uf = float("nan") if uf is None else uf
-        samples, valid, _ = self._assemble(channel, fs, t0, n, touched, results, need_owner=False)
+        elif same:
+            uf = float(ufs[0])
+            spans = [(int(vi[0]), int(vi[-1]) + 1, uf)]
+        else:
+            # Reader's canonical spans: the valid slots in order, grouped
+            # into maximal runs of one factor.
+            fv = self._factor_slots(n, results, owner)[vi]
+            change = ~((fv[1:] == fv[:-1]) | (np.isnan(fv[1:]) & np.isnan(fv[:-1])))
+            starts = np.concatenate(([0], np.flatnonzero(change) + 1))
+            ends = np.concatenate((starts[1:], [len(vi)]))
+            spans = [(int(vi[a]), int(vi[b - 1]) + 1, float(fv[a])) for a, b in zip(starts, ends)]
+            uf = None if len(spans) > 1 else spans[0][2]
         mismatches = []
         for out, _ in results:
             mismatches.extend(out.get("block_copy_mismatches") or [])
@@ -878,6 +930,10 @@ class MultiReader:
             "start_uutc": t0,
             "sampling_frequency": fs,
             "units_conversion_factor": uf,
+            "units_conversion_factors": [
+                {"start_index": a, "end_index": b, "units_conversion_factor": f}
+                for a, b, f in spans
+            ],
             "samples": samples,
             "valid": valid,
             "block_copy_mismatches": mismatches,
@@ -976,8 +1032,11 @@ class MultiReader:
                     if not (self._readers[k].info(channel)["start_time"] >= hi + margin
                             or self._readers[k].info(channel)["end_time"] + margin <= lo)]
             ks = keep or ks[:1]
-        parts = _run(lambda k: self._readers[k].block_envelope(channel, t0, t1), ks,
-                     self._workers())
+        pendings = {k: [] for k in ks}
+        parts = _run(lambda k: self._readers[k]._block_envelope(channel, t0, t1, pendings[k]),
+                     ks, self._workers())
+        if any(c is UnscaledSamplesWarning for p in pendings.values() for c, _, _ in p):
+            self._warn_unscaled(channel, stacklevel=3)
         if len(parts) == 1:
             return parts[0]
         order = np.argsort(np.concatenate([p["start_uutc"] for p in parts]), kind="stable")

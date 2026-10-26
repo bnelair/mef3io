@@ -36,7 +36,9 @@ class SegmentSummary:
     ``recording_time_offset`` holds its value only with
     ``include_values=True`` (the value is itself identifying: it is the local
     midnight of the recording day). ``number_of_discontinuities`` is the
-    DECLARED count (legacy writers leave 0 there even with gaps). File sizes
+    DECLARED count (legacy writers leave 0 there even with gaps).
+    ``units_conversion_factor`` is the segment's own, as stored (``0.0`` is
+    MEF's "no entry"; ``None`` when section 2 is locked). File sizes
     are in bytes; the ``.tdat`` is measured, never read. ``provenance`` is the
     dict described in :meth:`mef3io.Reader.segments`, or ``None``.
     """
@@ -53,6 +55,7 @@ class SegmentSummary:
     number_of_samples: Optional[int]
     number_of_blocks: Optional[int]
     number_of_discontinuities: Optional[int]
+    units_conversion_factor: Optional[float]
     time_offset: str
     recording_time_offset: Optional[int]
     offset_assumed_zero: bool
@@ -89,7 +92,9 @@ class ChannelSummary:
     ``units_description`` come from the first segment whose metadata section 2
     is readable, and are ``None`` when every section 2 is locked (encrypted,
     no level-1 password). Segments CAN differ (each has its own section 2);
-    only the first readable one is reported here. ``channel_description`` is
+    only the first readable one is reported here, except that
+    ``units_conversion_factor`` is ``None`` when the readable segments store
+    different factors (each segment's is in ``segments``). ``channel_description`` is
     section 2's free-text description from the same segment; every distinct
     value across segments and channels is in the identity table
     (``identity_field("channel_description").values``, with

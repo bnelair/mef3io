@@ -144,6 +144,9 @@ int mef3io_reader_channel_name(mef3io_reader* r, int32_t index, char* buf, size_
 
 typedef struct {
   double sampling_frequency;
+  /* The factor every segment stores; NaN when the channel's segments store
+   * different ones (mef3io_reader_segment_units_conversion_factor gives each
+   * segment's; mef3io_reader_read scales each sample by its own segment's). */
   double units_conversion_factor;
   int64_t start_time;
   int64_t end_time;
@@ -193,11 +196,19 @@ typedef struct {
 /* Number of grid samples a read over [t0, t1) returns (no decoding). */
 int mef3io_reader_read_size(mef3io_reader* r, const char* channel, int64_t t0, int64_t t1,
                             int64_t* out_n);
-/* Float64 read: gaps are NaN, values scaled by the conversion factor.
+/* Float64 read: gaps are NaN, each value scaled by the conversion factor of
+ * the segment it comes from (segments may store different ones).
+ * A segment whose factor is not set (0, MEF's "no entry") reads as its raw
+ * counts (factor 1), without a warning here. MEF3IO_ERR_FORMAT when a sample
+ * in the window comes from a segment whose factor is NaN or infinite; the raw
+ * reads still return its counts.
  * `buf` must hold at least the value from mef3io_reader_read_size. */
 int mef3io_reader_read(mef3io_reader* r, const char* channel, int64_t t0, int64_t t1,
                        double* buf, int64_t buf_len, int64_t* out_n);
-/* Raw read: int32 counts + validity mask (0 in gaps). Same sizing rule. */
+/* Raw read: int32 counts + validity mask (0 in gaps). Same sizing rule.
+ * The counts of a channel whose segments store different conversion factors
+ * mean different things: use mef3io_reader_read_raw_factors to learn which
+ * factor applies where. */
 int mef3io_reader_read_raw(mef3io_reader* r, const char* channel, int64_t t0, int64_t t1,
                            int32_t* samples, uint8_t* valid, int64_t buf_len, int64_t* out_n,
                            int64_t* out_start_uutc);
@@ -211,6 +222,29 @@ int mef3io_reader_read_raw_ex(mef3io_reader* r, const char* channel, int64_t t0,
                               int32_t* samples, uint8_t* valid, int64_t buf_len, int64_t* out_n,
                               int64_t* out_start_uutc, const mef3io_cancel_token* cancel,
                               mef3io_progress_fn progress, void* user_data);
+
+/* Output samples [start_index, end_index) (0-based, half-open) whose valid
+ * samples come from segments storing `units_conversion_factor` (as stored:
+ * 0 = not set, read by mef3io_reader_read as factor 1). */
+typedef struct {
+  int64_t start_index;
+  int64_t end_index;
+  double units_conversion_factor;
+} mef3io_factor_span;
+
+/* mef3io_reader_read_raw_ex plus where each conversion factor applies: units
+ * = samples[i] * the factor of the span holding i. Spans are sorted and
+ * disjoint, one for an ordinary window and none when nothing is valid; each
+ * runs from its first valid sample to just past its last (Reader::read_raw's
+ * factor_spans). `spans` holds `spans_len` entries; `*out_n_spans` is set to
+ * the number needed even when that is too many (the call then fails with
+ * MEF3IO_ERR_ARGUMENT, "buffer too small", and leaves the buffers untouched). */
+int mef3io_reader_read_raw_factors(mef3io_reader* r, const char* channel, int64_t t0,
+                                   int64_t t1, int32_t* samples, uint8_t* valid,
+                                   int64_t buf_len, int64_t* out_n, int64_t* out_start_uutc,
+                                   mef3io_factor_span* spans, int32_t spans_len,
+                                   int32_t* out_n_spans, const mef3io_cancel_token* cancel,
+                                   mef3io_progress_fn progress, void* user_data);
 
 typedef struct {
   int32_t segment_number;
@@ -246,6 +280,21 @@ int mef3io_reader_segment_provenance(mef3io_reader* r, const char* channel, int3
 const char* mef3io_operation_name(int32_t code);
 int mef3io_reader_segment(mef3io_reader* r, const char* channel, int32_t index,
                           mef3io_segment_info* out);
+/* Segment `index`'s section-2 units_conversion_factor, as stored (0 = MEF's
+ * "no entry"). Separate from mef3io_segment_info so that struct keeps its
+ * size and layout. Each of these per-index calls builds the channel's
+ * segment map, so for every segment use mef3io_reader_segment_table. */
+int mef3io_reader_segment_units_conversion_factor(mef3io_reader* r, const char* channel,
+                                                  int32_t index, double* out);
+/* Every segment of `channel` in one call (one segment map): `infos`,
+ * `provenances` and `factors` (units_conversion_factor) each hold `len`
+ * entries, or are NULL to skip that column. `*out_n` is set to the number of
+ * segments even when `len` is too small (the call then fails with
+ * MEF3IO_ERR_ARGUMENT, "buffer too small"); all three NULL with len 0 just
+ * counts. */
+int mef3io_reader_segment_table(mef3io_reader* r, const char* channel,
+                                mef3io_segment_info* infos, mef3io_provenance* provenances,
+                                double* factors, int32_t len, int32_t* out_n);
 
 typedef struct {
   int64_t start_uutc;

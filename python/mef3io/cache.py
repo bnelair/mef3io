@@ -95,7 +95,10 @@ from typing import Optional
 # 6: (5 was never released) the per-file fingerprint list is replaced by an
 # O(1)-per-channel signature, and the exact mef3io version that wrote the
 # snapshot is stored and must match (issue #64).
-CACHE_FORMAT_VERSION = 6
+# 7: a channel info's "units_conversion_factor" is None when the channel's
+# segments store different factors (#150; it used to be the first segment's).
+# The build check alone already rejects older snapshots; the bump says so.
+CACHE_FORMAT_VERSION = 7
 
 UH_BYTES = 1024
 _START_OFFSET, _END_OFFSET = 16, 24          # si8, stored (negated) uUTC

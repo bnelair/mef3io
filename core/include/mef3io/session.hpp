@@ -2,6 +2,7 @@
 #pragma once
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <exception>
 #include <map>
@@ -24,12 +25,64 @@
 namespace mef3io {
 
 // A contiguous run of decoded samples starting at an absolute uUTC time.
-// Discontinuities produce separate runs.
+// Discontinuities produce separate runs, and so does a change of conversion
+// factor between segments (#150): every sample of a run has the same one.
 struct DataRun {
   si8 start_uutc = 0;      // absolute (recording_time_offset applied)
   si8 start_sample = 0;    // channel-wide sample index of the first sample
+  /// The section-2 units_conversion_factor of the segment(s) these samples
+  /// come from, as stored (0 = MEF's "no entry"): units = samples * factor.
+  sf8 units_conversion_factor = 1.0;
   std::vector<si4> samples;
 };
+
+/// True when two stored conversion factors are the same value (NaN equals
+/// NaN here: a factor is a stored value, not a measurement).
+inline bool same_units_conversion_factor(sf8 a, sf8 b) {
+  return a == b || (std::isnan(a) && std::isnan(b));
+}
+
+/// A conversion factor a read in units accepts: finite (negative = a
+/// polarity inversion, allowed). NaN and +-inf are invalid and refused.
+inline bool usable_units_conversion_factor(sf8 f) { return std::isfinite(f); }
+
+/// The factor a read in units SCALES by: the stored one, except 0 —
+/// meflib's NO_ENTRY ("not set", meflib.h:439), which meflib's and pymef's
+/// section-2 templates hold until a writer sets it — read as 1, so such a
+/// segment reads as its raw counts (maintainer decision on #151; the Python
+/// Reader warns, UnscaledSamplesWarning).
+inline sf8 effective_units_conversion_factor(sf8 f) { return f == 0.0 ? 1.0 : f; }
+
+namespace detail {
+// read()'s grid (reader.cpp), here so block_envelope can apply the SAME
+// rule when it decides what a window touches.
+// Number of output samples of a window [t0, t1) (the C ABI's
+// mef3io_reader_n_samples mirrors it). Its argument is never negative.
+inline si8 grid_count(si8 t1, si8 t0, sf8 fs) {
+  return static_cast<si8>(std::llround(static_cast<sf8>(t1 - t0) * fs / 1e6));
+}
+
+// Output slot of a sample (or block start) at absolute uUTC `t`: the nearest
+// slot of the [t0, fs) grid, a TIE going to the EARLIER slot whatever the
+// sign of t - t0 (#129). So slot 0 holds the first sample at or after t0.
+// std::llround rounds halves away from zero: the block holding t0 (negative
+// offset) went one way and every later block (positive offset) the other,
+// leaving one slot no block claimed -- a NaN at the first block boundary of
+// any window starting exactly half a sample off the grid (at 500 Hz, every
+// millisecond time ending in 1 ms). One rule for every block keeps
+// consecutive blocks exactly their length apart.
+inline si8 grid_slot(si8 t, si8 t0, sf8 fs) {
+  return static_cast<si8>(std::ceil(static_cast<sf8>(t - t0) * fs / 1e6 - 0.5));
+}
+
+}  // namespace detail
+
+/// Why a read in units refuses samples whose segment stores an invalid
+/// factor (NaN or infinite; see usable_units_conversion_factor). Never names a segment, path
+/// or time: the same text is raised by Python's MultiReader, whose segment
+/// numbering differs. `alternative` names the call that returns the counts.
+std::string unusable_factor_message(const std::string& channel, sf8 factor,
+                                    const std::string& alternative);
 
 struct SegmentReader {
   // Source-relative '/'-separated paths (resolved through the SessionSource,
@@ -94,6 +147,10 @@ struct BlockJob {
   /// The `.tidx` entry's copies of the same two values, kept for comparison.
   si8 index_start_uutc = 0;
   ui4 index_number_of_samples = 0;
+  /// The block's OWN segment's section-2 conversion factor (#150): segments
+  /// of one channel may store different ones, so it is never the channel's.
+  sf8 units_conversion_factor = 1.0;
+  int segment_number = 0;
   crypto::AccessKeys keys;
 };
 
@@ -131,7 +188,6 @@ struct BlockJobs {
   std::vector<std::vector<ui1>> buffers;  // owns the .tdat images referenced by jobs
   std::vector<BlockJob> jobs;
   sf8 sampling_frequency = 0.0;
-  sf8 units_conversion_factor = 1.0;
   /// Blocks whose index entry and RED header disagree. Empty for every
   /// well-formed file; non-empty means the file is internally inconsistent.
   std::vector<BlockCopyMismatch> mismatches;
@@ -149,8 +205,9 @@ struct BlockIndexEntry {
 
 // Per-block extremes of a channel over a time window, from the block index
 // alone (block_envelope): one row per data block, nothing decoded. Values are
-// scaled like read() (the channel's conversion factor); a writer that left a
-// block's min/max unset (RED_NAN) gives NaN there.
+// scaled like read(): by the conversion factor of the block's own segment
+// (swapped for a negative one); a writer that left a block's min/max unset
+// (RED_NAN) gives NaN there.
 struct BlockEnvelope {
   std::vector<si8> start_uutc;  // first sample of the block
   std::vector<si8> end_uutc;    // just past its last sample: start + n / fs
@@ -169,6 +226,9 @@ struct SegmentInfo {
   si8 start_sample = 0;         // channel-wide index of the first sample
   si8 number_of_samples = 0;    // samples stored in this segment (gaps excluded)
   si8 number_of_blocks = 0;
+  /// This segment's section-2 units_conversion_factor, as stored (0 = MEF's
+  /// "no entry"). Segments of one channel may differ (#150).
+  sf8 units_conversion_factor = 1.0;
   /// Provenance of this segment's .tmet (see fmt::provenance): versions and
   /// operations only, no times. `present` is false for a file from another
   /// writer, or from mef3io before 1.2.
@@ -178,7 +238,11 @@ struct SegmentInfo {
 struct ChannelInfo {
   std::string name;
   sf8 sampling_frequency = 0.0;
-  sf8 units_conversion_factor = 1.0;
+  /// The factor every readable segment stores; nullopt when they differ
+  /// (#150; meflib then sets the channel's to NO_ENTRY, meflib.c:5494). The
+  /// reads scale each block by its own segment's factor either way, and
+  /// SegmentInfo::units_conversion_factor holds each segment's.
+  std::optional<sf8> units_conversion_factor = 1.0;
   std::string units_description;
   si8 start_time = 0;      // absolute uUTC
   si8 end_time = 0;        // absolute uUTC
@@ -260,6 +324,19 @@ class Session {
   std::vector<SegmentProblem> problems() const {
     std::lock_guard<std::mutex> lock(state_mu_);
     return problems_;
+  }
+
+  /// Channels a read() or block_envelope() has returned values for from a
+  /// segment whose conversion factor is not set (0): those values are the
+  /// raw counts. Grows as such segments are read; sorted.
+  std::vector<std::string> unscaled_channels() const {
+    std::lock_guard<std::mutex> lock(state_mu_);
+    return {unscaled_channels_.begin(), unscaled_channels_.end()};
+  }
+  /// INTERNAL (Reader::read): record that `channel` returned unscaled values.
+  void note_unscaled(const std::string& channel) {
+    std::lock_guard<std::mutex> lock(state_mu_);
+    unscaled_channels_.insert(channel);
   }
 
   /// Record (.rdat) files read so far whose password matched only through
@@ -457,6 +534,7 @@ class Session {
   mutable std::mutex index_mu_;
   std::vector<SegmentProblem> problems_;
   std::vector<std::string> legacy_password_record_files_;
+  std::set<std::string> unscaled_channels_;  // state_mu_
   std::set<std::string> reported_record_files_;  // record files already in problems_
   std::vector<std::string> record_only_channels_;  // records but no segments (yet)
 };

@@ -17,6 +17,7 @@
 #include "mef3io/byteio.hpp"
 #include "mef3io/crypto.hpp"
 #include "mef3io/errors.hpp"
+#include "mef3io/session.hpp"
 #include "mef3io/metadata.hpp"
 #include "mef3io/source.hpp"
 #include "mef3io/time.hpp"
@@ -254,6 +255,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     bool spans_certain = true;  // false: a listed gap may hold an unreadable segment's data
     bool ch_assumed = false, ch_verified_offset = false;  // see the gap computation
     bool n_samples_known = true;
+    bool factor_differs = false;
     si8 n_samples = 0;
 
     for (const auto& ls : lc->segments) {
@@ -387,6 +389,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
           is.number_of_samples = s2.number_of_samples;
           is.number_of_blocks = s2.number_of_blocks;
           is.number_of_discontinuities = s2.number_of_discontinuities;
+          is.units_conversion_factor = s2.units_conversion_factor;
           is.unset_declarations = unset_declarations(s2);
         }
         is.provenance = fmt::provenance::read(uh);
@@ -465,6 +468,10 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
           ic.units_conversion_factor = md.section2.units_conversion_factor;
           ic.units_description = md.section2.units_description;
           if (opt.include_values) ic.channel_description = md.section2.channel_description;
+        } else if (ic.units_conversion_factor &&
+                   !same_units_conversion_factor(*ic.units_conversion_factor,
+                                                 md.section2.units_conversion_factor)) {
+          factor_differs = true;  // #150: segments store different factors
         }
         // File-derived: a negative count is nonsense, and the sum must not overflow.
         if (md.section2.number_of_samples < 0)
@@ -512,6 +519,7 @@ SessionSummary inspect_session(const std::string& path, const InspectOptions& op
     if (ch_assumed && ch_verified_offset) spans_complete = spans_certain = false;
 
     if (n_samples_known) ic.number_of_samples = n_samples;
+    if (factor_differs) ic.units_conversion_factor.reset();
     if (ic.sampling_frequency && *ic.sampling_frequency > 0) {
       const double period = 1e6 / *ic.sampling_frequency;
       // From the index, block ends are exact (start + n/fs), so anything past

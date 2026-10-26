@@ -68,6 +68,7 @@ from ._reader import (  # noqa: E402
     SessionDeclarationWarning,
     SessionOperationWarning,
     UnreadableSegmentWarning,
+    UnscaledSamplesWarning,
 )
 from ._multi import MultiReader, MultiReaderDifferenceWarning  # noqa: E402
 from ._warnings import MefWarning  # noqa: E402
@@ -124,6 +125,7 @@ __all__ = [
     "PasswordInteropWarning",
     "SessionDeclarationWarning",
     "UnreadableSegmentWarning",
+    "UnscaledSamplesWarning",
     "SessionOperationWarning",
     "MultiReaderDifferenceWarning",
     "StepFallbackWarning",
