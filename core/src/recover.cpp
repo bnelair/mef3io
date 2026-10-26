@@ -556,6 +556,7 @@ std::optional<RecordFilePlan> plan_record_file(const fsys::path& rdat) {
   // after the last whole record may ever be dropped.
   std::vector<si8> offsets;
   std::uint64_t off = UH;
+  bool last_valid = true;  // the last walked record is whole AND CRC-valid (vacuous with none)
   while (off + fmt::RECORD_HEADER_BYTES <= bytes.size()) {
     const std::string type = byteio::read_string(bytes, off + 4, 4);
     if (type.empty()) break;
@@ -565,6 +566,8 @@ std::optional<RecordFilePlan> plan_record_file(const fsys::path& rdat) {
     if (stored != 0 &&
         crc::calculate(std::span<const ui1>(bytes).subspan(off + 4, fmt::RECORD_HEADER_BYTES - 4 + nb)) != stored)
       ++p.damaged;
+    last_valid = stored != 0 && crc::calculate(std::span<const ui1>(bytes).subspan(
+                                    off + 4, fmt::RECORD_HEADER_BYTES - 4 + nb)) == stored;
     offsets.push_back(static_cast<si8>(off));
     p.times.push_back(byteio::read<si8>(bytes, off + 16));
     p.max_entry = std::max<si8>(p.max_entry, fmt::RECORD_HEADER_BYTES + nb);
@@ -620,6 +623,16 @@ std::optional<RecordFilePlan> plan_record_file(const fsys::path& rdat) {
         }
         return false;  // runs past the end of the file: torn
       };
+      // A torn append follows INTACT data. If the walk stopped right after a
+      // record that fails its CRC, the stop is inside that record's own bytes
+      // (a length flipped down): damage. Likewise a stop strictly inside the
+      // span two consecutive index entries delimit.
+      bool inside_indexed_span = false;
+      for (std::uint64_t o = UH; o + 2 * fmt::RECORD_INDEX_BYTES <= ridx.size(); o += fmt::RECORD_INDEX_BYTES) {
+        const auto v = byteio::read<si8>(ridx, o + 8);
+        const auto w = byteio::read<si8>(ridx, o + 8 + fmt::RECORD_INDEX_BYTES);
+        if (v >= 0 && static_cast<std::uint64_t>(v) < off && w > static_cast<si8>(off)) inside_indexed_span = true;
+      }
       si8 at_or_beyond = 0;
       for (std::uint64_t o = UH; o + fmt::RECORD_INDEX_BYTES <= ridx.size(); o += fmt::RECORD_INDEX_BYTES) {
         const auto v = byteio::read<si8>(ridx, o + 8);
@@ -639,7 +652,11 @@ std::optional<RecordFilePlan> plan_record_file(const fsys::path& rdat) {
       for (std::uint64_t q = off + 1; q + fmt::RECORD_HEADER_BYTES <= bytes.size() && !later_whole; ++q)
         later_whole = whole_at(q);
       const bool tail_whole = entry_is_damage(off);  // present, non-zero bytes at the stop
-      if (at_or_beyond > 0)
+      if (!last_valid)
+        why = "the record just before it fails its CRC, so these bytes may be its own damaged body, not an interrupted write";
+      else if (inside_indexed_span)
+        why = "the stop lies inside the span of an indexed record";
+      else if (at_or_beyond > 0)
         why = std::to_string(at_or_beyond) + " index entr" + (at_or_beyond == 1 ? "y points" : "ies point") +
               " at or beyond the damage at bytes that are present and not zero, so the record is damaged, not torn";
       else if (later_whole)

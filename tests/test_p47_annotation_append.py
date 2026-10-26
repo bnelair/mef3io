@@ -520,6 +520,19 @@ def test_last_record_with_a_flipped_length_is_damage_even_with_an_index(tmp_path
             assert "damaged, not modified" in txt and "listed by neither" not in txt
 
 
+def test_every_single_bit_flip_of_the_last_length_is_damage_both_directions(tmp_path):
+    # up (16 -> huge) and down (16 -> 0, 16 -> 1...): never a drop
+    for k in range(32):
+        p, rdat, ridx, offs = _five_notes(tmp_path / str(k))
+        raw = bytearray(rdat.read_bytes())
+        raw[offs[4] + 12 + k // 8] ^= 1 << (k % 8)
+        rdat.write_bytes(bytes(raw))
+        before = (rdat.read_bytes(), ridx.read_bytes())
+        for apply in (False, True):
+            mef3io.recover_session(str(p), apply=apply)
+            assert (rdat.read_bytes(), ridx.read_bytes()) == before, f"bit {k}"
+
+
 def test_without_an_index_nothing_is_dropped_and_intact_records_still_read(tmp_path):
     for kind in ("length", "zeros"):
         p, rdat, ridx, offs = _five_notes(tmp_path / kind)
