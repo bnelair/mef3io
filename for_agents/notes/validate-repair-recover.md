@@ -1,7 +1,7 @@
 # Validator, repair, recovery
 
 > Read before touching validate.cpp/validate.py, repair_session, recover_session or the CLI validate/repair/recover.
-> Split out of CLAUDE.md verbatim; "the private reader" = the private third-party reader named in CLAUDE.md.
+> Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
 Validator/repair (`core/{include,src}/…/validate.{hpp,cpp}`, `python/mef3io/
 validate.py`, `python/mef3io/__main__.py`): a REGISTRY of 18 checks comparing a

@@ -1,7 +1,7 @@
 # Large files, append, durability
 
 > Read before ANY read/write path that touches .tdat/.tidx, an append, flush/close/wait_for_disk, fsync, recovery backups or tar streaming.
-> Split out of CLAUDE.md verbatim; "the private reader" = the private third-party reader named in CLAUDE.md.
+> Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
 - **NEVER READ OR COPY A `.tdat` WHOLE. ~30 GB is ONE CHANNEL**, so a session
   runs to hundreds of GB or TBs. This is the single easiest way to make the

@@ -1,7 +1,7 @@
 # Records, stored time and rto
 
 > Read before touching records read/write, to_stored_time, rto handling or record-file damage handling.
-> Split out of CLAUDE.md verbatim; "the private reader" = the private third-party reader named in CLAUDE.md.
+> Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
 - Pure-Python backend is a stub. Records are READ at all three levels
   (session / channel / segment, each with its own on-disk offset) and every

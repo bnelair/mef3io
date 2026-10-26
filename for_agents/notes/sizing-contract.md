@@ -1,7 +1,7 @@
 # Section-2 maximum_* fields (allocation contract)
 
 > Read before touching section-2 maximum_* declarations, the sizing/times validator checks or the append's maximum recomputation.
-> Split out of CLAUDE.md verbatim; "the private reader" = the private third-party reader named in CLAUDE.md.
+> Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
 - **Section-2 `maximum_*` fields are an ALLOCATION CONTRACT, not statistics.**
   `0` is NOT the NO_ENTRY sentinel for any of them (`maximum_difference_bytes`

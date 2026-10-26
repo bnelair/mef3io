@@ -1,7 +1,7 @@
 # Module map (full)
 
 > Read before adding a file/module or when you need to know where something lives.
-> Split out of CLAUDE.md verbatim; "the private reader" = the private third-party reader named in CLAUDE.md.
+> Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
 `core/` (C++): `types` (aliases + format constants), `byteio` (LE field IO, no
 packed-struct casts), `crc` (Koopman-32), `crypto` (SHA-256, AES-128-ECB,

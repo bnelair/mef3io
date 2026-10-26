@@ -1,7 +1,7 @@
 # Copy engine: anonymize, transform, cut, merge
 
 > Read before touching session_copy.cpp, segment_copy.hpp, anonymize/transform/merge (C++ or Python), their refusal codes or their verify.
-> Split out of CLAUDE.md verbatim; "the private reader" = the private third-party reader named in CLAUDE.md.
+> Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
 Copy engine (#73, `core/src/session_copy.cpp`): anonymize_session and
 transform_session are ONE driver (`run_copy`: preflight -> Copier pass into

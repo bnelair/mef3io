@@ -47,7 +47,7 @@ directory. `reference_files/` (meflib/pymef/mef3_dump) stayed in the old repo.
 
 ## Topic notes (read the file BEFORE touching its area)
 
-Everything that used to live in this file is verbatim in `for_agents/notes/`
+Everything that used to live in this file is in `for_agents/notes/` (verbatim except retargeted cross-references and the private reader's name)
 (plus the short invariants list `for_agents/INVARIANTS.md`, numbered sections
 cited from code and tests). Public repo: keep private names out of those
 files (see "Public text" below; they say "the private reader").

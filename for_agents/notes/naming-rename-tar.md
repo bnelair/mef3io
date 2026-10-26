@@ -1,7 +1,7 @@
 # Tar archives, naming and rename
 
 > Read before touching tar/source, session naming rules, naming.cpp, rename.cpp or archive/extract.
-> Split out of CLAUDE.md verbatim; "the private reader" = the private third-party reader named in CLAUDE.md.
+> Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
 Tar session archives: `archive_session(dir)` packs a session into ONE
 deterministic uncompressed ustar (`name.mefd.tar`); readers in all languages

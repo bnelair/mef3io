@@ -1,7 +1,7 @@
 # MATLAB binding and C ABI
 
 > Read before touching c_api.h, the MEX or the +mef3io classes.
-> Split out of CLAUDE.md verbatim; "the private reader" = the private third-party reader named in CLAUDE.md.
+> Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
 - **MATLAB binding implemented**: flat C ABI (`core/include/mef3io/c_api.h`,
   Catch2-tested) → single command-dispatch MEX (`matlab/mef3io_mex.cpp`) →

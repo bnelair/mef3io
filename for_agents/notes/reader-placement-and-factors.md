@@ -1,7 +1,7 @@
 # Reader: placement, factors, envelope, isolation
 
 > Read before touching reader.cpp (grid_slot/grid_count/claim_range), block_envelope, read_many, per-segment conversion factors or strict=False segment isolation.
-> Split out of CLAUDE.md verbatim; "the private reader" = the private third-party reader named in CLAUDE.md.
+> Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
 - **`block_envelope` (Session/Reader, viewers)** reads ONLY `.tidx` (rchar-
   pinned in test_p38). Skipping (`Session::skip_segment`, shared with

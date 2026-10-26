@@ -1,7 +1,7 @@
 # Provenance region
 
 > Read before writing ANY universal header, or adding a write path that edits a segment.
-> Split out of CLAUDE.md verbatim; "the private reader" = the private third-party reader named in CLAUDE.md.
+> Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
 - **Provenance region** (`fmt::provenance`, headers.hpp; spec in
   docs/mef3_format.md — a FROZEN format, change only additively): the

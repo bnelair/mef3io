@@ -1,7 +1,7 @@
 # Format gotchas (do NOT relearn the hard way)
 
 > Read before touching ANY on-disk field: times, encryption/passwords, RED encode, records layout, strings, .tmet/.tidx offsets; or when a test against the oracle disagrees.
-> Split out of CLAUDE.md verbatim; "the private reader" = the private third-party reader named in CLAUDE.md.
+> Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
 - **Times are stored NEGATED on disk** as meflib's "recording-time-offset
   applied" marker. User uUTC = `(t>=0)?t:(-t+rto)` (read), `disk = rto-absolute`

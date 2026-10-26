@@ -1,7 +1,7 @@
 # Writer: precision step, clamping, session metadata
 
 > Read before touching write_float, precision inference/step, quantization, int32 clamping or Writer metadata.
-> Split out of CLAUDE.md verbatim; "the private reader" = the private third-party reader named in CLAUDE.md.
+> Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
 Precision step (#81, `core/src/quantize_step.cpp`, `SessionWriter::write_float`
 with `Precision::detect_step()`, Python `precision="step"`, also

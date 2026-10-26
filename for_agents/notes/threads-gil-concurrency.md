@@ -1,7 +1,7 @@
 # Threads, GIL release, parallel open
 
 > Read before adding a long binding call, a constructor, shared mutable state in Session/Reader, or touching discover_layout / the open path.
-> Split out of CLAUDE.md verbatim; "the private reader" = the private third-party reader named in CLAUDE.md.
+> Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
 - **EVERY potentially long binding call RELEASES THE GIL** (#79). Opening is
   where all the metadata parsing happens (64 ch x 60 seg: a 616 ms open froze

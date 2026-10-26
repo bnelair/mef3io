@@ -1,7 +1,7 @@
 # MultiReader
 
 > Read before touching python/mef3io/_multi.py.
-> Split out of CLAUDE.md verbatim; "the private reader" = the private third-party reader named in CLAUDE.md.
+> Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
 MultiReader (`python/mef3io/_multi.py`, Python only, no C++): several
 recordings read as ONE without merging on disk. A DROP-IN for `Reader`: every

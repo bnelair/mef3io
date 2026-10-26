@@ -1,7 +1,7 @@
 # Coverage, verification gates, benchmarks
 
 > Read before changing CI/release coverage, scripts/verify_local.sh, the oracle/ledger gates or benchmarks.
-> Split out of CLAUDE.md verbatim; "the private reader" = the private third-party reader named in CLAUDE.md.
+> Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
 COVERAGE runs ONLY on a release (user decision 2026-10-19, never per-push):
 `scripts/coverage.sh` (atomic gcov counters: the decoder's threads otherwise

@@ -1,7 +1,7 @@
 # Warm-start snapshot cache
 
 > Read before touching python/mef3io/cache.py or Reader(cache=), or anything that affects an open's file/stat count.
-> Split out of CLAUDE.md verbatim; "the private reader" = the private third-party reader named in CLAUDE.md.
+> Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
 Warm-start snapshot cache (`python/mef3io/cache.py`, `Reader(cache=)`, cache
 format 7, #64; 7 = info ufact None when segments differ, #150). RULE: a snapshot only makes sense if it is SMALL and CHEAPER
