@@ -89,6 +89,7 @@ with mef3io.Reader("session.mefd") as r:
     print(r.channels)                     # ['eeg1']
     x = r.read("eeg1", start, start + 10_000_000)  # first 10 s, float64, gaps = NaN
     print(r.segments("eeg1"))             # what data is where
+    X = r.read(["eeg1"], start, start + 10_000_000)  # a list: 2-D, one row per channel
     env = r.block_envelope("eeg1")        # per-block min/max from the index: no decoding
     print(r.records("eeg1"))              # annotations
 ```
@@ -173,6 +174,14 @@ pages such as
   [Python guide](https://bnelair.github.io/mef3io/python/#ordering-and-naming-many-sessions).
 - **One file instead of a folder.** A session can be packed into a single
   `.mefd.tar` and read in place, without unpacking.
+
+## Upgrading from mef3io 1.x
+
+2.0 removes the per-call `n_threads` argument (set `r.n_threads`) and the
+`Writer(durability=)` option (use `flush()` or `wait_for_disk=True`), and
+`anonymize_session` keeps dates unless you pass a shift. The full list, with
+what to do for each, is in the
+[2.0.0 release notes](https://bnelair.github.io/mef3io/release_notes/2.0.0/#upgrading-from-1x).
 
 ## Upgrading from mef3io 1.1.2 or earlier
 

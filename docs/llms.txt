@@ -9,7 +9,7 @@ Install: `pip install mef3io` (Python 3.10+, numpy only). MATLAB: the mef3io-mat
 - [Overview](https://bnelair.github.io/mef3io/): what mef3io is, scope and limitations
 - [MEF 3.0 for students](https://bnelair.github.io/mef3io/students/): the format in plain words, when to use it
 - [Install](https://bnelair.github.io/mef3io/install/): wheels, MATLAB bundle, building from source
-- [Python guide](https://bnelair.github.io/mef3io/python/): Reader, Writer, inspect, cancel/progress, warnings, threads, tar archives, caching, mef_tools drop-in
+- [Python guide](https://bnelair.github.io/mef3io/python/): Reader (several channels in one read), Writer, inspect, cancel/progress, warnings, threads, tar archives, caching, mef_tools drop-in
 - [MATLAB guide](https://bnelair.github.io/mef3io/matlab/): the +mef3io classes
 - [C++ and C ABI guide](https://bnelair.github.io/mef3io/cpp/): the core library and the flat C API
 - [Examples](https://bnelair.github.io/mef3io/examples/): runnable scripts, including a de-identification example
