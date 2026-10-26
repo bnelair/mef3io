@@ -575,6 +575,45 @@ std::optional<RecordFilePlan> plan_record_file(const fsys::path& rdat) {
   p.dropped = static_cast<si8>(bytes.size() - off);  // a torn record, or zeros an unfinished write left
   p.n_before = has_ridx && ridx.size() >= UH ? static_cast<si8>((ridx.size() - UH) / fmt::RECORD_INDEX_BYTES) : 0;
 
+  // Is the part after the last whole record PROVABLY a torn append? A torn
+  // append ends at EOF inside its last record, so nothing intact can follow
+  // it. It is DAMAGE (a corrupt length or type field), not a tear, when (a)
+  // the .ridx lists a record AFTER the stopping point whose header and body
+  // sit whole in the file, or (b) the bytes from the stopping point to EOF
+  // are themselves one complete record (stored CRC matches with the length
+  // the file implies: the length field was damaged, not the data). Then both
+  // files stay byte for byte as they are and a note says so. (The header's
+  // entry count is no evidence: without barriers it can land before the data.)
+  if (p.dropped > 0) {
+    si8 intact_beyond = 0;
+    if (has_ridx && ridx.size() >= UH)
+      for (std::uint64_t o = UH; o + fmt::RECORD_INDEX_BYTES <= ridx.size(); o += fmt::RECORD_INDEX_BYTES) {
+        const auto v = byteio::read<si8>(ridx, o + 8);
+        if (v < 0 || static_cast<std::uint64_t>(v) <= off) continue;
+        const auto u = static_cast<std::uint64_t>(v);
+        if (u + fmt::RECORD_HEADER_BYTES > bytes.size() || byteio::read_string(bytes, u + 4, 4).empty()) continue;
+        if (byteio::read<ui4>(bytes, u + 12) <= bytes.size() - u - fmt::RECORD_HEADER_BYTES) ++intact_beyond;
+      }
+    bool tail_whole = false;
+    if (bytes.size() - off > fmt::RECORD_HEADER_BYTES) {
+      const ui4 stored = byteio::read<ui4>(bytes, off);
+      tail_whole = stored != 0 && !byteio::read_string(bytes, off + 4, 4).empty() &&
+                   crc::calculate(std::span<const ui1>(bytes).subspan(off + 4)) == stored;
+    }
+    if (intact_beyond > 0 || tail_whole) {
+      p.no_change = true;
+      p.dropped = 0;
+      p.action = "record file damaged, not modified: the records stop being readable at byte " +
+                 std::to_string(off) + " (" + std::to_string(p.n_after) + " intact before it), but " +
+                 (intact_beyond > 0 ? std::to_string(intact_beyond) + " record(s) are listed by the index beyond the damage"
+                                    : std::string("the rest of the file is one complete record with a damaged length field")) +
+                 "; both files were left exactly as they are (nothing is removed on a guess). A strict reader "
+                 "refuses the file; a lenient one reads the intact records";
+      if (p.damaged) p.action += "; " + damage_text(p.damaged);
+      return p;
+    }
+  }
+
   // Does the index describe exactly these records?
   bool index_ok = has_ridx && ridx.size() >= UH && (ridx.size() - UH) % fmt::RECORD_INDEX_BYTES == 0 &&
                   p.n_before == p.n_after;
@@ -613,7 +652,7 @@ std::optional<RecordFilePlan> plan_record_file(const fsys::path& rdat) {
     p.new_ridx_body.insert(p.new_ridx_body.end(), e.begin(), e.end());
   }
   std::string what;
-  if (p.dropped) what += "drops a torn last record (" + std::to_string(p.dropped) + " byte(s))";
+  if (p.dropped) what += "drops a torn last record, listed by neither the index nor the header (" + std::to_string(p.dropped) + " byte(s))";
   if (p.n_after != p.n_before || !has_ridx || p.ridx_rebuild)
     what += std::string(what.empty() ? "" : ", ") + "rebuilds the index from the records (" +
             std::to_string(p.n_before) + " -> " + std::to_string(p.n_after) + " entries)";

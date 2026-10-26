@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <optional>
+#include <string>
 #include <vector>
 
 #include "mef3io/byteio.hpp"
@@ -276,9 +278,44 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
   const bool count_known = declared != UNKNOWN_NUMBER_OF_ENTRIES;
   std::size_t off = fmt::UNIVERSAL_HEADER_BYTES;  // records follow the UH
 
+  // Damage-tolerant walk (lenient readers only): `seen` counts every record
+  // position, skipped ones included. A damaged record is listed and the walk
+  // goes on at the next offset the index knows, else after its own length
+  // when the header is plausible, else it stops (the rest is reported as one
+  // damaged tail). Never writes anything.
+  std::vector<std::uint64_t> idx;
+  if (info.tolerate_damage) {
+    for (si8 o : info.index_offsets)
+      if (o >= static_cast<si8>(fmt::UNIVERSAL_HEADER_BYTES) && static_cast<std::uint64_t>(o) < rdat.size())
+        idx.push_back(static_cast<std::uint64_t>(o));
+    std::sort(idx.begin(), idx.end());
+    idx.erase(std::unique(idx.begin(), idx.end()), idx.end());
+  }
+  std::size_t seen = 0;
+  // Returns true when the walk resumed at a later record.
+  auto skip_damaged = [&](std::size_t at, const std::string& reason, std::optional<std::size_t> own_end) {
+    info.damaged.push_back({seen, at, reason});
+    ++seen;
+    auto it = std::upper_bound(idx.begin(), idx.end(), static_cast<std::uint64_t>(at));
+    if (it != idx.end()) { off = static_cast<std::size_t>(*it); return true; }
+    if (own_end && idx.empty()) { off = *own_end; return true; }
+    return false;
+  };
+
   while (true) {
-    if (count_known && static_cast<si8>(out.size()) == declared) break;
+    if (count_known && static_cast<si8>(seen) == declared) break;
     if (off + fmt::RECORD_HEADER_BYTES > rdat.size()) {
+      if (info.tolerate_damage) {
+        const bool zeros = std::all_of(rdat.begin() + static_cast<std::ptrdiff_t>(off), rdat.end(),
+                                       [](ui1 c) { return c == 0; });
+        if (!(zeros && !count_known))
+          info.damaged.push_back({seen, off, "record file truncated: " + std::to_string(out.size()) +
+                                  " record(s) read" +
+                                  (count_known ? " of " + std::to_string(declared) + " declared" : "") +
+                                  ", then " + std::to_string(rdat.size() - off) +
+                                  " byte(s), less than a record header"});
+        break;
+      }
       // Out of bytes. Fine only when the count is unknown and nothing but
       // zero padding is left; otherwise a record was cut off.
       const bool clean_end =
@@ -294,6 +331,11 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
     // Record header (24 B).
     std::string type = read_string(rdat, off + 4, 4);
     if (type.empty() && !count_known) break;  // zero padding after the last record
+    if (type.empty() && info.tolerate_damage) {
+      if (skip_damaged(off, "record " + std::to_string(seen) + " has no type code (corrupt)", std::nullopt))
+        continue;
+      break;
+    }
     if (type.empty())
       throw FormatError("record " + std::to_string(out.size()) + " of " +
                         std::to_string(declared) + " declared has no type code (corrupt)");
@@ -305,6 +347,14 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
     si8 time = read<si8>(rdat, off + 16);
 
     std::size_t body_off = off + fmt::RECORD_HEADER_BYTES;
+    if (body_bytes > rdat.size() - body_off && info.tolerate_damage) {
+      if (skip_damaged(off, "record " + std::to_string(seen) + " (" + type + ") claims " +
+                                std::to_string(body_bytes) + " body bytes but only " +
+                                std::to_string(rdat.size() - body_off) + " remain (corrupt length)",
+                       std::nullopt))
+        continue;
+      break;
+    }
     if (body_bytes > rdat.size() - body_off)
       throw FormatError("record " + std::to_string(out.size()) + " claims " +
                         std::to_string(body_bytes) + " body bytes but only " +
@@ -313,9 +363,16 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
     // meflib validates (meflib.c:1839). CRC_NO_ENTRY means "not computed".
     if (stored_crc != CRC_NO_ENTRY &&
         crc::calculate(rdat.subspan(off + 4, fmt::RECORD_HEADER_BYTES - 4 + body_bytes)) !=
-            stored_crc)
+            stored_crc) {
+      if (info.tolerate_damage) {
+        if (skip_damaged(off, "record " + std::to_string(seen) + " (" + type + ") fails its CRC: the record is corrupt",
+                         body_off + body_bytes))
+          continue;
+        break;
+      }
       throw CrcError("record " + std::to_string(out.size()) + " (" + type +
                      ") fails its CRC: the record is corrupt");
+    }
 
     // Decrypt the body if encrypted.
     std::vector<ui1> body(rdat.begin() + body_off, rdat.begin() + body_off + body_bytes);
@@ -352,6 +409,7 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
       parse_body(rec, b, conv);
 
     out.push_back(std::move(rec));
+    ++seen;
 
     // Advance. Records are laid out contiguously; body may be padded to a
     // 16-byte boundary when the file uses encryption alignment.

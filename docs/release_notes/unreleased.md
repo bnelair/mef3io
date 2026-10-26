@@ -22,8 +22,15 @@ notes at release time (this one is planned as 2.0.1).
     keeps every whole record (one that fails its CRC is reported, never
     removed), drops only a torn fragment after the last one, and rebuilds the
     `.ridx` and the headers. The dry run lists such files (`record_files`);
-    healthy and legacy files are never listed. Until then the next
+    healthy and legacy files are never listed. A damaged record *header*
+    (e.g. a corrupt length field) is never mistaken for a torn tail: if the
+    index lists intact records beyond the stopping point, both files are left
+    untouched and a note says so. Until then the next
     `write_annotations` to a torn file is refused, naming `recover_session`.
+  - A `strict=False` reader no longer skips a whole annotation file for one
+    damaged record: it returns every intact record (resynchronising through
+    the `.ridx`) and lists each damaged one in `problems` (kind `"records"`,
+    with its byte offset). Strict still raises.
   - **Behaviour change, with migration advice:** code that called
     `write_annotations` twice expecting the second call to *replace* the first
     now keeps both sets. To start with no annotations, write to a new session.

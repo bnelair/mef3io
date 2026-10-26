@@ -145,6 +145,22 @@ struct RecordParseInfo {
   /// Out: positions (in the returned vector) of records whose body was left
   /// encrypted because `skip_locked_bodies` was set.
   std::vector<std::size_t> locked;
+  /// In: read what can be read. A record that fails its CRC, or whose header
+  /// is unusable, is listed in `damaged` and skipped instead of failing the
+  /// file; the walk resumes at the next offset in `index_offsets` (from the
+  /// .ridx), or, with none, after the record's own length when that is
+  /// plausible. Nothing is repaired or written. Strict readers leave it false.
+  bool tolerate_damage = false;
+  /// In (tolerate_damage): record offsets from the .ridx, to resync past a
+  /// damaged record. Any order; offsets outside the file are ignored.
+  std::vector<si8> index_offsets;
+  /// Out (tolerate_damage): what was skipped.
+  struct Damaged {
+    std::size_t number = 0;    ///< 0-based position in the file's walk
+    std::uint64_t offset = 0;  ///< byte offset of the record in the .rdat
+    std::string reason;
+  };
+  std::vector<Damaged> damaged;
 };
 
 std::vector<Record> parse_records(std::span<const ui1> rdat_bytes, si8 rto,

@@ -444,8 +444,10 @@ corrupted text, a record file is rejected for any of:
 
 A file that declares fewer records than it holds is tolerated, as in meflib:
 only the declared records are read (meflib.c:1869). A rejected file is
-contained like any other: strict raises, lenient skips it and lists it in
-`Reader.problems` with kind `"records"`.
+contained like any other: strict raises; lenient reads every record that is
+intact (using the `.ridx` offsets to resynchronise past a damaged one) and
+lists each damaged record in `Reader.problems` with kind `"records"`, naming
+the record and its byte offset. Nothing is repaired or removed.
 
 ### Where record files live
 

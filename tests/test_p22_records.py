@@ -833,12 +833,13 @@ def _two_notes(path):
     return _rdat(path)
 
 
-@pytest.mark.parametrize("damage", ["tail-truncated", "huge-body-bytes", "flipped-body-byte",
-                                    "declares-more-than-present"])
-def test_a_damaged_record_file_fails_instead_of_returning_less(tmp_path, damage):
+@pytest.mark.parametrize("damage,intact", [
+    ("tail-truncated", ["first note"]), ("huge-body-bytes", ["second note"]),
+    ("flipped-body-byte", ["second note"]), ("declares-more-than-present", ["first note", "second note"])])
+def test_a_damaged_record_file_fails_instead_of_returning_less(tmp_path, damage, intact):
     """Damage used to come back silently: a cut-off file returned fewer
     records, a flipped byte returned corrupted text. Now it raises (strict) or
-    is skipped and reported (lenient), like any other damaged file."""
+    reads every intact record and lists the damaged one (lenient)."""
     path = tmp_path / "dmg.mefd"
     rdat = _two_notes(path)
     raw = bytearray(rdat.read_bytes())
@@ -856,7 +857,7 @@ def test_a_damaged_record_file_fails_instead_of_returning_less(tmp_path, damage)
         mef3io.Reader(str(path)).records()
     r = mef3io.Reader(str(path), strict=False)
     with pytest.warns(mef3io.UnreadableSegmentWarning, match="record file"):
-        assert r.records() == []
+        assert [a["text"] for a in r.records()] == intact
     (problem,) = r.problems
     assert problem["kind"] == "records" and problem["segment_number"] == -1
 

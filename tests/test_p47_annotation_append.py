@@ -429,11 +429,64 @@ def test_a_record_failing_its_crc_in_the_middle_is_reported_and_nothing_is_remov
         o = int.from_bytes(ent[UH + 24 * i + 8:UH + 24 * i + 16], "little")
         assert rdat.read_bytes()[o:o + 40] == before[0][o:o + 40]
     assert not mef3io.recover_session(str(p), apply=False).record_files
-    with mef3io.Reader(str(p), strict=False) as r:
-        got = [x["text"] for x in r.records()]
     assert not rep.skipped
-    # the lenient reader skips a record FILE with a corrupt record (documented); the bytes above are the proof
-    assert set(got) <= {f"n{i}" for i in range(1, 6)}
+    # strict raises; lenient reads the four intact records and lists the one
+    with pytest.raises(Exception, match="CRC"):
+        mef3io.Reader(str(p)).records()
+    with mef3io.Reader(str(p), strict=False) as r:
+        with pytest.warns(mef3io.UnreadableSegmentWarning):
+            got = [x["text"] for x in r.records()]
+        probs = [q for q in r.problems if q["kind"] == "records"]
+    assert got == ["n1", "n3", "n4", "n5"]
+    assert len(probs) == 1 and "fails its CRC" in probs[0]["reason"]
+    assert f"byte offset {off2}" in probs[0]["reason"]
+
+
+def _five_notes(tmp_path):
+    p = _session(tmp_path / "s.mefd")
+    with mef3io.Writer(str(p)) as w:
+        for i in range(1, 6):
+            w.write_annotations([_note(START + i * S, f"n{i}")])
+    rdat, ridx = _files(p)
+    ent = ridx.read_bytes()
+    offs = [int.from_bytes(ent[UH + 24 * i + 8:UH + 24 * i + 16], "little") for i in range(5)]
+    return p, rdat, ridx, offs
+
+
+def test_a_corrupt_length_field_is_damage_not_a_torn_tail(tmp_path):
+    p, rdat, ridx, offs = _five_notes(tmp_path)
+    raw = bytearray(rdat.read_bytes())
+    raw[offs[1] + 13] ^= 0x40  # a bit in record 2's length field
+    rdat.write_bytes(bytes(raw))
+    before = (rdat.read_bytes(), ridx.read_bytes())
+    for apply in (False, True):
+        rep = mef3io.recover_session(str(p), apply=apply)
+        assert (rdat.read_bytes(), ridx.read_bytes()) == before
+        assert not rep.record_files and not rep.skipped
+        txt = " ".join(rep.notes)
+        assert "damaged, not modified" in txt and "listed by the index beyond the damage" in txt
+        assert "torn" not in txt
+    # the lenient reader still gets every record the index can locate
+    with mef3io.Reader(str(p), strict=False) as r:
+        with pytest.warns(mef3io.UnreadableSegmentWarning):
+            got = [x["text"] for x in r.records()]
+        probs = [q for q in r.problems if q["kind"] == "records"]
+    assert got == ["n1", "n3", "n4", "n5"]
+    assert len(probs) == 1 and f"byte offset {offs[1]}" in probs[0]["reason"]
+    with pytest.raises(Exception):
+        mef3io.Reader(str(p)).records()
+
+
+def test_lenient_without_an_index_reads_up_to_a_crc_damage_and_beyond(tmp_path):
+    p, rdat, ridx, offs = _five_notes(tmp_path)
+    raw = bytearray(rdat.read_bytes())
+    raw[offs[2] + 24 + 1] ^= 0xFF  # body of record 3
+    rdat.write_bytes(bytes(raw))
+    ridx.unlink()
+    with mef3io.Reader(str(p), strict=False) as r:
+        with pytest.warns(mef3io.UnreadableSegmentWarning):
+            got = [x["text"] for x in r.records()]
+    assert got == ["n1", "n2", "n4", "n5"]  # the record's own length is intact: walk goes on
 
 
 def test_a_torn_tail_after_a_damaged_record_drops_only_the_tail(tmp_path):
@@ -511,3 +564,16 @@ def test_unset_maximum_entry_size_is_measured_not_guessed(tmp_path):
         w.write_annotations([_note(START + 2 * S, "s")])
     assert int.from_bytes(rdat.read_bytes()[40:48], "little", signed=True) >= big
     assert [t for _, t in _notes(p)] == [long_text, "s"]
+
+
+def test_multireader_lenient_reads_the_intact_records_too(tmp_path):
+    p, rdat, ridx, offs = _five_notes(tmp_path)
+    raw = bytearray(rdat.read_bytes())
+    raw[offs[1] + 24 + 2] ^= 0xFF
+    rdat.write_bytes(bytes(raw))
+    with pytest.raises(Exception):
+        mef3io.MultiReader([str(p)]).records()
+    with mef3io.MultiReader([str(p)], strict=False) as mr:
+        with pytest.warns(mef3io.UnreadableSegmentWarning):
+            got = [x["text"] for x in mr.records()]
+    assert got == ["n1", "n3", "n4", "n5"]

@@ -406,8 +406,15 @@ would do); a healthy file, including one written by the legacy stack, is
 never listed. A whole record that fails its CRC (bit rot, foreign damage; not
 an interrupted append) is never removed and does not stop the walk: it stays in
 the file and the index, every record after it stays too, and it is reported in
-`report.notes` (or as `records_damaged` when the file needs other repair). A
-`.ridx` without its `.rdat` is only reported (nothing can be rebuilt from an
+`report.notes` (or as `records_damaged` when the file needs other repair).
+Nothing is removed on a guess: when the walk stops at a damaged
+*header* (a corrupt length or type field) and the `.ridx` lists intact records
+after that point, or the rest of the file is one complete record, the stop is
+damage and not a torn append. Recovery then leaves both files byte for byte as
+they are and notes it ("record file damaged, not modified"). Only a tail that
+nothing intact follows (the file ends inside it) is dropped as torn. A lenient
+reader still returns the records the index can locate and lists the damaged
+one in `problems`. A `.ridx` without its `.rdat` is only reported (nothing can be rebuilt from an
 index; it is kept, and writing is refused there). The check reads each record file once (annotation files are
 small next to the data) and only in recovery, never on a write.
 

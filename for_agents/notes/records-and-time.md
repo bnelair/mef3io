@@ -60,5 +60,14 @@ truncation and no whole-file rewrite anywhere — do not add one.
   channel, segment): walk whole records (a CRC-failing one is DAMAGE, counted + reported, KEPT, never ends the walk; only bytes after the last whole record may be dropped); healthy = index whole and
   matching every offset + counts right + header CRC ok + nothing after the
   last record. Else keep every whole record, drop the rest (backed up),
-  rebuild `.ridx` + both headers. Appends: stored body CRC 0 stays 0; unset max entry size is measured from the index; session level targets `session_record_file` (ambiguous = refuse); orphan `.ridx` refused (never truncated; recovery notes it); rollback restores both headers. Reported as `RecoveredRecordFile` in
+  rebuild `.ridx` + both headers. The tail is dropped ONLY when
+  provably torn: if the old `.ridx` lists a record AFTER the stopping point
+  whose header+body sit whole in the file, or the bytes from the stop to EOF
+  are one complete record (CRC matches: damaged length field), both files stay
+  byte-identical and a note ("record file damaged, not modified") is the only
+  output. The header count is NOT evidence (without barriers it lands first).
+  LENIENT READ (`Session::read_record_file`): strict parse fails -> retry with
+  `RecordParseInfo::tolerate_damage` + `.ridx` offsets: intact records are
+  returned, each damaged one is a `problems()` entry (kind "records", reason
+  with byte offset, key rdat@offset); strict unchanged. Appends: stored body CRC 0 stays 0; unset max entry size is measured from the index; session level targets `session_record_file` (ambiguous = refuse); orphan `.ridx` refused (never truncated; recovery notes it); rollback restores both headers. Reported as `RecoveredRecordFile` in
   `RecoveryReport.record_files`. No false positives on legacy files (test).
