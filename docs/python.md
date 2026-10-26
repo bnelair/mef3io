@@ -246,8 +246,15 @@ of silently wrapping. A `valid` mask of the wrong length raises
 
 Records: an iterable of dicts (`time` required; `type` defaults to `"Note"`;
 optional `text`, `duration`) or a pandas DataFrame with those columns.
-`channel=None` writes session-level records. Replaces the records at that
-level; in encrypted sessions record bodies are level-2 encrypted.
+`channel=None` writes session-level records. **Always appends** to the records
+already stored at that level (the files are created the first time) and never
+replaces or deletes one. A later call may carry an earlier time: it is
+appended too, and `records()` returns every level's records sorted by time
+(stable: equal times keep their write order). In encrypted sessions record
+bodies are level-2 encrypted. To start from nothing, write to a new session
+(or level). If a power cut interrupted an append, the next write is refused
+until `recover_session` has repaired the file (see
+[long recordings](long_recordings.md)).
 
 ## Reading
 

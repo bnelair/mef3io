@@ -1,0 +1,364 @@
+"""#156 (2.0.1): annotation writes APPEND; they never replace or delete.
+
+Before, `write_annotations` truncated `.rdat` + `.ridx` and wrote only the
+batch it was given, so every call deleted the annotations stored earlier. Now
+the pair is extended in place (record bytes, index entries, then the headers
+that count them; body CRCs extended, never recomputed), created when absent,
+and an interrupted append is repaired by `recover_session` without losing a
+stored record.
+"""
+import os
+import shutil
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+import mef3io  # noqa: E402
+from mef3io import _mef3io as _m  # noqa: E402
+
+START = 1577836800000000
+FS = 256.0
+S = 1_000_000
+UH = 1024
+CRC_START = 0xFFFFFFFF
+
+
+def _session(path, password=None, **kw):
+    kwargs = dict(overwrite=True)
+    if password:
+        kwargs.update(password1=password[0], password2=password[1])
+    with mef3io.Writer(str(path), **kwargs) as w:
+        w.write_int32("ch1", np.arange(2560, dtype=np.int32), 1.0, START, FS)
+    return Path(path)
+
+
+def _notes(path, channel=None, password="", **kw):
+    with mef3io.Reader(str(path), password=password) as r:
+        return [(x["time"], x["text"]) for x in r.records(channel, **kw)]
+
+
+def _files(path, channel=None):
+    p = Path(path)
+    if channel:
+        return p / f"{channel}.timd" / f"{channel}.rdat", p / f"{channel}.timd" / f"{channel}.ridx"
+    return p / f"{p.stem}.rdat", p / f"{p.stem}.ridx"
+
+
+def _note(t, text):
+    return {"time": t, "text": text}
+
+
+def test_two_calls_keep_both_sets_at_session_and_channel_level(tmp_path):
+    p = _session(tmp_path / "s.mefd")
+    with mef3io.Writer(str(p)) as w:
+        w.write_annotations([_note(START + S, "a"), _note(START + 2 * S, "b")])
+        w.write_annotations([_note(START + 3 * S, "c")])
+        w.write_annotations([_note(START + 4 * S, "d")], channel="ch1")
+        w.write_annotations([_note(START + 5 * S, "e")], channel="ch1")
+    assert [t for _, t in _notes(p, level="session")] == ["a", "b", "c"]
+    assert [t for _, t in _notes(p, "ch1", level="channel")] == ["d", "e"]
+
+
+def test_a_second_writer_keeps_what_the_first_stored(tmp_path):
+    p = _session(tmp_path / "s.mefd")
+    with mef3io.Writer(str(p)) as w:
+        w.write_annotations([_note(START + S, "first")])
+    with mef3io.Writer(str(p)) as w:
+        w.write_annotations([_note(START + 2 * S, "second")])
+    assert [t for _, t in _notes(p)] == ["first", "second"]
+
+
+def test_out_of_order_append_reads_back_sorted_and_stays_in_write_order_on_disk(tmp_path):
+    p = _session(tmp_path / "s.mefd")
+    with mef3io.Writer(str(p)) as w:
+        w.write_annotations([_note(START + 10 * S, "late")])
+        w.write_annotations([_note(START + 2 * S, "early"), _note(START + 10 * S, "late2")])
+    assert [t for _, t in _notes(p)] == ["early", "late", "late2"]  # stable on equal times
+    _, ridx = _files(p)
+    data = ridx.read_bytes()
+    times = [-int.from_bytes(data[UH + i * 24 + 16: UH + i * 24 + 24], "little", signed=True)
+             for i in range((len(data) - UH) // 24)]
+    assert times == [START + 10 * S, START + 2 * S, START + 10 * S]  # write order
+    assert mef3io.Validator(str(p)).validate().ok
+
+
+def test_appended_file_equals_a_single_call_file(tmp_path):
+    a = _session(tmp_path / "a.mefd")
+    b = _session(tmp_path / "b.mefd")
+    recs = [_note(START + i * S, f"note {i}" * (1 + i % 3)) for i in range(1, 8)]
+    with mef3io.Writer(str(a)) as w:
+        w.write_annotations(recs)
+    with mef3io.Writer(str(b)) as w:
+        w.write_annotations(recs[:3])
+        w.write_annotations(recs[3:])
+    for x, y in zip(_files(a), _files(b)):
+        bx, by = x.read_bytes(), y.read_bytes()
+        assert len(bx) == len(by)
+        assert bx[UH:] == by[UH:]  # body byte for byte
+        # header: count, max entry size, span and body CRC agree
+        assert bx[4:8] == by[4:8] and bx[32:48] == by[32:48] and bx[8:24] == by[8:24]
+    # and the header CRC / body CRC of the appended one are valid
+    from mef3io import _mef3io
+    for f in _files(b):
+        d = f.read_bytes()
+        assert _crc(d[4:UH]) == int.from_bytes(d[:4], "little")
+        assert _crc(d[UH:]) == int.from_bytes(d[4:8], "little")
+
+
+def _crc(data):
+    return _m.crc32(bytes(data)) if hasattr(_m, "crc32") else _koopman(data)
+
+
+_TABLE = None
+
+
+def _koopman(data):
+    # Koopman 0x741B8CD7, reflected, start 0xFFFFFFFF, no final inversion
+    global _TABLE
+    if _TABLE is None:
+        poly = 0xEB31D82E  # reflected 0x741B8CD7
+        _TABLE = []
+        for i in range(256):
+            c = i
+            for _ in range(8):
+                c = (c >> 1) ^ poly if c & 1 else c >> 1
+            _TABLE.append(c)
+    c = CRC_START
+    for b in data:
+        c = _TABLE[(c ^ b) & 0xFF] ^ (c >> 8)
+    return c
+
+
+def _rchar_wchar():
+    d = {}
+    for line in Path("/proc/self/io").read_text().splitlines():
+        k, v = line.split(":")
+        d[k] = int(v)
+    return d["rchar"], d["wchar"]
+
+
+def _append_cost(path, t):
+    with mef3io.Writer(str(path)) as w:
+        w.write_annotations([_note(t, "warm up")])  # whatever the first write loads once
+        r0, w0 = _rchar_wchar()
+        w.write_annotations([_note(t + 1, "x")])
+        r1, w1 = _rchar_wchar()
+    return r1 - r0, w1 - w0
+
+
+@pytest.mark.skipif(not Path("/proc/self/io").exists(), reason="needs /proc/self/io")
+def test_append_cost_does_not_grow_with_the_file(tmp_path):
+    small = _session(tmp_path / "small.mefd")
+    big = _session(tmp_path / "big.mefd")
+    with mef3io.Writer(str(small)) as w:
+        w.write_annotations([_note(START + i, "n" * 200) for i in range(1, 51)])
+    with mef3io.Writer(str(big)) as w:
+        w.write_annotations([_note(START + i, "n" * 200) for i in range(1, 20001)])
+    assert _files(big)[0].stat().st_size > 4_000_000
+    rs, ws = _append_cost(small, START + 50 * S)
+    rb, wb = _append_cost(big, START + 50 * S)
+    print("annotation append (bytes read, written): 50 records", (rs, ws),
+          "20000 records", (rb, wb))
+    assert rb < 32 * 1024 and wb < 16 * 1024, (rb, wb)  # the file is > 4 MB
+    # (the stream's read-ahead buffer is the only difference: a deeper offset fills a full one)
+    assert rb <= rs + 16 * 1024 and wb <= ws + 1024, ((rs, ws), (rb, wb))
+    assert len(_notes(big)) == 20002
+
+
+def test_encrypted_bodies_append_and_read_with_the_password(tmp_path):
+    pw = ("p1", "p2")
+    p = _session(tmp_path / "e.mefd", password=pw)
+    with mef3io.Writer(str(p), password1="p1", password2="p2") as w:
+        w.write_annotations([_note(START + S, "secret one")])
+    with mef3io.Writer(str(p), password1="p1", password2="p2") as w:
+        w.write_annotations([_note(START + 2 * S, "secret two")], channel="ch1")
+        w.write_annotations([_note(START + 3 * S, "secret three")])
+    assert [t for _, t in _notes(p, password="p2", level="session")] == ["secret one", "secret three"]
+    raw = _files(p)[0].read_bytes()
+    assert b"secret" not in raw
+    assert mef3io.Validator(str(p), password="p2").validate().ok
+    with mef3io.Writer(str(p)) as w:  # no password for an encrypted file: refused, nothing changed
+        before = raw
+        with pytest.raises(Exception):
+            w.write_annotations([_note(START + 9 * S, "nope")])
+    assert _files(p)[0].read_bytes() == before
+
+
+# ---- crash states ------------------------------------------------------------
+
+OLD = [_note(START + i * S, f"old {i}") for i in range(1, 6)]
+NEW = [_note(START + (10 + i) * S, f"new {i}") for i in range(3)]
+
+
+@pytest.fixture(scope="module")
+def images(tmp_path_factory):
+    root = tmp_path_factory.mktemp("rcrash")
+    p = _session(root / "s.mefd")
+    with mef3io.Writer(str(p)) as w:
+        w.write_annotations(OLD)
+    old = [f.read_bytes() for f in _files(p)]
+    with mef3io.Writer(str(p)) as w:
+        w.write_annotations(NEW)
+    new = [f.read_bytes() for f in _files(p)]
+    return p, old, new
+
+
+def _variant(old, new, kind, uh_new):
+    if kind == "old":
+        out = old
+    elif kind == "new":
+        out = new
+    elif kind == "torn":
+        out = new[: len(old) + (len(new) - len(old)) // 2 + 3]
+    else:  # zero: extended length, nothing landed
+        out = old + bytes(len(new) - len(old))
+    head = (new if uh_new else old)[:UH]
+    return head + out[UH:]
+
+
+STATES = [(r, i, rh, ih) for r in ("old", "new", "torn", "zero")
+          for i in ("old", "new", "torn", "zero") for rh in (False, True) for ih in (False, True)]
+
+
+@pytest.mark.parametrize("state", STATES, ids=lambda s: "-".join(map(str, s)))
+def test_every_crash_state_recovers_without_losing_a_stored_record(tmp_path, images, state):
+    src, old, new = images
+    rdat_k, ridx_k, rdat_h, ridx_h = state
+    p = tmp_path / "s.mefd"
+    shutil.copytree(src, p)
+    rdat, ridx = _files(p)
+    rdat.write_bytes(_variant(old[0], new[0], rdat_k, rdat_h))
+    ridx.write_bytes(_variant(old[1], new[1], ridx_k, ridx_h))
+
+    rep = mef3io.recover_session(str(p), apply=False)  # dry run reports, writes nothing
+    snapshot = (rdat.read_bytes(), ridx.read_bytes())
+    mef3io.recover_session(str(p), apply=False)
+    assert (rdat.read_bytes(), ridx.read_bytes()) == snapshot
+    healthy = (rdat_k, ridx_k, rdat_h, ridx_h) in (("old", "old", False, False), ("new", "new", True, True))
+    if healthy:
+        assert not rep.record_files
+
+    mef3io.recover_session(str(p), apply=True)
+    got = _notes(p)  # strict open
+    texts = [t for _, t in got]
+    for _, t in [(x["time"], x["text"]) for x in OLD]:
+        assert t in texts, f"{t} lost in {state}"
+    assert texts == sorted(texts, key=lambda t: dict((x["text"], x["time"]) for x in OLD + NEW)[t])
+    assert mef3io.recover_session(str(p), apply=False).nothing_to_do or \
+        not mef3io.recover_session(str(p), apply=False).record_files
+    assert mef3io.Validator(str(p)).validate().ok
+    # and the recorder carries on
+    with mef3io.Writer(str(p)) as w:
+        w.write_annotations([_note(START + 99 * S, "after")])
+    assert _notes(p)[-1][1] == "after"
+    assert len(_notes(p)) == len(texts) + 1
+
+
+def test_writer_refuses_a_torn_file_and_names_recovery(tmp_path, images):
+    src, old, new = images
+    p = tmp_path / "s.mefd"
+    shutil.copytree(src, p)
+    rdat, ridx = _files(p)
+    rdat.write_bytes(_variant(old[0], new[0], "torn", False))
+    ridx.write_bytes(old[1])
+    before = rdat.read_bytes()
+    with mef3io.Writer(str(p)) as w:
+        with pytest.raises(Exception, match="recover_session"):
+            w.write_annotations([_note(START + 50 * S, "x")])
+    assert rdat.read_bytes() == before  # nothing deleted, nothing added
+
+
+def test_recovery_does_not_flag_healthy_files(tmp_path):
+    p = _session(tmp_path / "s.mefd")
+    with mef3io.Writer(str(p)) as w:
+        w.write_annotations(OLD)
+        w.write_annotations(NEW, channel="ch1")
+        w.write_annotations([_note(START + S, "back")])
+    rep = mef3io.recover_session(str(p))
+    assert rep.record_files == () and rep.nothing_to_do
+
+
+def test_recovery_does_not_flag_legacy_annotation_files(tmp_path):
+    pytest.importorskip("mef_tools", reason="legacy oracle not installed")
+    import pandas as pd
+    from mef_tools.io import MefWriter
+
+    p = tmp_path / "legacy.mefd"
+    w = MefWriter(str(p), overwrite=True)
+    w.write_data(np.arange(2560, dtype=np.int32), "ch1", START, FS, precision=0)
+    w.write_annotations(pd.DataFrame({"time": [START + S, START + 2 * S], "type": ["Note"] * 2,
+                                      "text": ["a", "b"]}))
+    w.write_annotations(pd.DataFrame({"time": [START + 3 * S], "type": ["Note"], "text": ["c"]}),
+                        channel="ch1")
+    del w
+    rep = mef3io.recover_session(str(p))
+    assert rep.record_files == ()
+
+
+def test_pymef_reads_appended_and_out_of_order_files(tmp_path):
+    pytest.importorskip("pymef")
+    from pymef.mef_session import MefSession
+
+    p = _session(tmp_path / "s.mefd")
+    with mef3io.Writer(str(p)) as w:
+        w.write_annotations([_note(START + 5 * S, "b"), _note(START + 6 * S, "c")])
+        w.write_annotations([_note(START + 1 * S, "a")])  # earlier than the stored ones
+        w.write_annotations([_note(START + 2 * S, "x")], channel="ch1")
+        w.write_annotations([_note(START + 3 * S, "y")], channel="ch1")
+    s = MefSession(str(p), "")
+    try:
+        recs = s.read_records()
+        got = sorted((r["text"] if "text" in r else r.get("note", ""), ) for r in recs if r.get("type") == "Note")
+        assert len(recs) >= 3
+        texts = sorted(str(r.get("text", r.get("note", ""))) for r in recs if r.get("type") == "Note")
+        assert texts == ["a", "b", "c"], recs
+        ch = s.read_records(channel="ch1")
+        assert sorted(str(r.get("text", r.get("note", ""))) for r in ch if r.get("type") == "Note") == ["x", "y"]
+    finally:
+        s.close()
+
+
+def test_pymef_reads_an_encrypted_appended_file(tmp_path):
+    pytest.importorskip("pymef")
+    from pymef.mef_session import MefSession
+
+    p = _session(tmp_path / "e.mefd", password=("p1", "p2"))
+    for i in range(2):
+        with mef3io.Writer(str(p), password1="p1", password2="p2") as w:
+            w.write_annotations([_note(START + (3 - i) * S, f"n{i}")])
+    s = MefSession(str(p), "p2")
+    try:
+        texts = sorted(str(r.get("text", r.get("note", ""))) for r in s.read_records() if r.get("type") == "Note")
+        assert texts == ["n0", "n1"]
+    finally:
+        s.close()
+
+
+def test_compat_writer_appends(tmp_path):
+    from mef3io import MefWriter, MefReader
+    import pandas as pd
+
+    p = tmp_path / "c.mefd"
+    w = MefWriter(str(p), overwrite=True)
+    w.write_data(np.arange(2560, dtype=np.int32), "ch1", START, FS, precision=0)
+    w.write_annotations(pd.DataFrame({"time": [START + S], "type": ["Note"], "text": ["a"]}))
+    w.write_annotations(pd.DataFrame({"time": [START + 2 * S], "type": ["Note"], "text": ["b"]}))
+    w.close() if hasattr(w, "close") else None
+    del w
+    assert [t for _, t in _notes(p)] == ["a", "b"]
+
+
+def test_transform_copy_of_an_out_of_order_file_verifies(tmp_path):
+    p = _session(tmp_path / "s.mefd")
+    with mef3io.Writer(str(p)) as w:
+        w.write_annotations([_note(START + 5 * S, "b")])
+        w.write_annotations([_note(START + 1 * S, "a")])
+    out = tmp_path / "t.mefd"
+    rep = mef3io.transform_session(str(p), str(out))
+    assert mef3io.transform.verify(str(p), str(out)).ok if hasattr(mef3io, "transform") else True
+    assert [t for _, t in _notes(out)] == ["a", "b"]

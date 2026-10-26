@@ -21,6 +21,7 @@
 #include "mef3io/errors.hpp"
 #include "mef3io/headers.hpp"
 #include "mef3io/metadata.hpp"
+#include "mef3io/records.hpp"
 #include "mef3io/source.hpp"
 #include "mef3io/time.hpp"
 #include "mef3io/validate.hpp"
@@ -489,6 +490,228 @@ void rederive_declarations(const std::string& path, const std::string& password,
                                " check(s)); originals under " + path + ".repair-backup");
     } catch (const std::exception& e) {
       report.notes.push_back(where + ": declarations not re-derived: " + e.what());
+    }
+  }
+}
+
+}  // namespace
+
+namespace {
+
+// ---- annotation files (.rdat + .ridx) ---------------------------------------
+// An annotation append writes the record bytes, then the index entries, then
+// the two headers (records.cpp). A power cut can therefore leave: a torn last
+// record, whole records the header does not count, or an index that is short
+// or torn. Recovery keeps EVERY whole CRC-valid record, drops only the torn
+// fragment, and rebuilds the .ridx and the headers from the .rdat. It never
+// drops a record that is intact.
+struct RecordFilePlan {
+  fsys::path rdat, ridx;
+  std::string where;
+  std::vector<ui1> rdat_head, ridx_head;  // original 1024-byte headers (ridx may be empty)
+  std::uintmax_t rdat_size = 0;
+  std::uint64_t keep_bytes = 0;           // rdat prefix kept (whole records)
+  std::vector<ui1> new_ridx_body;
+  si8 n_before = 0, n_after = 0, max_entry = 0;
+  std::vector<si8> times;                 // stored header times of the kept records
+  ui4 body_crc = 0;
+  bool header_fix = false, ridx_rebuild = false;
+  std::string action;
+  si8 dropped = 0;
+};
+
+std::optional<RecordFilePlan> plan_record_file(const fsys::path& rdat) {
+  constexpr std::uint64_t UH = fmt::UNIVERSAL_HEADER_BYTES;
+  RecordFilePlan p;
+  p.rdat = rdat;
+  p.ridx = rdat;
+  p.ridx.replace_extension(".ridx");
+  p.where = rdat.string();
+  std::error_code ec;
+  p.rdat_size = fsys::file_size(rdat, ec);
+  if (ec || p.rdat_size < UH) return std::nullopt;  // not a record file we can reason about
+  const auto bytes = read_all(rdat);
+  p.rdat_head.assign(bytes.begin(), bytes.begin() + UH);
+  auto uh = fmt::UniversalHeader::parse(p.rdat_head);
+  if (uh.file_type_string != fmt::FILE_TYPE_RECORD_DATA) return std::nullopt;
+  const bool has_ridx = fsys::exists(p.ridx);
+  std::vector<ui1> ridx;
+  if (has_ridx) {
+    ridx = read_all(p.ridx);
+    if (ridx.size() >= UH) p.ridx_head.assign(ridx.begin(), ridx.begin() + UH);
+  }
+  // Walk the whole records. A record is whole when its header fits, its body
+  // fits and its CRC (when present) matches; the walk stops at the first that
+  // is not.
+  std::vector<si8> offsets;
+  std::uint64_t off = UH;
+  while (off + fmt::RECORD_HEADER_BYTES <= bytes.size()) {
+    const std::string type = byteio::read_string(bytes, off + 4, 4);
+    if (type.empty()) break;
+    const ui4 nb = byteio::read<ui4>(bytes, off + 12);
+    if (nb > bytes.size() - off - fmt::RECORD_HEADER_BYTES) break;
+    const ui4 stored = byteio::read<ui4>(bytes, off);
+    if (stored != 0 &&
+        crc::calculate(std::span<const ui1>(bytes).subspan(off + 4, fmt::RECORD_HEADER_BYTES - 4 + nb)) != stored)
+      break;
+    offsets.push_back(static_cast<si8>(off));
+    p.times.push_back(byteio::read<si8>(bytes, off + 16));
+    p.max_entry = std::max<si8>(p.max_entry, fmt::RECORD_HEADER_BYTES + nb);
+    off += fmt::RECORD_HEADER_BYTES + nb;
+  }
+  p.keep_bytes = off;
+  p.n_after = static_cast<si8>(offsets.size());
+  p.dropped = static_cast<si8>(bytes.size() - off);  // a torn record, or zeros an unfinished write left
+  p.n_before = has_ridx && ridx.size() >= UH ? static_cast<si8>((ridx.size() - UH) / fmt::RECORD_INDEX_BYTES) : 0;
+
+  // Does the index describe exactly these records?
+  bool index_ok = has_ridx && ridx.size() >= UH && (ridx.size() - UH) % fmt::RECORD_INDEX_BYTES == 0 &&
+                  p.n_before == p.n_after;
+  if (index_ok)
+    for (si8 i = 0; i < p.n_after && index_ok; ++i)
+      index_ok = byteio::read<si8>(ridx, UH + static_cast<std::uint64_t>(i) * fmt::RECORD_INDEX_BYTES + 8) ==
+                 offsets[static_cast<std::size_t>(i)];
+  if (index_ok) {
+    auto ri = fmt::UniversalHeader::parse(p.ridx_head);
+    index_ok = ri.file_type_string == fmt::FILE_TYPE_RECORD_INDICES && ri.header_crc_valid(p.ridx_head) &&
+               (ri.number_of_entries == p.n_after || ri.number_of_entries == -1);
+  }
+  const bool count_ok = uh.number_of_entries == p.n_after || uh.number_of_entries == -1;
+  const bool head_ok = uh.header_crc_valid(p.rdat_head);
+  if (index_ok && count_ok && head_ok && p.dropped == 0) return std::nullopt;  // healthy
+
+  p.ridx_rebuild = !index_ok;
+  p.header_fix = !count_ok || !head_ok || p.dropped != 0 || !index_ok;
+  p.body_crc = crc::calculate(std::span<const ui1>(bytes).subspan(UH, p.keep_bytes - UH));
+  // Index entries come from the record headers: type, version, encryption,
+  // offset, time.
+  for (si8 i = 0; i < p.n_after; ++i) {
+    const auto o = static_cast<std::uint64_t>(offsets[static_cast<std::size_t>(i)]);
+    std::array<ui1, fmt::RECORD_INDEX_BYTES> e{};
+    std::copy_n(bytes.begin() + static_cast<std::ptrdiff_t>(o + 4), 4, e.begin());
+    e[5] = bytes[o + 9];
+    e[6] = bytes[o + 10];
+    e[7] = bytes[o + 11];
+    byteio::write<si8>(e, 8, offsets[static_cast<std::size_t>(i)]);
+    byteio::write<si8>(e, 16, p.times[static_cast<std::size_t>(i)]);
+    p.new_ridx_body.insert(p.new_ridx_body.end(), e.begin(), e.end());
+  }
+  std::string what;
+  if (p.dropped) what += "drops a torn last record (" + std::to_string(p.dropped) + " byte(s))";
+  if (p.n_after != p.n_before || !has_ridx || p.ridx_rebuild)
+    what += std::string(what.empty() ? "" : ", ") + "rebuilds the index from the records (" +
+            std::to_string(p.n_before) + " -> " + std::to_string(p.n_after) + " entries)";
+  if (what.empty()) what = "repairs the file header";
+  p.action = what;
+  return p;
+}
+
+void apply_record_file(const RecordFilePlan& p, bool backup, const fsys::path& backup_root,
+                       const fsys::path& session_root) {
+  constexpr std::uint64_t UH = fmt::UNIVERSAL_HEADER_BYTES;
+  const std::string rel = fsys::relative(p.rdat, session_root).generic_string();
+  if (backup) {
+    back_up_bytes(backup_root, rel + ".header", p.rdat_head);
+    if (p.rdat_size > p.keep_bytes) {
+      std::ifstream f(p.rdat, std::ios::binary);
+      auto tail = read_range(f, p.keep_bytes, static_cast<std::size_t>(p.rdat_size - p.keep_bytes));
+      back_up_bytes(backup_root, rel + ".dropped", tail);
+    }
+    if (fsys::exists(p.ridx)) back_up_file(p.ridx, backup_root, fsys::relative(p.ridx, session_root).generic_string());
+  }
+  // Times of the UH span, from the kept records' stored times, in whichever
+  // convention they use (negated = offset applied: later time = smaller value).
+  si8 start = fmt::UUTC_NO_ENTRY, end = fmt::UUTC_NO_ENTRY;
+  if (!p.times.empty()) {
+    const auto mm = std::minmax_element(p.times.begin(), p.times.end());
+    const bool all_neg = *mm.second < 0, all_pos = *mm.first >= 0;
+    if (all_neg) { start = *mm.second; end = *mm.first; }
+    else if (all_pos) { start = *mm.first; end = *mm.second; }
+  }
+  auto uh = fmt::UniversalHeader::parse(p.rdat_head);
+  auto fix = [&](fmt::UniversalHeader h, std::vector<ui1> head, ui4 body_crc, si8 max_size) {
+    h.number_of_entries = p.n_after;
+    h.maximum_entry_size = max_size;
+    if (start != fmt::UUTC_NO_ENTRY) { h.start_time = start; h.end_time = end; }
+    h.body_crc = body_crc;
+    fmt::provenance::stamp_modified(h, fmt::provenance::Operation::Recovery);
+    h.serialize(head);
+    h.update_header_crc(head);
+    return head;
+  };
+  // Truncate first, then the headers, then the replaced index: a crash in
+  // between leaves a state this same recovery handles again.
+  if (p.rdat_size > p.keep_bytes) {
+    std::error_code ec;
+    fsys::resize_file(p.rdat, p.keep_bytes, ec);
+    if (ec) throw IoError("cannot truncate " + p.rdat.string() + ": " + ec.message());
+  }
+  {
+    const auto head = fix(uh, p.rdat_head, p.body_crc, p.max_entry);
+    std::fstream f(p.rdat, std::ios::binary | std::ios::in | std::ios::out);
+    if (!f) throw IoError("cannot open for header update: " + p.rdat.string());
+    f.write(reinterpret_cast<const char*>(head.data()), static_cast<std::streamsize>(head.size()));
+    f.flush();
+    if (!f) throw IoError("header update failed: " + p.rdat.string());
+    f.close();
+    (void)detail::fsync_file(p.rdat.string());
+  }
+  // The index: a new file (header from the rdat's, file type ridx), replaced atomically.
+  fmt::UniversalHeader ih = p.ridx_head.empty() ? uh : fmt::UniversalHeader::parse(p.ridx_head);
+  if (p.ridx_head.empty()) {
+    ih.file_type_string = fmt::FILE_TYPE_RECORD_INDICES;
+    ih.file_uuid = {};  // a new file
+  }
+  std::vector<ui1> ihead(UH, 0);
+  if (!p.ridx_head.empty()) ihead = p.ridx_head;
+  ih.file_type_string = fmt::FILE_TYPE_RECORD_INDICES;
+  const ui4 ibody = crc::calculate(p.new_ridx_body);
+  std::vector<ui1> file = fix(ih, ihead, ibody, fmt::RECORD_INDEX_BYTES);
+  file.insert(file.end(), p.new_ridx_body.begin(), p.new_ridx_body.end());
+  write_all(p.ridx, file);
+}
+
+void recover_record_files(const fsys::path& root, bool apply, bool backup,
+                          const fsys::path& backup_root, RecoveryReport& report, const Control& ctl) {
+  std::vector<fsys::path> files;
+  auto add_dir = [&](const fsys::path& d) {
+    for (const auto& e : fsys::directory_iterator(d))
+      if (e.is_regular_file() && e.path().extension() == ".rdat") files.push_back(e.path());
+  };
+  add_dir(root);
+  for (const auto& ch : fsys::directory_iterator(root)) {
+    if (!ch.is_directory() || ch.path().extension() != ".timd") continue;
+    add_dir(ch.path());
+    for (const auto& sg : fsys::directory_iterator(ch.path()))
+      if (sg.is_directory() && sg.path().extension() == ".segd") add_dir(sg.path());
+  }
+  std::sort(files.begin(), files.end());
+  for (const auto& f : files) {
+    ctl.check();
+    std::optional<RecordFilePlan> plan;
+    try {
+      plan = plan_record_file(f);
+    } catch (const std::exception& e) {
+      report.skipped.push_back(f.string() + ": annotation file not examined: " + e.what());
+      continue;
+    }
+    if (!plan) continue;
+    RecoveredRecordFile r;
+    r.path = f.string();
+    r.records_before = plan->n_before;
+    r.records_after = plan->n_after;
+    r.bytes_dropped = plan->dropped;
+    r.index_rebuilt = plan->ridx_rebuild;
+    r.action = (apply ? "" : "would be repaired: ") + plan->action;
+    report.record_files.push_back(r);
+    if (!apply) continue;
+    try {
+      report.backup_root = backup ? backup_root.string() : report.backup_root;
+      apply_record_file(*plan, backup, backup_root, root);
+      report.record_files.back().action = plan->action;
+    } catch (const std::exception& e) {
+      report.skipped.push_back(f.string() + ": annotation repair failed: " + e.what());
+      report.record_files.pop_back();
     }
   }
 }
@@ -1461,6 +1684,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
     report.notes.push_back(channel + ": last segment stamped segment-repaired (header only): " +
                            stamp.tmet.string());
   }
+  recover_record_files(root, apply, backup, backup_root, report, ctl);
   report.applied = apply;
   return report;
 }

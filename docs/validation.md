@@ -396,10 +396,22 @@ entries) keeps the `.tdat`'s stored checksum. It is reset to "not computed"
 only when the data file was truncated, blocks were rebuilt past what it
 covered, or the `.tdat` header predates the last append.
 
+**Annotation files.** Recovery also looks at every `.rdat` + `.ridx` pair
+(session, channel and segment level). An interrupted annotation append can
+leave a torn last record, record bytes the header does not count, or an index
+that is short, torn or missing. Recovery keeps every whole, CRC-valid record,
+drops only the torn fragment (and any bytes after the last whole record, which
+go to the backup), and rebuilds the `.ridx` and both headers from the
+records. They are listed in `report.record_files` (a dry run says what it
+would do); a healthy file, including one written by the legacy stack, is
+never listed. The check reads each record file once (annotation files are
+small next to the data) and only in recovery, never on a write.
+
 ### Reading the report
 
 ```python
 report.segments          # tuple[RecoveredSegment, ...] — only segments needing work
+report.record_files      # tuple[RecoveredRecordFile, ...] — annotation files needing work
 report.skipped           # segments that could not be examined, with reasons
 report.segments_examined # how many were looked at
 report.applied           # False for a dry run

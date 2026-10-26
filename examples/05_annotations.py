@@ -3,8 +3,9 @@
 Records attach either to the whole session or to one channel. Each record has
 a type ("Note", "EDFA", "SyLg", "Seiz"), a uUTC time, and typically text;
 "EDFA" carries a duration. In encrypted sessions record bodies are encrypted
-at level 2. write_annotations replaces the records at that level, so gather
-them and write once.
+at level 2. write_annotations always APPENDS to the records already stored at
+that level (and creates them the first time); it never replaces or deletes
+one. Readers return the records in time order.
 """
 import tempfile
 from pathlib import Path

@@ -434,6 +434,11 @@ void Session::read_record_file(std::vector<Record>& out, const std::string& rdat
       rec.channel = channel;
       rec.segment = segment;
     }
+    // File order is WRITE order (write_records only ever appends, so a later
+    // call can add an earlier time); readers return time order. Stable: equal
+    // times keep the order they were written in.
+    std::stable_sort(recs.begin(), recs.end(),
+                     [](const Record& a, const Record& b) { return a.time < b.time; });
     // Nothing is appended until the whole file parsed: a half-read file is
     // worse than a skipped one.
     out.insert(out.end(), std::make_move_iterator(recs.begin()),

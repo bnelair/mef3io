@@ -67,7 +67,7 @@ shutdown, `mef3io.recoverSession(path)` reports what is wrong (a dry run) and
   saturating. `Valid` is any numeric/logical mask, nonzero = valid.
 - **`writeAnnotations(records, channel)`** — struct array (or table) with
   fields `time` (required), `type` (default `'Note'`), `text`, `duration`.
-  Omit `channel` for session-level records. Replaces records at that level.
+  Omit `channel` for session-level records. Appends to the records already stored at that level (created if absent); never replaces or deletes one.
 - **`setMetadata(md)`** / the `Metadata=` constructor option — session-wide
   subject/acquisition metadata. Use the object API (mirrors Python):
 

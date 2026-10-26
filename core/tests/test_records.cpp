@@ -10,6 +10,8 @@
 #include "mef3io/byteio.hpp"
 #include "mef3io/c_api.h"
 #include "mef3io/crc.hpp"
+#include "mef3io/crypto.hpp"
+#include "mef3io/headers.hpp"
 #include "mef3io/errors.hpp"
 #include "mef3io/metadata.hpp"
 #include "mef3io/reader.hpp"
@@ -550,6 +552,75 @@ TEST_CASE("The offset probe verifies the body CRC before trusting section 3") {
   SECTION("a truncated record is rejected") {
     std::vector<ui1> cut(raw.begin(), raw.begin() + 12288);
     REQUIRE_THROWS_AS(probe_recording_time_offset(cut, ""), FormatError);
+  }
+  fsys::remove_all(dir);
+}
+
+// ---- #156: write_records APPENDS, at any level, encrypted or not ----------------
+
+TEST_CASE("write_records appends in place: same bytes as one call, any level, L2-encrypted") {
+  const auto dir = fsys::temp_directory_path() / "mef3io_records_append";
+  fsys::remove_all(dir);
+  fsys::create_directories(dir / "one");
+  fsys::create_directories(dir / "two");
+  auto note = [](si8 t, const char* text) {
+    Record r;
+    r.type = "Note";
+    r.time = t;
+    r.text = text;
+    return r;
+  };
+  const std::vector<Record> all = {note(T0 + SEC, "a"), note(T0 + 2 * SEC, "bb"),
+                                   note(T0 + 3 * SEC, "a longer note than the others")};
+  for (const std::string pw : {std::string(), std::string("secret")}) {
+    const std::string p2 = pw.empty() ? "" : "secret2";
+    // a SEGMENT-level folder name: the function does not care about the level.
+    write_records((dir / "one").string(), "ch-000000", "s", "ch", 0, all, 0, pw, p2);
+    write_records((dir / "two").string(), "ch-000000", "s", "ch", 0, {all[0]}, 0, pw, p2);
+    write_records((dir / "two").string(), "ch-000000", "s", "ch", 0, {all[1], all[2]}, 0, pw, p2);
+    for (const char* ext : {".rdat", ".ridx"}) {
+      auto slurp = [&](const char* d) {
+        std::ifstream f(dir / d / (std::string("ch-000000") + ext), std::ios::binary);
+        return std::vector<ui1>(std::istreambuf_iterator<char>(f), {});
+      };
+      const auto a = slurp("one"), b = slurp("two");
+      REQUIRE(a.size() == b.size());
+      // body, counts, max entry size, span, body CRC agree; header CRC valid
+      REQUIRE(std::equal(a.begin() + fmt::UNIVERSAL_HEADER_BYTES, a.end(),
+                         b.begin() + fmt::UNIVERSAL_HEADER_BYTES));
+      REQUIRE(std::equal(a.begin() + 4, a.begin() + 8, b.begin() + 4));
+      REQUIRE(std::equal(a.begin() + 16, a.begin() + 48, b.begin() + 16));
+      REQUIRE(crc::calculate(std::span<const ui1>(b).subspan(fmt::UNIVERSAL_HEADER_BYTES)) ==
+              byteio::read<ui4>(b, 4));
+      REQUIRE(crc::calculate(std::span<const ui1>(b).subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4)) ==
+              byteio::read<ui4>(b, 0));
+    }
+    // an earlier time is appended too (file order = write order)
+    write_records((dir / "two").string(), "ch-000000", "s", "ch", 0, {note(T0, "early")}, 0, pw, p2);
+    std::ifstream f(dir / "two" / "ch-000000.rdat", std::ios::binary);
+    std::vector<ui1> img(std::istreambuf_iterator<char>(f), {});
+    crypto::AccessKeys keys;
+    if (!pw.empty()) {
+      const auto uh = fmt::UniversalHeader::parse(img);
+      keys = crypto::validate_password(p2, uh.level_1_password_validation_field,
+                                       uh.level_2_password_validation_field);
+    }
+    const auto recs = parse_records(img, 0, keys);
+    REQUIRE(recs.size() == 4);
+    REQUIRE(recs[3].text == "early");
+    // a torn tail is refused, and nothing is changed
+    {
+      std::ofstream(dir / "two" / "ch-000000.rdat", std::ios::binary | std::ios::app) << "junk";
+    }
+    const auto size = fsys::file_size(dir / "two" / "ch-000000.rdat");
+    REQUIRE_THROWS_AS(
+        write_records((dir / "two").string(), "ch-000000", "s", "ch", 0, {note(T0, "x")}, 0, pw, p2),
+        FormatError);
+    REQUIRE(fsys::file_size(dir / "two" / "ch-000000.rdat") == size);
+    fsys::remove_all(dir / "one");
+    fsys::remove_all(dir / "two");
+    fsys::create_directories(dir / "one");
+    fsys::create_directories(dir / "two");
   }
   fsys::remove_all(dir);
 }

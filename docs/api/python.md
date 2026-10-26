@@ -158,6 +158,8 @@ See the [validation guide](../validation.md) for what each check means.
 
 ::: mef3io.RecoveredSegment
 
+::: mef3io.RecoveredRecordFile
+
 ## Errors
 
 mef3io raises `mef3io.MefError` and its subclasses `FormatError` (damaged

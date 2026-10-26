@@ -766,10 +766,22 @@ NB_MODULE(_mef3io, m) {
           d["declarations"] = decl;
           segs.append(d);
         }
+        nb::list rfiles;
+        for (const auto& f : r.record_files) {
+          nb::dict d;
+          d["path"] = f.path;
+          d["records_before"] = f.records_before;
+          d["records_after"] = f.records_after;
+          d["bytes_dropped"] = f.bytes_dropped;
+          d["index_rebuilt"] = f.index_rebuilt;
+          d["action"] = f.action;
+          rfiles.append(d);
+        }
         nb::list skipped;
         for (const auto& s : r.skipped) skipped.append(s);
         nb::dict out;
         out["segments"] = segs;
+        out["record_files"] = rfiles;
         out["skipped"] = skipped;
         out["segments_examined"] = r.segments_examined;
         out["applied"] = r.applied;

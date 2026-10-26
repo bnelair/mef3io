@@ -45,6 +45,18 @@ the first session-level annotation or new channel: that reads and
 CRC-checks every segment's `.tmet` once per Writer (about 1.4–1.8 s and
 157 MB at 64 channels × 150 segments) and nothing afterwards.
 
+## Annotations are appended in place
+
+`write_annotations` never rewrites the annotation files. A call appends the new
+records to `.rdat` and their entries to `.ridx`, updates the two headers (the
+count, the largest record, the time span) and extends their body CRCs over the
+new bytes only, so the cost of a call does not depend on how many annotations
+are stored (measured: a 4 MB, 20000-record file and a 50-record file both
+read under 32 KB and write 2.1 KB per appended record). Nothing stored earlier
+is ever overwritten, so a power cut can only affect the last call. Annotations
+follow the same rules as samples below: `flush()`, `close()` and
+`wait_for_disk` cover them.
+
 ## When is my data on disk?
 
 Writing to a file and the data being *on the disk* are two different moments.
@@ -178,6 +190,7 @@ sample whose bytes reached the disk (pinned state by state in
 | a `.tdat` header zeroed on a full-size segment (the header page never landed) | the header says nothing (type, segment number, names) | replaces it with one built from the segment's `.tmet` (not just re-sealed) |
 | a segment's `.tmet` missing but a complete, CRC-valid `.tmet.mef3io-tmp` beside it (a `wait_for_disk` write whose rename was lost) | the segment is invisible | publishes that file (backed up if a short `.tmet` was there; stamped Recovery) |
 | a later segment's `.tmet` AND `.tidx` lost, its data landed | the strict open of the whole session fails | rebuilds both: the `.tmet` from the previous segment's, the index from the data |
+| an **annotation** append interrupted (`.rdat`/`.ridx`, session or channel level): a torn last record, record bytes the header does not count, an index that is short, torn or missing | the strict open works (the header's count decides what is read); the next `write_annotations` is refused until recovery | keeps every whole, CRC-valid record, drops only the torn fragment (backed up), rebuilds the `.ridx` and both headers from the records; the dry run lists the file under `record_files`; healthy and legacy files are never listed |
 | a new segment's files empty, its data never landed | the strict open of the whole session fails | removes the segment (it holds no sample; moved to the backup) |
 
 Every segment recovery changes, and every last segment whose `.tmet` disagrees

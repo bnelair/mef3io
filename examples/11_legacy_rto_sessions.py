@@ -174,9 +174,8 @@ new_note = START + 70 * S
 with mef3io.Writer(str(session)) as w:
     w.write("ch1", extra, append_at, FS, precision=0)          # in-segment append
     w.write("ch2", extra, append_at, FS, precision=0)          # a new channel
-    # write_annotations REPLACES the records at a level: keep the old one.
-    w.write_annotations([{"type": "Note", "time": START + 5 * S, "text": "event (fictional)"},
-                         {"type": "Note", "time": new_note, "text": "added by mef3io"}])
+    # write_annotations APPENDS: the stored "event" stays, this one is added.
+    w.write_annotations([{"type": "Note", "time": new_note, "text": "added by mef3io"}])
 new_end = append_at + 30 * S
 written = {append_at, new_end, new_note}
 print(f"  wrote ch1 [{utc(append_at)}, {utc(new_end)}), ch2 likewise, a note at {utc(new_note)}")

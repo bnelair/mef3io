@@ -31,3 +31,34 @@
   readable. `write_records` rejects a record carrying a
   payload its type cannot store, so the gap fails loudly instead of silently.
   Cache is Python-level (a C++ warm-start is future).
+
+## Annotation writes APPEND, never replace (#156, 2.0.1)
+
+Maintainer decision, firm: "WE NEED ONLY APPEND. CREATE IF THERE'S NO PREV
+FILE. WE CANNOT BE DELETING DATA LIKE THIS." Before 2.0.1 `write_records`
+truncated `.rdat`/`.ridx` and wrote only the batch (every call deleted what was
+stored; the old docs said "Replaces"). There is NO replace mode, no
+truncation and no whole-file rewrite anywhere — do not add one.
+
+- `write_records` (core/src/records.cpp): file absent -> create the pair (a
+  batch is written in time order, stable); present -> APPEND in place, in the
+  `.tidx` order: record bytes, `.ridx` entries, `.ridx` header, `.rdat` header.
+  Body CRCs are EXTENDED (`crc::calculate(new, stored)`), count/max entry
+  size/span updated, provenance stamped Append. O(new records): reads two UHs
+  plus the last index entry and last record header (rchar/wchar pinned in
+  tests/test_p47_annotation_append.py). Failure rolls both files back to
+  their sizes/headers.
+- The O(1) health check (index whole entries, UH counts == index count, last
+  index entry's record ends exactly at EOF, header CRCs) REFUSES a damaged
+  pair (FormatError naming recover_session) instead of appending past a
+  torn record. Encryption must match the file (WriteConflictError).
+- Out-of-order time: appended anyway (file order = write order);
+  `Session::read_record_file` stable-sorts by time. The copy engine keeps FILE
+  order (ridx matched by offset, merge sorts by `sort_time`), pymef/meflib do
+  not assume sorted records (oracle-tested).
+- Recovery (`recover_record_files` in recover.cpp): per `.rdat` (root,
+  channel, segment): walk whole CRC-valid records; healthy = index whole and
+  matching every offset + counts right + header CRC ok + nothing after the
+  last record. Else keep every whole record, drop the rest (backed up),
+  rebuild `.ridx` + both headers. Reported as `RecoveredRecordFile` in
+  `RecoveryReport.record_files`. No false positives on legacy files (test).

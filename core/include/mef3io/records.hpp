@@ -155,13 +155,22 @@ std::vector<Record> parse_records(std::span<const ui1> rdat_bytes, si8 rto,
 /// it first; callers that create directories run it before doing so.
 void validate_records_for_write(const std::vector<Record>& records);
 
-// Write records to `<dir>/<base>.rdat` + `<base>.ridx`. `session_name`/
-// `channel_name` populate the universal headers. Times are stored with
-// to_stored_time(t, rto) (time.hpp): -t at rto 0, rto - t under an
-// anonymization offset; a time at or before a non-zero `rto` is refused
-// (WriteConflictError) before any file is touched. When
-// `password_1`/`password_2` are set, record bodies are level-2 encrypted
-// (meflib convention: records may hold identifying data).
+/// APPEND records to `<dir>/<base>.rdat` + `<base>.ridx`, creating the pair
+/// when it does not exist. NEVER replaces, truncates or rewrites stored
+/// records: the new bytes are added in place (record data, then its index
+/// entries, then the headers that count them; body CRCs are extended, not
+/// recomputed), so the cost is O(new records) however large the file is.
+/// A record earlier than the last stored one is appended too (file order =
+/// write order; readers return time order). Within one call the records are
+/// written in time order. An existing pair that is not intact (partial last
+/// record, short index, bad header CRC) is refused with a message naming
+/// recover_session, which repairs it. Times are stored with
+/// to_stored_time(t, rto) (time.hpp): -t at rto 0, rto - t under an
+/// anonymization offset; a time at or before a non-zero `rto` is refused
+/// (WriteConflictError) before any file is touched. When
+/// `password_1`/`password_2` are set, record bodies are level-2 encrypted
+/// (meflib convention: records may hold identifying data); an existing file's
+/// encryption must match (WriteConflictError otherwise).
 void write_records(const std::string& dir, const std::string& base,
                    const std::string& session_name, const std::string& channel_name,
                    int segment_number, const std::vector<Record>& records, si8 rto,

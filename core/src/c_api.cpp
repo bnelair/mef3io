@@ -653,6 +653,7 @@ int mef3io_recover_session_ex(const char* mefd_path, int apply, int backup, cons
                          std::to_string(report.segments.size()) + " needing recovery";
       if (!report.applied) text += "  (DRY RUN - nothing was written)";
       for (const auto& s : report.segments) text += "\n    " + s.path + ": " + s.action;
+      for (const auto& f : report.record_files) text += "\n    " + f.path + ": " + f.action;
       for (const auto& s : report.skipped) text += "\n    skipped " + s;
       for (const auto& n : report.notes) text += "\n    note: " + n;
       if (report.applied && !report.backup_root.empty())

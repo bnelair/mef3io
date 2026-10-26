@@ -59,6 +59,7 @@ __all__ = [
     "recover_session",
     "RecoveryReport",
     "RecoveredSegment",
+    "RecoveredRecordFile",
 ]
 
 def _backend():
@@ -673,10 +674,31 @@ class RecoveredSegment:
 
 
 @dataclasses.dataclass(frozen=True)
+class RecoveredRecordFile:
+    """One annotation file (``.rdat`` + ``.ridx``) an interrupted write left inconsistent.
+
+    Recovery keeps every whole, CRC-valid record, drops only a torn last
+    record and rebuilds the index and headers from the records.
+    """
+
+    path: str = ""
+    records_before: int = 0
+    records_after: int = 0
+    bytes_dropped: int = 0
+    index_rebuilt: bool = False
+    action: str = ""
+
+    def __str__(self) -> str:  # pragma: no cover - convenience
+        return f"{self.path}: {self.action}"
+
+
+@dataclasses.dataclass(frozen=True)
 class RecoveryReport:
     """What `recover_session` found, and did or would do."""
 
     segments: tuple[RecoveredSegment, ...] = ()
+    #: Annotation files needing work (torn last record, short or missing index).
+    record_files: tuple[RecoveredRecordFile, ...] = ()
     skipped: tuple[str, ...] = ()
     segments_examined: int = 0
     applied: bool = False
@@ -687,16 +709,18 @@ class RecoveryReport:
 
     @property
     def nothing_to_do(self) -> bool:
-        return not self.segments and not self.skipped
+        return not self.segments and not self.record_files and not self.skipped
 
     def summary(self) -> str:
         lines = [
             f"{self.segments_examined} segment(s) examined, "
-            f"{len(self.segments)} needing recovery"
+            f"{len(self.segments) + len(self.record_files)} needing recovery"
             + ("" if self.applied else "  (DRY RUN — nothing was written)")
         ]
         for s in self.segments:
             lines.append(f"    {s.path}: {s.action}")
+        for f in self.record_files:
+            lines.append(f"    {f.path}: {f.action}")
         for s in self.skipped:
             lines.append(f"    skipped {s}")
         for n in self.notes:
@@ -795,6 +819,7 @@ def recover_session(
                                 for k, v in s.items() if k in fields})
             for s in raw["segments"]
         ),
+        record_files=tuple(RecoveredRecordFile(**f) for f in raw.get("record_files", ())),
         skipped=tuple(raw["skipped"]),
         segments_examined=raw["segments_examined"],
         applied=raw["applied"],
