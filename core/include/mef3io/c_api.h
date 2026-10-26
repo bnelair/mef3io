@@ -412,7 +412,8 @@ int mef3io_archive_session(const char* session_dir, const char* tar_path, int ov
 /* ----- recovery ---------------------------------------------------------- */
 
 /* Make each segment's block index and data agree again after an interrupted
- * write. `apply` 0 reports what it WOULD do and writes nothing. `backup` saves
+ * write. `apply` 0 reports what it WOULD do and writes nothing. `backup` is accepted
+ * and IGNORED since 2.0.1 (0 is treated as 1: a backup is always kept); it saves
  * what changes (never the whole .tdat, which may be tens of gigabytes) under
  * "<session>.recover-backup". A human-readable summary lands in `out_summary`.
  * `out_segments` receives the number of segments needing work (may be NULL).

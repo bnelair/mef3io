@@ -178,7 +178,7 @@ sample whose bytes reached the disk (pinned state by state in
 | a `.tdat` header zeroed on a full-size segment (the header page never landed) | the header says nothing (type, segment number, names) | replaces it with one built from the segment's `.tmet` (not just re-sealed) |
 | a segment's `.tmet` missing but a complete, CRC-valid `.tmet.mef3io-tmp` beside it (a `wait_for_disk` write whose rename was lost) | the segment is invisible | publishes that file (backed up if a short `.tmet` was there; stamped Recovery) |
 | a later segment's `.tmet` AND `.tidx` lost, its data landed | the strict open of the whole session fails | rebuilds both: the `.tmet` from the previous segment's, the index from the data |
-| a new segment's files empty, its data never landed | the strict open of the whole session fails | removes the segment (it holds no sample; moved to the backup) |
+| a new segment's files empty, its data never landed | the strict open of the whole session fails | removes the segment (it holds no sample; moved to the backup, never deleted) |
 
 Every segment recovery changes, and every last segment whose `.tmet` disagrees
 with its index, then has its declarations re-derived from the index — that
@@ -190,7 +190,8 @@ committed by an *earlier* append is never at risk, because nothing rewrites it.
 Limits, stated exactly:
 
 - Within the torn append, blocks that follow a hole (a block that did not land
-  while later ones did) are dropped with the torn tail; they are in the backup.
+  while later ones did) are dropped with the torn tail; they are in the backup. The backup is always
+  written (`backup=False` / `--no-backup` are ignored since 2.0.1).
 - The block CRC check covers each channel's last append, back to its first
   block and **at most 64 MiB per channel**. Every checked byte is read once
   (pinned with `/proc/self/io`), so a dry run of a healthy session reads up to

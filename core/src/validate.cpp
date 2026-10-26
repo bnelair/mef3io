@@ -1854,7 +1854,10 @@ Report repair_session(const std::string& path, const RepairSelection& selection,
     throw IoError("cannot repair a tar session archive in place: " + path +
                   " (extract it first with extract_session)");
   detail::refuse_if_mid_operation(path);
-  return run(path, opts, &selection, ctl);
+  // A backup is always kept: `backup = false` is accepted and ignored.
+  RepairSelection always = selection;
+  always.backup = true;
+  return run(path, opts, &always, ctl);
 }
 
 }  // namespace mef3io

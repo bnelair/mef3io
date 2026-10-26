@@ -495,8 +495,11 @@ void rederive_declarations(const std::string& path, const std::string& password,
 
 }  // namespace
 
-RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
+RecoveryReport recover_session(const std::string& path, bool apply, bool /*backup: ignored*/,
                                const std::string& password, const Control& ctl) {
+  // The library never deletes stored data without keeping a copy: the backup
+  // flag is accepted for source compatibility and ignored.
+  constexpr bool backup = true;
   // The password is used only to read a segment's offset and rate when its
   // end time has to be decided (plan_end_times).
   if (path_has_suffix(path, ".tar"))
@@ -1390,7 +1393,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
       channels_to_stamp.insert(p.channel_dir);
   }
   // Dataless segments cut off by a power cut (see the scan): moved to the
-  // backup (or deleted without one); a channel folder left without segments
+  // backup; a channel folder left without segments
   // goes with them — it held no sample.
   for (const auto& rm : removals) {
     std::error_code ec;
@@ -1400,8 +1403,6 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
       fsys::create_directories(dest.parent_path());
       fsys::remove_all(dest, ec);
       fsys::rename(rm.dir, dest, ec);
-    } else {
-      fsys::remove_all(rm.dir, ec);
     }
     if (ec) {
       report.skipped.push_back(report.segments[rm.report_index].path +
@@ -1418,8 +1419,6 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
         const fsys::path dest = backup_root / rm.channel / "channel-folder";
         fsys::remove_all(dest, ec);
         fsys::rename(rm.channel_dir, dest, ec);
-      } else {
-        fsys::remove_all(rm.channel_dir, ec);
       }
       if (!ec)
         report.notes.push_back(rm.channel + ": the channel held no other segment, so its "

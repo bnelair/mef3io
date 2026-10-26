@@ -303,3 +303,13 @@ def test_cache_misses_a_middle_repair_when_the_stamp_is_skipped(session, tmp_pat
     note = [f for f in report.findings if f.check_id == "provenance.last-segment"][0]
     assert "Cached opens" in note.message
     assert C.load_valid(cache, str(session)) is not None
+
+
+def test_repair_backup_false_is_ignored_and_warns(session):
+    """2.0.1: a backup is always kept; backup=False only warns."""
+    last = _tmets(session)[-1]
+    _break_difference_bytes(last)
+    with pytest.warns(mef3io.BackupAlwaysKeptWarning):
+        report = mef3io.repair_session(str(session), ["sizing.difference-bytes"], backup=False)
+    assert report.segments_repaired >= 1
+    assert (Path(str(session) + ".repair-backup") / last.relative_to(session)).exists()

@@ -111,6 +111,8 @@ struct RepairSelection {
   std::vector<int> segments;          ///< empty = every segment
   /// Copy each file before rewriting it, into `<session>.repair-backup/`
   /// (outside the session tree, so no reader mistakes a backup for data).
+  /// IGNORED since 2.0.1: a backup is always written (the library never
+  /// changes stored data without keeping a copy). Kept so callers compile.
   bool backup = true;
 };
 
