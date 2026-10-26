@@ -542,3 +542,56 @@ def test_an_unclosed_writer_that_cannot_flush_warns_instead_of_losing_the_error(
     assert "injected" in str(ours[0].message) and str(path) not in str(ours[0].message)
     assert ours[0].message.path == str(path)
     del real
+
+
+# ---- 2.0.1: a backup is ALWAYS kept; backup=False / --no-backup only warn ----
+
+def test_dataless_segment_is_moved_into_the_backup_even_with_backup_false(tmp_path):
+    import warnings
+    path = tmp_path / "s.mefd"
+    with mef3io.Writer(str(path), block_length=BLOCK) as w:
+        w.write_int32("ch1", OLD, 1.0, START, FS)
+        w.write_int32("ch1", NEW, 1.0, T_NEW, FS, new_segment=True)
+    folder = sorted(Path(path).glob("ch1.timd/*.segd"))[-1]
+    name = folder.name
+    for f in folder.iterdir():
+        f.write_bytes(b"")
+    with pytest.warns(mef3io.BackupAlwaysKeptWarning):
+        rep = mef3io.recover_session(str(path), apply=True, backup=False)
+    assert not rep.skipped, rep.summary()
+    assert not folder.exists()
+    moved = Path(str(path) + ".recover-backup") / "ch1" / name
+    assert moved.is_dir() and (moved / folder.name.replace(".segd", ".tdat")).exists()
+    assert rep.backup_root
+
+
+def test_cli_no_backup_is_ignored(images, tmp_path):
+    path = _build(images, tmp_path, STATES[2])
+    proc = _cli("recover", str(path), "--apply", "--no-backup")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "BackupAlwaysKeptWarning" in proc.stderr or "always kept" in proc.stderr
+    assert Path(str(path) + ".recover-backup").exists()
+
+
+def test_a_second_recovery_never_replaces_the_first_backup(tmp_path):
+    """Same dataless segment name twice: both copies must survive."""
+    path = tmp_path / "s.mefd"
+    with mef3io.Writer(str(path), block_length=BLOCK) as w:
+        w.write_int32("ch1", OLD, 1.0, START, FS)
+    backup = Path(str(path) + ".recover-backup") / "ch1"
+    names = []
+    for k in range(2):
+        with mef3io.Writer(str(path), block_length=BLOCK) as w:
+            w.write_int32("ch1", NEW, 1.0, T_NEW, FS, new_segment=True)
+        folder = sorted(Path(path).glob("ch1.timd/*.segd"))[-1]
+        names.append(folder.name)
+        for f in folder.iterdir():
+            f.write_bytes(b"")
+        with pytest.warns(mef3io.BackupAlwaysKeptWarning):
+            rep = mef3io.recover_session(str(path), apply=True, backup=False)
+        assert not rep.skipped, rep.summary()
+        assert not folder.exists()
+    assert names[0] == names[1]
+    kept = sorted(p.name for p in backup.iterdir() if p.name.startswith(names[0]))
+    assert kept == [names[0], names[0] + ".1"]
+    assert all(p.is_dir() for p in backup.iterdir())

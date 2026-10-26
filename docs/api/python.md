@@ -198,6 +198,8 @@ see [Warnings carry the path as data](../python.md#warnings-carry-the-path-as-da
 
 ::: mef3io.WriterFlushWarning
 
+::: mef3io.BackupAlwaysKeptWarning
+
 ## Metadata objects
 
 ::: mef3io.Metadata

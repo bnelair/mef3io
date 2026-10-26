@@ -95,6 +95,9 @@ block_length=None, n_threads=0, metadata=None, wait_for_disk=False)`
   `recover_session`. See
   [When is my data on disk?](long_recordings.md#when-is-my-data-on-disk).
   (2.0 removed `durability=`; passing it raises `TypeError`.)
+- `recover_session` and `repair_session` always keep a backup of what they
+  change. `backup=False` (and the CLI's `--no-backup`) is still accepted but
+  ignored since 2.0.1, with one `BackupAlwaysKeptWarning`.
 - `block_length` overrides the RED block size (default: `fs` samples for
   fs ≥ 5000, else `10*fs`, at least 1). A block can hold at most
   858 993 396 samples (`mef3io._mef3io.MAX_BLOCK_SAMPLES`: its byte size is a

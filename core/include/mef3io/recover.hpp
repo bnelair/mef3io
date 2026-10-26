@@ -86,7 +86,10 @@ struct RecoveryReport {
 ///
 /// @param path      `.mefd` session directory. Tar archives are refused.
 /// @param apply     false (default) reports what it WOULD do and writes nothing.
-/// @param backup    copy each file to `<session>.recover-backup/` before writing.
+/// @param backup    IGNORED since 2.0.1 (kept so callers compile): a backup is
+///                  always written to `<session>.recover-backup/` before any
+///                  change, and anything recovery drops (a dataless segment, a
+///                  sub-block fragment) is moved/copied there, never deleted.
 /// @param password  needed only to read encrypted metadata (the offset and
 ///                  rate, at a non-zero recording-time offset).
 ///

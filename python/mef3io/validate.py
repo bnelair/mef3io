@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Sequence
 
 from ._cancel import CancelToken, _hooks
+from ._warnings import MefWarning, emit
 
 __all__ = [
     "Check",
@@ -565,6 +566,26 @@ def validate_session(
     return Validator(path, **kwargs).validate(cancel=cancel, progress=progress)
 
 
+class BackupAlwaysKeptWarning(MefWarning):
+    """``backup=False`` (or ``--no-backup``) was passed and ignored.
+
+    ``recover_session`` and ``repair_session`` always keep a backup of what
+    they change; the argument is accepted only so existing callers keep
+    working.
+    """
+
+
+def _warn_backup_ignored(backup, path) -> None:
+    if not backup:
+        emit(
+            BackupAlwaysKeptWarning,
+            "backup=False is ignored: a backup of everything that changes is always kept "
+            "(mef3io never changes or deletes stored data without keeping a copy)",
+            path=str(path),
+            stacklevel=3,
+        )
+
+
 def repair_session(
     path: str,
     check_ids: Sequence[str],
@@ -597,9 +618,11 @@ def repair_session(
         Which repairs to apply. Required and non-empty — repairs are never
         implicit. :attr:`Report.repairable_check_ids` lists the candidates.
     backup : bool, default True
-        Copy each file before rewriting it, into ``<session>.repair-backup/``
-        (outside the session tree, so no reader mistakes a backup for data).
-        An existing backup is never overwritten.
+        Ignored since 2.0.1: a backup is **always** kept, in
+        ``<session>.repair-backup/`` (outside the session tree, so no reader
+        mistakes a backup for data), and an existing backup is never
+        overwritten. ``backup=False`` is still accepted and emits one
+        :class:`BackupAlwaysKeptWarning`.
     cancel : CancelToken, optional
         Stop the repair from another thread. Repairs are decided during the
         validation pass and written only after it: a cancel during the pass
@@ -631,6 +654,7 @@ def repair_session(
             "implicit. Use Validator(path).validate().repairable_check_ids to see the "
             "candidates."
         )
+    _warn_backup_ignored(backup, path)
     v = Validator(path, **kwargs)
     raw = _backend().repair_session(
         v.path,
@@ -640,7 +664,7 @@ def repair_session(
         segments=v.segments,
         check_ids=[],
         exact_difference_bytes=v.exact_difference_bytes,
-        backup=bool(backup),
+        backup=True,
         **_hooks(cancel, progress),
     )
     return _to_report(
@@ -782,9 +806,12 @@ def recover_session(
     apply : bool, default False
         False reports what it would do and writes nothing.
     backup : bool, default True
-        Save what changes to ``<session>.recover-backup/`` first. Only the
-        ``.tidx``, the ``.tdat``'s 1024-byte header and any dropped fragment —
-        never the whole data file, which may be tens of gigabytes.
+        Ignored since 2.0.1: what changes is **always** saved to
+        ``<session>.recover-backup/`` first (only the ``.tidx``, the
+        ``.tdat``'s 1024-byte header and any dropped fragment — never the
+        whole data file, which may be tens of gigabytes). A dataless segment
+        is moved there, never deleted. ``backup=False`` is still accepted and
+        emits one :class:`BackupAlwaysKeptWarning`.
     password : str, optional
         Only needed for encrypted sessions.
     cancel : CancelToken, optional
@@ -814,8 +841,9 @@ def recover_session(
     healthy segment's findings are left to :func:`repair_session`. A later
     segment whose ``.tmet`` was lost is rebuilt from the previous segment's.
     """
+    _warn_backup_ignored(backup, path)
     raw = _backend().recover_session(
-        str(path), bool(apply), bool(backup), password or "", **_hooks(cancel, progress)
+        str(path), bool(apply), True, password or "", **_hooks(cancel, progress)
     )
     fields = {f.name for f in dataclasses.fields(RecoveredSegment)}
     return RecoveryReport(
@@ -853,7 +881,7 @@ def _recover_main(argv) -> int:
     p.add_argument("path", help="session .mefd directory")
     p.add_argument("--apply", action="store_true", help="actually write (default: dry run)")
     p.add_argument("--no-backup", action="store_true",
-                   help="do not save what changes to <session>.recover-backup/")
+                   help="ignored: a backup is always kept in <session>.recover-backup/")
     p.add_argument("--password", default="", help="for encrypted sessions")
     args = p.parse_args(list(argv))
 
@@ -927,7 +955,8 @@ def _build_parser(repair: bool) -> "argparse.ArgumentParser":
     )
     if repair:
         parser.add_argument(
-            "--no-backup", action="store_true", help="do not back up rewritten files"
+            "--no-backup", action="store_true",
+            help="ignored: a backup is always kept in <session>.repair-backup/"
         )
     parser.add_argument(
         "--fast",
