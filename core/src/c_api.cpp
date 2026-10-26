@@ -651,6 +651,8 @@ int mef3io_recover_session_ex(const char* mefd_path, int apply, int backup, cons
     if (out_summary && out_summary_bytes) {
       std::string text = std::to_string(report.segments_examined) + " segment(s) examined, " +
                          std::to_string(report.segments.size()) + " needing recovery";
+      if (!report.record_files.empty())
+        text += ", " + std::to_string(report.record_files.size()) + " annotation file(s) needing recovery";
       if (!report.applied) text += "  (DRY RUN - nothing was written)";
       for (const auto& s : report.segments) text += "\n    " + s.path + ": " + s.action;
       for (const auto& f : report.record_files) text += "\n    " + f.path + ": " + f.action;

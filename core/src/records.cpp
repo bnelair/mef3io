@@ -542,6 +542,12 @@ void write_records(const std::string& dir, const std::string& base,
   const std::string rdat_path = (fs::path(dir) / (base + ".rdat")).string();
   const std::string ridx_path = (fs::path(dir) / (base + ".ridx")).string();
   const bool exists = fs::exists(rdat_path);
+  // An index with no data file: never truncate it (write_file would), and do
+  // not guess. recover_session lists it; the writer refuses.
+  if (!exists && fs::exists(ridx_path))
+    throw FormatError("record index without its record file: " + ridx_path +
+                      " (the .rdat is missing; nothing was written; run recover_session, which "
+                      "reports it, and restore the .rdat or move the .ridx away)");
   bool encrypt = !password_1.empty();
   crypto::ValidationFields vf =
       encrypt ? crypto::make_validation_fields(password_1, password_2) : crypto::ValidationFields{};
@@ -640,8 +646,13 @@ void write_records(const std::string& dir, const std::string& base,
       uh.end_time = to_stored_time(hi, rto);
     };
     const si8 new_n = n_idx + static_cast<si8>(enc.size());
-    const ui4 rdat_body_crc = crc::calculate(new_rdat, rdat_uh.body_crc);   // rolling: no re-read
-    const ui4 ridx_body_crc = crc::calculate(new_ridx, ridx_uh.body_crc);
+    // Rolling CRC (no re-read). A stored CRC_NO_ENTRY (0: mef_tools never
+    // computed it) is no CRC state: extending it would write a checksum the
+    // file fails, so it stays "never computed".
+    const ui4 rdat_body_crc = rdat_uh.body_crc == fmt::CRC_NO_ENTRY
+                                  ? fmt::CRC_NO_ENTRY : crc::calculate(new_rdat, rdat_uh.body_crc);
+    const ui4 ridx_body_crc = ridx_uh.body_crc == fmt::CRC_NO_ENTRY
+                                  ? fmt::CRC_NO_ENTRY : crc::calculate(new_ridx, ridx_uh.body_crc);
     auto patched = [&](fmt::UniversalHeader uh, std::vector<ui1> head, ui4 body_crc, si8 max_size) {
       uh.number_of_entries = new_n;
       uh.maximum_entry_size = max_size;
@@ -652,8 +663,24 @@ void write_records(const std::string& dir, const std::string& base,
       uh.update_header_crc(head);
       return head;
     };
+    // maximum_entry_size is an allocation contract: a stored NO_ENTRY / 0 /
+    // negative is unusable, so measure the existing records (their sizes are
+    // the gaps between the index offsets; the index is 24 B per record) rather
+    // than describe only the appended ones.
+    si8 stored_max = rdat_uh.maximum_entry_size;
+    if (stored_max <= 0 && n_idx > 0) {
+      const auto idx = read_at(ridx_path, UH, static_cast<std::size_t>(ridx_size - UH));
+      std::vector<si8> offs;
+      offs.reserve(static_cast<std::size_t>(n_idx) + 1);
+      for (si8 i = 0; i < n_idx; ++i)
+        offs.push_back(read<si8>(idx, static_cast<std::size_t>(i) * fmt::RECORD_INDEX_BYTES + 8));
+      offs.push_back(static_cast<si8>(rdat_size));
+      std::sort(offs.begin(), offs.end());
+      stored_max = 0;
+      for (std::size_t i = 1; i < offs.size(); ++i) stored_max = std::max(stored_max, offs[i] - offs[i - 1]);
+    }
     const auto rdat_head = patched(rdat_uh, rdat_uh_bytes, rdat_body_crc,
-                                   std::max<si8>(rdat_uh.maximum_entry_size == fmt::SI8_NO_ENTRY ? 0 : rdat_uh.maximum_entry_size, max_entry));
+                                   std::max<si8>(stored_max < 0 ? 0 : stored_max, max_entry));
     const auto ridx_head = patched(ridx_uh, ridx_uh_bytes, ridx_body_crc, fmt::RECORD_INDEX_BYTES);
 
     // Order: data, the index that points at it, then the headers that count
@@ -671,6 +698,9 @@ void write_records(const std::string& dir, const std::string& base,
       std::error_code ignored;
       try {
         if (patched_ridx) write_at(ridx_path, 0, ridx_uh_bytes);
+      } catch (...) {}
+      try {
+        write_at(rdat_path, 0, rdat_uh_bytes);  // a torn header patch too
       } catch (...) {}
       if (touched_ridx) fs::resize_file(ridx_path, ridx_size, ignored);
       if (touched_rdat) fs::resize_file(rdat_path, rdat_size, ignored);

@@ -362,3 +362,152 @@ def test_transform_copy_of_an_out_of_order_file_verifies(tmp_path):
     rep = mef3io.transform_session(str(p), str(out))
     assert mef3io.transform.verify(str(p), str(out)).ok if hasattr(mef3io, "transform") else True
     assert [t for _, t in _notes(out)] == ["a", "b"]
+
+
+# ---- round-1 review fixes (#159) ----------------------------------------------
+
+
+def _body_crc(path):
+    return int.from_bytes(Path(path).read_bytes()[4:8], "little")
+
+
+def test_appending_to_a_legacy_file_keeps_its_never_computed_crc(tmp_path):
+    pytest.importorskip("mef_tools", reason="legacy oracle not installed")
+    import pandas as pd
+    from mef_tools.io import MefWriter
+
+    p = tmp_path / "legacy.mefd"
+    w = MefWriter(str(p), overwrite=True)
+    w.write_data(np.arange(2560, dtype=np.int32), "ch1", START, FS, precision=0)
+    w.write_annotations(pd.DataFrame({"time": [START + S], "type": ["Note"], "text": ["a"]}))
+    w.write_annotations(pd.DataFrame({"time": [START + 2 * S], "type": ["Note"], "text": ["c"]}),
+                        channel="ch1")
+    del w
+    stored = {lv: _body_crc(_files(p, lv)[0]) for lv in (None, "ch1")}
+    assert 0 in stored.values()  # the oracle's "never computed"
+    with mef3io.Writer(str(p)) as w:
+        w.write_annotations([_note(START + 3 * S, "b")])
+        w.write_annotations([_note(START + 4 * S, "d")], channel="ch1")
+    for lv, before in stored.items():
+        if before == 0:
+            assert _body_crc(_files(p, lv)[0]) == 0
+    assert [t for _, t in _notes(p)] == ["a", "b"]
+    assert [t for _, t in _notes(p, "ch1")] == ["c", "d"]
+    pytest.importorskip("pymef")
+    from pymef.mef_session import MefSession
+    s = MefSession(str(p), "")
+    try:
+        assert len([r for r in s.read_records() if r.get("type") == "Note"]) == 2
+        assert len([r for r in s.read_records(channel="ch1") if r.get("type") == "Note"]) == 2
+    finally:
+        s.close()
+
+
+def test_a_record_failing_its_crc_in_the_middle_is_reported_and_nothing_is_removed(tmp_path):
+    p = _session(tmp_path / "s.mefd")
+    five = [_note(START + i * S, f"n{i}") for i in range(1, 6)]
+    with mef3io.Writer(str(p)) as w:
+        for n in five:
+            w.write_annotations([n])
+    rdat, ridx = _files(p)
+    raw = bytearray(rdat.read_bytes())
+    ent = ridx.read_bytes()
+    off2 = int.from_bytes(ent[UH + 24 + 8:UH + 24 + 16], "little")
+    raw[off2 + 24 + 2] ^= 0xFF  # a byte in record 2's body
+    rdat.write_bytes(bytes(raw))
+    before = (rdat.read_bytes(), ridx.read_bytes())
+    dry = mef3io.recover_session(str(p), apply=False)
+    assert (rdat.read_bytes(), ridx.read_bytes()) == before
+    assert any("fail their CRC" in n for n in dry.notes) or any(
+        f.records_damaged for f in dry.record_files)
+    rep = mef3io.recover_session(str(p), apply=True)
+    assert len(rdat.read_bytes()) == len(before[0])  # nothing removed
+    ent_after = ridx.read_bytes()
+    assert len(ent_after) == len(before[1])
+    # records 1,3,4,5 are byte for byte what they were
+    for i in (0, 2, 3, 4):
+        o = int.from_bytes(ent[UH + 24 * i + 8:UH + 24 * i + 16], "little")
+        assert rdat.read_bytes()[o:o + 40] == before[0][o:o + 40]
+    assert not mef3io.recover_session(str(p), apply=False).record_files
+    with mef3io.Reader(str(p), strict=False) as r:
+        got = [x["text"] for x in r.records()]
+    assert not rep.skipped
+    # the lenient reader skips a record FILE with a corrupt record (documented); the bytes above are the proof
+    assert set(got) <= {f"n{i}" for i in range(1, 6)}
+
+
+def test_a_torn_tail_after_a_damaged_record_drops_only_the_tail(tmp_path):
+    p = _session(tmp_path / "s.mefd")
+    with mef3io.Writer(str(p)) as w:
+        for i in range(1, 4):
+            w.write_annotations([_note(START + i * S, f"n{i}")])
+    rdat, ridx = _files(p)
+    raw = bytearray(rdat.read_bytes())
+    ent = ridx.read_bytes()
+    off2 = int.from_bytes(ent[UH + 24 + 8:UH + 24 + 16], "little")
+    raw[off2 + 24 + 2] ^= 0xFF
+    size = len(raw)
+    rdat.write_bytes(bytes(raw) + b"\x00" * 7)  # a fragment after the last whole record
+    mef3io.recover_session(str(p), apply=True)
+    assert len(rdat.read_bytes()) == size  # only the fragment went
+    assert len(ridx.read_bytes()) == len(ent)
+
+
+def test_session_append_targets_the_file_the_reader_uses(tmp_path):
+    p = _session(tmp_path / "orig.mefd")
+    with mef3io.Writer(str(p)) as w:
+        w.write_annotations([_note(START + S, "old")])
+    q = tmp_path / "renamed.mefd"
+    p.rename(q)
+    with mef3io.Writer(str(q)) as w:
+        w.write_annotations([_note(START + 2 * S, "new")])
+    assert sorted(f.name for f in q.glob("*.rdat")) == ["orig.rdat"]
+    assert [t for _, t in _notes(q)] == ["old", "new"]
+
+
+def test_ambiguous_session_record_files_refuse_a_write(tmp_path):
+    p = _session(tmp_path / "s.mefd")
+    with mef3io.Writer(str(p)) as w:
+        w.write_annotations([_note(START + S, "old")])
+    rdat, ridx = _files(p)
+    shutil.copy(rdat, p / "a.rdat")
+    shutil.copy(ridx, p / "a.ridx")
+    rdat.rename(p / "b.rdat")
+    ridx.rename(p / "b.ridx")
+    with pytest.raises(Exception, match="ambiguous"):
+        with mef3io.Writer(str(p)) as w:
+            w.write_annotations([_note(START + 2 * S, "new")])
+    assert sorted(f.name for f in p.glob("*.rdat")) == ["a.rdat", "b.rdat"]
+
+
+def test_an_orphan_index_is_never_replaced_and_recovery_reports_it(tmp_path):
+    p = _session(tmp_path / "s.mefd")
+    with mef3io.Writer(str(p)) as w:
+        w.write_annotations([_note(START + S, "old")])
+    rdat, ridx = _files(p)
+    keep = ridx.read_bytes()
+    rdat.unlink()
+    with pytest.raises(Exception, match="recover_session"):
+        with mef3io.Writer(str(p)) as w:
+            w.write_annotations([_note(START + 2 * S, "new")])
+    assert ridx.read_bytes() == keep and not rdat.exists()
+    rep = mef3io.recover_session(str(p), apply=True)
+    assert any("without its record file" in n for n in rep.notes)
+    assert ridx.read_bytes() == keep
+
+
+def test_unset_maximum_entry_size_is_measured_not_guessed(tmp_path):
+    p = _session(tmp_path / "s.mefd")
+    long_text = "x" * 500
+    with mef3io.Writer(str(p)) as w:
+        w.write_annotations([_note(START + S, long_text)])
+    rdat, _ = _files(p)
+    raw = bytearray(rdat.read_bytes())
+    big = len(raw) - UH
+    raw[40:48] = (-1).to_bytes(8, "little", signed=True)
+    raw[0:4] = _koopman(bytes(raw[4:UH])).to_bytes(4, "little")
+    rdat.write_bytes(bytes(raw))
+    with mef3io.Writer(str(p)) as w:
+        w.write_annotations([_note(START + 2 * S, "s")])
+    assert int.from_bytes(rdat.read_bytes()[40:48], "little", signed=True) >= big
+    assert [t for _, t in _notes(p)] == [long_text, "s"]

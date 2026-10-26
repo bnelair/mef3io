@@ -502,9 +502,12 @@ namespace {
 // An annotation append writes the record bytes, then the index entries, then
 // the two headers (records.cpp). A power cut can therefore leave: a torn last
 // record, whole records the header does not count, or an index that is short
-// or torn. Recovery keeps EVERY whole CRC-valid record, drops only the torn
-// fragment, and rebuilds the .ridx and the headers from the .rdat. It never
-// drops a record that is intact.
+// or torn. Recovery keeps EVERY whole record, drops only the torn fragment
+// AFTER the last whole record (backed up), and rebuilds the .ridx and the
+// headers from the .rdat. A whole record whose CRC fails (bit rot, foreign
+// damage: NOT an interrupted append) is never removed and never ends the walk:
+// it stays in the file and the index, is counted and reported, and every
+// record after it stays too.
 struct RecordFilePlan {
   fsys::path rdat, ridx;
   std::string where;
@@ -518,7 +521,14 @@ struct RecordFilePlan {
   bool header_fix = false, ridx_rebuild = false;
   std::string action;
   si8 dropped = 0;
+  si8 damaged = 0;                        // whole records failing their CRC (kept)
+  bool no_change = false;                 // nothing to repair; only damage to report
 };
+
+std::string damage_text(si8 n) {
+  return std::to_string(n) + " record(s) fail their CRC (damage, not an interrupted write): kept "
+         "exactly as they are, nothing removed; a strict reader reports them";
+}
 
 std::optional<RecordFilePlan> plan_record_file(const fsys::path& rdat) {
   constexpr std::uint64_t UH = fmt::UNIVERSAL_HEADER_BYTES;
@@ -540,9 +550,10 @@ std::optional<RecordFilePlan> plan_record_file(const fsys::path& rdat) {
     ridx = read_all(p.ridx);
     if (ridx.size() >= UH) p.ridx_head.assign(ridx.begin(), ridx.begin() + UH);
   }
-  // Walk the whole records. A record is whole when its header fits, its body
-  // fits and its CRC (when present) matches; the walk stops at the first that
-  // is not.
+  // Walk the whole records. A record is whole when its header fits and its
+  // body fits; the walk stops at the first that does not (a torn tail). A
+  // record failing its CRC is counted as damaged but stays: only the bytes
+  // after the last whole record may ever be dropped.
   std::vector<si8> offsets;
   std::uint64_t off = UH;
   while (off + fmt::RECORD_HEADER_BYTES <= bytes.size()) {
@@ -553,7 +564,7 @@ std::optional<RecordFilePlan> plan_record_file(const fsys::path& rdat) {
     const ui4 stored = byteio::read<ui4>(bytes, off);
     if (stored != 0 &&
         crc::calculate(std::span<const ui1>(bytes).subspan(off + 4, fmt::RECORD_HEADER_BYTES - 4 + nb)) != stored)
-      break;
+      ++p.damaged;
     offsets.push_back(static_cast<si8>(off));
     p.times.push_back(byteio::read<si8>(bytes, off + 16));
     p.max_entry = std::max<si8>(p.max_entry, fmt::RECORD_HEADER_BYTES + nb);
@@ -578,7 +589,12 @@ std::optional<RecordFilePlan> plan_record_file(const fsys::path& rdat) {
   }
   const bool count_ok = uh.number_of_entries == p.n_after || uh.number_of_entries == -1;
   const bool head_ok = uh.header_crc_valid(p.rdat_head);
-  if (index_ok && count_ok && head_ok && p.dropped == 0) return std::nullopt;  // healthy
+  if (index_ok && count_ok && head_ok && p.dropped == 0) {
+    if (p.damaged == 0) return std::nullopt;  // healthy
+    p.no_change = true;                       // only damage to report; nothing to write
+    p.action = damage_text(p.damaged);
+    return p;
+  }
 
   p.ridx_rebuild = !index_ok;
   p.header_fix = !count_ok || !head_ok || p.dropped != 0 || !index_ok;
@@ -602,6 +618,7 @@ std::optional<RecordFilePlan> plan_record_file(const fsys::path& rdat) {
     what += std::string(what.empty() ? "" : ", ") + "rebuilds the index from the records (" +
             std::to_string(p.n_before) + " -> " + std::to_string(p.n_after) + " entries)";
   if (what.empty()) what = "repairs the file header";
+  if (p.damaged) what += "; " + damage_text(p.damaged);
   p.action = what;
   return p;
 }
@@ -686,6 +703,27 @@ void recover_record_files(const fsys::path& root, bool apply, bool backup,
       if (sg.is_directory() && sg.path().extension() == ".segd") add_dir(sg.path());
   }
   std::sort(files.begin(), files.end());
+  // A .ridx whose .rdat is missing: nothing can be rebuilt from an index
+  // alone, and it is never deleted or replaced. Reported only.
+  {
+    std::vector<fsys::path> dirs = {root};
+    for (const auto& ch : fsys::directory_iterator(root)) {
+      if (!ch.is_directory() || ch.path().extension() != ".timd") continue;
+      dirs.push_back(ch.path());
+      for (const auto& sg : fsys::directory_iterator(ch.path()))
+        if (sg.is_directory() && sg.path().extension() == ".segd") dirs.push_back(sg.path());
+    }
+    for (const auto& d : dirs)
+      for (const auto& e : fsys::directory_iterator(d)) {
+        if (!e.is_regular_file() || e.path().extension() != ".ridx") continue;
+        auto sibling = e.path();
+        sibling.replace_extension(".rdat");
+        if (!fsys::exists(sibling))
+          report.notes.push_back(e.path().string() + ": record index without its record file (.rdat "
+                                 "missing); kept as is, nothing can be rebuilt from an index alone, "
+                                 "and writing annotations here is refused until the .rdat is restored");
+      }
+  }
   for (const auto& f : files) {
     ctl.check();
     std::optional<RecordFilePlan> plan;
@@ -696,12 +734,17 @@ void recover_record_files(const fsys::path& root, bool apply, bool backup,
       continue;
     }
     if (!plan) continue;
+    if (plan->no_change) {
+      report.notes.push_back(f.string() + ": " + plan->action);
+      continue;
+    }
     RecoveredRecordFile r;
     r.path = f.string();
     r.records_before = plan->n_before;
     r.records_after = plan->n_after;
     r.bytes_dropped = plan->dropped;
     r.index_rebuilt = plan->ridx_rebuild;
+    r.records_damaged = plan->damaged;
     r.action = (apply ? "" : "would be repaired: ") + plan->action;
     report.record_files.push_back(r);
     if (!apply) continue;

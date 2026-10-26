@@ -18,6 +18,7 @@
 #include "durability.hpp"
 #include "mef3io/time.hpp"
 #include "last_segment.hpp"
+#include "session_layout.hpp"
 #include "clamp.hpp"
 #include "number_text.hpp"
 
@@ -460,6 +461,15 @@ void SessionWriter::write_records(std::optional<std::string> channel,
   } else {
     dir = mefd_path_;
     base = session_name_;
+    // Append to the file the READER treats as the session's records (the sole
+    // .rdat whatever its name, e.g. after the folder was renamed); never start
+    // a second one beside it. Several candidates: refuse, name them.
+    std::string ambiguity;
+    const std::string existing = detail::session_record_file(DirectorySource(mefd_path_), ambiguity);
+    if (!ambiguity.empty())
+      throw FormatError(ambiguity + "; annotations were not written (keep one record file at the "
+                                    "session root, or run recover_session)");
+    if (!existing.empty()) base = existing.substr(0, existing.size() - 5);  // strip ".rdat"
   }
   try {
     mef3io::write_records(dir, base, session_name_, channel.value_or(""), 0, records, rto,

@@ -773,6 +773,7 @@ NB_MODULE(_mef3io, m) {
           d["records_before"] = f.records_before;
           d["records_after"] = f.records_after;
           d["bytes_dropped"] = f.bytes_dropped;
+          d["records_damaged"] = f.records_damaged;
           d["index_rebuilt"] = f.index_rebuilt;
           d["action"] = f.action;
           rfiles.append(d);

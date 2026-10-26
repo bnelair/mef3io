@@ -677,14 +677,17 @@ class RecoveredSegment:
 class RecoveredRecordFile:
     """One annotation file (``.rdat`` + ``.ridx``) an interrupted write left inconsistent.
 
-    Recovery keeps every whole, CRC-valid record, drops only a torn last
-    record and rebuilds the index and headers from the records.
+    Recovery keeps every whole record, drops only a torn fragment after the
+    last whole one (backed up) and rebuilds the index and headers from the
+    records. A record that fails its CRC (``records_damaged``) is damage, not
+    an interrupted write: it is reported and kept, never removed.
     """
 
     path: str = ""
     records_before: int = 0
     records_after: int = 0
     bytes_dropped: int = 0
+    records_damaged: int = 0
     index_rebuilt: bool = False
     action: str = ""
 
@@ -714,7 +717,9 @@ class RecoveryReport:
     def summary(self) -> str:
         lines = [
             f"{self.segments_examined} segment(s) examined, "
-            f"{len(self.segments) + len(self.record_files)} needing recovery"
+            f"{len(self.segments)} needing recovery"
+            + (f", {len(self.record_files)} annotation file(s) needing recovery"
+               if self.record_files else "")
             + ("" if self.applied else "  (DRY RUN — nothing was written)")
         ]
         for s in self.segments:

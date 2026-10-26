@@ -399,12 +399,16 @@ covered, or the `.tdat` header predates the last append.
 **Annotation files.** Recovery also looks at every `.rdat` + `.ridx` pair
 (session, channel and segment level). An interrupted annotation append can
 leave a torn last record, record bytes the header does not count, or an index
-that is short, torn or missing. Recovery keeps every whole, CRC-valid record,
-drops only the torn fragment (and any bytes after the last whole record, which
-go to the backup), and rebuilds the `.ridx` and both headers from the
+that is short, torn or missing. Recovery keeps every whole record, drops only
+the torn fragment after the last whole record (backed up), and rebuilds the `.ridx` and both headers from the
 records. They are listed in `report.record_files` (a dry run says what it
 would do); a healthy file, including one written by the legacy stack, is
-never listed. The check reads each record file once (annotation files are
+never listed. A whole record that fails its CRC (bit rot, foreign damage; not
+an interrupted append) is never removed and does not stop the walk: it stays in
+the file and the index, every record after it stays too, and it is reported in
+`report.notes` (or as `records_damaged` when the file needs other repair). A
+`.ridx` without its `.rdat` is only reported (nothing can be rebuilt from an
+index; it is kept, and writing is refused there). The check reads each record file once (annotation files are
 small next to the data) and only in recovery, never on a write.
 
 ### Reading the report

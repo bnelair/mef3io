@@ -19,7 +19,8 @@ notes at release time (this one is planned as 2.0.1).
     the order of writing); `records()` returns the records sorted by time,
     equal times in the order written.
   - `recover_session` now also repairs an interrupted annotation append: it
-    keeps every whole record, drops only a torn last record, and rebuilds the
+    keeps every whole record (one that fails its CRC is reported, never
+    removed), drops only a torn fragment after the last one, and rebuilds the
     `.ridx` and the headers. The dry run lists such files (`record_files`);
     healthy and legacy files are never listed. Until then the next
     `write_annotations` to a torn file is refused, naming `recover_session`.
@@ -27,3 +28,10 @@ notes at release time (this one is planned as 2.0.1).
     `write_annotations` twice expecting the second call to *replace* the first
     now keeps both sets. To start with no annotations, write to a new session.
     mef3io no longer offers a way to delete stored annotations.
+  - Appends keep a legacy file honest: a stored body CRC of 0 ("never
+    computed", mef_tools) stays 0; an unset largest-record size is measured
+    from the existing records; session-level records go to the file readers
+    use (the sole `.rdat`, whatever its name; several candidates are refused);
+    an index without its `.rdat` is never replaced.
+  - The order is within each level; legacy readers (mef_tools, pymef) return
+    file order, so they show an out-of-order append unsorted.

@@ -58,8 +58,9 @@ struct RecoveredSegment {
 struct RecoveredRecordFile {
   std::string path;              ///< human-readable location of the .rdat
   si8 records_before = 0;        ///< entries in the index (0 when it is missing)
-  si8 records_after = 0;         ///< whole, CRC-valid records the file holds
+  si8 records_after = 0;         ///< whole records the file holds (damaged ones included)
   si8 bytes_dropped = 0;         ///< trailing bytes that are not a whole record
+  si8 records_damaged = 0;       ///< whole records failing their CRC: reported, KEPT, never dropped
   bool index_rebuilt = false;    ///< the .ridx is rebuilt from the .rdat
   std::string action;            ///< what happened, in words
 };

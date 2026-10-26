@@ -57,8 +57,8 @@ truncation and no whole-file rewrite anywhere — do not add one.
   order (ridx matched by offset, merge sorts by `sort_time`), pymef/meflib do
   not assume sorted records (oracle-tested).
 - Recovery (`recover_record_files` in recover.cpp): per `.rdat` (root,
-  channel, segment): walk whole CRC-valid records; healthy = index whole and
+  channel, segment): walk whole records (a CRC-failing one is DAMAGE, counted + reported, KEPT, never ends the walk; only bytes after the last whole record may be dropped); healthy = index whole and
   matching every offset + counts right + header CRC ok + nothing after the
   last record. Else keep every whole record, drop the rest (backed up),
-  rebuild `.ridx` + both headers. Reported as `RecoveredRecordFile` in
+  rebuild `.ridx` + both headers. Appends: stored body CRC 0 stays 0; unset max entry size is measured from the index; session level targets `session_record_file` (ambiguous = refuse); orphan `.ridx` refused (never truncated; recovery notes it); rollback restores both headers. Reported as `RecoveredRecordFile` in
   `RecoveryReport.record_files`. No false positives on legacy files (test).

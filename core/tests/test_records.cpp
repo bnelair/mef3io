@@ -597,8 +597,11 @@ TEST_CASE("write_records appends in place: same bytes as one call, any level, L2
     }
     // an earlier time is appended too (file order = write order)
     write_records((dir / "two").string(), "ch-000000", "s", "ch", 0, {note(T0, "early")}, 0, pw, p2);
-    std::ifstream f(dir / "two" / "ch-000000.rdat", std::ios::binary);
-    std::vector<ui1> img(std::istreambuf_iterator<char>(f), {});
+    std::vector<ui1> img;
+    {
+      std::ifstream f(dir / "two" / "ch-000000.rdat", std::ios::binary);  // closed before remove_all (Windows)
+      img.assign(std::istreambuf_iterator<char>(f), {});
+    }
     crypto::AccessKeys keys;
     if (!pw.empty()) {
       const auto uh = fmt::UniversalHeader::parse(img);
