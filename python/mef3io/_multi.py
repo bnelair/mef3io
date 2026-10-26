@@ -901,6 +901,11 @@ class MultiReader:
             rows.append(out)
             if u:
                 unscaled.append(ch)
+        # Every successful call ends with exactly one (total, total), also
+        # when the last channels touch no recording (their reads report none).
+        if progress is not None and state["last"] < unit * len(names):
+            state["last"] = unit * len(names)
+            progress(unit * len(names), unit * len(names))
         out = np.stack(rows)
         for ch in dict.fromkeys(unscaled):
             self._warn_unscaled(ch, stacklevel=3)

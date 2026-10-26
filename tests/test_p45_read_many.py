@@ -581,3 +581,24 @@ def test_get_data_errors_follow_the_requested_order(tmp_path):
     b = _err(lambda: raw.read("b"))
     mr = mef3io.MefReader(str(path))
     assert _err(lambda: mr.get_data(["a", "b", "c"])) == b
+
+
+def test_multireader_list_progress_ends_at_total_without_data_at_the_end(tmp_path):
+    """Round 2 N1: the last listed channel has nothing in the window (no
+    recording touched, so its read reports no progress): the call still ends
+    with exactly one (total, total)."""
+    paths, _ = _parts(tmp_path)
+    p = tmp_path / "late.mefd"
+    with mef3io.Writer(str(p), overwrite=True) as w:
+        w.write("L", np.zeros(1000), START + 100 * SECOND, FS)
+    with mef3io.MultiReader([str(x) for x in paths] + [str(p)]) as mr:
+        for names in (["A", "L"], ["L"], ["L", "A", "L"]):
+            calls = []
+            x = _quiet(mr.read, names, START, START + 3 * SECOND,
+                       progress=lambda d, t: calls.append((d, t)))
+            assert x.shape == (len(names), 3000)
+            total = (1 << 20) * len(names)
+            assert calls and calls[-1] == (total, total)
+            assert sum(1 for d, t in calls if d == t) == 1
+            assert all(t == total for _, t in calls)
+            assert all(a[0] < b[0] for a, b in zip(calls, calls[1:]))
