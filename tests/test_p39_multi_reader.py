@@ -45,7 +45,8 @@ def _write(path, pieces, *, rate, channels=("A", "B"), subject="Jane", precision
     meta = mef3io.Metadata(subject=mef3io.Subject(name_1=subject, id="P-1"),
                            acquisition=mef3io.Acquisition(session_description=description or ""))
     rng = np.random.default_rng(abs(hash((str(path), rate))) % 2**32)
-    with mef3io.Writer(str(path), overwrite=True, metadata=meta) as w:
+    shutil.rmtree(path, ignore_errors=True)  # the TEST rewrites its own session; the library never deletes
+    with mef3io.Writer(str(path), metadata=meta) as w:
         for t, secs, new in pieces:
             for c, ch in enumerate(channels):
                 x = rng.integers(-2000, 2000, int(round(rate * secs))).astype(np.float64)
@@ -523,7 +524,7 @@ def test_legacy_mef_tools_parts(tmp_path):
     paths = []
     for i in range(2):
         p = tmp_path / f"legacy{i}.mefd"
-        w = MefWriter(str(p), overwrite=True)
+        w = MefWriter(str(p))
         w.write_data(np.arange(5000, dtype=np.int32) * 1.0 + i, "ch1",
                      START + i * 30 * SECOND, 256.0, precision=0)
         del w

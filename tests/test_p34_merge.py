@@ -45,7 +45,7 @@ def _session(path, chunks, *, channels=("A", "B"), subject="Jane", rate=FS, new_
     """`chunks`: (start offset in s, seconds); each written to every channel."""
     kw = dict(password1="pw-one", password2="pw-two") if password else {}
     meta = mef3io.Metadata(subject=mef3io.Subject(name_1=subject, id="P-1"))
-    with mef3io.Writer(str(path), overwrite=True, metadata=meta, **kw) as w:
+    with mef3io.Writer(str(path), metadata=meta, **kw) as w:
         for i, (t, secs) in enumerate(chunks):
             for c, ch in enumerate(channels):
                 x = np.arange(int(rate * secs)) * 1.0 + 1000 * i + 100 * c
@@ -247,7 +247,7 @@ def test_every_code_only_a_merge_raises_is_documented():
 
 
 def _one(path, t_us, n, rate=FS, channels=("A",)):
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         for ch in channels:
             w.write(ch, np.arange(n) * 1.0, START + t_us, rate, precision=0)
     return Path(path)

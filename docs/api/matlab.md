@@ -77,7 +77,7 @@ and data agree again after an unclean shutdown, rebuilding missing index
 entries from the RED block headers. Dry run unless `Apply=true`.
 
 ```matlab
-w = mef3io.Writer(p, Overwrite=true);
+w = mef3io.Writer(p);
 w.writeInt32('ch1', counts, 0.1, t0, 512);
 delete(w)
 

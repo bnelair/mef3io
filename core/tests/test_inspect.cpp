@@ -21,7 +21,7 @@ std::string write_session(const std::string& name, const std::string& pw1 = "",
                           const std::string& pw2 = "") {
   const auto dir = fsys::temp_directory_path() / name;
   fsys::remove_all(dir);
-  SessionWriter w(dir.string(), true, pw1, pw2);
+  SessionWriter w(dir.string(), pw1, pw2);
   SessionMetadata md;
   md.subject_id = "MRN-1";
   w.set_metadata(md);

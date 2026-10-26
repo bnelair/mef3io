@@ -23,7 +23,7 @@ START = 1_577_836_800_000_000
 session = str(Path(tempfile.mkdtemp()) / "legacy_style.mefd")
 
 # --- write, mef_tools style ------------------------------------------------
-writer = MefWriter(session, overwrite=True)
+writer = MefWriter(session)
 writer.data_units = "mV"
 writer.mef_block_len = 1000
 

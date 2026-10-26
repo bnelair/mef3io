@@ -28,7 +28,7 @@ def ramps(tmp_path_factory):
     for fs, block in ((500.0, 5000), (500.0, 777), (250.0, 2500), (1000.0, 10000),
                       (200.0, 2000), (256.0, 2560)):
         path = root / f"r{int(fs)}_{block}.mefd"
-        with mef3io.Writer(str(path), overwrite=True, block_length=block) as w:
+        with mef3io.Writer(str(path), block_length=block) as w:
             w.write("ch", np.arange(3 * block, dtype=float), START, fs=fs, precision=0)
         out[(fs, block)] = path
     return out
@@ -67,7 +67,7 @@ def test_ties_before_the_start_and_around_a_gap(tmp_path):
     resumes: NaN exactly where there is no data, a unit ramp elsewhere."""
     fs, period = 500.0, 2000
     path = tmp_path / "gap.mefd"
-    with mef3io.Writer(str(path), overwrite=True, block_length=1000) as w:
+    with mef3io.Writer(str(path), block_length=1000) as w:
         w.write("ch", np.arange(10_000, dtype=float), START, fs=fs, precision=0)
         # 4 s gap, then 10 000 more samples continuing the ramp's values
         w.write("ch", np.arange(10_000, 20_000, dtype=float), START + 24_000_000, fs=fs,

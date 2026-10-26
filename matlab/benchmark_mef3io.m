@@ -29,8 +29,9 @@ for enc = [false true]
     if enc, label = 'encrypted'; p1 = 'pwd1'; p2 = 'pwd2'; end
     path = fullfile(outDir, ['bench_' label '.mefd']);
 
+    if isfolder(path), rmdir(path, 's'); end   % the benchmark's own scratch data
     t = tic;
-    w = mef3io.Writer(path, Overwrite=true, Password1=p1, Password2=p2, Units='uV');
+    w = mef3io.Writer(path, Password1=p1, Password2=p2, Units='uV');
     for i = 1:nCh
         w.write(channels{i}, x(:, i), start, fs, Precision=3);
     end

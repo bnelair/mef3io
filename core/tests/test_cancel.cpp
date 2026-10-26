@@ -39,7 +39,7 @@ fsys::path fresh_dir(const std::string& name) {
 // Two channels x two segments, enough blocks and bytes for several 1 MB chunks.
 std::string write_session(const fsys::path& dir) {
   const std::string path = (dir / "s.mefd").string();
-  SessionWriter w(path, true);
+  SessionWriter w(path);
   std::mt19937 rng(69);
   std::uniform_int_distribution<si4> dist(-30000, 30000);
   const si8 start = 1600000000000000;
@@ -220,10 +220,10 @@ TEST_CASE("Cancelled archive / extract / validate / repair / recover leave nothi
     ctl.progress = [&](std::uint64_t d, std::uint64_t t) {
       if (d > 0 && d < t) token.cancel();
     };
-    CHECK_THROWS_AS(archive_session(path, "", false, ctl), Cancelled);
+    CHECK_THROWS_AS(archive_session(path, "", ctl), Cancelled);
     CHECK(listing(dir) == before);
   }
-  SECTION("extract, cancelled part-way, with overwrite of an existing tree") {
+  SECTION("extract onto an existing tree is refused and leaves it alone") {
     const auto tar = archive_session(path);
     const auto target = (dir / "x.mefd").string();
     fsys::create_directories(target);
@@ -231,10 +231,7 @@ TEST_CASE("Cancelled archive / extract / validate / repair / recover leave nothi
       std::ofstream(fsys::path(target) / "keep.txt") << "mine";
     }
     const auto with_target = listing(dir);
-    ctl.progress = [&](std::uint64_t d, std::uint64_t t) {
-      if (d > 0 && d < t) token.cancel();
-    };
-    CHECK_THROWS_AS(extract_session(tar, target, true, ctl), Cancelled);
+    CHECK_THROWS_AS(extract_session(tar, target, ctl), IoError);
     CHECK(listing(dir) == with_target);
     CHECK(fsys::exists(fsys::path(target) / "keep.txt"));
   }
@@ -247,7 +244,7 @@ TEST_CASE("Cancelled archive / extract / validate / repair / recover leave nothi
     RepairSelection sel;
     sel.check_ids = {"sizing.difference-bytes"};
     CHECK_THROWS_AS(repair_session(path, sel, {}, ctl), Cancelled);
-    CHECK_THROWS_AS(recover_session(path, true, true, "", ctl), Cancelled);
+    CHECK_THROWS_AS(recover_session(path, true, "", ctl), Cancelled);
     CHECK(listing(dir) == before);
   }
   fsys::remove_all(dir);

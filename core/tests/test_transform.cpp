@@ -37,7 +37,7 @@ fsys::path fresh(const std::string& name) {
 
 std::string write_session(const fsys::path& dir) {
   const std::string path = (dir / "subject_x.mefd").string();
-  SessionWriter w(path, true);
+  SessionWriter w(path);
   SessionMetadata md;
   md.subject_name_1 = "Jane";
   md.recording_location = "Ward 3";
@@ -268,7 +268,7 @@ TEST_CASE("merge_sessions: recordings that take turns merge; overlapping data is
   const auto dir = fresh("mef3io_merge_core");
   auto write = [&](const std::string& name, std::vector<std::pair<si8, std::size_t>> chunks) {
     const std::string path = (dir / name).string();
-    SessionWriter w(path, true);
+    SessionWriter w(path);
     for (const auto& [t, n] : chunks) {
       std::vector<si4> x(n);
       for (std::size_t i = 0; i < n; ++i) x[i] = static_cast<si4>(i % 1000);

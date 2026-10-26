@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -150,13 +151,14 @@ def test_patient_identity_is_copied_only_on_request(tmp_path, discontinuous):
         assert (r.metadata.subject.name_1, r.metadata.subject.id) == ("Doe Jane", "MRN123")  # EDF+ "_" = space
 
 
-def test_existing_session_is_not_replaced_without_overwrite(tmp_path):
+def test_existing_session_is_never_replaced(tmp_path):
     src, out = tmp_path / "x.edf", str(tmp_path / "x.mefd")
     _write_edf(src)
     ex.convert(src, out, "UTC")
     with pytest.raises(FileExistsError):
         ex.convert(src, out, "UTC")
-    ex.verify(out, ex.convert(src, out, "UTC", overwrite=True))
+    shutil.rmtree(out)  # the test removes its own session; the example never does
+    ex.verify(out, ex.convert(src, out, "UTC"))
 
 
 def test_command_line_encrypts_without_passwords_on_the_command_line(tmp_path, monkeypatch, capsys):
@@ -182,14 +184,11 @@ def test_command_line_refuses_mistyped_passwords(tmp_path, monkeypatch):
     assert not (tmp_path / "e.mefd").exists()
 
 
-def test_bad_edf_path_with_overwrite_keeps_the_old_session(tmp_path):
-    src, out = tmp_path / "x.edf", str(tmp_path / "x.mefd")
-    _write_edf(src)
-    ex.convert(src, out, "UTC")
+def test_bad_edf_path_creates_nothing(tmp_path):
+    out = str(tmp_path / "x.mefd")
     with pytest.raises(OSError):
-        ex.convert(tmp_path / "missing.edf", out, "UTC", overwrite=True)
-    with mef3io.Reader(out) as r:
-        assert len(r.channels) == 2
+        ex.convert(tmp_path / "missing.edf", out, "UTC")
+    assert not (tmp_path / "x.mefd").exists()
 
 
 def test_copy_patient_warns_when_nothing_to_copy(tmp_path, capsys):

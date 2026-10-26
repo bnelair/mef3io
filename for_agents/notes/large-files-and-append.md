@@ -268,8 +268,8 @@
   length = data length. Python Writer checks block_length BEFORE its ctor
   creates the folder; MATLAB Writer.m does the same via MEX `check_block_length`
   -> C ABI `mef3io_check_block_length` (also `mef3io_check_signal_parameters`,
-  `MEF3IO_MAX_BLOCK_SAMPLES` static_asserted equal to the core's): writer_open
-  with Overwrite removes the session, so nothing may be refused after it. MATLAB Writer.m passes full() arrays and converts
+  `MEF3IO_MAX_BLOCK_SAMPLES` static_asserted equal to the core's): a bad
+  argument is refused before any folder is created. MATLAB Writer.m passes full() arrays and converts
   string annotation fields; the MEX refuses sparse/complex BUFFERS
   (`require_dense_real`); scalars accept sparse (get_scalar refuses complex only).
   `Reader.segments(ch)` maps what data

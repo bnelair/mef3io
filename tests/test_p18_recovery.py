@@ -139,7 +139,7 @@ def test_recovery_backs_up_what_it_changes_but_not_the_data_file(tmp_path):
     tdat.write_bytes(raw[: len(raw) // 2])
     tdat_size = tdat.stat().st_size
 
-    mef3io.recover_session(str(path), apply=True, backup=True)
+    mef3io.recover_session(str(path), apply=True)
     backup = Path(str(path) + ".recover-backup")
     assert backup.is_dir(), "a backup should have been taken"
     saved = list(backup.rglob("*"))
@@ -163,7 +163,7 @@ def test_recovery_refuses_a_tar_archive(tmp_path):
 
 def test_the_durability_option_is_gone(tmp_path):
     """2.0 removed `durability=` (Writer, MefWriter): passing it is a TypeError,
-    raised before the constructor can remove an `overwrite=True` session.
+    raised before the constructor opens (or creates) anything.
 
     Every append now takes one path: only the `.tmet` is flushed before its
     rename (pinned per file in core/tests/test_durability.cpp); the torn tails
@@ -187,9 +187,9 @@ def test_the_durability_option_is_gone(tmp_path):
 
     for durability in ("fast", "full"):
         with pytest.raises(TypeError, match="durability"):
-            mef3io.Writer(str(path), overwrite=True, durability=durability)
+            mef3io.Writer(str(path), durability=durability)
         with pytest.raises(TypeError, match="durability"):
-            MefWriter(str(path), overwrite=True, durability=durability)
+            MefWriter(str(path), durability=durability)
     assert sorted(p.name for p in Path(path).rglob("*") if p.is_file()) == before, (
         "the session was destroyed by a rejected argument"
     )
@@ -377,7 +377,7 @@ def test_a_healthy_legacy_session_with_an_offset_needs_no_recovery(tmp_path, fs,
     mef_tools = pytest.importorskip("mef_tools.io", reason="legacy oracle not installed")
     path = tmp_path / "legacy.mefd"
     x = np.random.default_rng(0).normal(0, 50, int(seconds * fs))
-    w = mef_tools.MefWriter(str(path), overwrite=True)
+    w = mef_tools.MefWriter(str(path))
     w.record_offset = 1_000_000_000
     w.write_data(x, "ch1", START, fs, precision=2)
     del w
@@ -501,7 +501,7 @@ def test_flush_close_and_wait_for_disk(tmp_path):
     np.testing.assert_array_equal(got["default"], got["flush"])
     np.testing.assert_array_equal(got["default"], got["wait"])
 
-    mw = MefWriter(str(tmp_path / "compat.mefd"), overwrite=True, wait_for_disk=True)
+    mw = MefWriter(str(tmp_path / "compat.mefd"), wait_for_disk=True)
     mw.write_data(x.astype(float), "ch1", START, FS, precision=0)
     mw.flush()
     mw.close()

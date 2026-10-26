@@ -42,7 +42,7 @@ constexpr si8 START = 1577836800000000;
 std::string write_session(const std::string& name, int channels, int segments) {
   const auto dir = fsys::temp_directory_path() / name;
   fsys::remove_all(dir);
-  SessionWriter w(dir.string(), true);
+  SessionWriter w(dir.string());
   std::vector<si4> a(256);
   for (int i = 0; i < 256; ++i) a[i] = i;
   for (int c = 0; c < channels; ++c)
@@ -93,7 +93,7 @@ TEST_CASE("opening a session: requests per channel and per segment", "[open-call
     check(src->calls());
   }
   SECTION("Session, tar archive") {
-    const auto tar = archive_session(path, "", true);
+    const auto tar = mef3io::test::archive_fresh(path);
     auto src = std::make_shared<CountingSource>(std::make_shared<TarSource>(tar));
     Session s{std::shared_ptr<const SessionSource>(src)};
     REQUIRE(s.channels().size() == C);
@@ -128,7 +128,7 @@ TEST_CASE("the .tmet read is bounded by the fixed record size", "[open-calls]") 
     REQUIRE(lenient.problems()[0].reason.find("got 1000") != std::string::npos);
   }
   SECTION("the tar source returns the same bounded bytes") {
-    const auto tar = archive_session(path, "", true);
+    const auto tar = mef3io::test::archive_fresh(path);
     TarSource t(tar);
     const std::string rel = "ch0.timd/" + stem("ch0", 0) + ".segd/" + stem("ch0", 0) + ".tmet";
     REQUIRE(t.read_head(rel, 100) == t.read_range(rel, 0, 100));
@@ -189,7 +189,7 @@ void require_same_listings(const SessionSource& dir, const SessionSource& tar,
 TEST_CASE("TarSource::list_dir lists the children only, in sorted order", "[open-calls][tar]") {
   const auto path = write_session("mef3io_tar_listing.mefd", 3, 3);
   { std::ofstream(path + "/ch1.timd/ch1.rdat") << "x"; }
-  const auto tar = archive_session(path, "", true);
+  const auto tar = mef3io::test::archive_fresh(path);
   DirectorySource dir(path);
   TarSource t(tar);
   require_same_listings(dir, t);
@@ -217,7 +217,7 @@ TEST_CASE("TarSource::list_dir does not scale with the archive", "[open-calls][t
   // lists each channel folder cost O(channels x members).
   auto per_call = [](int segments) {
     const auto path = write_session("mef3io_tar_scale.mefd", 1, segments);
-    const auto tar = archive_session(path, "", true);
+    const auto tar = mef3io::test::archive_fresh(path);
     TarSource t(tar);
     const double secs = best_of_3([&] {
       for (int i = 0; i < 2000; ++i) t.list_dir("ch0.timd/" + stem("ch0", i % segments) + ".segd");
@@ -243,7 +243,7 @@ TEST_CASE("an open scales linearly in segments, directory and tar", "[open-calls
   struct Cost { double dir, tar; };
   auto per_segment = [](int segments) {
     const auto path = write_session("mef3io_open_scale.mefd", 1, segments);
-    const auto tar = archive_session(path, "", true);
+    const auto tar = mef3io::test::archive_fresh(path);
     Cost c{best_of_3([&] { Session s(path, "", true, 1); }) / segments,
            best_of_3([&] { Session s(tar, "", true, 1); }) / segments};
     fsys::remove(tar);

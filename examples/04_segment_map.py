@@ -23,7 +23,7 @@ CHUNK = 25600                                   # 100 s of data
 session = str(Path(tempfile.mkdtemp()) / "sparse.mefd")
 
 # Three islands of data: day 0, day 1, day 7 — in separate segments.
-with mef3io.Writer(session, overwrite=True) as w:
+with mef3io.Writer(session) as w:
     for day in (0, 1, 7):
         data = np.sin(np.arange(CHUNK) / 20 + day)
         w.write("ch1", data, START + day * DAY_US, FS, precision=3,

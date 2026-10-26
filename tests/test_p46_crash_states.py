@@ -188,7 +188,7 @@ def test_recover_alone_restores_every_crash_state(images, tmp_path, state):
     dry = mef3io.recover_session(str(path))
     assert not dry.skipped, dry.summary()
     assert dry.segments, "a torn append must not be reported as healthy:\n" + dry.summary()
-    rep = mef3io.recover_session(str(path), apply=True, backup=False)
+    rep = mef3io.recover_session(str(path), apply=True)
     assert not rep.skipped, rep.summary()
     have = _check(path, state)
     # Idempotent: a second pass finds nothing.
@@ -200,14 +200,14 @@ def test_recover_alone_restores_every_crash_state(images, tmp_path, state):
 @pytest.mark.parametrize("state", STATES[:5] + STATES[-3:-1], ids=lambda s: s[0])
 def test_the_cli_restores_them_too(images, tmp_path, state):
     path = _build(images, tmp_path, state)
-    proc = _cli("recover", str(path), "--apply", "--no-backup")
+    proc = _cli("recover", str(path), "--apply")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     _check(path, state)
 
 
 def test_a_healthy_session_is_left_alone(images, tmp_path):
     path = _build(images, tmp_path, ("healthy", "new", "new", "new", "new", "new"))
-    rep = mef3io.recover_session(str(path), apply=True, backup=False)
+    rep = mef3io.recover_session(str(path), apply=True)
     assert rep.nothing_to_do, rep.summary()
     assert not Path(str(path) + ".repair-backup").exists()
 
@@ -237,7 +237,7 @@ def test_a_new_segment_cut_off_before_its_data_is_removed(tmp_path, what, empty)
             for ch in r.channels:
                 r.read(ch)
 
-    rep = mef3io.recover_session(str(path), apply=True, backup=True)
+    rep = mef3io.recover_session(str(path), apply=True)
     assert not rep.skipped, rep.summary()
     assert rep.segments and "removed" in rep.segments[0].action, rep.summary()
     assert not folder.exists()
@@ -262,7 +262,7 @@ def test_a_first_segment_whose_tmet_is_lost_is_skipped_with_advice(tmp_path):
         w.write_int32("ch2", OLD, 1.0, START, FS)
     folder = next(Path(path).glob("ch2.timd/*.segd"))
     next(folder.glob("*.tmet")).write_bytes(b"")
-    rep = mef3io.recover_session(str(path), apply=True, backup=False)
+    rep = mef3io.recover_session(str(path), apply=True)
     assert rep.skipped and "strict=False" in rep.skipped[0], rep.summary()
     assert "first segment" in rep.skipped[0]
     assert folder.exists()
@@ -327,7 +327,7 @@ def test_a_healthy_legacy_session_is_left_byte_for_byte(tmp_path):
     neither report nor touch them (that is `repair`'s job, by explicit id)."""
     mef_tools = pytest.importorskip("mef_tools.io")
     path = tmp_path / "legacy.mefd"
-    w = mef_tools.MefWriter(str(path), overwrite=True)
+    w = mef_tools.MefWriter(str(path))
     w.mef_block_len = BLOCK
     x = np.random.default_rng(9).normal(0, 50, int(40 * FS))
     w.write_data(x[: len(x) // 2], "ch1", START, FS, precision=3)

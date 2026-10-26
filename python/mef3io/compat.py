@@ -254,10 +254,16 @@ class MefWriter:
 
     __version__ = "mef3io"
 
-    def __init__(self, session_path, overwrite=False, password1=None, password2=None,
-                 verbose=False, metadata=None, wait_for_disk=False):
+    def __init__(self, session_path, password1=None, password2=None,
+                 verbose=False, metadata=None, wait_for_disk=False, **removed):
+        from ._removed import OVERWRITE_MESSAGE, reject_positional_bool, reject_removed
+
+        # mef_tools' second positional argument was ``overwrite``: refuse it
+        # (by keyword or by position) rather than shift the passwords.
+        reject_removed("MefWriter", removed)
+        reject_positional_bool("MefWriter", password1, OVERWRITE_MESSAGE)
         self._path = str(session_path)
-        self._w = _mef3io.SessionWriter(self._path, overwrite, password1 or "", password2 or "")
+        self._w = _mef3io.SessionWriter(self._path, password1 or "", password2 or "")
         self._w.set_wait_for_disk(bool(wait_for_disk))
         warn_unreadable_metadata(self._w.unreadable_metadata, path=self._path)
         warn_password_interop(password1, password2, path=self._path)

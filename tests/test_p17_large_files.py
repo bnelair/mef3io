@@ -114,7 +114,7 @@ def test_recovery_streams_rather_than_loading_the_data_file(big_session, tmp_pat
     """Recovery needs the file's SIZE plus a few block headers, never its body."""
     path, size = big_session
     before = _rchar()
-    report = m.recover_session(path, False, True, "")   # dry run
+    report = m.recover_session(path, False, "")   # dry run
     read_bytes = _rchar() - before
 
     assert report["segments_examined"] > 0

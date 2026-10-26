@@ -6,7 +6,7 @@ What is pinned here:
   repair and recover part-way, raising mef3io.Cancelled;
 * a cancelled call leaves NOTHING behind — no partial archive, no staging
   directory, no modified session file, no backup directory — and an existing
-  target survives an overwrite that was cancelled;
+  target is never touched;
 * progress(done, total) starts at (0, total), never decreases, never runs past
   total, and ends with (total, total) exactly once — on success only;
 * a progress callback that raises stops the operation like a cancel and its
@@ -261,12 +261,11 @@ def test_archive_cancelled_from_another_thread_leaves_nothing(session):
     assert _listing(parent) == before, "a partial archive or temp file was left behind"
 
 
-def test_cancelled_archive_overwrite_keeps_the_old_archive(session):
+def test_archive_onto_an_existing_archive_is_refused_and_leaves_it_alone(session):
     tar = session.parent / "s.mefd.tar"
     tar.write_bytes(b"previous archive")
-    err, _ = cancel_mid_flight(
-        lambda **kw: mef3io.archive_session(str(session), str(tar), overwrite=True, **kw))
-    assert isinstance(err, mef3io.Cancelled), err
+    with pytest.raises(mef3io.IoError, match="exists"):
+        mef3io.archive_session(str(session), str(tar))
     assert tar.read_bytes() == b"previous archive"
     assert not Path(str(tar) + ".tmp").exists()
 
@@ -281,26 +280,15 @@ def test_extract_cancelled_from_another_thread_leaves_nothing(session, tmp_path)
     assert list(out_parent.iterdir()) == [], "a partial or staging directory was left behind"
 
 
-def test_cancelled_extract_overwrite_keeps_the_existing_session(session, tmp_path):
+def test_extract_onto_an_existing_session_is_refused_and_leaves_it_alone(session, tmp_path):
     tar = mef3io.archive_session(str(session), str(tmp_path / "t.mefd.tar"))
     existing = tmp_path / "keep.mefd"
     shutil.copytree(session, existing)
     (existing / "marker.txt").write_text("the user's own file")
     before = _digest(existing)
-    err, _ = cancel_mid_flight(lambda **kw: mef3io.extract_session(
-        tar, str(existing), overwrite=True, **kw))
-    assert isinstance(err, mef3io.Cancelled), err
-    assert _digest(existing) == before, "the existing session was damaged by a cancelled overwrite"
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["keep.mefd", "s.mefd", "t.mefd.tar"]
-
-
-def test_completed_extract_overwrite_replaces_the_target(session, tmp_path):
-    tar = mef3io.archive_session(str(session), str(tmp_path / "t.mefd.tar"))
-    existing = tmp_path / "keep.mefd"
-    existing.mkdir()
-    (existing / "stale.txt").write_text("old")
-    mef3io.extract_session(tar, str(existing), overwrite=True)
-    assert _digest(existing) == _digest(session)
+    with pytest.raises(mef3io.IoError, match="exists"):
+        mef3io.extract_session(tar, str(existing))
+    assert _digest(existing) == before, "the existing session was touched"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["keep.mefd", "s.mefd", "t.mefd.tar"]
 
 
@@ -499,7 +487,7 @@ def test_an_empty_read_reports_zero_of_zero_once(session):
         assert rec.calls == [(0, 0)]
 
 
-def test_extract_without_overwrite_never_deletes_a_target_that_appears(session, tmp_path):
+def test_extract_never_replaces_a_target_that_appears(session, tmp_path):
     tar = mef3io.archive_session(str(session), str(tmp_path / "t.mefd.tar"))
     target = tmp_path / "late.mefd"
     created = []

@@ -23,7 +23,7 @@ universal headers) — never samples or the index — back up to
 `<session>.repair-backup/`, skip any segment whose CRC fails, and reject tar
 archives. `Report.ok` ignores findings repaired in the same pass. CLI:
 `python -m mef3io validate <path> [--check ID] [--list-checks] [--fast]` reads,
-`python -m mef3io repair <path> --check ID [--no-backup]` writes and refuses an
+`python -m mef3io repair <path> --check ID` (always backs up; `--no-backup` was removed)` writes and refuses an
 empty selection — separate subcommands, neither reachable from the other
 (`__main__.py` exists so `-m` doesn't double-import the package). On READ,
 `Session::declaration_issues()` scans the already-parsed s2 for unset sizes

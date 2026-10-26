@@ -358,3 +358,28 @@ never a byte restore. Headers are patched as bytes (name field, provenance
 region, CRCs); `UniversalHeader::serialize` would cut a 256-byte name that
 fills its field. Tests: `tests/test_p36_rename.py` (a crash at EVERY point via
 the test-only `_crash_at`, which leaves the disk as a crash would).
+
+## 16. Write paths never delete or replace stored data
+
+Maintainer rule (2026-10-26): a write path appends, or creates what is absent.
+It never removes or replaces an existing session, archive or backup.
+
+- `SessionWriter` / `Writer` / `MefWriter` / MATLAB `Writer` have NO overwrite
+  option (removed from C++, Python, MEX and MATLAB). Opening on an existing
+  session always hydrates it and appends. Python raises `TypeError` (keyword
+  or a bool in the old positional slot; `python/mef3io/_removed.py`), MATLAB
+  `mef3io:overwriteRemoved`, with: "mef3io never deletes a session; remove or
+  rename the folder yourself, or write to a new path".
+- `archive_session` / `extract_session` refuse an existing target (`IoError`),
+  also one that appears while they work (staging is removed, the newcomer
+  never touched). Same removal of `overwrite` in C++, Python, MATLAB.
+- `recover_session` and `repair_session` ALWAYS back up what they change or
+  drop (`<session>.recover-backup/`, `<session>.repair-backup/`): no `backup`
+  parameter, no `--no-backup`.
+- C ABI keeps its signatures (ABI stability): `overwrite != 0` or
+  `backup == 0` returns `MEF3IO_ERR_ARGUMENT` with the same message; the MEX
+  passes 0 / 1 itself.
+- Tests, benchmarks and scripts that rewrite a path remove their OWN scratch
+  folder first (`shutil.rmtree`); the library never does. A new write path
+  must not call `remove_all` / `remove` on anything it did not create in the
+  same call.

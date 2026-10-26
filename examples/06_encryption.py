@@ -20,7 +20,7 @@ L1, L2 = "tech-password", "research-password"
 
 session = str(Path(tempfile.mkdtemp()) / "secret.mefd")
 
-with mef3io.Writer(session, overwrite=True, password1=L1, password2=L2) as w:
+with mef3io.Writer(session, password1=L1, password2=L2) as w:
     w.write("ch1", np.sin(np.arange(5000) / 20), START, FS, precision=3)
     w.write_annotations([{"time": START + 1_000_000, "text": "confidential note"}], "ch1")
 

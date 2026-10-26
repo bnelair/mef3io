@@ -24,6 +24,7 @@ What is pinned here:
 """
 from __future__ import annotations
 
+import shutil
 import os
 import time
 import warnings
@@ -51,9 +52,11 @@ def adc_counts(n, seed=0, bits=16, walk=40):
 
 
 def write(path, data, precision="step", channel="ch1", **kw):
+    if kw.pop("overwrite", True) and Path(path).exists():
+        shutil.rmtree(path)  # the TEST removes its own old session; the library never does
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        with mef3io.Writer(str(path), overwrite=kw.pop("overwrite", True)) as w:
+        with mef3io.Writer(str(path)) as w:
             s = w.write(channel, data, kw.pop("start", START), FS, precision=precision, **kw)
     fallbacks = [x for x in caught if issubclass(x.category, mef3io.StepFallbackWarning)]
     return s, fallbacks
@@ -136,7 +139,7 @@ def test_inexact_products_read_back_within_the_tolerance(tmp_path):
 def _default(path, x):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        with mef3io.Writer(str(path), overwrite=True) as w:
+        with mef3io.Writer(str(path)) as w:
             return w.write("ch1", x, START, FS)
 
 
@@ -202,7 +205,7 @@ def test_int32_overflow_in_the_sample_falls_back_and_clamps(tmp_path):
     assert _mef3io.detect_step(x)["step"] == 0.195
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        with mef3io.Writer(str(tmp_path / "b.mefd"), overwrite=True) as w:
+        with mef3io.Writer(str(tmp_path / "b.mefd")) as w:
             s = w.write("ch1", x, START, FS, precision="step")
     assert s["quantization"] == "step" and s["clamped"] == 1 and s["clamped_infinite"] == 0
     clamped = [c for c in caught if issubclass(c.category, mef3io.ClampedSamplesWarning)]
@@ -224,7 +227,7 @@ def test_infinite_values_are_clamped(tmp_path, precision):
     p = tmp_path / "s.mefd"
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        with mef3io.Writer(str(p), overwrite=True) as w:
+        with mef3io.Writer(str(p)) as w:
             s = w.write("ch1", x, START, FS, precision=precision)
     assert s["clamped"] == 2 and s["clamped_infinite"] == 2
     if precision == "step":
@@ -239,7 +242,7 @@ def test_infinite_values_are_clamped(tmp_path, precision):
 
 
 def test_only_step_is_accepted_as_a_string(tmp_path):
-    with mef3io.Writer(str(tmp_path / "s.mefd"), overwrite=True) as w:
+    with mef3io.Writer(str(tmp_path / "s.mefd")) as w:
         with pytest.raises(ValueError, match="'step'"):
             w.write("ch1", np.zeros(10), START, FS, precision="Step")
     assert not (tmp_path / "s.mefd" / "ch1.timd").exists()
@@ -321,7 +324,7 @@ def test_step_on_a_decimal_channel(tmp_path):
     """A channel written with the default path keeps its decimal factor."""
     p = tmp_path / "s.mefd"
     x = np.round(adc_counts(20_000, seed=15) * 0.001, 3)
-    with mef3io.Writer(str(p), overwrite=True) as w:
+    with mef3io.Writer(str(p)) as w:
         w.write("ch1", x, START, FS, precision=3)
     t1 = START + int(round(len(x) / FS * 1e6))
     y = adc_counts(20_000, seed=16) * 0.002  # on the 0.001 grid: exact
@@ -343,14 +346,14 @@ def test_compat_writer_accepts_step(tmp_path):
     c = adc_counts(10_000, seed=18)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        w = mef3io.MefWriter(str(p), overwrite=True)
+        w = mef3io.MefWriter(str(p))
         w.write_data(c * 0.195, "ch1", START, FS, precision="step")
         w.close()
     raw = mef3io.Reader(str(p)).read_raw("ch1")
     assert raw["units_conversion_factor"] == 0.195
     np.testing.assert_array_equal(raw["samples"], c)
     with pytest.raises(ValueError, match="float data"):
-        mef3io.MefWriter(str(tmp_path / "t.mefd"), overwrite=True).write_data(
+        mef3io.MefWriter(str(tmp_path / "t.mefd")).write_data(
             c.astype(np.int32), "ch1", START, FS, precision="step")
 
 
@@ -362,7 +365,7 @@ def test_files_are_much_smaller_and_match_write_int32(tmp_path):
     x = c * 0.195
     write(tmp_path / "step.mefd", x)
     _default(tmp_path / "default.mefd", x)
-    with mef3io.Writer(str(tmp_path / "int.mefd"), overwrite=True) as w:
+    with mef3io.Writer(str(tmp_path / "int.mefd")) as w:
         w.write_int32("ch1", c.astype(np.int32), 0.195, START, FS)
     step, default, ints = (size_of(tmp_path / f"{n}.mefd") for n in ("step", "default", "int"))
     print(f"\n1 h @ 512 Hz, 0.195 step: default {default / 1e6:.2f} MB, "
@@ -395,7 +398,8 @@ def _write_times(tmp_path, n):
         def go():
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                with mef3io.Writer(str(tmp_path / "t.mefd"), overwrite=True) as w:
+                shutil.rmtree(tmp_path / "t.mefd", ignore_errors=True)  # the test's own data
+                with mef3io.Writer(str(tmp_path / "t.mefd")) as w:
                     w.write("ch1", data, START, FS, precision=precision)
         return min(_timed(go) for _ in range(3))
 
@@ -454,7 +458,7 @@ def test_step_append_on_a_negative_factor(tmp_path):
     """A polarity-inverting factor (allowed, see write_int32) is kept too."""
     p = tmp_path / "s.mefd"
     c = adc_counts(10_000, seed=23)
-    with mef3io.Writer(str(p), overwrite=True) as w:
+    with mef3io.Writer(str(p)) as w:
         w.write_int32("ch1", c.astype(np.int32), -0.195, START, FS)
     t1 = START + int(round(len(c) / FS * 1e6))
     y = adc_counts(10_000, seed=24) * -0.195
@@ -523,7 +527,7 @@ def test_a_saturation_spike_in_an_append_is_clamped(tmp_path, precision):
     append succeeds, the spike reads back as the clamped extreme, one warning."""
     p = tmp_path / "s.mefd"
     x = np.round(adc_counts(5_000, seed=36) * 0.001, 3)
-    with mef3io.Writer(str(p), overwrite=True) as w:
+    with mef3io.Writer(str(p)) as w:
         w.write("ch1", x, START, FS, precision=3)
     t1 = START + int(round(len(x) / FS * 1e6))
     y = np.round(adc_counts(5_000, seed=37) * 0.001, 3)
@@ -547,7 +551,7 @@ def test_many_clamps_one_warning_and_ordinary_data_never_clamps(tmp_path):
     x[rng.choice(len(x), 1000, replace=False)] = 1e300  # saturated
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        with mef3io.Writer(str(tmp_path / "a.mefd"), overwrite=True) as w:
+        with mef3io.Writer(str(tmp_path / "a.mefd")) as w:
             s = w.write("ch1", x, START, FS, precision=2)
     assert s["clamped"] == 1000
     assert len([c for c in caught if issubclass(c.category, mef3io.ClampedSamplesWarning)]) == 1
@@ -558,7 +562,8 @@ def test_many_clamps_one_warning_and_ordinary_data_never_clamps(tmp_path):
               adc_counts(50_000, seed=43) * 0.195):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            with mef3io.Writer(str(tmp_path / "b.mefd"), overwrite=True) as w:
+            shutil.rmtree(tmp_path / "b.mefd", ignore_errors=True)  # the test's own data
+            with mef3io.Writer(str(tmp_path / "b.mefd")) as w:
                 for ch, prec in (("ch1", -1), ("ch2", "step")):  # a channel keeps one factor
                     s = w.write(ch, z, START, FS, precision=prec)
                     assert s["clamped"] == 0
@@ -575,7 +580,7 @@ def test_default_append_to_a_step_channel_is_refused_clearly(tmp_path):
             w.write("ch1", x, t1, FS)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        mw = mef3io.MefWriter(str(p), overwrite=False)
+        mw = mef3io.MefWriter(str(p))
         with pytest.raises(mef3io.WriteConflictError, match="precision='step'"):
             mw.write_data(x, "ch1", t1, FS)
 

@@ -16,7 +16,7 @@ x(1001:1250) = NaN;                       % a gap
 chunkUs = int64(round(n / fs * 1e6));
 
 % ---- write: float with gap, in-segment append, int32, annotations --------
-w = mef3io.Writer(path, Overwrite=true, Units='uV');
+w = mef3io.Writer(fresh(path), Units='uV');
 s1 = w.write('ch1', x, start, fs, Precision=3);
 assert(s1.samples_written == n - 250 && s1.segment == 0);
 s2 = w.write('ch1', x, start + chunkUs, fs);          % in-segment append
@@ -105,7 +105,7 @@ delete(r);
 
 % ---- encrypted round trip --------------------------------------------------
 encPath = fullfile(sessionDir, 'matlab_enc.mefd');
-w = mef3io.Writer(encPath, Overwrite=true, Password1='pwd1', Password2='pwd2');
+w = mef3io.Writer(fresh(encPath), Password1='pwd1', Password2='pwd2');
 w.write('ch1', x, start, fs, Precision=3);
 delete(w);
 r = mef3io.Reader(encPath, 'pwd2');
@@ -127,7 +127,7 @@ assert(gotError, 'wrong password must be rejected');
 % byte the old mapping took for é.
 utfPath = fullfile(sessionDir, 'matlab_utf8.mefd');
 pw1 = ['b' char(233)]; pw2 = ['x' char(252) 'y'];      % 'bé', 'xüy'
-w = mef3io.Writer(utfPath, Overwrite=true, Password1=pw1, Password2=pw2);
+w = mef3io.Writer(fresh(utfPath), Password1=pw1, Password2=pw2);
 w.write('ch1', x, start, fs, Precision=3);
 delete(w);
 lastwarn('');
@@ -137,7 +137,7 @@ assert(~strcmp(wid, 'mef3io:legacyPassword'), 'a new session must not need the f
 assert(isequaln(r.read('ch1'), yEnc));
 delete(r);
 oldPath = fullfile(sessionDir, 'matlab_utf8_old.mefd');
-w = mef3io.Writer(oldPath, Overwrite=true, Password1=['b' char(169)], ...
+w = mef3io.Writer(fresh(oldPath), Password1=['b' char(169)], ...
                   Password2=['x' char(188) 'y']);       % old bytes of 'bé' / 'xüy'
 w.write('ch1', x, start, fs, Precision=3);
 delete(w);
@@ -150,7 +150,7 @@ delete(r);
 
 % ---- input flexibility: types are coerced, edge windows are legal ----------
 flexPath = fullfile(sessionDir, 'matlab_flex.mefd');
-w = mef3io.Writer(flexPath, Overwrite=true);
+w = mef3io.Writer(fresh(flexPath));
 w.write('s', single(x(1:100)), start, fs, Precision=3);        % single -> double
 w.write('i', int16(1:100), start, fs, Precision=0);            % ints -> double
 w.writeInt32('c', int32(1:100), 0.5, single(start), fs, ...    % single timestamp
@@ -176,7 +176,7 @@ mdPath = fullfile(sessionDir, 'matlab_md.mefd');
 md = mef3io.Metadata( ...
     subject=mef3io.Subject(id="MRN-9", name_1="Alice", recording_location="ICU-2"), ...
     acquisition=mef3io.Acquisition(session_description="nightly", line_frequency=60));
-w = mef3io.Writer(mdPath, Overwrite=true, Metadata=md);
+w = mef3io.Writer(fresh(mdPath), Metadata=md);
 w.write('ch1', x, start, fs, Precision=3);
 delete(w);
 r = mef3io.Reader(mdPath);
@@ -203,14 +203,24 @@ assert(contains(segsTar(1).path, '::'));               % tar member notation
 delete(rDir); delete(rTar);
 gotError = false;                                      % existing target refused
 try mef3io.archiveSession(path); catch, gotError = true; end
-assert(gotError, 'existing archive target must be refused without Overwrite');
-mef3io.archiveSession(path, '', Overwrite=true);       % deterministic rewrite OK
+assert(gotError, 'existing archive target must be refused');
+firstBytes = fileread(tarPath);                        % deterministic re-archive
+delete(tarPath);                                       % (the test removes its own file)
+tarPath = mef3io.archiveSession(path);
+assert(isequal(fileread(tarPath), firstBytes), 'archiveSession must be deterministic');
+gotError = false;                                      % the removed option is refused
+try mef3io.archiveSession(path, '', Overwrite=true); catch, gotError = true; end
+assert(gotError, 'archiveSession Overwrite option was removed');
+gotError = false;
+try mef3io.Writer(path, Overwrite=true); catch, gotError = true; end
+assert(gotError, 'Writer Overwrite option was removed');
+assert(exist(fullfile(path, 'ch1.timd'), 'dir') == 7, 'a refused Writer must not delete');
 gotError = false;                                      % tar sessions are read-only
-try mef3io.Writer(tarPath, Overwrite=true); catch, gotError = true; end
+try mef3io.Writer(tarPath); catch, gotError = true; end
 assert(gotError, 'Writer must refuse tar archives');
 assert(exist(tarPath, 'file') == 2);                   % and never delete them
 gotError = false;                                      % naming: .mefd / .mefd.tar only
-try mef3io.Writer(fullfile(sessionDir, 'bad_name'), Overwrite=true); catch, gotError = true; end
+try mef3io.Writer(fullfile(sessionDir, 'bad_name')); catch, gotError = true; end
 assert(gotError, 'Writer must refuse non-.mefd session names');
 gotError = false;
 try mef3io.extractSession(tarPath, fullfile(sessionDir, 'bad_name')); catch, gotError = true; end
@@ -227,7 +237,7 @@ delete(tarPath);
 
 % plain struct still accepted by setMetadata
 mdPath2 = fullfile(sessionDir, 'matlab_md2.mefd');
-w = mef3io.Writer(mdPath2, Overwrite=true, ...
+w = mef3io.Writer(fresh(mdPath2), ...
                   Metadata=struct('subject_id', 'S2', 'session_description', 'via struct'));
 w.write('ch1', x, start, fs, Precision=3);
 delete(w);
@@ -242,7 +252,7 @@ delete(r);
 durCounts = int32(mod(0:1999, 100))';
 durStep = int64(round(2000 / fs * 1e6));
 dp = fullfile(sessionDir, 'matlab_append_recover.mefd');
-w = mef3io.Writer(dp, Overwrite=true);
+w = mef3io.Writer(fresh(dp));
 w.writeInt32('ch1', durCounts, 0.5, start, fs);
 delete(w);
 w = mef3io.Writer(dp, WaitForDisk=true);                 % reopened: appends
@@ -267,7 +277,7 @@ delete(r);
 % The removed Durability option is an error, and must not have written anything.
 gotError = false;
 try
-    mef3io.Writer(fullfile(sessionDir, 'matlab_bad_dur.mefd'), Overwrite=true, ...
+    mef3io.Writer(fresh(fullfile(sessionDir, 'matlab_bad_dur.mefd')), ...
                   Durability='full');
 catch
     gotError = true;
@@ -292,7 +302,7 @@ delete(recTarPath);
 % reports it, and returns the intact one. Mirrors tests/test_p20 in Python.
 isoPath = fullfile(sessionDir, 'matlab_iso.mefd');
 isoCounts = int32(mod(0:1999, 100))';
-w = mef3io.Writer(isoPath, Overwrite=true);
+w = mef3io.Writer(fresh(isoPath));
 w.writeInt32('ch1', isoCounts, 0.5, start, fs);
 w.writeInt32('ch1', isoCounts, 0.5, start + int64(1e7), fs, NewSegment=true);
 delete(w);
@@ -337,7 +347,7 @@ delete(r);
 % A rate that is not finite and > 0, or a conversion factor that is 0, NaN or
 % infinite, is a clean error and leaves nothing on disk.
 badPath = fullfile(sessionDir, 'matlab_bad_args.mefd');
-w = mef3io.Writer(badPath, Overwrite=true);
+w = mef3io.Writer(fresh(badPath));
 for badFs = [0, -256, NaN, Inf]
     gotError = false;
     try w.write('ch1', x, start, badFs); catch, gotError = true; end
@@ -378,10 +388,10 @@ assert(numel(spAnns) == 1 && strcmp(spAnns(1).text, 'string text'), ...
 delete(r);
 
 % A refused block length must not cost the existing session: the check runs
-% BEFORE writer_open, which with Overwrite=true removes it (#83 review).
+% BEFORE writer_open (#83 review).
 gotError = false;
 try
-    mef3io.Writer(badPath, Overwrite=true, BlockLength=1e9);
+    mef3io.Writer(badPath, BlockLength=1e9);
 catch
     gotError = true;
 end
@@ -398,7 +408,7 @@ delete(w);
 % info says NaN, readRaw lists where each factor applies (1-based, inclusive).
 mixPath = fullfile(sessionDir, 'matlab_factors.mefd');
 c = int32(mod(0:511, 50))' - 25;
-w = mef3io.Writer(mixPath, Overwrite=true);
+w = mef3io.Writer(fresh(mixPath));
 w.writeInt32('m', c, 0.01, start, fs);
 w.writeInt32('m', c, -0.5, start + int64(4e6), fs, NewSegment=true);
 delete(w);
@@ -416,4 +426,10 @@ assert(raw.units_conversion_factors(2).start_index == 1025 && ...
 delete(r);
 
 fprintf('test_mef3io: all assertions passed (%s)\n', sessionDir);
+end
+
+function p = fresh(p)
+% The test's own scratch folder: removed here so each Writer starts empty (the
+% library itself never deletes a session).
+if isfolder(p), rmdir(p, 's'); end
 end

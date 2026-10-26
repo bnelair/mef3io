@@ -167,7 +167,7 @@ def dir_size(path: str) -> int:
 def write_mef_tools(cfg: Config, path: str):
     from mef_tools.io import MefWriter
 
-    w = MefWriter(path, overwrite=True)
+    w = MefWriter(path, overwrite=True)  # mef_tools (legacy) writer
     if cfg.mef_block_samples > 0:
         w.mef_block_len = int(cfg.mef_block_samples)
     for i in range(cfg.channels):
@@ -183,7 +183,8 @@ def write_mef_tools(cfg: Config, path: str):
 def write_mef3io(cfg: Config, path: str):
     import mef3io
 
-    with mef3io.Writer(path, overwrite=True) as w:
+    shutil.rmtree(path, ignore_errors=True)  # the benchmark's own scratch data; mef3io never deletes a session
+    with mef3io.Writer(path) as w:
         if cfg.mef_block_samples > 0:
             w._impl.set_block_length(int(cfg.mef_block_samples))
         for i in range(cfg.channels):
@@ -503,6 +504,7 @@ def bench_append(cfg: Config, outdir: Path) -> dict:
             step = int(chunk_samples / cfg.fs * 1e6)
 
             if backend == "mef3io":
+                shutil.rmtree(path, ignore_errors=True)  # the benchmark's own scratch data; mef3io never deletes a session
                 w = mef3io.Writer(path, n_threads=cfg.append_threads)
                 for i in range(cfg.append_chunks):
                     t0 = time.perf_counter()
@@ -514,7 +516,7 @@ def bench_append(cfg: Config, outdir: Path) -> dict:
             else:
                 from mef_tools.io import MefWriter
 
-                w = MefWriter(path, overwrite=True)
+                w = MefWriter(path, overwrite=True)  # mef_tools (legacy) writer
                 for i in range(cfg.append_chunks):
                     t0 = time.perf_counter()
                     for c in range(cfg.append_channels):

@@ -1,7 +1,7 @@
 classdef Writer < handle
     %WRITER Write a MEF 3.0 session (mef3io MEX backend).
     %
-    %   w = mef3io.Writer(path, Overwrite=true);
+    %   w = mef3io.Writer(path);        % creates the session or appends to it
     %   w.write('ch1', data, startUutc, fs);            % NaN = gap, precision inferred
     %   w.write('ch1', more, t2, fs);                   % appends in-segment
     %   w.write('ch1', x, t3, fs, NewSegment=true);     % force a new segment
@@ -20,6 +20,9 @@ classdef Writer < handle
     %
     % Encrypted sessions: pass Password1 and Password2 (both required).
     % Times are uUTC: microseconds since the Unix epoch (int64 or double).
+    % An existing session is always appended to: mef3io never deletes a
+    % session (the Overwrite option was removed; remove or rename the folder
+    % yourself, or write to a new path).
     % `path` must end .mefd (enforced); tar archives are read-only and
     % refused — pack a directory with mef3io.archiveSession instead.
 
@@ -32,7 +35,7 @@ classdef Writer < handle
         function obj = Writer(path, opts)
             arguments
                 path (1, :) char
-                opts.Overwrite (1, 1) logical = false
+                opts.Overwrite = []   % removed: refused below with a message
                 opts.Password1 (1, :) char = ''
                 opts.Password2 (1, :) char = ''
                 opts.Units (1, :) char = ''
@@ -41,12 +44,15 @@ classdef Writer < handle
                 opts.Metadata = []   % mef3io.Metadata or a struct of fields
                 opts.WaitForDisk (1, 1) logical = false
             end
-            % Refused BEFORE writer_open, which with Overwrite=true removes
-            % the existing session (#83).
+            if ~isempty(opts.Overwrite)
+                error('mef3io:overwriteRemoved', ...
+                      'mef3io never deletes a session; remove or rename the folder yourself, or write to a new path');
+            end
+            % Refused BEFORE writer_open, before any folder is created (#83).
             if opts.BlockLength > 0
                 mef3io_mex('check_block_length', opts.BlockLength);
             end
-            obj.h = mef3io_mex('writer_open', path, double(opts.Overwrite), ...
+            obj.h = mef3io_mex('writer_open', path, ...
                                opts.Password1, opts.Password2);
             if ~isempty(opts.Units)
                 mef3io_mex('writer_set_units', obj.h, opts.Units);

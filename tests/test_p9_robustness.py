@@ -22,7 +22,7 @@ FS = 256.0
 
 def _make_session(tmp_path):
     path = str(tmp_path / "s.mefd")
-    w = m.SessionWriter(path, True)
+    w = m.SessionWriter(path)
     w.write_float("ch1", np.ascontiguousarray(np.sin(np.arange(5000) / 20)), START, FS, 3)
     del w
     return path
@@ -120,7 +120,7 @@ def test_truncated_tdat_raises(tmp_path):
 def test_write_accepts_any_numeric_input(tmp_path):
     # Lists, integer arrays, float32, scalars — everything numeric is coerced.
     path = str(tmp_path / "s.mefd")
-    with mef3io.Writer(path, overwrite=True) as w:
+    with mef3io.Writer(path) as w:
         w.write("lst", [1.5, 2.5, float("nan"), 4.0], START, FS, precision=1)
         w.write("ints", np.arange(100, dtype=np.int16), START, FS, precision=0)
         w.write("f32", np.linspace(0, 1, 100, dtype=np.float32), START, FS, precision=3)
@@ -136,7 +136,7 @@ def test_write_accepts_any_numeric_input(tmp_path):
 
 def test_write_int32_strictness_and_safety(tmp_path):
     path = str(tmp_path / "s.mefd")
-    with mef3io.Writer(path, overwrite=True) as w:
+    with mef3io.Writer(path) as w:
         # the primitive path never alters data: floats must be rejected ...
         with pytest.raises(TypeError, match="integer data"):
             w.write_int32("ch1", [10.6, 11.4, 13.0], 0.5, START, FS)
@@ -169,7 +169,7 @@ def test_empty_and_inverted_windows(tmp_path):
 
 def test_annotation_time_types(tmp_path):
     path = str(tmp_path / "s.mefd")
-    with mef3io.Writer(path, overwrite=True) as w:
+    with mef3io.Writer(path) as w:
         w.write("ch1", np.zeros(100), START, FS, precision=0)
         w.write_annotations([
             {"time": np.float64(START + 1e6), "text": "np float time"},

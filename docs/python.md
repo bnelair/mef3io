@@ -28,16 +28,18 @@ as an append that overlaps). `MefError` subclasses `RuntimeError`, so older
 ## Writing
 
 ```python
-with mef3io.Writer("session.mefd", overwrite=True, units="uV") as w:
+with mef3io.Writer("session.mefd", units="uV") as w:
     w.write("ch1", data, start_uutc, fs=256.0)
 ```
 
-`Writer(path, overwrite=False, password1="", password2="", units=None,
+`Writer(path, password1="", password2="", units=None,
 block_length=None, n_threads=0, metadata=None, wait_for_disk=False)`
 
-- `overwrite=True` deletes an existing session first. With
-  `overwrite=False`, an existing session is **reopened for appending** —
-  state is recovered from disk, so this works across program runs.
+- An existing session is **reopened for appending** (a missing one is
+  created) — state is recovered from disk, so this works across program
+  runs. mef3io **never deletes a session**: the `overwrite=` option of 2.x
+  was removed, and passing it raises `TypeError` ("mef3io never deletes a
+  session; remove or rename the folder yourself, or write to a new path").
 - Encryption: pass **both** passwords (MEF has no "level-1 only" files; see
   the [encryption model](encryption_model.md)). It encrypts the subject
   fields, technical metadata and annotation text, **not the samples or their
@@ -549,7 +551,7 @@ the same whatever the number of segments. Per channel it compares:
 - the last segment's provenance region: which mef3io operation last modified
   it, and how many times;
 - the random file IDs of the first and last segment's metadata files. This
-  catches a session rewritten with `overwrite=True` from the same samples but
+  catches a session removed and rewritten at the same path from the same samples but
   with new units, conversion factor or subject.
 
 A snapshot is used only by the exact mef3io build that wrote it (the version
@@ -1002,8 +1004,9 @@ with mef3io.Writer(session) as w:              # appends work again
     w.write("ch1", more, t, fs=256.0)
 ```
 
-Pass `tar_path=` / `dest_dir=` to choose targets and `overwrite=True` to
-replace an existing one.
+Pass `tar_path=` / `dest_dir=` to choose targets. An existing target is
+**refused** (`IoError`): mef3io never deletes or replaces data, so remove or
+rename it yourself (the `overwrite=` option of 2.x was removed).
 
 Session naming is **enforced at every entry point** (reading, writing,
 archiving, extracting, in all language bindings): directories must end
@@ -1067,8 +1070,7 @@ stop at the same points). `Cancelled` subclasses `Exception` directly, not
 - a read returns no partial array;
 - `archive_session` builds the archive in a temporary file and
   `extract_session` in a temporary sibling directory, renamed into place only
-  when complete — a cancel leaves neither, and with `overwrite=True` the
-  existing target is untouched;
+  when complete — a cancel leaves neither;
 - `repair_session` and `recover_session` decide everything during a read-only
   pass and write only after it. A cancel during that pass (which is where the
   time goes) leaves the session byte-identical and creates no backup
@@ -1102,10 +1104,8 @@ the next segment or block. Windowed (viewer) reads fetch only their window.
 With `total == 0` (an empty window) the single `(0, 0)` call is also the
 final one.
 
-`extract_session(..., overwrite=True)` briefly needs room for both trees. A
-hard kill mid-extract can leave a `<dest>.mef3io-extract-<hex>` staging
-directory, and a replaced tree that could not be deleted is left as
-`<dest>.mef3io-replaced-<hex>`; both are safe to delete.
+A hard kill mid-extract can leave a `<dest>.mef3io-extract-<hex>` staging
+directory; it is safe to delete.
 
 When neither keyword is given, nothing changes: the hooks cost one pointer
 test per unit of work (see `benchmarks/cancel_overhead_benchmark.py`).
@@ -1128,7 +1128,7 @@ md = Metadata(
     subject=Subject(id="MRN-123", name_1="Jane", recording_location="EMU-4"),
     acquisition=Acquisition(session_description="pre-surgical", line_frequency=60.0),
 )
-with mef3io.Writer("session.mefd", overwrite=True, metadata=md) as w:
+with mef3io.Writer("session.mefd", metadata=md) as w:
     w.write("ch1", data, start_uutc, fs=256.0)
 # or later, before writing:  w.set_metadata(md)   (also accepts a flat dict)
 ```

@@ -733,7 +733,7 @@ def test_acceptance_legacy_session_reads_and_upgrades_losslessly(tmp_path):
     path = tmp_path / "legacy.mefd"
     rng = np.random.default_rng(3)
     x = rng.integers(-30000, 30000, 6000).astype(np.int32)
-    w = MefWriter(str(path), overwrite=True)
+    w = MefWriter(str(path))
     w.write_data(x[:3000], "ch1", START, FS, precision=0)
     w.write_data(x[3000:], "ch1", START + int(3000 / FS * 1e6) + int(3e6), FS, precision=0)
     del w

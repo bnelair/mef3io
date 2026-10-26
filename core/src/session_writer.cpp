@@ -105,26 +105,24 @@ std::vector<si4> quantize_to_int32(std::span<const sf8> data, int precision,
   return out;
 }
 
-SessionWriter::SessionWriter(const std::string& mefd_path, bool overwrite, std::string password_1,
+SessionWriter::SessionWriter(const std::string& mefd_path, std::string password_1,
                              std::string password_2)
     : mefd_path_(mefd_path),
       password_1_(std::move(password_1)),
       password_2_(std::move(password_2)) {
-  // Tar archives are read-only sessions. Refuse them before the destructive
-  // overwrite/remove_all below can ever touch one.
+  // Tar archives are read-only sessions.
   if (path_has_suffix(mefd_path_, ".tar"))
     throw IoError("cannot write into a tar archive (tar sessions are read-only): " + mefd_path_ +
                   "; write a .mefd directory and pack it with archive_session()");
   // Same naming contract as the reader: only clearly-marked session
-  // directories are ever created or overwritten.
+  // directories are ever created or extended.
   if (!path_has_suffix(mefd_path_, ".mefd"))
     throw IoError("session directory must end with .mefd: " + mefd_path_);
   if (fs::exists(mefd_path_) && !fs::is_directory(mefd_path_))
     throw IoError("session path exists and is not a directory: " + mefd_path_);
-  // Mid-rename (#72): no write, not even an overwrite, until it is finished
+  // Mid-rename (#72): no write until it is finished
   // or rolled back — its journal would otherwise restore stale headers.
   detail::refuse_if_mid_operation(mefd_path_);
-  if (overwrite && fs::exists(mefd_path_)) fs::remove_all(mefd_path_);
   // Held data before this writer: its new segments/channels are flushed.
   session_preexisted_ = fs::exists(mefd_path_);
   fs::create_directories(mefd_path_);

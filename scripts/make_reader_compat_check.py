@@ -181,7 +181,7 @@ def build(out: Path, seconds: float) -> list[tuple[str, str, str]]:
                   f"continuous across the join."))
 
     p = out / "03_written_by_mef_tools.mefd"
-    mw = MefWriter(str(p), overwrite=True)
+    mw = MefWriter(str(p), overwrite=True)  # mef_tools (legacy) writer
     for i, ch in enumerate(CHANNELS):
         mw.write_data(eeg(n1, 300 + i), ch, START, FS, precision=LEGACY_PRECISION)
         mw.write_data(eeg(n2, 350 + i), ch, START + int((n1 / FS + GAP_SECONDS) * 1e6), FS,
@@ -200,7 +200,7 @@ def build(out: Path, seconds: float) -> list[tuple[str, str, str]]:
     shutil.copytree(out / "03_written_by_mef_tools.mefd", p4)
     ids4 = mef3io.Validator(str(p4)).validate().repairable_check_ids
     if ids4:
-        mef3io.repair_session(str(p4), ids4, backup=False)
+        mef3io.repair_session(str(p4), ids4)
     notes.append((p4.name, "MUST WORK",
                   f"03 after repair_session (fixed: {', '.join(ids4) or 'nothing'}). Identical "
                   f"samples to 03, declarations corrected. The upgrade path for data already in "
@@ -218,7 +218,7 @@ def build(out: Path, seconds: float) -> list[tuple[str, str, str]]:
     p6 = out / "06_that_same_session_repaired.mefd"
     shutil.copytree(p5, p6)
     ids6 = mef3io.Validator(str(p6)).validate().repairable_check_ids
-    mef3io.repair_session(str(p6), ids6, backup=False)
+    mef3io.repair_session(str(p6), ids6)
     notes.append((p6.name, "MUST WORK",
                   f"05 after repair_session (fixed: {', '.join(ids6)}). Byte-for-byte the SAME "
                   f"SAMPLES as 05 — only declarations differ. 05 vs 06 is the pair that isolates "
@@ -244,10 +244,10 @@ def build(out: Path, seconds: float) -> list[tuple[str, str, str]]:
     p9 = out / "09_recovered_after_interrupted_write.mefd"
     write_gapped(p9, seconds)
     truncate_index(p9, DROP_ENTRIES)
-    rec = mef3io.recover_session(str(p9), apply=True, backup=False)
+    rec = mef3io.recover_session(str(p9), apply=True)
     ids9 = mef3io.Validator(str(p9)).validate().repairable_check_ids
     if ids9:
-        mef3io.repair_session(str(p9), ids9, backup=False)
+        mef3io.repair_session(str(p9), ids9)
     recovered = sum(s.blocks_recovered for s in rec.segments)
     notes.append((p9.name, "MUST WORK",
                   f"Written by the current build, then an interrupted append simulated (blocks "

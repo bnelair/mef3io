@@ -136,7 +136,7 @@ def _rich_session(path, password=False, channels=("ch1", "ch2", "ch3"), unknown=
     kw = dict(password1="pw-one", password2="pw-two") if password else {}
     meta = mef3io.Metadata(subject=subject, acquisition=mef3io.Acquisition(
         session_description="Jane Roe overnight", channel_description="left hippocampus"))
-    with mef3io.Writer(str(path), overwrite=True, metadata=meta, **kw) as w:
+    with mef3io.Writer(str(path), metadata=meta, **kw) as w:
         for i, ch in enumerate(channels):
             w.write(ch, _signal(int(FS) * 60, i), START, FS, precision=3)
         w.write(channels[0], _signal(int(FS) * 30, 9), START + 120 * SECOND, FS, precision=3,
@@ -272,7 +272,7 @@ def test_raw_time_fields_keep_their_sign_and_tz_fields_are_set(rich):
 def test_time_zone_fields_are_set_whatever_the_source_held(tmp_path):
     src = tmp_path / "tz.mefd"
     meta = mef3io.Metadata(subject=mef3io.Subject(gmt_offset=-21600))
-    with mef3io.Writer(str(src), overwrite=True, metadata=meta) as w:
+    with mef3io.Writer(str(src), metadata=meta) as w:
         w.write("ch1", _signal(2560, 1), START, FS, precision=3)
     for tmet in _tmets(src):                       # and DST fields, as a recorder fills them
         raw = bytearray(tmet.read_bytes())
@@ -395,7 +395,7 @@ def test_a_raising_text_callable_aborts_and_leaves_nothing(tmp_path):
 
 def test_descriptions_kept_get_the_new_session_name(tmp_path):
     src = tmp_path / "jane_roe.mefd"
-    with mef3io.Writer(str(src), overwrite=True) as w:      # session_description = the name
+    with mef3io.Writer(str(src)) as w:      # session_description = the name
         w.write("ch1", _signal(2560, 1), START, FS, precision=3)
     _anon(src, tmp_path / "P7.mefd", clear=("subject", "location"))
     with mef3io.Reader(str(tmp_path / "P7.mefd")) as r:
@@ -472,7 +472,7 @@ def _legacy(path, rto=0, chans=("ch1", "ch2")):
     pd = pytest.importorskip("pandas")
     from mef_tools.io import MefWriter
 
-    w = MefWriter(str(path), overwrite=True)
+    w = MefWriter(str(path))
     if rto:
         w.record_offset = rto
     for ch in chans:
@@ -530,7 +530,7 @@ def _set_rto(path, rto, channels):
 def test_offset_refusals(tmp_path):
     # Segments disagree on the offset.
     src = tmp_path / "dis.mefd"
-    with mef3io.Writer(str(src), overwrite=True) as w:
+    with mef3io.Writer(str(src)) as w:
         for ch in ("a", "b"):
             w.write(ch, _signal(2560, 1), START, FS, precision=3)
     _set_rto(src, START - DAY, ["a"])
@@ -1069,7 +1069,7 @@ def test_rto_session_with_sequential_record_ids_is_published(tmp_path):
 
 
 def _named_session(path, channels, subject):
-    with mef3io.Writer(str(path), overwrite=True,
+    with mef3io.Writer(str(path),
                        metadata=mef3io.Metadata(subject=subject)) as w:
         for i, ch in enumerate(channels):
             w.write(ch, _signal(2560, i), START, FS, precision=3)
@@ -1338,7 +1338,7 @@ def test_no_false_positives_on_a_realistic_copy(tmp_path):
     The field-wise scan must report nothing."""
     src = tmp_path / "big.mefd"
     fs = 512.0
-    with mef3io.Writer(str(src), overwrite=True) as w:
+    with mef3io.Writer(str(src)) as w:
         for k in range(12):
             t = START + k * 600 * SECOND + (3600 * SECOND if k >= 6 else 0)
             for c in range(4):
@@ -1390,7 +1390,7 @@ def test_cli(tmp_path, rich, capsys):
 
 
 def _kept_text_session(path, subject, channels=("LH1", "LH2"), note="Muller called at night"):
-    with mef3io.Writer(str(path), overwrite=True,
+    with mef3io.Writer(str(path),
                        metadata=mef3io.Metadata(subject=subject)) as w:
         for i, ch in enumerate(channels):
             w.write(ch, _signal(2560, i), START, FS, precision=3)
@@ -1500,7 +1500,7 @@ def test_a_left_out_channels_description_is_not_tried(tmp_path):
 
 def test_units_the_removal_cannot_clean_are_refused_up_front(tmp_path):
     src = tmp_path / "u.mefd"
-    with mef3io.Writer(str(src), overwrite=True, units="mVolt") as w:
+    with mef3io.Writer(str(src), units="mVolt") as w:
         for i, ch in enumerate(("mV", "LH1")):
             w.write(ch, _signal(2560, i), START, FS, precision=3)
     rep = mef3io.anonymize.check(src, tmp_path / "S001.mefd", SHIFT, exclude_channels=["mV"])

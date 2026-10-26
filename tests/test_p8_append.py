@@ -31,7 +31,7 @@ def _segd_dirs(path, ch="ch1"):
 def _write_two(path, gap_us=0, new_segment=False, p1="", p2=""):
     a = np.sin(np.arange(2000) / 20)
     b = np.sin(np.arange(2000) / 20 + 5)
-    w = m.SessionWriter(path, True, p1, p2)
+    w = m.SessionWriter(path, p1, p2)
     w.write_float("ch1", np.ascontiguousarray(a), START, FS)
     t2 = START + int(2000 / FS * 1e6) + gap_us
     w.write_float("ch1", np.ascontiguousarray(b), t2, FS, -1, new_segment)
@@ -102,11 +102,11 @@ def test_reopened_session_appends_in_segment(tmp_path):
     path = str(tmp_path / "s.mefd")
     a = np.sin(np.arange(2000) / 20)
     b = np.sin(np.arange(2000) / 20 + 5)
-    w = m.SessionWriter(path, True)
+    w = m.SessionWriter(path)
     w.write_float("ch1", np.ascontiguousarray(a), START, FS)
     del w
 
-    w = m.SessionWriter(path, False)  # reopen: state hydrated from disk
+    w = m.SessionWriter(path)  # reopen: state hydrated from disk
     t2 = START + int(2000 / FS * 1e6)
     s = w.write_float("ch1", np.ascontiguousarray(b), t2, FS)
     del w
@@ -128,10 +128,10 @@ def test_reopened_append_reuses_precision(tmp_path):
     path = str(tmp_path / "s.mefd")
     fine = np.random.default_rng(0).normal(0, 0.01, 2000)   # infers high precision
     coarse = np.random.default_rng(1).normal(0, 1000.0, 2000)  # would infer lower
-    w = m.SessionWriter(path, True)
+    w = m.SessionWriter(path)
     w.write_float("ch1", np.ascontiguousarray(fine), START, FS)
     del w
-    w = m.SessionWriter(path, False)
+    w = m.SessionWriter(path)
     t2 = START + int(2000 / FS * 1e6)
     w.write_float("ch1", np.ascontiguousarray(coarse), t2, FS)
     del w
@@ -156,7 +156,7 @@ def test_append_encrypted_session(tmp_path):
     assert len(got) == 4000 and np.allclose(legacy, got)
 
     # reopen + append also works through the encryption path
-    w = m.SessionWriter(path, False, p1, p2)
+    w = m.SessionWriter(path, p1, p2)
     t3 = START + 2 * int(2000 / FS * 1e6)
     w.write_float("ch1", np.ascontiguousarray(a), t3, FS)
     del w
@@ -176,7 +176,7 @@ def test_append_encrypted_session(tmp_path):
 def test_append_conflicts_raise(tmp_path):
     path = str(tmp_path / "s.mefd")
     a, _ = _write_two(path)
-    w = m.SessionWriter(path, False)
+    w = m.SessionWriter(path)
     # overlapping start time
     with pytest.raises(RuntimeError, match="before segment end"):
         w.write_float("ch1", np.ascontiguousarray(a), START, FS)
@@ -195,7 +195,7 @@ def test_append_conflicts_raise(tmp_path):
 def test_failed_append_rolls_back_to_the_original_segment(tmp_path):
     path = str(tmp_path / "s.mefd")
     a = np.sin(np.arange(2000) / 20)
-    w = m.SessionWriter(path, True)
+    w = m.SessionWriter(path)
     w.write_float("ch1", np.ascontiguousarray(a), START, FS)
     del w
 
@@ -215,7 +215,7 @@ def test_failed_append_rolls_back_to_the_original_segment(tmp_path):
     blocker.mkdir()
     (blocker / "keep").write_text("x")
     try:
-        w = m.SessionWriter(path, False)
+        w = m.SessionWriter(path)
         t2 = START + int(2000 / FS * 1e6)
         with pytest.raises(RuntimeError, match="cannot open for write"):
             w.write_float("ch1", np.ascontiguousarray(a), t2, FS)
@@ -236,7 +236,7 @@ def test_segment_map_locates_data_across_huge_gap(tmp_path):
     path = str(tmp_path / "s.mefd")
     a = np.sin(np.arange(2000) / 20)
     day = int(86400e6)
-    w = m.SessionWriter(path, True)
+    w = m.SessionWriter(path)
     w.write_float("ch1", np.ascontiguousarray(a), START, FS)
     w.write_float("ch1", np.ascontiguousarray(a), START + day, FS, -1, True)
     del w
@@ -262,7 +262,7 @@ def test_compat_writer_appends_in_segment(tmp_path):
 
     path = str(tmp_path / "s.mefd")
     a = 40 * np.sin(np.arange(3000) / 20)
-    cw = CompatWriter(path, overwrite=True)
+    cw = CompatWriter(path)
     cw.write_data(a, "ch1", START, FS, precision=3)
     t2 = START + int(3000 / FS * 1e6)
     cw.write_data(a, "ch1", t2, FS, precision=3)

@@ -158,7 +158,7 @@ def _move_an_index_entry(src):
 
 def _disputed_offset(templates, tmp_path):
     src = tmp_path / "src" / "dis.mefd"
-    with mef3io.Writer(str(src), overwrite=True) as w:
+    with mef3io.Writer(str(src)) as w:
         for ch in ("a", "b"):
             w.write(ch, _signal(2560, 1), START, FS, precision=3)
     _set_rto(src, START - DAY, ["a"])
@@ -182,7 +182,7 @@ def _glued(templates, tmp_path):
     """A left-out channel's name glued into kept note text (#115): the
     removal takes whole words only, the copy's check would refuse it."""
     src = tmp_path / "src" / "glued.mefd"
-    with mef3io.Writer(str(src), overwrite=True) as w:
+    with mef3io.Writer(str(src)) as w:
         for ch in ("a3", "LH1"):
             w.write(ch, _signal(2560, 1), START, FS, precision=3)
         w.write_annotations([{"type": "Note", "time": START + SECOND, "text": "a3a3 artefact"}])
@@ -598,7 +598,7 @@ def test_verify_still_refuses_a_channel_named_after_the_patient(tmp_path):
 
 
 def _multi_segment(path, channels, subject, n_segments=3):
-    with mef3io.Writer(str(path), overwrite=True,
+    with mef3io.Writer(str(path),
                        metadata=mef3io.Metadata(subject=subject)) as w:
         for k in range(n_segments):
             for i, ch in enumerate(channels):
@@ -717,7 +717,7 @@ def test_check_releases_the_gil(tmp_path):
     from test_p31_gil_release import _assert_releases
 
     src = tmp_path / "many.mefd"
-    w = mef3io._mef3io.SessionWriter(str(src), True)
+    w = mef3io._mef3io.SessionWriter(str(src))
     x = np.arange(256, dtype=np.int32)
     for seg in range(1200):
         w.write_int32("ch", x, 1.0, START + seg * 10_000_000, 256.0, None, seg > 0)

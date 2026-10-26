@@ -567,7 +567,6 @@ def validate_session(
 def repair_session(
     path: str,
     check_ids: Sequence[str],
-    backup: bool = True,
     *,
     cancel: CancelToken | None = None,
     progress: Callable[[int, int], object] | None = None,
@@ -588,6 +587,12 @@ def repair_session(
     are never touched. A segment whose CRCs do not verify is reported and left
     alone, and a ``.mefd.tar`` archive is refused outright (extract it first).
 
+    Every file a repair rewrites is first copied into
+    ``<session>.repair-backup/`` (outside the session tree, so no reader
+    mistakes a backup for data); an existing backup is never overwritten. There
+    is no way to turn that off: the ``backup=`` option of 2.x was removed
+    (passing it raises ``TypeError``).
+
     Parameters
     ----------
     path : str
@@ -595,10 +600,6 @@ def repair_session(
     check_ids : sequence of str
         Which repairs to apply. Required and non-empty — repairs are never
         implicit. :attr:`Report.repairable_check_ids` lists the candidates.
-    backup : bool, default True
-        Copy each file before rewriting it, into ``<session>.repair-backup/``
-        (outside the session tree, so no reader mistakes a backup for data).
-        An existing backup is never overwritten.
     cancel : CancelToken, optional
         Stop the repair from another thread. Repairs are decided during the
         validation pass and written only after it: a cancel during the pass
@@ -630,6 +631,9 @@ def repair_session(
             "implicit. Use Validator(path).validate().repairable_check_ids to see the "
             "candidates."
         )
+    from ._removed import reject_removed
+
+    reject_removed("repair_session", {k: v for k, v in kwargs.items() if k == "backup"})
     v = Validator(path, **kwargs)
     raw = _backend().repair_session(
         v.path,
@@ -639,7 +643,6 @@ def repair_session(
         segments=v.segments,
         check_ids=[],
         exact_difference_bytes=v.exact_difference_bytes,
-        backup=bool(backup),
         **_hooks(cancel, progress),
     )
     return _to_report(
@@ -716,19 +719,23 @@ class RecoveryReport:
 def recover_session(
     path: str,
     apply: bool = False,
-    backup: bool = True,
     password: str = "",
     *,
     cancel: CancelToken | None = None,
     progress: Callable[[int, int], object] | None = None,
+    **removed,
 ) -> RecoveryReport:
     """Make each segment's block index and data agree after an interrupted write.
 
     This is **not** :func:`repair_session`, which only ever rewrites
     declarations and is safe to run on anything. Recovery may truncate the
     index, rebuild index entries from the data file, and drop a trailing
-    fragment — so it is a dry run unless you ask for it, and it backs up what it
-    changes first.
+    fragment — so it is a dry run unless you ask for it, and it ALWAYS backs up
+    what it changes or drops first, into ``<session>.recover-backup/`` (only the
+    ``.tidx``, the ``.tdat``'s 1024-byte header and any dropped fragment, never
+    the whole data file, which may be tens of gigabytes). The ``backup=`` option
+    of 2.x was removed (passing it raises ``TypeError``): mef3io never discards
+    data.
 
     An interrupted append leaves one of two shapes, and they are handled
     differently because one has lost data and the other has not:
@@ -752,10 +759,6 @@ def recover_session(
         ``.mefd`` session directory. Tar archives are refused.
     apply : bool, default False
         False reports what it would do and writes nothing.
-    backup : bool, default True
-        Save what changes to ``<session>.recover-backup/`` first. Only the
-        ``.tidx``, the ``.tdat``'s 1024-byte header and any dropped fragment —
-        never the whole data file, which may be tens of gigabytes.
     password : str, optional
         Only needed for encrypted sessions.
     cancel : CancelToken, optional
@@ -785,8 +788,12 @@ def recover_session(
     healthy segment's findings are left to :func:`repair_session`. A later
     segment whose ``.tmet`` was lost is rebuilt from the previous segment's.
     """
+    from ._removed import BACKUP_MESSAGE, reject_positional_bool, reject_removed
+
+    reject_removed("recover_session", removed)
+    reject_positional_bool("recover_session", password, BACKUP_MESSAGE)
     raw = _backend().recover_session(
-        str(path), bool(apply), bool(backup), password or "", **_hooks(cancel, progress)
+        str(path), bool(apply), password or "", **_hooks(cancel, progress)
     )
     fields = {f.name for f in dataclasses.fields(RecoveredSegment)}
     return RecoveryReport(
@@ -822,14 +829,12 @@ def _recover_main(argv) -> int:
     )
     p.add_argument("path", help="session .mefd directory")
     p.add_argument("--apply", action="store_true", help="actually write (default: dry run)")
-    p.add_argument("--no-backup", action="store_true",
-                   help="do not save what changes to <session>.recover-backup/")
     p.add_argument("--password", default="", help="for encrypted sessions")
     args = p.parse_args(list(argv))
 
     try:
         report = recover_session(
-            args.path, apply=args.apply, backup=not args.no_backup, password=args.password
+            args.path, apply=args.apply, password=args.password
         )
     except (ValueError, RuntimeError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -895,10 +900,6 @@ def _build_parser(repair: bool) -> "argparse.ArgumentParser":
         if repair
         else "run only this check id (repeatable)",
     )
-    if repair:
-        parser.add_argument(
-            "--no-backup", action="store_true", help="do not back up rewritten files"
-        )
     parser.add_argument(
         "--fast",
         action="store_true",
@@ -955,7 +956,7 @@ def _main(argv: Sequence[str] | None = None, repair: bool = False) -> int:
     try:
         if repair:
             report = repair_session(
-                args.path, args.check, backup=not args.no_backup, **opts
+                args.path, args.check, **opts
             )
         else:
             report = Validator(args.path, **opts).validate(args.check)

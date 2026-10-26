@@ -717,37 +717,37 @@ NB_MODULE(_mef3io, m) {
   // rather than freezing every other thread in the process.
   m.def(
       "archive_session",
-      [](const std::string& session_dir, const std::string& tar_path, bool overwrite,
+      [](const std::string& session_dir, const std::string& tar_path,
          const mef3io::CancelToken* cancel, nb::object progress) {
         PyHooks hooks(cancel, std::move(progress));
         return hooks.run([&](const mef3io::Control& ctl) {
-          return mef3io::archive_session(session_dir, tar_path, overwrite, ctl);
+          return mef3io::archive_session(session_dir, tar_path, ctl);
         });
       },
-      nb::arg("session_dir"), nb::arg("tar_path") = "", nb::arg("overwrite") = false,
+      nb::arg("session_dir"), nb::arg("tar_path") = "",
       nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none(),
       "Pack a session directory into a single uncompressed tar archive and "
       "return the archive path.");
   m.def(
       "extract_session",
-      [](const std::string& tar_path, const std::string& dest_dir, bool overwrite,
+      [](const std::string& tar_path, const std::string& dest_dir,
          const mef3io::CancelToken* cancel, nb::object progress) {
         PyHooks hooks(cancel, std::move(progress));
         return hooks.run([&](const mef3io::Control& ctl) {
-          return mef3io::extract_session(tar_path, dest_dir, overwrite, ctl);
+          return mef3io::extract_session(tar_path, dest_dir, ctl);
         });
       },
-      nb::arg("tar_path"), nb::arg("dest_dir") = "", nb::arg("overwrite") = false,
+      nb::arg("tar_path"), nb::arg("dest_dir") = "",
       nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none(),
       "Unpack a session archive back into a directory and return its path.");
 
   m.def(
       "recover_session",
-      [](const std::string& path, bool apply, bool backup, const std::string& password,
+      [](const std::string& path, bool apply, const std::string& password,
          const mef3io::CancelToken* cancel, nb::object progress) {
         PyHooks hooks(cancel, std::move(progress));
         mef3io::RecoveryReport r = hooks.run([&](const mef3io::Control& ctl) {
-          return mef3io::recover_session(path, apply, backup, password, ctl);
+          return mef3io::recover_session(path, apply, password, ctl);
         });
         nb::list segs;
         for (const auto& s : r.segments) {
@@ -779,7 +779,7 @@ NB_MODULE(_mef3io, m) {
         out["notes"] = notes;
         return out;
       },
-      nb::arg("path"), nb::arg("apply") = false, nb::arg("backup") = true,
+      nb::arg("path"), nb::arg("apply") = false,
       nb::arg("password") = "", nb::arg("cancel").none() = nb::none(),
       nb::arg("progress") = nb::none(),
       "Make each segment's block index and data agree after an interrupted "
@@ -1333,7 +1333,7 @@ NB_MODULE(_mef3io, m) {
       [](const std::string& path, std::vector<std::string> repair_check_ids,
          const std::string& password, std::vector<std::string> channels,
          std::vector<int> segments, std::vector<std::string> check_ids,
-         bool exact_difference_bytes, bool backup, const mef3io::CancelToken* cancel,
+         bool exact_difference_bytes, const mef3io::CancelToken* cancel,
          nb::object progress) {
         mef3io::ValidateOptions opts;
         opts.password = password;
@@ -1345,7 +1345,6 @@ NB_MODULE(_mef3io, m) {
         sel.check_ids = std::move(repair_check_ids);
         sel.channels = std::move(channels);
         sel.segments = std::move(segments);
-        sel.backup = backup;
         PyHooks hooks(cancel, std::move(progress));
         mef3io::Report r = hooks.run([&](const mef3io::Control& ctl) {
           return mef3io::repair_session(path, sel, opts, ctl);
@@ -1356,7 +1355,7 @@ NB_MODULE(_mef3io, m) {
       nb::arg("channels") = std::vector<std::string>{},
       nb::arg("segments") = std::vector<int>{},
       nb::arg("check_ids") = std::vector<std::string>{},
-      nb::arg("exact_difference_bytes") = true, nb::arg("backup") = true,
+      nb::arg("exact_difference_bytes") = true,
       nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none(),
       "Validate, then write back only the selected repairs. Never implicit.");
 
@@ -1650,14 +1649,14 @@ NB_MODULE(_mef3io, m) {
     return d;
   };
   nb::class_<mef3io::SessionWriter>(m, "SessionWriter")
-      // Removes the old tree (overwrite=True) or hydrates every channel's
-      // state from disk: without the GIL (#79). See construct_nogil.
+      // Creates the session or hydrates every channel's state from disk
+      // (never removes anything): without the GIL (#79). See construct_nogil.
       .def("__init__",
-           [](mef3io::SessionWriter* self, const std::string& path, bool overwrite,
+           [](mef3io::SessionWriter* self, const std::string& path,
               std::string password1, std::string password2) {
-             construct_nogil(self, path, overwrite, std::move(password1), std::move(password2));
+             construct_nogil(self, path, std::move(password1), std::move(password2));
            },
-           nb::arg("path"), nb::arg("overwrite") = false, nb::arg("password1") = "",
+           nb::arg("path"), nb::arg("password1") = "",
            nb::arg("password2") = "")
       .def("set_block_length", &mef3io::SessionWriter::set_block_length)
       .def("set_units", &mef3io::SessionWriter::set_units)

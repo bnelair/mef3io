@@ -22,7 +22,10 @@ threads (#79; GIL released on open and every long call; the Python races of
 encode; settable at runtime; no per-call count (2.0). Parallel open (#141),
 decode, encode, all byte-/result-deterministic across thread counts.
 Python (pytest) + standalone C++ Catch2 suites.
-Wheel builds via `python -m build`.
+Wheel builds via `python -m build`. WRITE PATHS NEVER DELETE OR REPLACE
+stored data (for_agents/INVARIANTS.md §16): no `overwrite` on Writer/archive/
+extract, no `backup=False` on recover/repair (C ABI keeps signatures, refuses
+the old values).
 
 ## Build & test (use the active conda env for everything)
 

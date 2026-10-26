@@ -450,12 +450,12 @@ def test_repair_backs_up_before_rewriting(tmp_path):
     assert backups[0].read_bytes() == original
 
 
-def test_backup_can_be_declined(tmp_path):
+def test_repair_always_writes_its_backup(tmp_path):
     path = tmp_path / "s.mefd"
     _write(path)
     _patch_s2(_tmet(path), "maximum_difference_bytes", 0)
-    mef3io.repair_session(str(path), ["sizing.difference-bytes"], backup=False)
-    assert not Path(str(path) + ".repair-backup").exists()
+    mef3io.repair_session(str(path), ["sizing.difference-bytes"])
+    assert Path(str(path) + ".repair-backup").exists()  # there is no way to decline it
 
 
 # --- damaged input is reported, never repaired ------------------------------
@@ -810,7 +810,7 @@ def test_legacy_written_session_reports_known_divergences(tmp_path):
     path = tmp_path / "legacy.mefd"
     rng = np.random.default_rng(0)
     x = rng.normal(0, 3000, 4000).astype(np.int32)
-    w = MefWriter(str(path), overwrite=True)
+    w = MefWriter(str(path))
     w.write_data(x, "ch1", START, FS, precision=0)
     w.write_data(x, "ch1", START + int(4000 / FS * 1e6) + int(5e6), FS, precision=0)
     del w
@@ -937,7 +937,7 @@ def test_time_checks_stand_down_when_the_offset_is_unknown(tmp_path):
     from mef_tools.io import MefWriter
 
     path = tmp_path / "rto.mefd"
-    w = MefWriter(str(path), overwrite=True, password1="lvl1", password2="lvl2")
+    w = MefWriter(str(path), password1="lvl1", password2="lvl2")
     w.record_offset = START  # non-zero recording-time offset
     w.write_data(np.arange(1000, dtype=np.int32), "ch1", START, FS, precision=0)
     del w
@@ -2273,3 +2273,30 @@ def test_a_repair_records_that_it_computed_a_crc_nobody_had_verified(tmp_path):
     ]
     assert notes, report.summary()
     assert struct.unpack_from("<I", tmet.read_bytes(), 4)[0] != 0, "a CRC was computed"
+
+
+def test_backup_option_was_removed_and_repair_recover_always_back_up(tmp_path):
+    """repair/recover always keep a backup: backup= is a TypeError (keyword or
+    positional), the CLI has no --no-backup, and a repair writes its backup."""
+    import subprocess
+    import sys
+
+    path = tmp_path / "s.mefd"
+    with mef3io.Writer(str(path)) as w:
+        w.write("ch1", np.arange(2048, dtype=np.float64), 1_700_000_000_000_000, 256.0)
+    for call in (
+        lambda: mef3io.repair_session(str(path), ["sizing.difference-bytes"], backup=False),
+        lambda: mef3io.recover_session(str(path), apply=True, backup=False),
+        lambda: mef3io.recover_session(str(path), True, False),
+    ):
+        with pytest.raises(TypeError, match="always keep a backup"):
+            call()
+    for sub in ("recover", "repair"):
+        env = dict(os.environ)
+        pkg_root = str(Path(mef3io.__file__).resolve().parent.parent)
+        env["PYTHONPATH"] = os.pathsep.join([pkg_root] + [p for p in sys.path if p])
+        proc = subprocess.run(
+            [sys.executable, "-m", "mef3io", sub, str(path), "--no-backup"],
+            capture_output=True, text=True, env=env,
+        )
+        assert proc.returncode != 0 and "--no-backup" in proc.stderr

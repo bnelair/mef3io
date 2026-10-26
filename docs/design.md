@@ -318,7 +318,7 @@ storage; lazy open + mmap indices already fix the pathological local case).
   header, or the last segment's `.tdat`/`.tidx` sizes differ; or when the set
   of channel folders or the session-level `.rdat`/`.ridx` sizes differ.
   The two first/last `.tmet` file UUIDs are compared too (a same-samples
-  `overwrite=True` with new metadata), and the version includes the compiled
+  rewrite at the same path with new metadata), and the version includes the compiled
   extension's identity. No snapshot is saved when segments ≤ channels;
   a metadata-free marker sends later cached opens straight to a plain open.
   **Blind spot, by design:** an in-place change to a non-last segment that

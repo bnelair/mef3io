@@ -218,7 +218,7 @@ def test_mef3io_reads_a_mef_tools_session(tmp_path, precision):
         -20000, 20000, 4000, dtype=np.int32
     )
 
-    writer = MefWriter(str(path), overwrite=True)
+    writer = MefWriter(str(path))
     writer.write_data(x, "ch1", START, FS, precision=precision)
     del writer
 
@@ -241,7 +241,7 @@ def test_mef3io_reads_a_mef_tools_session_with_gaps(tmp_path):
     a = rng.integers(-3000, 3000, 2000, dtype=np.int32)
     b = rng.integers(-3000, 3000, 2000, dtype=np.int32)
 
-    writer = MefWriter(str(path), overwrite=True)
+    writer = MefWriter(str(path))
     writer.write_data(a, "ch1", START, FS)
     writer.write_data(b, "ch1", START + int(2000 / FS * 1e6) + int(4e6), FS)
     del writer
@@ -263,7 +263,7 @@ def test_mef3io_reads_an_encrypted_mef_tools_session(tmp_path):
     rng = np.random.default_rng(23)
     x = rng.integers(-7000, 7000, 2000, dtype=np.int32)
 
-    writer = MefWriter(str(path), overwrite=True, password1="p1", password2="p2")
+    writer = MefWriter(str(path), password1="p1", password2="p2")
     writer.write_data(x, "ch1", START, FS)
     del writer
 
@@ -309,7 +309,7 @@ def test_legacy_reads_a_mef3io_session_with_a_non_ascii_password(tmp_path, pw1, 
 def test_mef3io_reads_a_mef_tools_session_with_a_non_ascii_password(tmp_path, pw1, pw2):
     path = tmp_path / "legacy_enc_utf8.mefd"
     x = np.random.default_rng(48).integers(-7000, 7000, 2000, dtype=np.int32)
-    writer = MefWriter(str(path), overwrite=True, password1=pw1, password2=pw2)
+    writer = MefWriter(str(path), password1=pw1, password2=pw2)
     writer.write_data(x, "ch1", START, FS)
     del writer
     legacy = np.asarray(MefReader(str(path), password2=pw2).get_data("ch1")).ravel()
@@ -342,7 +342,7 @@ def test_mef3io_appends_to_a_mef_tools_session_and_the_oracle_still_reads_it(tmp
     first = rng.integers(-15000, 15000, 3000, dtype=np.int32)
     second = rng.integers(-15000, 15000, 2000, dtype=np.int32)
 
-    writer = MefWriter(str(path), overwrite=True)
+    writer = MefWriter(str(path))
     writer.write_data(first, "ch1", START, FS)
     del writer
     before = _pymef_samples(path, "ch1", len(first))
@@ -370,7 +370,7 @@ def test_repairing_a_legacy_session_keeps_every_sample_and_fixes_the_declaration
     rng = np.random.default_rng(32)
     x = rng.integers(-12000, 12000, 5000, dtype=np.int32)
 
-    writer = MefWriter(str(path), overwrite=True)
+    writer = MefWriter(str(path))
     writer.write_data(x, "ch1", START, FS)
     del writer
 
@@ -404,7 +404,7 @@ def test_the_legacy_writer_can_append_to_a_mef3io_session(tmp_path):
     w.write_int32("ch1", first, 1.0, START, FS)
     w.close()
 
-    writer = MefWriter(str(path), overwrite=False)
+    writer = MefWriter(str(path))
     writer.write_data(second, "ch1", START + int(len(first) / FS * 1e6), FS)
     del writer
 
@@ -425,7 +425,7 @@ def test_a_repaired_session_survives_a_further_legacy_append(tmp_path):
     first = rng.integers(-6000, 6000, 3000, dtype=np.int32)
     second = rng.integers(-6000, 6000, 1500, dtype=np.int32)
 
-    writer = MefWriter(str(path), overwrite=True)
+    writer = MefWriter(str(path))
     writer.write_data(first, "ch1", START, FS)
     del writer
 
@@ -433,7 +433,7 @@ def test_a_repaired_session_survives_a_further_legacy_append(tmp_path):
     if ids:
         mef3io.repair_session(str(path), ids)
 
-    writer = MefWriter(str(path), overwrite=False)
+    writer = MefWriter(str(path))
     writer.write_data(second, "ch1", START + int(len(first) / FS * 1e6), FS)
     del writer
 

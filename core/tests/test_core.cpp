@@ -262,7 +262,7 @@ TEST_CASE("In-segment append extends the last segment") {
     b[i] = 2 * i;
   }
   {
-    SessionWriter w(dir.string(), true);
+    SessionWriter w(dir.string());
     auto s1 = w.write_int32("ch1", a, 1.0, start, fs);
     REQUIRE(s1.segment == 0);
     const si8 t2 = start + static_cast<si8>(std::llround(1000 / fs * 1e6));
@@ -304,7 +304,7 @@ TEST_CASE("Section-2 sizing declarations match the blocks on disk") {
   std::uniform_int_distribution<si4> dist(-30000, 30000);
   for (auto& v : a) v = dist(rng);
   {
-    SessionWriter w(dir.string(), true);
+    SessionWriter w(dir.string());
     w.write_int32("ch1", a, 1.0, start, fs);
     // A gap, so the segment holds two contiguous runs rather than one.
     const si8 t2 = start + static_cast<si8>(std::llround(3000 / fs * 1e6)) + 5000000;
@@ -388,7 +388,7 @@ TEST_CASE("Validator reports declaration defects and repairs only what is select
   std::uniform_int_distribution<si4> dist(-30000, 30000);
   for (auto& v : a) v = dist(rng);
   {
-    SessionWriter w(dir.string(), true);
+    SessionWriter w(dir.string());
     w.write_int32("ch1", a, 1.0, start, fs);
   }
 
@@ -443,7 +443,6 @@ TEST_CASE("Validator reports declaration defects and repairs only what is select
   // Repairing one check leaves the other finding outstanding.
   RepairSelection one;
   one.check_ids = {"sizing.difference-bytes"};
-  one.backup = false;
   auto repaired = repair_session(dir.string(), one);
   REQUIRE(repaired.segments_repaired == 1);
 
@@ -457,7 +456,6 @@ TEST_CASE("Validator reports declaration defects and repairs only what is select
   // Opting in to the rest clears the session, and it still decodes.
   RepairSelection rest;
   rest.check_ids = after.repairable_check_ids();
-  rest.backup = false;
   REQUIRE_FALSE(rest.check_ids.empty());
   repair_session(dir.string(), rest);
   REQUIRE(validate_session(dir.string()).ok());
@@ -486,7 +484,7 @@ TEST_CASE("C ABI round trip (write, read, records, segments)") {
 
   // --- write ---
   mef3io_writer* w = nullptr;
-  REQUIRE(mef3io_writer_open(path.c_str(), 1, "", "", &w) == MEF3IO_OK);
+  REQUIRE(mef3io_writer_open(path.c_str(), 0, "", "", &w) == MEF3IO_OK);
   {
     int t = -1;
     REQUIRE(mef3io_writer_threads(w, &t) == MEF3IO_OK);
@@ -606,7 +604,7 @@ TEST_CASE("Corrupt inputs fail with exceptions, never crashes") {
     const auto dir = fsys::temp_directory_path() / "mef3io_trunc_test.mefd";
     fsys::remove_all(dir);
     {
-      SessionWriter w(dir.string(), true);
+      SessionWriter w(dir.string());
       std::vector<si4> a(1000);
       for (int i = 0; i < 1000; ++i) a[i] = i;
       w.write_int32("ch1", a, 1.0, 1577836800000000, 250.0);
@@ -627,7 +625,7 @@ TEST_CASE("tmet tolerates trailing padding but not corruption inside the record"
   const auto dir = fsys::temp_directory_path() / "mef3io_tmet_pad_test.mefd";
   fsys::remove_all(dir);
   {
-    SessionWriter w(dir.string(), true);
+    SessionWriter w(dir.string());
     std::vector<si4> a(1000);
     for (int i = 0; i < 1000; ++i) a[i] = i;
     w.write_int32("ch1", a, 1.0, 1577836800000000, 250.0);
@@ -674,7 +672,7 @@ TEST_CASE("Decoding is thread-count invariant when blocks overlap the sample gri
   std::vector<si4> a(60000);
   for (std::size_t i = 0; i < a.size(); ++i) a[i] = static_cast<si4>(rng() % 20000) - 10000;
   {
-    SessionWriter w(dir.string(), true);
+    SessionWriter w(dir.string());
     w.write_int32("ch1", a, 1.0, start, fs);
   }
 
@@ -735,7 +733,7 @@ TEST_CASE("Report::ok is false when nothing was examined") {
   std::uniform_int_distribution<si4> dist(-1000, 1000);
   for (auto& v : a) v = dist(rng);
   {
-    SessionWriter w(dir.string(), true);
+    SessionWriter w(dir.string());
     w.write_int32("ch1", a, 1.0, start, 250.0);
   }
 
@@ -768,7 +766,7 @@ TEST_CASE("C ABI exposes append and recovery for the MATLAB binding") {
   for (auto& v : a) v = dist(rng);
 
   mef3io_writer* w = nullptr;
-  REQUIRE(mef3io_writer_open(dir.string().c_str(), 1, "", "", &w) == 0);
+  REQUIRE(mef3io_writer_open(dir.string().c_str(), 0, "", "", &w) == 0);
   REQUIRE(mef3io_writer_write_int32(w, "ch1", a.data(), nullptr, static_cast<int64_t>(a.size()),
                                     0.5, 1577836800000000LL, 256.0, 0, nullptr) == 0);
   REQUIRE(mef3io_writer_flush(w) == 0);                 // everything so far on disk
@@ -790,9 +788,28 @@ TEST_CASE("C ABI exposes append and recovery for the MATLAB binding") {
   // ...and the session still validates.
   REQUIRE(validate_session(dir.string()).ok());
 
+  // Nothing in the C ABI deletes data: the removed overwrite / backup switches
+  // are refused (the signatures stay for ABI stability) and the session stays.
+  {
+    mef3io_writer* ow = nullptr;
+    REQUIRE(mef3io_writer_open(dir.string().c_str(), 1, "", "", &ow) == MEF3IO_ERR_ARGUMENT);
+    REQUIRE(ow == nullptr);
+    REQUIRE(std::string(mef3io_last_error()).find("never deletes a session") !=
+            std::string::npos);
+    REQUIRE(fsys::exists(dir / "ch1.timd"));
+    REQUIRE(mef3io_recover_session(dir.string().c_str(), 1, 0, "", summary, sizeof summary,
+                                   &segments) == MEF3IO_ERR_ARGUMENT);
+    REQUIRE(std::string(mef3io_last_error()).find("backup") != std::string::npos);
+    char scratch[2048] = {0};
+    REQUIRE(mef3io_archive_session(dir.string().c_str(), "", 1, scratch, sizeof scratch) ==
+            MEF3IO_ERR_ARGUMENT);
+    REQUIRE(mef3io_extract_session("x.mefd.tar", "", 1, scratch, sizeof scratch) ==
+            MEF3IO_ERR_ARGUMENT);
+  }
+
   // Recovery refuses a tar archive rather than writing into one.
   char tar_path[2048] = {0};
-  REQUIRE(mef3io_archive_session(dir.string().c_str(), "", 1, tar_path, sizeof tar_path) == 0);
+  REQUIRE(mef3io_archive_session(dir.string().c_str(), "", 0, tar_path, sizeof tar_path) == 0);
   const std::string tar = tar_path;
   REQUIRE(mef3io_recover_session(tar.c_str(), 1, 1, "", summary, sizeof summary, &segments) != 0);
   REQUIRE(std::string(mef3io_last_error()).find("tar") != std::string::npos);
@@ -824,7 +841,7 @@ TEST_CASE("every write path refuses an invalid rate, factor or block length firs
   REQUIRE(5 * MAX_BLOCK_SAMPLES + 304 + 7 < static_cast<si8>(fmt::UI4_NO_ENTRY));
 
   {
-    SessionWriter w(dir.string(), true);
+    SessionWriter w(dir.string());
     for (double fs : {0.0, -256.0, nan, inf, 1e-300, 1e12}) {
       REQUIRE_THROWS_AS(w.write_int32("ch1", a, 1.0, start, fs), std::invalid_argument);
       std::vector<sf8> f(100, 1.0);
@@ -849,7 +866,7 @@ TEST_CASE("every write path refuses an invalid rate, factor or block length firs
 
   // The C ABI reports it as an argument error.
   mef3io_writer* w = nullptr;
-  REQUIRE(mef3io_writer_open(dir.string().c_str(), 1, "", "", &w) == 0);
+  REQUIRE(mef3io_writer_open(dir.string().c_str(), 0, "", "", &w) == 0);
   REQUIRE(mef3io_writer_write_int32(w, "ch1", a.data(), nullptr, 100, 1.0, start, 0.0, 0,
                                     nullptr) == MEF3IO_ERR_ARGUMENT);
   REQUIRE(std::string(mef3io_last_error()).find("sampling frequency") != std::string::npos);
@@ -864,8 +881,8 @@ TEST_CASE("every write path refuses an invalid rate, factor or block length firs
   mef3io_writer_close(w);
   REQUIRE_FALSE(fsys::exists(dir / "ch1.timd"));
 
-  // The checks a caller runs BEFORE mef3io_writer_open, which with overwrite
-  // removes the existing session (the MATLAB Writer does exactly this).
+  // The checks a caller can run BEFORE mef3io_writer_open (the MATLAB Writer
+  // does exactly this).
   REQUIRE(MEF3IO_MAX_BLOCK_SAMPLES == MAX_BLOCK_SAMPLES);
   REQUIRE(mef3io_check_block_length(MEF3IO_MAX_BLOCK_SAMPLES) == 0);
   REQUIRE(mef3io_check_block_length(0) == 0);
@@ -1031,7 +1048,7 @@ TEST_CASE("per-segment conversion factors: reads, spans and the C ABI (#150)") {
   const std::vector<int64_t> starts = {start, start + 4000000LL, start + 6000000LL};
 
   mef3io_writer* w = nullptr;
-  REQUIRE(mef3io_writer_open(dir.string().c_str(), 1, "", "", &w) == 0);
+  REQUIRE(mef3io_writer_open(dir.string().c_str(), 0, "", "", &w) == 0);
   for (std::size_t k = 0; k < 3; ++k)
     REQUIRE(mef3io_writer_write_int32(w, "ch", counts[k].data(), nullptr, 512, factors[k],
                                       starts[k], fs, k > 0 ? 1 : 0, nullptr) == 0);

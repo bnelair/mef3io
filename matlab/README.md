@@ -45,7 +45,7 @@ loaded MEX is cached by MATLAB, so an old binary silently keeps running.
 
 ```matlab
 % ---- write ----
-w = mef3io.Writer('session.mefd', Overwrite=true, Units='uV');
+w = mef3io.Writer('session.mefd', Units='uV');
 w.write('ch1', data, startUutc, 256);                 % NaN = gap, precision inferred
 w.write('ch1', more, t2, 256);                        % appends in-segment
 w.writeInt32('ch2', counts, 0.01, startUutc, 256);    % verbatim counts + factor

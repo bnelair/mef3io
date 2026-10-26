@@ -33,7 +33,7 @@ def test_compat_writer_read_by_legacy(tmp_path):
     path = str(tmp_path / "c.mefd")
     data = _sig()
     data[1000:1200] = np.nan
-    w = CompatWriter(path, overwrite=True)
+    w = CompatWriter(path)
     w.write_data(data, "ch1", START, FS, precision=3)
     w.close()
     lr = LegacyReader(path)
@@ -45,7 +45,7 @@ def test_compat_writer_read_by_legacy(tmp_path):
 
 def test_compat_reader_api(tmp_path):
     path = str(tmp_path / "c.mefd")
-    with mef3io.Writer(path, overwrite=True) as w:
+    with mef3io.Writer(path) as w:
         w.write("ch1", _sig(), START, FS, 3)
     r = CompatReader(path)
     assert r.channels == ["ch1"]
@@ -64,7 +64,7 @@ def test_top_level_legacy_imports(tmp_path):
     data = _sig()
     data[500:700] = np.nan
 
-    w = TopWriter(path, overwrite=True)
+    w = TopWriter(path)
     w.data_units = "mV"
     w.mef_block_len = 512
     w.max_nans_written = 0   # legacy knobs accepted
@@ -93,7 +93,7 @@ def test_top_level_legacy_imports(tmp_path):
 
     path2 = str(tmp_path / "i.mefd")
     counts = (np.arange(1000) % 100).astype(np.int32)
-    w2 = TopWriter(path2, overwrite=True)
+    w2 = TopWriter(path2)
     w2.write_data(counts, "ch1", START, FS, precision=2)  # ufact = 10^-2
     w2.close()
     r2 = TopReader(path2)
@@ -106,7 +106,7 @@ def test_records_write_read_roundtrip(tmp_path):
         {"type": "Note", "time": START + 100000, "text": "onset"},
         {"type": "Note", "time": START + 500000, "text": "offset"},
     ]
-    with mef3io.Writer(path, overwrite=True) as w:
+    with mef3io.Writer(path) as w:
         w._impl.write_float("ch1", np.ascontiguousarray(_sig()), START, FS, 3)
         w._impl.write_records("ch1", annotations)
     # read back via mef3io and via legacy
@@ -121,7 +121,7 @@ def test_records_write_read_roundtrip(tmp_path):
 
 def test_encrypted_records_roundtrip(tmp_path):
     path = str(tmp_path / "re.mefd")
-    with mef3io.Writer(path, overwrite=True, password1="p1", password2="p2") as w:
+    with mef3io.Writer(path, password1="p1", password2="p2") as w:
         w._impl.write_float("ch1", np.ascontiguousarray(_sig()), START, FS, 3)
         w._impl.write_records("ch1", [{"type": "Note", "time": START + 1000, "text": "secret"}])
     with mef3io.Reader(path, "p2") as r:
@@ -140,7 +140,7 @@ END = SEG2 + int(1000 / FS * 1e6)
 
 def _make_session(tmp_path):
     path = str(tmp_path / "s.mefd")
-    with mef3io.Writer(path, overwrite=True) as w:
+    with mef3io.Writer(path) as w:
         w.write("ch1", _sig(), START, FS, 3)
         w.write("ch1", _sig(1000), SEG2, FS, 3, new_segment=True)
     return path
@@ -203,7 +203,7 @@ def test_cache_invalidated_by_same_size_metadata_repair(tmp_path):
     mef3io.Reader(path, cache="auto", warn_declarations=False)  # create snapshot
     assert C.load_valid(cp, path) is not None
     size = tmet.stat().st_size
-    mef3io.repair_session(path, ["sizing.difference-bytes"], backup=False)
+    mef3io.repair_session(path, ["sizing.difference-bytes"])
     assert tmet.stat().st_size == size
     assert C.load_valid(cp, path) is None
     cp.unlink(missing_ok=True)

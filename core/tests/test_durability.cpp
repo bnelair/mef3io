@@ -215,7 +215,7 @@ TEST_CASE("a write flushes only the .tmet it replaces, before the rename", "[dur
 
   FlushLog log;
   {
-    SessionWriter w(session, true);
+    SessionWriter w(session);
     for (const char* ch : channels) w.write_int32(ch, a, 0.5, start, rate);
     // A FRESH session: each channel's FIRST segment flushes its .tmet
     // before the rename (once per channel: no previous segment a lost .tmet
@@ -241,14 +241,14 @@ TEST_CASE("a write flushes only the .tmet it replaces, before the rename", "[dur
     // A new segment in a session that held data when the writer opened it:
     // its .tmet IS flushed before the rename — a short one would fail the
     // strict open of the whole session (one MISSING is only skipped).
-    SessionWriter w(session, false);
+    SessionWriter w(session);
     w.write_int32("ch3", a, 0.5, start + 2 * step, rate, {}, /*new_segment=*/true);
     REQUIRE(tmet_flushes(log.take()) == 1);
   }
   {
     // A REOPENED writer appends through the slow path (walks the index once):
     // the same one barrier, nothing on the .tdat or .tidx.
-    SessionWriter w(session, false);
+    SessionWriter w(session);
     w.write_int32("ch2", a, 0.5, start + 2 * step, rate);
     auto got = log.take();
     INFO(got.size());
@@ -258,7 +258,7 @@ TEST_CASE("a write flushes only the .tmet it replaces, before the rename", "[dur
   }
   {
     // A NEW CHANNEL in a session that already held data: the same.
-    SessionWriter w(session, false);
+    SessionWriter w(session);
     w.write_int32("ch4", a, 0.5, start, rate);
     REQUIRE(tmet_flushes(log.take()) == 1);
   }
@@ -275,7 +275,7 @@ TEST_CASE("a failed append's rollback publishes the restored .tidx flushed", "[d
   std::vector<si4> a(2560);
   for (std::size_t i = 0; i < a.size(); ++i) a[i] = static_cast<si4>(i % 991) - 300;
   const si8 step = static_cast<si8>(a.size() / rate * 1e6);
-  { SessionWriter w(session, true); w.write_int32("ch1", a, 0.5, start, rate); }
+  { SessionWriter w(session); w.write_int32("ch1", a, 0.5, start, rate); }
 
   fs::path seg;
   for (const auto& e : fs::directory_iterator(dir.dir / "s.mefd" / "ch1.timd")) seg = e.path();
@@ -294,7 +294,7 @@ TEST_CASE("a failed append's rollback publishes the restored .tidx flushed", "[d
   {
     // A REOPENED writer: the slow path, whose rollback writes the original
     // .tidx back whole (padding included) through write_file_atomic.
-    SessionWriter w(session, false);
+    SessionWriter w(session);
     REQUIRE_THROWS(w.write_int32("ch1", a, 0.5, start + step, rate));
   }
   const auto got = log.take();
@@ -358,7 +358,7 @@ TEST_CASE("flush() and close() wait for everything written, in one batch", "[dur
   const si8 step = static_cast<si8>(a.size() / rate * 1e6);
   BatchLog batches;
   {
-    SessionWriter w(session, true);
+    SessionWriter w(session);
     for (const char* ch : {"ch1", "ch2", "ch3"}) w.write_int32(ch, a, 0.5, start, rate);
     for (const char* ch : {"ch1", "ch2", "ch3"}) w.write_int32(ch, a, 0.5, start + step, rate);
     w.write_records(std::nullopt, {{.type = "Note", .time = start, .text = "x"}});
@@ -388,7 +388,7 @@ TEST_CASE("wait_for_disk: each write returns after ITS files, in one batch", "[d
   std::vector<si4> a(2560, 3);
   const si8 step = static_cast<si8>(a.size() / rate * 1e6);
   BatchLog batches;
-  SessionWriter w(session, true);
+  SessionWriter w(session);
   w.set_wait_for_disk(true);
   for (si8 k = 0; k < 2; ++k) {  // a first segment, then an append
     for (const char* ch : {"ch1", "ch2"}) {
@@ -419,7 +419,7 @@ TEST_CASE("a failed flush is sticky: a retry cannot report success", "[durabilit
   const Scratch dir("sticky");
   const auto session = (dir.dir / "s.mefd").string();
   std::vector<si4> a(2560, 3);
-  SessionWriter w(session, true);
+  SessionWriter w(session);
   w.write_int32("ch1", a, 0.5, 1577836800000000, 256.0);
   detail::flush_batch_observer = [](const std::vector<fs::path>&) {
     throw IoError("could not flush to disk, the write is not durable: injected");
@@ -441,7 +441,7 @@ TEST_CASE("a failed wait_for_disk flush inside a write is sticky too", "[durabil
   const Scratch dir("sticky_wait");
   const auto session = (dir.dir / "s.mefd").string();
   std::vector<si4> a(2560, 3);
-  SessionWriter w(session, true);
+  SessionWriter w(session);
   w.set_wait_for_disk(true);
   detail::flush_batch_observer = [](const std::vector<fs::path>&) {
     throw IoError("could not flush to disk, the write is not durable: injected");

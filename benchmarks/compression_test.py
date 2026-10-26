@@ -85,7 +85,7 @@ def write_mef(signal: np.ndarray, path: str, fs: float, precision: int):
 
     if os.path.exists(path):
         shutil.rmtree(path)
-    with mef3io.Writer(path, overwrite=True) as w:
+    with mef3io.Writer(path) as w:
         for i in range(signal.shape[1]):
             col = np.ascontiguousarray(signal[:, i], dtype=np.float64)
             w.write(channel_name(i), col, BASE_UUTC, fs, precision=precision)

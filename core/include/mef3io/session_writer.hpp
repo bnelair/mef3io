@@ -82,11 +82,11 @@ class SessionWriter {
  public:
   /// Open a session for writing.
   /// @param mefd_path   `.mefd` directory to create or extend.
-  /// @param overwrite   true removes any existing session first; false reopens
-  ///                    it for appending (state recovered from disk).
+  ///                    An existing session is reopened for appending (state
+  ///                    recovered from disk); mef3io never deletes a session.
   /// @param password_1  level-1 password (empty = no encryption).
   /// @param password_2  level-2 password (required with password_1 to encrypt).
-  SessionWriter(const std::string& mefd_path, bool overwrite = false, std::string password_1 = "",
+  SessionWriter(const std::string& mefd_path, std::string password_1 = "",
                 std::string password_2 = "");
   /// Flushes what is still unflushed (flush()), swallowing a failure: call
   /// flush() yourself to see one.
@@ -247,7 +247,7 @@ class SessionWriter {
   // segment, else the canonical zero-padded name.
   std::string segment_stem(const std::string& channel, const ChannelState& st, int seg) const;
   // Load fs/ufact/total_samples/last_end_uutc from the channel's last segment
-  // on disk (for sessions reopened with overwrite=false). No-op once hydrated.
+  // on disk (for sessions reopened from disk). No-op once hydrated.
   void check_still_writable() const;
   void hydrate(const std::string& channel, ChannelState& st);
   // What the on-disk segments of a level (one channel, or the whole session)

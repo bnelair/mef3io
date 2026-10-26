@@ -18,7 +18,7 @@ def _signal(n=200000):
 
 
 def _write(path, threads, data):
-    w = m.SessionWriter(path, True)
+    w = m.SessionWriter(path)
     w.set_threads(threads)
     w.write_float("ch1", np.ascontiguousarray(data), START, FS, 2)
     del w
@@ -156,7 +156,7 @@ def test_decode_deterministic_when_a_block_is_shadowed(tmp_path):
     # sides of it, so clipping each block at the next block's start is wrong.
     rng = np.random.default_rng(5)
     path = str(tmp_path / "s.mefd")
-    w = m.SessionWriter(path, True)
+    w = m.SessionWriter(path)
     t, us, gap = START, 1e6 / FS, 100
     for _ in range(12):
         for npt in (9000, 700):  # a small gap keeps each piece its own block

@@ -71,7 +71,7 @@ md = Metadata(
                             line_frequency=60.0),
 )
 
-with mef3io.Writer("session.mefd", overwrite=True, metadata=md) as w:
+with mef3io.Writer("session.mefd", metadata=md) as w:
     w.write("ch1", data, start_uutc, fs=256.0)
 ```
 
@@ -99,7 +99,7 @@ md = mef3io.Metadata( ...
     subject=mef3io.Subject(id="MRN-123", name_1="Doe", recording_location="EMU-4"), ...
     acquisition=mef3io.Acquisition(session_description="pre-surgical eval", line_frequency=60));
 
-w = mef3io.Writer("session.mefd", Overwrite=true, Metadata=md);
+w = mef3io.Writer("session.mefd", Metadata=md);
 w.write("ch1", data, startUutc, 256);
 delete(w);
 
@@ -117,7 +117,7 @@ flat field names (`subject_id`, `session_description`, `line_frequency`, …).
 
 ```python
 from mef3io import MefWriter, Metadata, Subject
-w = MefWriter("session.mefd", overwrite=True,
+w = MefWriter("session.mefd",
               metadata=Metadata(subject=Subject(id="MRN-123")))
 ```
 
@@ -125,7 +125,7 @@ w = MefWriter("session.mefd", overwrite=True,
 existing legacy code keeps working with only the import changed:
 
 ```python
-w = MefWriter("session.mefd", overwrite=True)
+w = MefWriter("session.mefd")
 w.section3_dict["subject_ID"] = b"MRN-123"        # note legacy caps
 w.section3_dict["subject_name_1"] = "Doe"
 w.section2_ts_dict["session_description"] = b"pre-surgical"

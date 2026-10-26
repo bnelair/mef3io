@@ -29,7 +29,7 @@ fsys::path fresh_dir(const std::string& name) {
 
 void write_demo_session(const std::string& path, const std::string& pw1 = "",
                         const std::string& pw2 = "") {
-  SessionWriter w(path, true, pw1, pw2);
+  SessionWriter w(path, pw1, pw2);
   std::vector<si4> a(1000), b(500);
   for (int i = 0; i < 1000; ++i) a[i] = i - 500;
   for (int i = 0; i < 500; ++i) b[i] = 3 * i;
@@ -115,16 +115,19 @@ TEST_CASE("Tar archive round trip matches directory session") {
 
   SECTION("deterministic output") {
     auto first = slurp(tar);
-    const std::string again = archive_session(dir.string(), "", /*overwrite=*/true);
+    // A second archive of the same session is refused (never replaced); once
+    // the test removes the first one, the new bytes are identical.
+    REQUIRE_THROWS_AS(archive_session(dir.string()), IoError);
+    fsys::remove(tar);
+    const std::string again = archive_session(dir.string());
     REQUIRE(slurp(again) == first);
   }
 
   SECTION("writer refuses tar sessions") {
-    REQUIRE_THROWS_AS(SessionWriter(tar, false), IoError);
-    REQUIRE_THROWS_AS(SessionWriter(tar, true), IoError);  // overwrite must not delete it
+    REQUIRE_THROWS_AS(SessionWriter(tar), IoError);
     REQUIRE(fsys::exists(tar));
     // .tar target refused even if nothing exists there yet
-    REQUIRE_THROWS_AS(SessionWriter((dir.parent_path() / "nope.mefd.tar").string(), true),
+    REQUIRE_THROWS_AS(SessionWriter((dir.parent_path() / "nope.mefd.tar").string()),
                       IoError);
   }
 
@@ -150,8 +153,8 @@ TEST_CASE("archive_session guards") {
   write_demo_session(dir.string());
 
   const std::string tar = archive_session(dir.string());
-  REQUIRE_THROWS_AS(archive_session(dir.string()), IoError);  // target exists, no overwrite
-  REQUIRE_NOTHROW(archive_session(dir.string(), "", true));
+  REQUIRE_THROWS_AS(archive_session(dir.string()), IoError);  // target exists: never replaced
+  REQUIRE(fsys::exists(tar));
   REQUIRE_THROWS_AS(archive_session(dir.string(), (dir / "inner.mefd.tar").string()), IoError);
   REQUIRE_THROWS_AS(archive_session((dir / "missing").string()), IoError);
 
@@ -177,7 +180,7 @@ TEST_CASE("Session naming (.mefd / .mefd.tar) is enforced on every entry point")
 
   // Writer: refuses a non-.mefd target (nothing may be created).
   const auto bad_writer = base / "mef3io_naming_writer";
-  REQUIRE_THROWS_AS(SessionWriter(bad_writer.string(), true), IoError);
+  REQUIRE_THROWS_AS(SessionWriter(bad_writer.string()), IoError);
   REQUIRE_FALSE(fsys::exists(bad_writer));
 
   // Archiving: source must be .mefd, an explicit target must be .mefd.tar.
@@ -187,7 +190,7 @@ TEST_CASE("Session naming (.mefd / .mefd.tar) is enforced on every entry point")
   // Extraction: source must be .mefd.tar, an explicit target must be .mefd.
   REQUIRE_THROWS_AS(extract_session(plain_tar.string()), IoError);
   REQUIRE_THROWS_AS(
-      extract_session(tar, (base / "mefio_naming_out").string(), true), IoError);
+      extract_session(tar, (base / "mefio_naming_out").string()), IoError);
 
   fsys::remove_all(plain_dir);
   fsys::remove(plain_tar);
@@ -338,8 +341,7 @@ TEST_CASE("extract_session restores the directory byte-identically") {
 
   SECTION("guards") {
     REQUIRE_THROWS_AS(extract_session(moved.string()), IoError);  // target exists
-    REQUIRE_NOTHROW(extract_session(moved.string(), "", true));
-    REQUIRE_THROWS_AS(extract_session(moved.string(), "", false), IoError);
+    REQUIRE_THROWS_AS(extract_session(moved.string(), ""), IoError);  // still refused
     const auto no_suffix = fsys::temp_directory_path() / "mef3io_nosuffix";
     fsys::copy_file(moved, no_suffix, fsys::copy_options::overwrite_existing);
     REQUIRE_THROWS_AS(extract_session(no_suffix.string()), IoError);  // cannot derive target
@@ -385,12 +387,14 @@ TEST_CASE("C ABI: mef3io_archive_session and reading a tar session") {
   mef3io_reader_close(r2);
   fsys::remove_all(ext_dir);
 
-  // Existing target without overwrite -> IO error code.
+  // Existing target -> IO error code; overwrite != 0 is an argument error.
   REQUIRE(mef3io_archive_session(dir.string().c_str(), nullptr, 0, out_path, sizeof out_path) ==
           MEF3IO_ERR_IO);
+  REQUIRE(mef3io_archive_session(dir.string().c_str(), nullptr, 1, out_path, sizeof out_path) ==
+          MEF3IO_ERR_ARGUMENT);
   // Writer over the archive is refused.
   mef3io_writer* w = nullptr;
-  REQUIRE(mef3io_writer_open(out_path, 1, "", "", &w) == MEF3IO_ERR_IO);
+  REQUIRE(mef3io_writer_open(out_path, 0, "", "", &w) == MEF3IO_ERR_IO);
 
   fsys::remove_all(dir);
   fsys::remove(dir.string() + ".tar");

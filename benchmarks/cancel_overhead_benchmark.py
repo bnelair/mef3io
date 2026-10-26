@@ -45,7 +45,8 @@ START = 1_600_000_000_000_000
 def make_session(path: Path) -> None:
     rng = np.random.default_rng(7)
     n = int(FS * 3600 * HOURS)
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    shutil.rmtree(path, ignore_errors=True)  # the benchmark's own scratch data; mef3io never deletes a session
+    with mef3io.Writer(str(path)) as w:
         for c in range(N_CH):
             x = np.cumsum(rng.standard_normal(n)) * 0.1
             w.write(f"ch{c:02d}", x, START, FS, precision=3)
@@ -106,10 +107,10 @@ def main() -> int:
 
     for label, kw in variants:
         rows.append((label, "archive_session", timed(
-            lambda: mef3io.archive_session(str(session), str(tar), overwrite=True, **kw),
+            lambda: mef3io.archive_session(str(session), str(tar), **kw),
             args.repeat)))
         rows.append((label, "extract_session", timed(
-            lambda: mef3io.extract_session(str(tar), str(out_dir), overwrite=True, **kw),
+            lambda: mef3io.extract_session(str(tar), str(out_dir), **kw),
             args.repeat)))
         rows.append((label, "validate_session", timed(
             lambda: mef3io.validate_session(str(session), **kw), args.repeat)))

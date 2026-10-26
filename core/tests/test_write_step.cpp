@@ -115,7 +115,7 @@ TEST_CASE("SessionWriter: precision step stores the counts, falls back otherwise
   const auto c = counts(20000, 4);
   const auto x = times(c, 0.195);
   {
-    SessionWriter w(s.dir.string(), true);
+    SessionWriter w(s.dir.string());
     const WriteSummary r = w.write_float("ch1", x, kStart, 512.0, Precision::detect_step());
     REQUIRE(r.quantization == Quantization::Step);
     REQUIRE(r.units_conversion_factor == 0.195);

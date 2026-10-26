@@ -224,7 +224,7 @@ TEST_CASE("C ABI reads records at every level with every body field") {
 
   std::vector<double> data(1000, 0.0);
   mef3io_writer* w = nullptr;
-  REQUIRE(mef3io_writer_open(path.c_str(), 1, "", "", &w) == MEF3IO_OK);
+  REQUIRE(mef3io_writer_open(path.c_str(), 0, "", "", &w) == MEF3IO_OK);
   mef3io_write_summary sum{};
   REQUIRE(mef3io_writer_write_float(w, "ch1", data.data(), 1000, T0, 250.0, 3, 0, &sum) ==
           MEF3IO_OK);
@@ -343,7 +343,7 @@ TEST_CASE("Record times follow the offset of the level they belong to") {
   fsys::remove_all(dir);
   const si8 RTO = 3 * 86400 * SEC;
   {
-    SessionWriter w(dir.string(), true);
+    SessionWriter w(dir.string());
     const std::vector<si4> x(2560, 0);
     w.write_int32("ch1", x, 1.0, T0, 256.0);
     w.write_int32("ch2", x, 1.0, T0, 256.0);
@@ -475,7 +475,7 @@ TEST_CASE("C ABI reports segment metadata the writer could not use") {
   const auto dir = fsys::temp_directory_path() / "mef3io_unreadable_md.mefd";
   fsys::remove_all(dir);
   {
-    SessionWriter w(dir.string(), true);
+    SessionWriter w(dir.string());
     const std::vector<si4> x(512, 0);
     w.write_int32("ch1", x, 1.0, T0, 256.0);
     w.write_int32("ch2", x, 1.0, T0, 256.0);
@@ -512,7 +512,7 @@ TEST_CASE("The offset probe verifies the body CRC before trusting section 3") {
   const auto dir = fsys::temp_directory_path() / "mef3io_probe_s3.mefd";
   fsys::remove_all(dir);
   {
-    SessionWriter w(dir.string(), true);
+    SessionWriter w(dir.string());
     const std::vector<si4> x(512, 0);
     w.write_int32("ch1", x, 1.0, T0, 256.0);
   }

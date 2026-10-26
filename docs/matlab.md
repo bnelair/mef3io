@@ -33,7 +33,7 @@ with the C++ message.
 ## Writing
 
 ```matlab
-w = mef3io.Writer('session.mefd', Overwrite=true, Units='uV');
+w = mef3io.Writer('session.mefd', Units='uV');
 w.write('ch1', data, startUutc, 256);                 % NaN = gap, precision inferred
 w.write('ch1', more, t2, 256);                        % appends in-segment
 w.write('ch1', x, t3, 256, NewSegment=true);          % force a new segment
@@ -42,8 +42,9 @@ w.writeAnnotations(struct('time', t, 'text', 'note'), 'ch1');
 delete(w);                                            % or let it go out of scope
 ```
 
-`mef3io.Writer(path, ...)` name-value options: `Overwrite` (default false —
-an existing session is reopened for appending), `Password1`/`Password2`
+`mef3io.Writer(path, ...)` name-value options: an existing session is always
+reopened for appending, never deleted (the `Overwrite` option of 2.x was
+removed and is refused: remove or rename the folder yourself), `Password1`/`Password2`
 (both required for encryption), `Units`, `BlockLength`, `Threads` (encode
 threads, `0` = automatic; `w.setThreads(n)` / `w.threads()` later),
 `Metadata` (below) and `WaitForDisk` (default false: a write returns once its
@@ -75,7 +76,7 @@ shutdown, `mef3io.recoverSession(path)` reports what is wrong (a dry run) and
 md = mef3io.Metadata( ...
     subject=mef3io.Subject(id="MRN-123", name_1="Jane", recording_location="EMU-4"), ...
     acquisition=mef3io.Acquisition(session_description="pre-surgical", line_frequency=60));
-w = mef3io.Writer('s.mefd', Overwrite=true, Metadata=md);
+w = mef3io.Writer('s.mefd', Metadata=md);
 ```
 
 Every field defaults, so set only what you have. `setMetadata` also accepts a
@@ -150,8 +151,8 @@ sessionDir = mef3io.extractSession(tarPath);       % -> 'session.mefd' back
 w = mef3io.Writer(sessionDir);                     % writable again
 ```
 
-`archiveSession(dir, tarPath, Overwrite=true)` / `extractSession(tarPath,
-destDir, Overwrite=true)` pick targets and replace existing ones; they mirror
+`archiveSession(dir, tarPath)` / `extractSession(tarPath, destDir)` pick
+targets and refuse existing ones (no `Overwrite`: mef3io never deletes data); they mirror
 Python's `mef3io.archive_session` / `extract_session`.
 
 Session naming is enforced at every entry point: directories must end

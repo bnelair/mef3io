@@ -452,7 +452,7 @@ std::vector<std::string> segment_repairable_ids(const std::string& path,
   return ids;
 }
 
-void rederive_declarations(const std::string& path, const std::string& password, bool backup,
+void rederive_declarations(const std::string& path, const std::string& password,
                            const std::vector<std::pair<std::string, int>>& targets,
                            RecoveryReport& report) {
   std::set<std::pair<std::string, int>> done;
@@ -473,7 +473,6 @@ void rederive_declarations(const std::string& path, const std::string& password,
       sel.check_ids = ids;
       sel.channels = {key.first};
       sel.segments = {key.second};
-      sel.backup = backup;
       const Report r = repair_session(path, sel, vo);
       std::vector<std::string> repaired;
       for (const auto& f : r.findings)
@@ -484,7 +483,7 @@ void rederive_declarations(const std::string& path, const std::string& password,
           seg.declarations = repaired;
       for (const auto& n : r.findings)
         if (n.check_id == "provenance.last-segment") report.notes.push_back(where + ": " + n.message);
-      if (backup && r.segments_repaired > 0)
+      if (r.segments_repaired > 0)
         report.notes.push_back(where + ": declarations re-derived (" + std::to_string(repaired.size()) +
                                " check(s)); originals under " + path + ".repair-backup");
     } catch (const std::exception& e) {
@@ -495,7 +494,7 @@ void rederive_declarations(const std::string& path, const std::string& password,
 
 }  // namespace
 
-RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
+RecoveryReport recover_session(const std::string& path, bool apply,
                                const std::string& password, const Control& ctl) {
   // The password is used only to read a segment's offset and rate when its
   // end time has to be decided (plan_end_times).
@@ -1202,7 +1201,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
   // ---- phase 2: write. Rebuilt .tmet files go first (the index/data
   // recovery and the declaration step below read them). -----------------
   for (const auto& tr : tmet_rebuilds) {
-    if (backup && tr.existed) {
+    if (tr.existed) {
       report.backup_root = backup_root.string();
       const auto rel = tr.path.parent_path().parent_path().stem().string() + "/" +
                        tr.path.filename().string();
@@ -1273,7 +1272,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
     const si8 tail = p.tail;
     const std::uint64_t offset = p.data_end;
 
-    if (backup) {
+    {
       // Back up what CHANGES, not the whole file. The .tidx is small. The
       // .tdat may be tens of gigabytes and recovery only ever rewrites its
       // 1024-byte header and drops a trailing fragment shorter than one
@@ -1373,8 +1372,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
         report.notes.push_back(p.description + ": end time left as is: the segment metadata "
                                                "changed while recovery was running");
       } else {
-        if (backup)
-          back_up_bytes(backup_root, channel + "/" + base + ".tmet.header", p.tmet_header);
+        back_up_bytes(backup_root, channel + "/" + base + ".tmet.header", p.tmet_header);
         auto uh = fmt::UniversalHeader::parse(tmet_bytes);
         uh.end_time = *p.end.new_end[0];
         fmt::provenance::stamp_modified(uh, fmt::provenance::Operation::Recovery);
@@ -1390,18 +1388,16 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
       channels_to_stamp.insert(p.channel_dir);
   }
   // Dataless segments cut off by a power cut (see the scan): moved to the
-  // backup (or deleted without one); a channel folder left without segments
+  // backup; a channel folder left without segments
   // goes with them — it held no sample.
   for (const auto& rm : removals) {
     std::error_code ec;
-    if (backup) {
+    {
       report.backup_root = backup_root.string();
       const fsys::path dest = backup_root / rm.channel / rm.dir.filename();
       fsys::create_directories(dest.parent_path());
       fsys::remove_all(dest, ec);
       fsys::rename(rm.dir, dest, ec);
-    } else {
-      fsys::remove_all(rm.dir, ec);
     }
     if (ec) {
       report.skipped.push_back(report.segments[rm.report_index].path +
@@ -1413,14 +1409,10 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
     for (const auto& e : fsys::directory_iterator(rm.channel_dir, ec))
       if (e.is_directory() && e.path().extension() == ".segd") any = true;
     if (!any && !ec) {
-      if (backup) {
-        // Keep whatever else the folder held (channel records) in the backup.
-        const fsys::path dest = backup_root / rm.channel / "channel-folder";
-        fsys::remove_all(dest, ec);
-        fsys::rename(rm.channel_dir, dest, ec);
-      } else {
-        fsys::remove_all(rm.channel_dir, ec);
-      }
+      // Keep whatever else the folder held (channel records) in the backup.
+      const fsys::path dest = backup_root / rm.channel / "channel-folder";
+      fsys::remove_all(dest, ec);
+      fsys::rename(rm.channel_dir, dest, ec);
       if (!ec)
         report.notes.push_back(rm.channel + ": the channel held no other segment, so its "
                                             "folder was removed too");
@@ -1431,7 +1423,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
     if (!withdrawn[p.report_index])
       declaration_targets.insert(declaration_targets.begin(), {p.channel, p.segment_number});
   for (const auto& k : rebuilt_tmet_segments) declaration_targets.push_back(k);
-  if (apply) rederive_declarations(path, password, backup, declaration_targets, report);
+  if (apply) rederive_declarations(path, password, declaration_targets, report);
 
   if (std::find(withdrawn.begin(), withdrawn.end(), true) != withdrawn.end()) {
     std::vector<RecoveredSegment> still;
@@ -1452,11 +1444,9 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
                              detail::STAMP_SKIPPED_CONSEQUENCE);
       continue;
     }
-    if (backup) {
-      report.backup_root = backup_root.string();
-      back_up_bytes(backup_root, channel + "/" + stamp.segment_stem + ".tmet.header",
-                    stamp.old_header);
-    }
+    report.backup_root = backup_root.string();
+    back_up_bytes(backup_root, channel + "/" + stamp.segment_stem + ".tmet.header",
+                  stamp.old_header);
     detail::write_last_segment_stamp(stamp);
     report.notes.push_back(channel + ": last segment stamped segment-repaired (header only): " +
                            stamp.tmet.string());

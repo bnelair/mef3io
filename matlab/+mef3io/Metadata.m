@@ -5,7 +5,7 @@ classdef Metadata
     %
     %   md = mef3io.Metadata(subject=mef3io.Subject(id="MRN-123"));
     %   md.acquisition.line_frequency = 60;
-    %   w = mef3io.Writer("s.mefd", Overwrite=true, Metadata=md);
+    %   w = mef3io.Writer("s.mefd", Metadata=md);
 
     properties
         subject mef3io.Subject = mef3io.Subject

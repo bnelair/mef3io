@@ -55,7 +55,7 @@ def test_tar_reads_identically_to_directory(case, tmp_path):
     _assert_same_session(src, tar, case["password"] or "")
 
 
-def test_default_tar_path_and_overwrite(tmp_path):
+def test_default_tar_path_and_existing_target(tmp_path):
     src = tmp_path / "sess.mefd"
     _write_demo(src)
     tar = mef3io.archive_session(src)
@@ -63,7 +63,11 @@ def test_default_tar_path_and_overwrite(tmp_path):
     with pytest.raises(RuntimeError, match="exists"):
         mef3io.archive_session(src)
     first = Path(tar).read_bytes()
-    assert mef3io.archive_session(src, overwrite=True) == tar
+    assert Path(tar).read_bytes() == first  # the refusal left it untouched
+    with pytest.raises(TypeError, match="never deletes"):
+        mef3io.archive_session(src, overwrite=True)  # the option was removed
+    Path(tar).unlink()  # the TEST removes its own archive; the library never does
+    assert mef3io.archive_session(src) == tar
     assert Path(tar).read_bytes() == first  # deterministic output
 
 
@@ -132,13 +136,33 @@ def test_writer_rejects_tar_paths(tmp_path):
     tar = mef3io.archive_session(src)
     with pytest.raises(RuntimeError, match="read-only"):
         mef3io.Writer(tar)
+    assert Path(tar).exists()
     with pytest.raises(RuntimeError, match="read-only"):
-        mef3io.Writer(tar, overwrite=True)
-    assert Path(tar).exists()  # overwrite must never delete the archive
+        mef3io.Writer(tmp_path / "new.mefd.tar")
     with pytest.raises(RuntimeError, match="read-only"):
-        mef3io.Writer(tmp_path / "new.mefd.tar", overwrite=True)
-    with pytest.raises(RuntimeError, match="read-only"):
-        mef3io.MefWriter(tar, overwrite=True)
+        mef3io.MefWriter(tar)
+
+
+def test_removed_overwrite_option_is_refused(tmp_path):
+    """mef3io never deletes a session: overwrite= is a TypeError everywhere,
+    by keyword or (for the Writers, whose 2nd positional it used to be) by
+    position, and an existing session is left exactly as it was."""
+    src = tmp_path / "sess.mefd"
+    _write_demo(src)
+    before = sorted(str(p) for p in src.rglob("*"))
+    for make in (
+        lambda: mef3io.Writer(str(src), overwrite=True),
+        lambda: mef3io.Writer(str(src), True),
+        lambda: mef3io.MefWriter(str(src), overwrite=False),
+        lambda: mef3io.MefWriter(str(src), True),
+    ):
+        with pytest.raises(TypeError, match="never deletes a session"):
+            make()
+    tar = mef3io.archive_session(src)
+    with pytest.raises(TypeError, match="never deletes"):
+        mef3io.extract_session(tar, tmp_path / "x.mefd", overwrite=True)
+    assert not (tmp_path / "x.mefd").exists()
+    assert sorted(str(p) for p in src.rglob("*")) == before
 
 
 def test_compressed_archive_rejected(tmp_path):
@@ -180,7 +204,7 @@ def test_session_naming_enforced_everywhere(tmp_path):
 
     # Writing: target must end .mefd, and nothing may be created on refusal.
     with pytest.raises(RuntimeError, match=r"must end with \.mefd"):
-        mef3io.Writer(tmp_path / "bad_name", overwrite=True)
+        mef3io.Writer(tmp_path / "bad_name")
     assert not (tmp_path / "bad_name").exists()
 
     # Archiving: source must be .mefd, an explicit target must be .mefd.tar.
@@ -272,7 +296,7 @@ def test_extract_session_guards(tmp_path):
     out = mef3io.extract_session(tar, tmp_path / "x.mefd")
     with pytest.raises(RuntimeError, match="exists"):
         mef3io.extract_session(tar, tmp_path / "x.mefd")
-    assert mef3io.extract_session(tar, tmp_path / "x.mefd", overwrite=True) == out
+    assert Path(out).exists()  # the refusal left the target untouched
     # archives must carry the .mefd.tar suffix (default target derives from it)
     no_suffix = tmp_path / "archive_without_suffix"
     no_suffix.write_bytes(Path(tar).read_bytes())
@@ -301,7 +325,7 @@ def test_extract_foreign_tar_and_unsafe_members(tmp_path):
 
 
 def _write_demo(path):
-    with mef3io.Writer(str(path), overwrite=True, units="uV") as w:
+    with mef3io.Writer(str(path), units="uV") as w:
         x = np.sin(np.arange(2000) / 20.0)
         x[500:520] = np.nan
         w.write("ch1", x, 1577836800000000, fs=250.0)

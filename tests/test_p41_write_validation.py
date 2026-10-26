@@ -262,7 +262,7 @@ def test_the_compat_writer_keeps_no_refused_block_length(tmp_path):
     """Review of #145, finding 5: the legacy-style setter must not remember a
     value the writer refused."""
     from mef3io import MefWriter
-    w = MefWriter(str(tmp_path / "c.mefd"), overwrite=True)
+    w = MefWriter(str(tmp_path / "c.mefd"))
     w.mef_block_len = 1000
     with pytest.raises(ValueError, match="block length"):
         w.mef_block_len = m.MAX_BLOCK_SAMPLES + 1

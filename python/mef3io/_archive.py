@@ -9,10 +9,10 @@ from ._cancel import CancelToken, _hooks
 def archive_session(
     session_path,
     tar_path: Optional[str] = None,
-    overwrite: bool = False,
     *,
     cancel: Optional[CancelToken] = None,
     progress: Optional[Callable[[int, int], object]] = None,
+    **removed,
 ) -> str:
     """Pack a session directory into a single uncompressed tar archive.
 
@@ -30,10 +30,10 @@ def archive_session(
         The ``.mefd`` session directory to pack (the suffix is enforced).
     tar_path : str, optional
         Target archive path; must end ``.mefd.tar``. Default derives
-        ``<session_path>.tar`` (``name.mefd`` becomes ``name.mefd.tar``).
-    overwrite : bool, optional
-        Replace an existing target archive. Default ``False`` (an existing
-        target raises).
+        ``<session_path>.tar`` (``name.mefd`` becomes ``name.mefd.tar``). An
+        existing target raises: mef3io never deletes or replaces data (the
+        ``overwrite=`` option of 2.x was removed), so remove or rename it
+        yourself.
     cancel : CancelToken, optional
         Stop the archive from another thread; checked between 1 MB chunks.
         The archive is built in a temporary file and renamed into place only
@@ -57,19 +57,21 @@ def archive_session(
     ...     x = r.read(r.channels[0])
     """
     from . import _mef3io
+    from ._removed import reject_removed
 
+    reject_removed("archive_session", removed)
     return _mef3io.archive_session(
-        str(session_path), str(tar_path or ""), bool(overwrite), **_hooks(cancel, progress)
+        str(session_path), str(tar_path or ""), **_hooks(cancel, progress)
     )
 
 
 def extract_session(
     tar_path,
     dest_dir: Optional[str] = None,
-    overwrite: bool = False,
     *,
     cancel: Optional[CancelToken] = None,
     progress: Optional[Callable[[int, int], object]] = None,
+    **removed,
 ) -> str:
     """Unpack a session archive back into a ``.mefd`` directory.
 
@@ -78,9 +80,7 @@ def extract_session(
     stripped, so ``dest_dir`` becomes the session directory itself; archives
     from foreign tar tools work too. The session is unpacked into a temporary
     sibling directory and moved into place only when complete, so a failed or
-    cancelled extraction never leaves a half-written directory behind — and
-    with ``overwrite=True`` the existing directory survives until the new one
-    is whole.
+    cancelled extraction never leaves a half-written directory behind.
 
     Parameters
     ----------
@@ -89,9 +89,9 @@ def extract_session(
     dest_dir : str, optional
         Target directory; must end ``.mefd``. Default strips the ``.tar``
         suffix (``name.mefd.tar`` becomes ``name.mefd`` next to the archive).
-    overwrite : bool, optional
-        Replace an existing target directory. Default ``False`` (an existing
-        target raises).
+        An existing target raises: mef3io never deletes or replaces data (the
+        ``overwrite=`` option of 2.x was removed), so remove or rename it
+        yourself.
     cancel : CancelToken, optional
         Stop the extraction from another thread; checked between 1 MB chunks.
         Raises :class:`Cancelled` and leaves nothing behind.
@@ -111,7 +111,9 @@ def extract_session(
     ...     w.write("ch1", more_data, t, fs=256.0)
     """
     from . import _mef3io
+    from ._removed import reject_removed
 
+    reject_removed("extract_session", removed)
     return _mef3io.extract_session(
-        str(tar_path), str(dest_dir or ""), bool(overwrite), **_hooks(cancel, progress)
+        str(tar_path), str(dest_dir or ""), **_hooks(cancel, progress)
     )

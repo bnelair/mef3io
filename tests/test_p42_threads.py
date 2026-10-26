@@ -46,7 +46,7 @@ def _quiet(fn, *a, **kw):
 
 def _write(path, channels=("a", "b", "c", "d"), segments=4, start=START):
     rng = np.random.default_rng(7)
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         for s in range(segments):
             for ch in channels:
                 x = rng.integers(-500, 500, 1000).astype(np.float64)
@@ -218,7 +218,7 @@ def test_writer_n_threads_property(tmp_path):
     outs = []
     for n in (1, 4):
         path = tmp_path / f"w{n}.mefd"
-        with mef3io.Writer(str(path), overwrite=True, n_threads=n) as w:
+        with mef3io.Writer(str(path), n_threads=n) as w:
             assert w.n_threads == n
             w.n_threads = 3
             assert w.n_threads == 3 and w._impl.threads() == 3
@@ -227,7 +227,7 @@ def test_writer_n_threads_property(tmp_path):
         outs.append(_seg(path, "a", 0, ".tdat").read_bytes()[1024:])  # past the UH (UUIDs)
     assert outs[0] == outs[1]
     with pytest.raises(ValueError):
-        mef3io.Writer(str(tmp_path / "x.mefd"), overwrite=True, n_threads=-2)
+        mef3io.Writer(str(tmp_path / "x.mefd"), n_threads=-2)
 
 
 # --------------------------------------------------------------------------
@@ -502,7 +502,7 @@ def _stale_tmet_session(path, fs, block, first_s, appended_s, then_s):
     and .tidx extended, the .tmet not yet renamed) once the recorder restarts
     in a new segment — and what a writer with a short header end produces."""
     rng = np.random.default_rng(3)
-    with mef3io.Writer(str(path), overwrite=True, block_length=block) as w:
+    with mef3io.Writer(str(path), block_length=block) as w:
         w.write("ch", rng.integers(-99, 99, int(first_s * fs)).astype(float), START, fs,
                 precision=0)
     tmet = _seg(path, "ch", 0, ".tmet")
@@ -536,7 +536,7 @@ def test_window_past_a_short_end_written_by_mef_tools(tmp_path):
 
     path = tmp_path / "c.mefd"
     fs = 256.0
-    w = MefWriter(str(path), overwrite=True)
+    w = MefWriter(str(path))
     x = np.arange(int(60 * fs), dtype=np.float64) % 50
     w.write_data(x, "ch", START, fs, end_uutc=START + 30 * SECOND, precision=0,
                  discont_handler=False)
@@ -558,7 +558,7 @@ def test_a_late_tmet_start_does_not_hide_the_segment(tmp_path, negated):
     fs = 256.0
     rng = np.random.default_rng(5)
     s1 = START + 3600 * SECOND
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         w.write("ch", rng.integers(-99, 99, int(10 * fs)).astype(float), START, fs, precision=0)
         w.write("ch", rng.integers(-99, 99, int(10 * fs)).astype(float), s1, fs, precision=0,
                 new_segment=True)

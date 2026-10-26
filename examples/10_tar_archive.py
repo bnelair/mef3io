@@ -23,7 +23,7 @@ session = str(root / "demo.mefd")
 
 x = np.sin(np.arange(20_000) / 20)
 x[5000:5100] = np.nan  # a gap
-with mef3io.Writer(session, overwrite=True, units="uV") as w:
+with mef3io.Writer(session, units="uV") as w:
     w.write("ch1", x, START, FS, precision=3)
     w.write_annotations([{"time": START + 1_000_000, "text": "marker"}])
 

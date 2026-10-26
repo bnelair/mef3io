@@ -46,7 +46,7 @@ def _write(path, channels=("ch1", "ch2"), metadata=None, password1="", password2
     md = metadata if metadata is not None else mef3io.Metadata(
         subject=SUBJECT,
         acquisition=mef3io.Acquisition(session_description="night study"))
-    with mef3io.Writer(str(path), overwrite=True, metadata=md,
+    with mef3io.Writer(str(path), metadata=md,
                        password1=password1, password2=password2) as w:
         for ch in channels:
             w.write(ch, np.sin(np.arange(2560) / 10.0), START, FS, precision=3)
@@ -340,7 +340,7 @@ def test_level_1_password_leaves_section_3_locked(encrypted):
 
 def test_level_2_password_opens_everything(encrypted, tmp_path):
     s = mef3io.inspect(encrypted, "pw2", include_values=True)
-    plain = mef3io.inspect(_write(tmp_path / "e.mefd"), include_values=True)
+    plain = mef3io.inspect(_write(tmp_path / "plain.mefd"), include_values=True)
     assert s.encryption["access"] == "full" and s.encryption["encrypted"]
     assert s.identity_field("subject_id").values == ["MRN-123"]
     assert [r.fields for r in s.records] == [r.fields for r in plain.records]
@@ -514,7 +514,7 @@ def _legacy_locked_session(path, rto):
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        w = MefWriter(str(path), overwrite=True, password1="l1", password2="l2")
+        w = MefWriter(str(path), password1="l1", password2="l2")
         w.record_offset = rto
         w.write_data(np.arange(5000, dtype=np.int32) * 1.0, "ch1", START, FS, precision=0)
         w.write_annotations(pd.DataFrame([{"time": START + SECOND, "type": "Note", "text": "n"}]))

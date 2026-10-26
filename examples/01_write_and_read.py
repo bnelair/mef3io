@@ -20,7 +20,7 @@ session = str(Path(tempfile.mkdtemp()) / "example.mefd")
 data = 40 * np.sin(np.arange(5000) / 20)
 data[1000:1250] = np.nan        # a ~1 s dropout: stored as a gap, not as data
 
-with mef3io.Writer(session, overwrite=True, units="uV") as w:
+with mef3io.Writer(session, units="uV") as w:
     summary = w.write("ch1", data, START, FS)          # precision inferred
     w.write("ch2", data * 0.5, START, FS, precision=3)  # ufact = 10**-3
 print("write summary:", summary)   # samples_written excludes the NaN gap

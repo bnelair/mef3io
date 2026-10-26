@@ -277,13 +277,13 @@ class Writer:
     ----------
     path : str
         Path to the ``.mefd`` session directory to create or extend (the
-        suffix is enforced). Tar archives are read-only sessions: a ``.tar``
-        path raises — write a directory and pack it with
-        :func:`mef3io.archive_session`.
-    overwrite : bool, optional
-        ``True`` deletes any existing session first. ``False`` (default)
-        reopens an existing session for appending — state is recovered from
-        disk, so appends work across program runs.
+        suffix is enforced). An existing session is reopened for appending —
+        state is recovered from disk, so appends work across program runs —
+        and a missing one is created. mef3io never deletes a session: the
+        ``overwrite=`` option of 2.x was removed (passing it raises
+        ``TypeError``); remove or rename the folder yourself, or write to a new
+        path. Tar archives are read-only sessions: a ``.tar`` path raises —
+        write a directory and pack it with :func:`mef3io.archive_session`.
     password1, password2 : str, optional
         Level-1 and level-2 passwords. MEF has no "level-1 only" files, so to
         encrypt a session pass **both**; leave both empty for no encryption.
@@ -327,33 +327,37 @@ class Writer:
 
     Examples
     --------
-    >>> with mef3io.Writer("session.mefd", overwrite=True, units="uV") as w:
+    >>> with mef3io.Writer("session.mefd", units="uV") as w:
     ...     w.write("ch1", data, start_uutc, fs=256.0)   # NaN marks gaps
     """
 
     def __init__(
         self,
         path: str,
-        overwrite: bool = False,
         password1: str = "",
+
         password2: str = "",
         units: Optional[str] = None,
         block_length: Optional[int] = None,
         n_threads: int = 0,
         metadata=None,
         wait_for_disk: bool = False,
+        **removed,
     ):
         from . import _mef3io
+        from ._removed import OVERWRITE_MESSAGE, reject_positional_bool, reject_removed
 
-        # Validated FIRST: the SessionWriter constructor removes an existing
-        # session when overwrite=True, so checking afterwards could delete a
-        # good session and only then raise.
+        reject_removed("Writer", removed)
+        reject_positional_bool("Writer", password1, OVERWRITE_MESSAGE)
+
+        # Validated FIRST, so a bad argument is refused before any folder is
+        # created.
         if block_length is not None:
             # More than a MEF 3.0 block can describe (its size is a 32-bit
             # field): refused here, before the folder exists (#83).
             _mef3io.check_block_length(int(block_length))
         self._path = str(path)
-        self._impl = _mef3io.SessionWriter(str(path), overwrite, password1 or "", password2 or "")
+        self._impl = _mef3io.SessionWriter(str(path), password1 or "", password2 or "")
         warn_unreadable_metadata(self._impl.unreadable_metadata, path=self._path)
         warn_password_interop(password1, password2, path=self._path)
         # Deliberately cache-unaware: a snapshot is judged only when a cached

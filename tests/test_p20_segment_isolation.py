@@ -38,7 +38,7 @@ CHUNK = 2000
 def _write_segments(path, n_segments=3):
     """n separate segments, each its own .segd, with known contents."""
     data = []
-    w = m.SessionWriter(str(path), True)
+    w = m.SessionWriter(str(path))
     for i in range(n_segments):
         block = np.arange(i * CHUNK, (i + 1) * CHUNK, dtype=np.int32)
         t = START + int(round(i * CHUNK / FS * 1e6)) + i * int(1e6)  # gap between segments

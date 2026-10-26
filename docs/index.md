@@ -125,7 +125,7 @@ meflib, pymef and mef_tools. New to the format? See
 ```python
 import mef3io
 
-with mef3io.Writer("session.mefd", overwrite=True, units="uV") as w:
+with mef3io.Writer("session.mefd", units="uV") as w:
     w.write("ch1", data, start_uutc, fs=256.0)          # NaN = gap
     w.write_annotations([{"time": start_uutc, "text": "start"}], "ch1")
 

@@ -123,8 +123,8 @@ all throw `IoError` on anything else.
 ```cpp
 #include "mef3io/session_writer.hpp"
 
-mef3io::SessionWriter w("session.mefd", /*overwrite=*/true,
-                        /*password_1=*/"", /*password_2=*/"");
+// Creates the session, or reopens an existing one for appending; never deletes.
+mef3io::SessionWriter w("session.mefd", /*password_1=*/"", /*password_2=*/"");
 w.set_units("uV");
 
 // Float path: NaN = discontinuity gap; precision < 0 -> inferred
@@ -323,9 +323,15 @@ MATLAB MEX is built on it). Conventions:
   skipped); `mef3io_password_interop_issue` says why a password will not
   work as expected in other MEF readers;
 - `mef3io_reader_open` also accepts a tar session archive;
-  `mef3io_archive_session(dir, tar_path_or_NULL, overwrite, out, n)` creates
+  `mef3io_archive_session(dir, tar_path_or_NULL, 0, out, n)` creates
   one, `mef3io_extract_session` unpacks it back, and `mef3io_writer_open`
-  rejects `.tar` paths (`MEF3IO_ERR_IO`);
+  rejects `.tar` paths (`MEF3IO_ERR_IO`). An existing target is refused
+  (`MEF3IO_ERR_IO`), and the `overwrite` argument of `mef3io_writer_open`,
+  `mef3io_archive_session[_ex]` and `mef3io_extract_session[_ex]` (and `backup`
+  of `mef3io_recover_session[_ex]`) is kept only for ABI stability: any
+  non-zero `overwrite` (or `backup == 0`) returns `MEF3IO_ERR_ARGUMENT`.
+  The C++ `SessionWriter`, `archive_session`, `extract_session` and
+  `recover_session` no longer have these parameters;
 - reads use a deterministic size query + caller-allocated buffer:
 
 ```c

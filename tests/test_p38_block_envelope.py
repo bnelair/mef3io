@@ -27,7 +27,7 @@ def session(tmp_path_factory):
     rng = np.random.default_rng(3)
     x = rng.normal(0, 1, int(60 * FS)).round(3)  # 60 s, precision 3
     y = rng.normal(5, 2, int(40 * FS)).round(3)
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         w.write("ch", x, START, fs=FS, precision=3)
         w.write("ch", y, START + 90 * SECOND, fs=FS, precision=3, new_segment=True)
     return path, x, y
@@ -70,7 +70,7 @@ def test_a_window_returns_the_overlapping_blocks(session):
 @pytest.mark.skipif(not Path("/proc/self/io").exists(), reason="needs /proc/self/io")
 def test_no_data_byte_is_read(tmp_path):
     path = tmp_path / "big.mefd"
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         for k in range(40):
             w.write("ch", np.arange(int(60 * FS), dtype=float), START + k * 60 * SECOND, fs=FS,
                     precision=0, new_segment=True)
@@ -96,7 +96,7 @@ def test_no_data_byte_is_read(tmp_path):
 
 def test_unset_extremes_are_nan(tmp_path):
     path = tmp_path / "unset.mefd"
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         w.write("ch", np.arange(int(20 * FS), dtype=float), START, fs=FS, precision=0)
     tidx = next(path.rglob("*.tidx"))
     raw = bytearray(tidx.read_bytes())
@@ -115,7 +115,7 @@ def test_a_legacy_session(tmp_path):
     from mef_tools.io import MefWriter
 
     path = tmp_path / "legacy.mefd"
-    w = MefWriter(str(path), overwrite=True)
+    w = MefWriter(str(path))
     w.write_data(np.arange(20_000, dtype=np.int32) * 1.0, "ch", START, 500.0, precision=0)
     del w
     with mef3io.Reader(str(path)) as r:
@@ -129,7 +129,7 @@ def test_a_legacy_session(tmp_path):
 
 def test_a_lenient_reader_skips_an_unreadable_segment(tmp_path):
     path = tmp_path / "damaged.mefd"
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         for k in range(3):
             w.write("ch", np.arange(int(20 * FS), dtype=float), START + k * 60 * SECOND, fs=FS,
                     precision=0, new_segment=True)

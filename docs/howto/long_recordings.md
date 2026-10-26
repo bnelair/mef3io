@@ -64,8 +64,8 @@ with mef3io.Writer("recording.mefd") as w:      # creates, or reopens and extend
         w.write("Fp1", block, block_start, fs)
 ```
 
-- Opening a `Writer` without `overwrite=True` reopens an existing session
-  and appends to it, so a program can stop and continue the next day. One
+- Opening a `Writer` on an existing session reopens it
+  and appends to it (mef3io never deletes a session), so a program can stop and continue the next day. One
   `Writer` kept open is faster, because it does not re-read the index on
   each block.
 - With one `Writer` kept open, each append costs time in proportion to the

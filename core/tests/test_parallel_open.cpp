@@ -58,7 +58,7 @@ std::string write_damaged(const std::string& name) {
   const auto dir = (fsys::temp_directory_path() / name).string();
   fsys::remove_all(dir);
   {
-    SessionWriter w(dir, true);
+    SessionWriter w(dir);
     std::vector<si4> x(500);
     for (int i = 0; i < 500; ++i) x[i] = i * 3 - 700;
     for (const char* ch : {"a", "b", "c", "d", "e", "f"})
@@ -220,7 +220,7 @@ TEST_CASE("parallel_try_each runs every item and reports each one's error", "[pa
 TEST_CASE("a lenient open is identical at every thread count, directory and tar",
           "[parallel-open]") {
   const auto dir = write_damaged("mef3io_par_open_lenient.mefd");
-  const auto tar = archive_session(dir, "", true);
+  const auto tar = mef3io::test::archive_fresh(dir);
   for (const std::string& path : {dir, tar}) {
     CAPTURE(path);
     Session base(path, "", false, 1);
@@ -247,7 +247,7 @@ TEST_CASE("a lenient open is identical at every thread count, directory and tar"
 TEST_CASE("a strict open raises the serial walk's error at every thread count",
           "[parallel-open]") {
   const auto dir = write_damaged("mef3io_par_open_strict.mefd");
-  const auto tar = archive_session(dir, "", true);
+  const auto tar = mef3io::test::archive_fresh(dir);
   for (const std::string& path : {dir, tar}) {
     CAPTURE(path);
     const Outcome want = strict_failure([&] { Session s(path, "", true, 1); });
@@ -336,7 +336,7 @@ TEST_CASE("open time with a per-request delay, by thread count", "[.open-bench-t
         const auto dir = (fsys::temp_directory_path() / "mef3io_par_open_bench.mefd").string();
         fsys::remove_all(dir);
         {
-          SessionWriter w(dir, true);
+          SessionWriter w(dir);
           std::vector<si4> a(256);
           for (int i = 0; i < 256; ++i) a[i] = i;
           for (int c = 0; c < channels; ++c)
@@ -412,7 +412,7 @@ TEST_CASE("n_threads = 1 starts no extra thread: open, read, write", "[parallel-
     r.read("f");
     r.toc("e");
     const auto wdir = (fsys::temp_directory_path() / "mef3io_par_open_one_w.mefd").string();
-    SessionWriter w(wdir, true);
+    SessionWriter w(wdir);
     w.set_threads(1);
     std::vector<si4> x(50000, 3);
     w.write_int32("z", x, 1.0, START, 250.0, {}, false);
@@ -435,7 +435,7 @@ TEST_CASE("a negative thread count is an error everywhere", "[parallel-open]") {
   Reader r(dir, "", 2, false);
   CHECK_THROWS_AS(r.set_threads(-1), std::invalid_argument);
   CHECK(r.threads() == 2);
-  SessionWriter w((fsys::temp_directory_path() / "mef3io_par_open_neg_w.mefd").string(), true);
+  SessionWriter w((fsys::temp_directory_path() / "mef3io_par_open_neg_w.mefd").string());
   CHECK_THROWS_AS(w.set_threads(-1), std::invalid_argument);
   CHECK(check_threads(0) == 0);
   fsys::remove_all(dir);
@@ -450,7 +450,7 @@ TEST_CASE("a windowed read skips walking cached indexes that miss the window",
   const auto dir = (fsys::temp_directory_path() / "mef3io_par_open_span.mefd").string();
   fsys::remove_all(dir);
   {
-    SessionWriter w(dir, true);
+    SessionWriter w(dir);
     std::vector<si4> a(2560, 1);
     for (int s = 0; s < 40; ++s)
       w.write_int32("ch", a, 1.0, START + s * 20'000'000LL, 256.0, {}, s > 0);
@@ -482,13 +482,13 @@ TEST_CASE("a segment that grew after its span was learnt is read once evicted",
   std::vector<si4> a(256 * 60);
   for (std::size_t i = 0; i < a.size(); ++i) a[i] = static_cast<si4>(i % 1000);
   {
-    SessionWriter w(dir, true);
+    SessionWriter w(dir);
     w.write_int32("ch", a, 1.0, START, 256.0, {}, false);  // [0, 60 s)
   }
   Reader r(dir, "", 1);
   REQUIRE(r.read("ch", START + 10'000'000, START + 20'000'000).size() == 2560);
   {
-    SessionWriter w(dir, false);  // another writer appends [60, 120 s) in place
+    SessionWriter w(dir);  // another writer appends [60, 120 s) in place
     w.write_int32("ch", a, 1.0, START + 60'000'000, 256.0, {}, false);
   }
   r.session().set_index_cache_bytes(1);

@@ -23,7 +23,7 @@ from test_p29_anonymize import START, SECOND, _legacy
 
 def _session(path, segments=4, channels=("A", "B"), password=False):
     kw = dict(password1="pw-one", password2="pw-two") if password else {}
-    with mef3io.Writer(str(path), overwrite=True, **kw) as w:
+    with mef3io.Writer(str(path), **kw) as w:
         for k in range(segments):
             for ch in channels:
                 w.write(ch, np.arange(2560) * 1.0, START + k * 60 * SECOND, 256.0, precision=0,
@@ -78,10 +78,10 @@ def test_time_range_of_a_legacy_session_with_an_offset(tmp_path):
 
 
 def test_time_range_with_segments_numbered_against_time(tmp_path):
-    with mef3io.Writer(str(tmp_path / "s.mefd"), overwrite=True) as w:
+    with mef3io.Writer(str(tmp_path / "s.mefd")) as w:
         w.write("A", np.arange(2560) * 1.0, START + 1000 * SECOND, 256.0, precision=0)
     seg0 = tmp_path / "s.mefd" / "A.timd" / "A-000000.segd"
-    with mef3io.Writer(str(tmp_path / "t.mefd"), overwrite=True) as w:
+    with mef3io.Writer(str(tmp_path / "t.mefd")) as w:
         w.write("A", np.arange(2560) * 1.0, START, 256.0, precision=0)
     seg1 = tmp_path / "s.mefd" / "A.timd" / "A-000001.segd"
     shutil.copytree(tmp_path / "t.mefd" / "A.timd" / "A-000000.segd", seg1)

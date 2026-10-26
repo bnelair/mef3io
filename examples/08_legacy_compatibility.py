@@ -53,7 +53,7 @@ time_write_leg = time.time() - start_time_leg
 
 # ===== NEW WRITE WITH TIMING =====
 start_time_new = time.time()
-wrt = MefWriter(pth_new, overwrite=True, password1='pwd1', password2='pwd2')
+wrt = MefWriter(pth_new, password1='pwd1', password2='pwd2')
 wrt.mef_block_len = 1000
 wrt.max_nans_written = 0
 wrt.data_units = 'uV'

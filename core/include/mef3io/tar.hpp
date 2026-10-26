@@ -84,7 +84,7 @@ class TarSource : public SessionSource {
 /// untouched; members are stored under the directory's name so a plain
 /// `tar -x` reproduces the tree. Output is deterministic (sorted entries,
 /// zeroed mtimes/owners) — archiving the same session twice yields identical
-/// bytes. Refuses an existing target unless `overwrite`.
+/// bytes. Refuses an existing target (mef3io never deletes or replaces data).
 ///
 /// `ctl.cancel` is checked between 1 MB copy chunks; `ctl.progress` reports the
 /// member bytes copied out of their total. The archive is written to a
@@ -92,25 +92,22 @@ class TarSource : public SessionSource {
 /// (or failed) call leaves neither a partial archive nor the temporary file,
 /// and an existing target is untouched.
 std::string archive_session(const std::string& session_dir, const std::string& tar_path = "",
-                            bool overwrite = false, const Control& ctl = {});
+                            const Control& ctl = {});
 
 /// Inverse of archive_session: unpack a session archive back into a directory
 /// and return its path. `dest_dir` empty strips the archive's ".tar" suffix
 /// ("name.mefd.tar" becomes "name.mefd" next to it). The session root inside
 /// the archive is stripped, so `dest_dir` becomes the session directory
 /// itself; foreign archives (GNU/bsdtar/tarfile) work too. Refuses an
-/// existing target unless `overwrite`; a failed extraction is cleaned up.
+/// existing target (never replaced); a failed extraction is cleaned up.
 ///
 /// The session is unpacked into a temporary sibling directory and moved into
 /// place only once complete, so a cancelled (`ctl.cancel`, checked between
-/// 1 MB chunks) or failed extraction leaves nothing behind — and, with
-/// `overwrite`, the existing target survives untouched until the new tree is
-/// whole. `ctl.progress` reports member bytes written out of their total.
-/// An overwrite briefly needs room for both trees. A hard kill mid-call can
-/// leave a `<dest>.mef3io-extract-<hex>` (staging) or, after a successful
-/// swap whose cleanup failed, a `<dest>.mef3io-replaced-<hex>` sibling; both
-/// are mef3io's own and safe to delete.
+/// 1 MB chunks) or failed extraction leaves nothing behind.
+/// `ctl.progress` reports member bytes written out of their total. A hard kill
+/// mid-call can leave a `<dest>.mef3io-extract-<hex>` staging sibling, which is
+/// mef3io's own and safe to delete.
 std::string extract_session(const std::string& tar_path, const std::string& dest_dir = "",
-                            bool overwrite = false, const Control& ctl = {});
+                            const Control& ctl = {});
 
 }  // namespace mef3io

@@ -97,8 +97,9 @@ Each rewritten file is first copied to `<session>.repair-backup/`, outside the
 session tree so no reader mistakes a backup for data. For a `.tdat` only the
 1024-byte universal header is copied — that is all a repair can touch. Copies
 are staged as `.part` and renamed, so an interrupted copy is never mistaken for
-a pristine backup, and a completed backup is never overwritten. Pass
-`backup=False` (or `--no-backup`) to skip it.
+a pristine backup, and a completed backup is never overwritten. There is no switch to skip it: the
+`backup=` option and `--no-backup` of 2.x were removed (a repair rewrites
+declarations, so it always keeps the originals).
 
 **Repairing an older segment also stamps the last one.** When the repaired
 segment is not its channel's last, the last segment's `.tmet` gets a
@@ -418,7 +419,9 @@ for s in report.segments:
   and any dropped fragment go to
   `<session>.recover-backup/`. The `.tdat` itself may be tens of gigabytes —
   and that is one channel — so copying it to undo a header patch would make the
-  tool unusable on exactly the sessions it is for. Pass `backup=False` to skip.
+  tool unusable on exactly the sessions it is for. The backup is always taken:
+  `backup=` / `--no-backup` were removed, because recovery drops data and
+  mef3io never discards data without keeping a copy.
 - **A healthy session is untouched**, byte for byte — a legacy session's
   declaration findings included. Checking it costs one `.tmet` header per
   channel, the validator's count checks on each channel's last segment

@@ -37,7 +37,7 @@ fsys::path fresh(const std::string& name) {
 
 std::string write_session(const fsys::path& dir) {
   const std::string path = (dir / "subject_x.mefd").string();
-  SessionWriter w(path, true);
+  SessionWriter w(path);
   std::mt19937 rng(70);
   std::uniform_int_distribution<si4> dist(-30000, 30000);
   for (const char* ch : {"a", "b"}) {
@@ -218,7 +218,7 @@ TEST_CASE("copy_segment: dropping blocks flags the next kept one and renumbers s
   const auto dir = fresh("mef3io_copy_drop");
   const std::string path = (dir / "c.mefd").string();
   {
-    SessionWriter w(path, true);
+    SessionWriter w(path);
     std::vector<si4> x(50000);
     for (std::size_t i = 0; i < x.size(); ++i) x[i] = static_cast<si4>(i % 97);
     w.write_int32("a", x, 1.0, START, 1000.0, {}, false);
@@ -308,7 +308,7 @@ TEST_CASE("a kept channel named after the patient is refused before any write (#
   const auto dir = fresh("mef3io_anon_channel_identity");
   const std::string src = (dir / "s.mefd").string();
   {
-    SessionWriter w(src, true);
+    SessionWriter w(src);
     SessionMetadata m;
     m.subject_name_1 = "Jane";
     m.subject_name_2 = "Roe";

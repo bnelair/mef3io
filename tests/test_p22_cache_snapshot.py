@@ -22,6 +22,7 @@ Oracle-free, so it runs on every CI platform.
 """
 from __future__ import annotations
 
+import shutil
 import builtins
 import io
 import json
@@ -56,7 +57,7 @@ PROV_COUNT = 960 + 52  # provenance modification count (ui4 LE)
 def _write(path: Path, channels=("ch1",), segments=3, first=0):
     """``segments`` one-second segments per channel, appended to ``path``."""
     x = np.arange(SEG_SAMPLES, dtype=np.int32) % 50
-    with mef3io.Writer(str(path), overwrite=not path.exists()) as w:
+    with mef3io.Writer(str(path)) as w:
         for ch in channels:
             for s in range(first, first + segments):
                 w.write_int32(ch, x, 0.5, START + s * SEG_US, FS, new_segment=True)
@@ -236,14 +237,16 @@ def test_same_version_different_build_is_rebuilt(tmp_path):
 
 
 @pytest.mark.parametrize("change", ["units", "ufact", "subject"])
-def test_overwrite_with_same_samples_new_metadata_is_detected(tmp_path, change):
-    """Writer(overwrite=True) with the very same samples leaves counts, times,
+def test_recreated_with_same_samples_new_metadata_is_detected(tmp_path, change):
+    """A session removed and rewritten with the very same samples leaves counts, times,
     sizes and provenance (create/0) identical; only the per-file random UUID
     tells the new files from the old ones."""
     path = tmp_path / "s.mefd"
     x = np.arange(SEG_SAMPLES, dtype=np.int32) % 50
 
     def write(second):
+        if path.exists():
+            shutil.rmtree(path)  # the test removes its own session; the library never does
         kw = {}
         if change == "units":
             kw["units"] = "mV" if second else "uV"
@@ -251,7 +254,7 @@ def test_overwrite_with_same_samples_new_metadata_is_detected(tmp_path, change):
             kw["metadata"] = mef3io.Metadata(
                 subject=mef3io.Subject(id="B" if second else "A"))
         ufact = 0.25 if (change == "ufact" and second) else 0.5
-        with mef3io.Writer(str(path), overwrite=True, **kw) as w:
+        with mef3io.Writer(str(path), **kw) as w:
             for s in range(2):
                 w.write_int32("ch1", x, ufact, START + s * SEG_US, FS, new_segment=True)
 
@@ -304,7 +307,7 @@ def _encrypted_session(tmp_path, segments=2):
     path = tmp_path / "enc.mefd"
     x = np.arange(SEG_SAMPLES, dtype=np.int32) % 50
     md = mef3io.Metadata(subject=mef3io.Subject(name_1="Jane", id="MRN123"))
-    with mef3io.Writer(str(path), overwrite=True, password1="pw1", password2="pw2",
+    with mef3io.Writer(str(path), password1="pw1", password2="pw2",
                        metadata=md) as w:
         for s in range(segments):
             w.write_int32("ch1", x, 0.5, START + s * SEG_US, FS, new_segment=True)
@@ -374,7 +377,7 @@ def test_an_encrypted_session_never_gets_a_marker(tmp_path):
     removed by the first open."""
     path = tmp_path / "enc.mefd"
     x = np.arange(SEG_SAMPLES, dtype=np.int32) % 50
-    with mef3io.Writer(str(path), overwrite=True, password1="pw1", password2="pw2") as w:
+    with mef3io.Writer(str(path), password1="pw1", password2="pw2") as w:
         w.write_int32("ch1", x, 0.5, START, FS)
     assert not C.worth_caching(C.layout(str(path)))
     cache = tmp_path / "snap.mef3cache"
@@ -578,7 +581,7 @@ def test_repair_of_a_middle_segment_is_detected(tmp_path):
             os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns - hour))
 
     cache = _snapshot(tmp_path, path)
-    report = mef3io.repair_session(str(path), ["sizing.difference-bytes"], backup=False)
+    report = mef3io.repair_session(str(path), ["sizing.difference-bytes"])
     assert report.segments_repaired == 1
     assert C.load_valid(cache, str(path)) is None
 

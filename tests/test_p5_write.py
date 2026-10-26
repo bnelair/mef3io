@@ -24,7 +24,7 @@ FS = 256.0
 
 def _write_float(tmp_path, data, precision=-1, p1="", p2=""):
     path = str(tmp_path / "w.mefd")
-    w = m.SessionWriter(path, True, p1, p2)
+    w = m.SessionWriter(path, p1, p2)
     summary = w.write_float("ch1", np.ascontiguousarray(data, dtype=np.float64), START, FS, precision)
     del w
     return path, summary
@@ -95,7 +95,7 @@ def test_int32_primitive_path(tmp_path):
     counts = np.random.default_rng(4).integers(-2000, 2000, 3000).astype(np.int32)
     ufact = 2.5e-7
     path = str(tmp_path / "i.mefd")
-    w = m.SessionWriter(path, True)
+    w = m.SessionWriter(path)
     w.write_int32("ch1", np.ascontiguousarray(counts), ufact, START, FS)
     del w
     r = MefReader(path)
@@ -115,7 +115,7 @@ def test_precision_inference_matches_mef_tools(tmp_path):
 
 def test_new_segment_appends(tmp_path):
     path = str(tmp_path / "seg.mefd")
-    w = m.SessionWriter(path, True)
+    w = m.SessionWriter(path)
     a = np.sin(np.arange(2000) / 20)
     b = np.sin(np.arange(2000) / 20 + 5)
     w.write_float("ch1", np.ascontiguousarray(a), START, FS)
@@ -157,7 +157,7 @@ def test_valid_mask_is_honoured_for_every_dtype(tmp_path, make_mask):
     base[800:1200] = 0
 
     path = tmp_path / "s.mefd"
-    w = m.SessionWriter(str(path), True, "", "")
+    w = m.SessionWriter(str(path), "", "")
     w.write_int32("ch1", data, 0.5, start, fs, make_mask(base), False)
     del w
 

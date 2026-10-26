@@ -36,7 +36,7 @@ Validation (per channel, O(1) in segments)
    count is the change marker: it catches a mef3io edit of the last segment
    even at equal file size. Files without the ``M3IO`` magic contribute no
    provenance. Both headers' random per-file UUIDs (offset 836) are compared
-   too, which catches a session rewritten with ``overwrite=True`` from the same
+   too, which catches a session deleted and rewritten at the same path from the same
    samples but with new units, conversion factor or subject.
 3. The last segment's ``.tdat`` and ``.tidx`` sizes (appends grow them), via
    ``open`` + ``fstat`` so an NFS attribute cache cannot hide them.
@@ -346,7 +346,7 @@ def _channel_signature(timd: str, n: int, first: Optional[str], last: Optional[s
         # (zeros, a foreign writer) contribute nothing.
         "provenance": prov.hex() if prov[:4] == _PROVENANCE_MAGIC else None,
         # The writer draws a fresh random file UUID for every file it creates,
-        # so a session REWRITTEN in place (Writer(overwrite=True)) with the same
+        # so a session RECREATED at the same path (folder removed, then rewritten) with the same
         # samples but new units, conversion factor or subject — same counts,
         # times, sizes, and provenance back to create/0 — still differs here.
         "file_uuids": first_uh[_FILE_UUID_OFFSET:_FILE_UUID_OFFSET + 16].hex()

@@ -3,7 +3,7 @@ function [summary, nSegments] = recoverSession(path, opts)
 %
 %   summary = mef3io.recoverSession(sessionPath)               % DRY RUN
 %   summary = mef3io.recoverSession(sessionPath, Apply=true)
-%   [summary, n] = mef3io.recoverSession(sessionPath, Apply=true, Backup=false)
+%   [summary, n] = mef3io.recoverSession(sessionPath, Apply=true)
 %
 %   This is the counterpart to mef3io.Writer's write path, which flushes
 %   only each segment's .tmet: a power cut during an append can leave the
@@ -25,7 +25,8 @@ function [summary, nSegments] = recoverSession(path, opts)
 %   repairs as repair_session - so recovery alone leaves a valid session. An
 %   index that fails its own CRC is rebuilt from the CRC-checked blocks.
 %
-%   It is a DRY RUN unless Apply=true, and backs up what it changes to
+%   It is a DRY RUN unless Apply=true, and ALWAYS backs up what it changes or
+%   drops (the Backup option was removed; mef3io never discards data) to
 %   <session>.recover-backup first - the .tidx, the .tdat's 1024-byte header
 %   and any dropped fragment, never the whole data file, which may be tens of
 %   gigabytes per channel.
@@ -43,9 +44,13 @@ function [summary, nSegments] = recoverSession(path, opts)
     arguments
         path (1, :) char
         opts.Apply (1, 1) logical = false
-        opts.Backup (1, 1) logical = true
+        opts.Backup = []   % removed: refused below with a message
         opts.Password (1, :) char = ''
     end
+    if ~isempty(opts.Backup)
+        error('mef3io:backupRemoved', ['recovery always keeps a backup of ' ...
+            'what it drops; the Backup option was removed']);
+    end
     [summary, nSegments] = mef3io_mex('recover_session', path, ...
-        double(opts.Apply), double(opts.Backup), opts.Password);
+        double(opts.Apply), opts.Password);
 end

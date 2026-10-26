@@ -38,7 +38,7 @@ def _session(path, segments=2, channels=("A", "B"), password=False, description=
     if description is not None:
         kw["metadata"] = mef3io.Metadata(
             acquisition=mef3io.Acquisition(session_description=description))
-    with mef3io.Writer(str(path), overwrite=True, **kw) as w:
+    with mef3io.Writer(str(path), **kw) as w:
         for k in range(segments):
             for ch in channels:
                 w.write(ch, np.arange(2560) * 1.0, START + k * 60 * SECOND, 256.0, precision=0,

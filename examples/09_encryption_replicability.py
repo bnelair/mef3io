@@ -73,7 +73,7 @@ annotations = pd.DataFrame([
 
 def write_session(writer_cls, path, encrypted):
     p1, p2 = (PWD1, PWD2) if encrypted else (None, None)
-    w = writer_cls(str(path), overwrite=True, password1=p1, password2=p2)
+    w = writer_cls(str(path), password1=p1, password2=p2)
     w.data_units = "uV"
     w.max_nans_written = 0                     # split on NaN in both writers
     for i, ch in enumerate(CHANNELS):

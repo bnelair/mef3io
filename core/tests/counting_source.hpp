@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <filesystem>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -12,6 +13,7 @@
 #include <vector>
 
 #include "mef3io/source.hpp"
+#include "mef3io/tar.hpp"
 
 namespace mef3io::test {
 
@@ -75,5 +77,13 @@ class CountingSource : public SessionSource {
   mutable std::atomic<long> list_dir_{0}, exists_{0}, file_size_{0}, read_all_{0},
       read_head_{0}, read_range_{0};
 };
+
+/// Archive `session` to "<session>.tar". The library never replaces an
+/// existing archive, so the TEST removes a leftover of its own first.
+inline std::string archive_fresh(const std::string& session) {
+  std::error_code ec;
+  std::filesystem::remove(session + ".tar", ec);
+  return mef3io::archive_session(session);
+}
 
 }  // namespace mef3io::test

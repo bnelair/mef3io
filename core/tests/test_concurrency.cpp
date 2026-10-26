@@ -28,7 +28,7 @@ std::string write_session(const std::string& name, int segments, const std::stri
                           const std::string& pw2 = "") {
   const auto dir = fsys::temp_directory_path() / name;
   fsys::remove_all(dir);
-  SessionWriter w(dir.string(), true, pw1, pw2);
+  SessionWriter w(dir.string(), pw1, pw2);
   std::vector<si4> a(2500);
   for (int i = 0; i < 2500; ++i) a[i] = i;
   for (int s = 0; s < segments; ++s)

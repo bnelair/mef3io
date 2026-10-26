@@ -3,7 +3,7 @@
 The first write to a channel creates segment 0. Later writes append
 IN-SEGMENT: the existing segment's files are extended in place (same layout
 the legacy mef_tools writer produces). Pass new_segment=True to start a fresh
-segment instead. A session can be reopened later (overwrite=False) and
+segment instead. A session can be reopened later (an existing session is always appended to) and
 appended to — state is recovered from the files on disk.
 
 Appends are validated against the segment: the sampling frequency and
@@ -26,13 +26,13 @@ session = str(Path(tempfile.mkdtemp()) / "grow.mefd")
 sig = lambda k: np.sin(np.arange(CHUNK) / 20 + k)  # noqa: E731
 
 # --- write, then append contiguously (stays one segment) ------------------
-with mef3io.Writer(session, overwrite=True) as w:
+with mef3io.Writer(session) as w:
     w.write("ch1", sig(0), START, FS, precision=3)
     s = w.write("ch1", sig(1), START + CHUNK_US, FS)   # in-segment append
     print("append landed in segment", s["segment"])    # -> 0
 
 # --- reopen the session later and keep appending ---------------------------
-with mef3io.Writer(session, overwrite=False) as w:     # note: overwrite=False
+with mef3io.Writer(session) as w:     # an existing session is appended to
     w.write("ch1", sig(2), START + 2 * CHUNK_US, FS)   # still segment 0
 
 # --- a gap is fine: it becomes a discontinuity inside the segment ----------

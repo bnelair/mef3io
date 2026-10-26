@@ -109,9 +109,9 @@ struct RepairSelection {
   std::vector<std::string> check_ids;
   std::vector<std::string> channels;  ///< empty = every channel
   std::vector<int> segments;          ///< empty = every segment
-  /// Copy each file before rewriting it, into `<session>.repair-backup/`
-  /// (outside the session tree, so no reader mistakes a backup for data).
-  bool backup = true;
+  // A repair ALWAYS copies each file it rewrites into `<session>.repair-backup/`
+  // first (outside the session tree, so no reader mistakes a backup for data);
+  // there is no switch to turn that off.
 };
 
 struct Report {

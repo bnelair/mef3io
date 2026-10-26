@@ -114,6 +114,7 @@ def write_phase(cfg, path: Path) -> dict:
 
     # ONE writer held open, which is what a real acquisition does and what
     # keeps each append O(new data) instead of re-walking the index.
+    shutil.rmtree(path, ignore_errors=True)  # the benchmark's own scratch data; mef3io never deletes a session
     w = mef3io.Writer(
         str(path), n_threads=cfg.threads,
         block_length=cfg.block_length or None,
@@ -225,7 +226,7 @@ def mef_tools_write(cfg, path: Path) -> dict:
     times: list[float] = []
     r0, w0 = io_counters()
     t_start = time.perf_counter()
-    w = MefWriter(str(path), overwrite=True)
+    w = MefWriter(str(path), overwrite=True)  # mef_tools (legacy) writer
     try:
         for i in range(n_blocks):
             t0 = time.perf_counter()

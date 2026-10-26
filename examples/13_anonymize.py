@@ -39,7 +39,7 @@ meta = mef3io.Metadata(
     acquisition=mef3io.Acquisition(session_description="Jane Roe, overnight EEG"),
 )
 rng = np.random.default_rng(0)
-with mef3io.Writer(src, overwrite=True, units="uV", metadata=meta) as w:
+with mef3io.Writer(src, units="uV", metadata=meta) as w:
     # "LAH42" is a real electrode label; the 42 inside it overlaps the subject
     # ID's digits, so the verification lists a note (and keeps the name).
     for ch in ("Fp1", "LAH42", "ECG"):

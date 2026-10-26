@@ -7,7 +7,7 @@ sensible default, so you fill in only what you have::
     from mef3io import Metadata, Subject, Acquisition
 
     md = Metadata(subject=Subject(id="MRN-123", name_1="Jane"))
-    with mef3io.Writer("s.mefd", overwrite=True, metadata=md) as w:
+    with mef3io.Writer("s.mefd", metadata=md) as w:
         ...
 
     md = mef3io.Reader("s.mefd", "l2pw").metadata

@@ -85,7 +85,7 @@ jobs:
           import numpy as np
           import mef3io
           p = tempfile.mkdtemp() + '/s.mefd'
-          w = mef3io.Writer(p, overwrite=True)
+          w = mef3io.Writer(p)
           d = np.sin(np.arange(1000) / 9)
           d[100:200] = np.nan
           w.write('ch', d, 1577836800000000, 256.0, precision=3)

@@ -11,9 +11,9 @@ archives tolerated, `./` prefixes + missing dir entries OK, compressed input
 rejected with a clear error). `extract_session(tar)` is the exact inverse
 (archive→extract→archive byte-identical; strips the in-archive session root;
 rejects `..` member traversal; cleans up on failure) and yields a writable
-session again. Writers REJECT `.tar` paths — the guard sits BEFORE the
-overwrite/remove_all in SessionWriter's ctor so an archive can never be
-deleted. Python `mef3io.archive_session`/`extract_session`; MATLAB
+session again. Writers REJECT `.tar` paths — the guard sits at the top of
+SessionWriter's ctor (no overwrite exists any more: nothing in the library
+deletes a session). Python `mef3io.archive_session`/`extract_session`; MATLAB
 `mef3io.archiveSession`/`extractSession`; C ABI `mef3io_archive_session`/
 `mef3io_extract_session`. Session NAMING IS ENFORCED in core (all bindings):
 dirs must end `.mefd`, archives `.mefd.tar` — reader (`open_session_source`),

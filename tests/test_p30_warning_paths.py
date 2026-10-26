@@ -52,7 +52,7 @@ def _assert_path_free(w, path, tmp_path):
 
 
 def _declaration_session(path):
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         w.write("ch1", np.arange(2560.0), p20.START, 256.0, precision=0)
     tmet = next(Path(path).glob("ch1.timd/*.segd/*.tmet"))
     p13._patch_s2(tmet, "maximum_difference_bytes", 0)
@@ -268,7 +268,7 @@ def test_writer_unreadable_metadata_warning(tmp_path):
 
     path = tmp_path / f"{NAME}.mefd"
     p22._segment_layout(path, [0], [1])
-    for make in (lambda: mef3io.Writer(str(path)), lambda: MefWriter(str(path), overwrite=False)):
+    for make in (lambda: mef3io.Writer(str(path)), lambda: MefWriter(str(path))):
         wr, ws = _record(make)
         wr.close()
         (w,) = ws

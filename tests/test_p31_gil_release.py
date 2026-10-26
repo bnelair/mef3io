@@ -38,7 +38,7 @@ MIN_CALL = 0.04   # below this a stall cannot be told from scheduling noise
 @pytest.fixture(scope="module")
 def many_segments(tmp_path_factory):
     path = tmp_path_factory.mktemp("gil") / "many.mefd"
-    w = m.SessionWriter(str(path), True)
+    w = m.SessionWriter(str(path))
     x = np.arange(256, dtype=np.int32)
     for seg in range(SEGMENTS):
         w.write_int32("ch", x, 1.0, START + seg * 10_000_000, 256.0, None, seg > 0)
@@ -118,16 +118,16 @@ def test_toc_does_not_hold_the_gil(many_segments):
 
 
 def test_a_writer_open_does_not_hold_the_gil(many_segments, tmp_path):
-    """overwrite=True removes the old tree first: without the GIL too. (A
+    """Opening a Writer on an existing session: without the GIL too. (A
     reopen for append hydrates lazily and is too short to measure.)"""
     def overwrite():
         copy = tmp_path / "copy.mefd"
         if copy.exists():
             shutil.rmtree(copy)
         shutil.copytree(many_segments, copy)
-        return lambda: m.SessionWriter(str(copy), True)
+        return lambda: m.SessionWriter(str(copy))
     _assert_releases(overwrite, runs=2)
-    assert not any((tmp_path / "copy.mefd").glob("*.timd"))  # it really removed the tree
+    assert any((tmp_path / "copy.mefd").glob("*.timd"))  # the library never removes the tree
 
 
 def test_a_writer_flush_does_not_hold_the_gil(tmp_path):
@@ -139,7 +139,7 @@ def test_a_writer_flush_does_not_hold_the_gil(tmp_path):
 
     def make():
         path = tmp_path / f"f{next(counter)}.mefd"
-        w = m.SessionWriter(str(path), True)
+        w = m.SessionWriter(str(path))
         x = np.random.default_rng(0).integers(-30000, 30000, 200_000, dtype=np.int32)
         for c in range(32):
             w.write_int32(f"ch{c}", x, 1.0, 1577836800000000, 1000.0)
@@ -154,7 +154,7 @@ def test_errors_still_raise_after_the_gil_comes_back(tmp_path):
     with pytest.raises(mef3io.IoError):
         m.Session(str(tmp_path / "not-a-session"))
     with pytest.raises(mef3io.IoError):
-        m.SessionWriter(str(tmp_path / "x.mefd.tar"), True)
+        m.SessionWriter(str(tmp_path / "x.mefd.tar"))
 
 
 def test_concurrent_opens_agree(many_segments):
@@ -175,7 +175,7 @@ def test_concurrent_opens_agree(many_segments):
 @pytest.fixture(scope="module")
 def small(tmp_path_factory):
     path = tmp_path_factory.mktemp("conc") / "small.mefd"
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         for seg in range(12):
             w.write("ch", np.sin(np.arange(2560) / 9.0), START + seg * 20_000_000, 256.0,
                     precision=3, new_segment=seg > 0)
@@ -253,7 +253,7 @@ def envelope_segments(tmp_path_factory):
     # 3x the segments keeps the call well above the floor; the stall
     # criterion is unchanged.
     path = tmp_path_factory.mktemp("gil_env") / "env.mefd"
-    w = m.SessionWriter(str(path), True)
+    w = m.SessionWriter(str(path))
     x = np.arange(256, dtype=np.int32)
     for seg in range(3 * SEGMENTS):
         w.write_int32("ch", x, 1.0, START + seg * 10_000_000, 256.0, None, seg > 0)

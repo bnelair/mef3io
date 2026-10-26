@@ -79,7 +79,9 @@ start = 1_700_000_000_000_000            # microseconds since 1970 (uUTC)
 signal = np.random.randn(60 * int(fs))   # one minute
 signal[1000:1500] = np.nan               # a gap: NaN is stored as missing data
 
-with mef3io.Writer("session.mefd", overwrite=True, units="uV") as w:
+# A Writer creates the session, or appends to it when it exists: mef3io never
+# deletes a session (remove or rename the folder yourself to start over).
+with mef3io.Writer("session.mefd", units="uV") as w:
     w.write("eeg1", signal, start, fs=fs)
     w.write("eeg2", signal[::-1].copy(), start, fs=fs)
     w.write_annotations([{"time": start, "text": "recording start"}], channel="eeg1")

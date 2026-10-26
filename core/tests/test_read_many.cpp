@@ -40,7 +40,7 @@ constexpr sf8 FS = 250.0;
 std::string write_session(const std::string& name) {
   const auto dir = (fsys::temp_directory_path() / name).string();
   fsys::remove_all(dir);
-  SessionWriter w(dir, true);
+  SessionWriter w(dir);
   std::vector<si4> x(5000);
   for (int i = 0; i < 5000; ++i) x[i] = static_cast<si4>(1000 * std::sin(i / 9.0)) + i % 7;
   std::vector<ui1> valid(5000, 1);
@@ -253,7 +253,7 @@ TEST_CASE("multi-channel read time with a per-request delay", "[.read-many-bench
     const auto dir = (fsys::temp_directory_path() / "mef3io_read_many_bench.mefd").string();
     fsys::remove_all(dir);
     {
-      SessionWriter w(dir, true);
+      SessionWriter w(dir);
       std::vector<si4> x(static_cast<std::size_t>(fs * 660));
       for (int c = 0; c < channels; ++c) {
         for (std::size_t i = 0; i < x.size(); ++i)

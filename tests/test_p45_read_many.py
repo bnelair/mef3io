@@ -88,7 +88,7 @@ def _set_factor(tmet, value):
 def _build(path):
     """Channels of one rate, each a different shape the read must get right."""
     rng = np.random.default_rng(45)
-    with mef3io.Writer(str(path), overwrite=True, block_length=700) as w:
+    with mef3io.Writer(str(path), block_length=700) as w:
         # gappy float data over two segments
         x = np.sin(np.arange(20000) / 13.0) * 100
         x[3000:4200] = np.nan
@@ -199,7 +199,7 @@ def test_default_window_is_the_union_and_one_channel_is_unchanged(session):
 
 def test_arguments_are_checked_before_anything_is_read(session, tmp_path):
     other = tmp_path / "rates.mefd"
-    with mef3io.Writer(str(other), overwrite=True) as w:
+    with mef3io.Writer(str(other)) as w:
         w.write("a", np.zeros(1000), START, 256.0)
         w.write("b", np.zeros(1000), START, 512.0)
         w.write("c", np.zeros(1000), START, 256.0)
@@ -306,7 +306,7 @@ def test_unscaled_warning_once_per_channel(session):
 
 def test_an_invalid_factor_is_refused_like_a_single_read(tmp_path):
     path = tmp_path / "nan.mefd"
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         w.write_int32("a", np.arange(3000, dtype=np.int32), 1.0, START, FS)
         w.write_int32("b", np.arange(3000, dtype=np.int32), 1.0, START, FS)
     for tmet in glob.glob(f"{path}/b.timd/*/*.tmet"):
@@ -359,7 +359,7 @@ def test_block_envelope_list_is_a_dict_of_single_results(session):
 @pytest.mark.skipif(not Path("/proc/self/io").exists(), reason="needs /proc/self/io")
 def test_block_envelope_list_reads_no_data_byte(tmp_path):
     path = tmp_path / "big.mefd"
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         for k in range(20):
             for ch in ("a", "b", "c"):
                 w.write(ch, np.arange(int(60 * FS), dtype=float), START + k * 60 * SECOND,
@@ -386,7 +386,7 @@ def _parts(tmp_path):
     paths = []
     for k, (t, secs) in enumerate([(0, 12), (15 * SECOND, 10)]):
         p = tmp_path / f"part{k}.mefd"
-        with mef3io.Writer(str(p), overwrite=True) as w:
+        with mef3io.Writer(str(p)) as w:
             for ch, uf in (("A", 0.5), ("B", 1.0), ("C", 0.25 if k else 0.125)):
                 x = rng.integers(-2000, 2000, int(secs * FS)).astype(np.int32)
                 if ch == "B":
@@ -434,7 +434,7 @@ def test_multireader_lists_equal_the_merged_reader(tmp_path):
 
 def test_multireader_refuses_like_a_reader(tmp_path):
     p = tmp_path / "x.mefd"
-    with mef3io.Writer(str(p), overwrite=True) as w:
+    with mef3io.Writer(str(p)) as w:
         w.write("a", np.zeros(1000), START, 256.0)
         w.write("b", np.zeros(1000), START, 1000.0 / 3)
     with mef3io.Reader(str(p)) as r, mef3io.MultiReader([str(p)]) as mr:
@@ -450,7 +450,7 @@ def test_multireader_refuses_like_a_reader(tmp_path):
 
 def test_get_data_list_equals_the_per_channel_loop(session, tmp_path):
     other = tmp_path / "rates.mefd"
-    with mef3io.Writer(str(other), overwrite=True) as w:
+    with mef3io.Writer(str(other)) as w:
         w.write("a", np.sin(np.arange(3000) / 5.0), START, 256.0, precision=3)
         w.write("b", np.cos(np.arange(3000) / 5.0), START + 2 * SECOND, 512.0, precision=3)
         w.write("c", np.arange(2000) * 0.5, START + SECOND, 256.0, precision=1)
@@ -511,7 +511,7 @@ def test_the_lowest_failing_channel_wins_across_stages(tmp_path, n_threads):
 def test_a_refused_first_channel_stops_the_call_early(tmp_path):
     path = tmp_path / "early.mefd"
     names = [f"c{i}" for i in range(12)]
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         rng = np.random.default_rng(1)
         for ch in names:
             w.write_int32(ch, rng.integers(-30000, 30000, 120_000).astype(np.int32), 1.0,
@@ -542,7 +542,7 @@ def test_a_refused_first_channel_stops_the_call_early(tmp_path):
 
 def test_a_single_channel_with_an_unusable_rate_reads_as_before(tmp_path):
     path = tmp_path / "rate.mefd"
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         w.write("a", np.zeros(1000), START, FS)
         w.write("b", np.zeros(1000), START, FS)
     for tmet in glob.glob(f"{path}/b.timd/*/*.tmet"):
@@ -569,7 +569,7 @@ def test_get_data_rows_are_independent_arrays(session):
 
 def test_get_data_errors_follow_the_requested_order(tmp_path):
     path = tmp_path / "order.mefd"
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         w.write("a", np.zeros(3000), START, 256.0)
         w.write("b", np.zeros(3000), START, 512.0)
         w.write("c", np.zeros(3000), START, 256.0)
@@ -589,7 +589,7 @@ def test_multireader_list_progress_ends_at_total_without_data_at_the_end(tmp_pat
     with exactly one (total, total)."""
     paths, _ = _parts(tmp_path)
     p = tmp_path / "late.mefd"
-    with mef3io.Writer(str(p), overwrite=True) as w:
+    with mef3io.Writer(str(p)) as w:
         w.write("L", np.zeros(1000), START + 100 * SECOND, FS)
     with mef3io.MultiReader([str(x) for x in paths] + [str(p)]) as mr:
         for names in (["A", "L"], ["L"], ["L", "A", "L"]):

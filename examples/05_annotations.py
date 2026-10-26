@@ -18,7 +18,7 @@ START = 1_577_836_800_000_000
 
 session = str(Path(tempfile.mkdtemp()) / "annotated.mefd")
 
-with mef3io.Writer(session, overwrite=True) as w:
+with mef3io.Writer(session) as w:
     w.write("ch1", np.sin(np.arange(5000) / 20), START, FS, precision=3)
 
     # session-level records (channel=None)

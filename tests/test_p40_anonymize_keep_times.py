@@ -175,7 +175,7 @@ def test_stored_time_fields_are_byte_identical_and_tz_fields_cleared(kept):
 def test_gmt_and_dst_are_cleared_and_times_unchanged(tmp_path):
     src = tmp_path / "tz.mefd"
     meta = mef3io.Metadata(subject=mef3io.Subject(gmt_offset=-21600))
-    with mef3io.Writer(str(src), overwrite=True, metadata=meta) as w:
+    with mef3io.Writer(str(src), metadata=meta) as w:
         w.write("ch1", _signal(2560, 1), START, FS, precision=3)
     for tmet in _tmets(src):
         raw = bytearray(tmet.read_bytes())
@@ -211,7 +211,7 @@ def test_a_recording_time_offset_is_kept_with_the_times(tmp_path):
 
 def test_segments_that_disagree_on_the_offset_keep_their_times(tmp_path):
     src = tmp_path / "dis.mefd"
-    with mef3io.Writer(str(src), overwrite=True) as w:
+    with mef3io.Writer(str(src)) as w:
         for ch in ("a", "b"):
             w.write(ch, _signal(2560, 1), START, FS, precision=3)
     _set_rto(src, START - DAY, ["a"])
@@ -398,7 +398,7 @@ def test_a_cut_under_a_disputed_offset_keeps_every_channel_with_samples(tmp_path
     # window, as the Reader shows them.
     src = tmp_path / "dis.mefd"
     rto = START - DAY
-    with mef3io.Writer(str(src), overwrite=True) as w:
+    with mef3io.Writer(str(src)) as w:
         w.write("a", _signal(int(FS * 60), 1), START, FS, precision=3)
         w.write("b", _signal(int(FS * 60), 2), START + rto, FS, precision=3)
     _set_rto(src, rto, ["a"])
@@ -421,7 +421,7 @@ def test_a_cut_under_a_disputed_offset_keeps_every_channel_with_samples(tmp_path
 @pytest.mark.parametrize("op", ["anonymize", "transform"])
 def test_a_cut_places_channel_records_by_their_own_offset(tmp_path, op):
     src = tmp_path / "dis.mefd"
-    with mef3io.Writer(str(src), overwrite=True) as w:
+    with mef3io.Writer(str(src)) as w:
         for ch in ("a", "b"):
             w.write(ch, _signal(int(FS * 60), 1), START, FS, precision=3)
         w.write_annotations([{"time": START + 20 * SECOND, "type": "Note", "text": "x"}],
@@ -504,7 +504,7 @@ def test_verify_checks_a_cut_segments_span_on_an_offset_session(tmp_path, op, gl
     """At rto != 0 the validator stands its time checks down, so verify
     itself checks every cut segment header against the blocks it holds."""
     src = tmp_path / "rto.mefd"
-    with mef3io.Writer(str(src), overwrite=True) as w:
+    with mef3io.Writer(str(src)) as w:
         w.write("a", _signal(int(FS * 60), 1), START, FS, precision=3)
     _set_rto(src, 3600 * SECOND, ["a"])
     with mef3io.Reader(str(src)) as r:

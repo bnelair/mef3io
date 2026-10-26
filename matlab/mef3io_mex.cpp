@@ -270,37 +270,34 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     return;
   }
   if (cmd == "archive_session") {
-    need_args(nrhs, 4, "archive_session");
+    need_args(nrhs, 3, "archive_session");
     std::string session_dir = get_string(prhs[1], "session_dir");
     std::string tar_path = get_string(prhs[2], "tar_path");
-    int overwrite = get_int(prhs[3], "overwrite");
     char out_path[2048] = {0};
-    check(mef3io_archive_session(session_dir.c_str(), tar_path.c_str(), overwrite, out_path,
+    check(mef3io_archive_session(session_dir.c_str(), tar_path.c_str(), 0, out_path,
                                  sizeof out_path));
     plhs[0] = make_utf8_string(out_path);
     return;
   }
   if (cmd == "recover_session") {
-    need_args(nrhs, 5, "recover_session");
+    need_args(nrhs, 4, "recover_session");
     std::string path = get_string(prhs[1], "path");
     int apply = get_int(prhs[2], "apply");
-    int backup = get_int(prhs[3], "backup");
-    std::string password = get_string(prhs[4], "password");
+    std::string password = get_string(prhs[3], "password");
     std::vector<char> summary(8192, 0);
     int64_t segments = 0;
-    check(mef3io_recover_session(path.c_str(), apply, backup, password.c_str(), summary.data(),
+    check(mef3io_recover_session(path.c_str(), apply, 1 /* backup is always kept */, password.c_str(), summary.data(),
                                  summary.size(), &segments));
     plhs[0] = make_utf8_string(summary.data());
     if (nlhs > 1) plhs[1] = mxCreateDoubleScalar(static_cast<double>(segments));
     return;
   }
   if (cmd == "extract_session") {
-    need_args(nrhs, 4, "extract_session");
+    need_args(nrhs, 3, "extract_session");
     std::string tar_path = get_string(prhs[1], "tar_path");
     std::string dest_dir = get_string(prhs[2], "dest_dir");
-    int overwrite = get_int(prhs[3], "overwrite");
     char out_path[2048] = {0};
-    check(mef3io_extract_session(tar_path.c_str(), dest_dir.c_str(), overwrite, out_path,
+    check(mef3io_extract_session(tar_path.c_str(), dest_dir.c_str(), 0, out_path,
                                  sizeof out_path));
     plhs[0] = make_utf8_string(out_path);
     return;
@@ -708,13 +705,12 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
 
   // ---- writer ----------------------------------------------------------
   if (cmd == "writer_open") {
-    need_args(nrhs, 5, "writer_open");
+    need_args(nrhs, 4, "writer_open");
     std::string path = get_string(prhs[1], "path");
-    int overwrite = get_int(prhs[2], "overwrite");
-    std::string p1 = get_string(prhs[3], "password1");
-    std::string p2 = get_string(prhs[4], "password2");
+    std::string p1 = get_string(prhs[2], "password1");
+    std::string p2 = get_string(prhs[3], "password2");
     mef3io_writer* w = nullptr;
-    check(mef3io_writer_open(path.c_str(), overwrite, p1.c_str(), p2.c_str(), &w));
+    check(mef3io_writer_open(path.c_str(), 0, p1.c_str(), p2.c_str(), &w));
     track(g_writers, reinterpret_cast<std::uint64_t>(w));
     plhs[0] = make_handle(w);
     return;

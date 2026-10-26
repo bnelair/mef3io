@@ -274,7 +274,7 @@ def _write_both(tmp_path, chunks, gap_us=0):
     w.close()
 
     theirs = str(tmp_path / "theirs.mefd")
-    lw = MefWriter(theirs, overwrite=True)
+    lw = MefWriter(theirs)
     for i, x in enumerate(data):
         lw.write_data(x, "ch1", START + i * step, FS, precision=0)
     del lw
@@ -306,7 +306,7 @@ def test_one_sided_offset_the_legacy_stack_wraps_and_mef3io_does_not(tmp_path):
         s = w.write("ch1", x, START, FS)
     assert s["units_conversion_factor"] == 0.01
     theirs = str(tmp_path / "theirs.mefd")
-    lw = MefWriter(theirs, overwrite=True)
+    lw = MefWriter(theirs)
     lw.write_data(x, "ch1", START, FS)
     del lw
     _compare(_collect(ours), _collect(theirs), "one-sided offset", case="one-sided offset")

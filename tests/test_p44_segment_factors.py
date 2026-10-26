@@ -63,7 +63,7 @@ def _counts(k):
 
 
 def _write_mixed(path, plan=PLAN, channels=("A",), start=START):
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         for k, (t, uf, new) in enumerate(plan):
             for ch in channels:
                 w.write_int32(ch, _counts(k), uf, start + t, FS, new_segment=new)

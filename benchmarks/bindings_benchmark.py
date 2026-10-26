@@ -6,6 +6,7 @@ MATLAB-vs-Python tradeoff (both sit on the same C++ core).
 
 Usage: python benchmarks/bindings_benchmark.py [out_dir]
 """
+import shutil
 import sys
 import tempfile
 import time
@@ -41,8 +42,9 @@ def main(out_dir: str) -> None:
         p1, p2 = ("pwd1", "pwd2") if encrypted else ("", "")
         path = str(Path(out_dir) / f"bench_{label}.mefd")
 
+        shutil.rmtree(path, ignore_errors=True)  # the benchmark's own scratch data; mef3io never deletes a session
         t = time.perf_counter()
-        with mef3io.Writer(path, overwrite=True, password1=p1, password2=p2, units="uV") as w:
+        with mef3io.Writer(path, password1=p1, password2=p2, units="uV") as w:
             for i, ch in enumerate(CHANNELS):
                 w.write(ch, x[i], START, FS, precision=3)
         t_write = time.perf_counter() - t

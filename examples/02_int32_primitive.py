@@ -22,7 +22,7 @@ counts = (1000 * np.sin(np.arange(8000) / 50)).astype(np.int32)
 valid = np.ones(len(counts), dtype=bool)
 valid[3000:3500] = False      # acquisition dropout — stored as a gap
 
-with mef3io.Writer(session, overwrite=True) as w:
+with mef3io.Writer(session) as w:
     summary = w.write_int32("ch1", counts, UFACT, START, FS, valid=valid)
 print("blocks:", summary["blocks"], "gaps skipped:", summary["gaps_skipped"])
 

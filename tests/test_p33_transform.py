@@ -424,7 +424,7 @@ def _two_segment_session(path, password=False):
     """ch1: two segments (0-60 s, 120-150 s); ch2: one (0-60 s); notes in
     and out of a window, and a Seiz that straddles its start."""
     kw = dict(password1="pw-one", password2="pw-two") if password else {}
-    with mef3io.Writer(str(path), overwrite=True, **kw) as w:
+    with mef3io.Writer(str(path), **kw) as w:
         for i, ch in enumerate(("ch1", "ch2")):
             w.write(ch, np.cumsum(np.random.default_rng(i).normal(size=256 * 60)).round(3),
                     START, 256.0, precision=3)
@@ -547,7 +547,7 @@ def test_the_cli_cuts(tmp_path, capsys):
 
 
 def _session_at(path, fs, seconds=40, channels=("ch1", "ch2"), starts=None):
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         for i, ch in enumerate(channels):
             start = START if starts is None else starts[i]
             w.write(ch, np.cumsum(np.random.default_rng(i).normal(size=int(fs * seconds))).round(3),
@@ -609,7 +609,7 @@ def test_a_window_in_a_gap_between_segments(tmp_path):
 def test_a_duplicated_block_fails_verification(tmp_path):
     # The same samples in every 10-s block (2560 at 256 Hz): blocks of one size.
     src = tmp_path / "p.mefd"
-    with mef3io.Writer(str(src), overwrite=True) as w:
+    with mef3io.Writer(str(src)) as w:
         w.write("ch1", np.tile((np.arange(2560) % 50) * 1.0, 20), START, 256.0, precision=0)
     t0, t1 = START + 15 * SECOND, START + 150 * SECOND
     copy = tmp_path / "cut.mefd"
@@ -673,7 +673,7 @@ def test_a_long_block_overlapped_by_later_short_ones_is_not_missed(tmp_path):
 
     src = tmp_path / "p.mefd"
     fs = p6.FS
-    with mef3io.Writer(str(src), overwrite=True, block_length=int(10 * fs)) as w:
+    with mef3io.Writer(str(src), block_length=int(10 * fs)) as w:
         w.write("ch1", np.arange(int(fs * 120)) * 1.0, START, fs, precision=0)
     n = len(list((src / "ch1.timd").glob("*/*.tidx"))[0].read_bytes()[UH:]) // 56
     # Block i (10 s each) starts at i*10 s; move blocks 1..5 back to start at

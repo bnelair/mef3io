@@ -21,7 +21,7 @@ session identity is `session_key` = SHA-256 of the abs path, NEVER the path
 exact old name via discard_if_ours, `_discard_legacy_auto_cache`, no listing); per channel the .segd count (one listing of the .timd — always
 listed, never trust dir mtimes: FUSE/object stores report constant ones),
 start/end from the first/last segment's .tmet universal header plus both
-headers' random file_UUIDs (offset 836 — catches overwrite=True with the same
+headers' random file_UUIDs (offset 836 — catches a removed-and-rewritten session with the same
 samples but new units/ufact/subject), the last segment's .tdat/.tidx sizes,
 its provenance region (offset 960; the modification count is the change
 marker); plus channel folders and session .rdat/.ridx sizes. Sizes via

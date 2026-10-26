@@ -40,7 +40,7 @@ UH, ENT = 1024, 56
 
 def _write(path, n=60000):
     data = np.arange(n, dtype=np.int32)
-    w = m.SessionWriter(str(path), True)
+    w = m.SessionWriter(str(path))
     w.write_int32("ch1", data, 1.0, START, FS)
     del w
     return data

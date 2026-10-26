@@ -47,7 +47,7 @@ HEADER_REPAIR = 3
 
 def _write(path: Path):
     rng = np.random.default_rng(0)
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         for s in range(N_SEG):
             x = rng.normal(0, 300, SEG_SAMPLES).astype(np.int32)
             w.write_int32("ch1", x, 0.5, START + s * SEG_US, FS, new_segment=True)
@@ -93,7 +93,7 @@ def test_middle_repair_stamps_the_last_segment(session):
     before_bytes = after_bytes(last)
     body = last.read_bytes()[UH:]
 
-    report = mef3io.repair_session(str(session), ["sizing.difference-bytes"], backup=True)
+    report = mef3io.repair_session(str(session), ["sizing.difference-bytes"])
     assert report.segments_repaired == 1
 
     after = _region(last)
@@ -120,7 +120,7 @@ def test_last_segment_repair_adds_no_second_stamp(session):
     last = _tmets(session)[-1]
     _break_difference_bytes(last)
     before = _region(last)
-    mef3io.repair_session(str(session), ["sizing.difference-bytes"], backup=False)
+    mef3io.repair_session(str(session), ["sizing.difference-bytes"])
     after = _region(last)
     assert after["last_op"] == HEADER_REPAIR
     assert after["count"] == before["count"] + 1
@@ -133,7 +133,7 @@ def test_cached_open_rebuilds_after_a_middle_repair(session, tmp_path):
     cache = tmp_path / "snap.mef3cache"
     mef3io.Reader(str(session), cache=str(cache), warn_declarations=False)
     assert C.load_valid(cache, str(session)) is not None
-    mef3io.repair_session(str(session), ["sizing.difference-bytes"], backup=False)
+    mef3io.repair_session(str(session), ["sizing.difference-bytes"])
     assert C.load_valid(cache, str(session)) is None
     r = mef3io.Reader(str(session), cache=str(cache))
     assert r._impl is not None, "the stale snapshot was served"
@@ -143,7 +143,7 @@ def test_session_stays_valid_and_readable(session):
     middle = _tmets(session)[1]
     _break_difference_bytes(middle)
     expected = mef3io.Reader(str(session)).read("ch1")
-    mef3io.repair_session(str(session), ["sizing.difference-bytes"], backup=False)
+    mef3io.repair_session(str(session), ["sizing.difference-bytes"])
 
     assert mef3io.validate_session(str(session)).ok
     np.testing.assert_array_equal(mef3io.Reader(str(session)).read("ch1"), expected)
@@ -162,7 +162,7 @@ def test_repair_right_after_extract_session_succeeds_and_stamps(session, tmp_pat
     _break_difference_bytes(_tmets(session)[1])
     tar = mef3io.archive_session(str(session))
     out = Path(mef3io.extract_session(tar, str(tmp_path / "x.mefd")))
-    report = mef3io.repair_session(str(out), ["sizing.difference-bytes"], backup=False)
+    report = mef3io.repair_session(str(out), ["sizing.difference-bytes"])
     assert report.segments_repaired == 1
     last = _tmets(out)[-1]
     assert _region(last)["last_op"] == SEGMENT_REPAIRED
@@ -184,7 +184,7 @@ def test_stale_writer_temp_file_skips_only_the_stamp(session, tmp_path):
     cache = tmp_path / "snap.mef3cache"
     mef3io.Reader(str(session), cache=str(cache), warn_declarations=False)
 
-    report = mef3io.repair_session(str(session), ["sizing.difference-bytes"], backup=False)
+    report = mef3io.repair_session(str(session), ["sizing.difference-bytes"])
     assert report.segments_repaired == 1
     assert _region(middle)["last_op"] == HEADER_REPAIR
     assert after_bytes(last) == before, "stamped despite a writer's temp file"
@@ -200,7 +200,7 @@ def test_stale_writer_temp_file_skips_only_the_stamp(session, tmp_path):
 def _cli_repair(session, capsys):
     from mef3io.__main__ import main
 
-    main(["repair", str(session), "--check", "sizing.difference-bytes", "--no-backup"])
+    main(["repair", str(session), "--check", "sizing.difference-bytes"])
     return capsys.readouterr().out
 
 
@@ -232,7 +232,7 @@ def test_last_segment_with_a_bad_crc_is_left_byte_identical(session):
     raw[UH + 100] ^= 0xFF  # body changed, stored body CRC now wrong
     last.write_bytes(bytes(raw))
     before = last.read_bytes()
-    report = mef3io.repair_session(str(session), ["sizing.difference-bytes"], backup=False)
+    report = mef3io.repair_session(str(session), ["sizing.difference-bytes"])
     assert report.segments_repaired == 1
     assert last.read_bytes() == before
     notes = [f for f in report.findings if f.check_id == "provenance.last-segment"]
@@ -248,7 +248,7 @@ def test_foreign_region_is_skipped_with_a_note(session):
         raw[REGION:REGION + 64] = b"XYZW" + bytes(range(60))
 
     _rewrite_tmet(last, foreign)
-    report = mef3io.repair_session(str(session), ["sizing.difference-bytes"], backup=False)
+    report = mef3io.repair_session(str(session), ["sizing.difference-bytes"])
     assert report.segments_repaired == 1
     assert after_bytes(last) == b"XYZW" + bytes(range(60)), "another application's region"
     notes = [f for f in report.findings if f.check_id == "provenance.last-segment"]
@@ -263,7 +263,7 @@ def test_recovery_of_a_middle_segment_stamps_the_last(session):
         f.truncate(tdat.stat().st_size - 10)
     last = _tmets(session)[-1]
     before = _region(last)
-    report = mef3io.recover_session(str(session), apply=True, backup=True)
+    report = mef3io.recover_session(str(session), apply=True)
     assert report.segments, report.summary()
     after = _region(last)
     assert after["last_op"] == SEGMENT_REPAIRED
@@ -280,7 +280,7 @@ def test_recovery_with_a_stale_temp_file_skips_only_the_stamp(session):
     last = _tmets(session)[-1]
     (last.parent / (last.name + ".mef3io-tmp")).write_bytes(b"")
     before = after_bytes(last)
-    report = mef3io.recover_session(str(session), apply=True, backup=False)
+    report = mef3io.recover_session(str(session), apply=True)
     assert report.segments and report.applied
     assert after_bytes(last) == before
     assert any("can be removed" in n and "Cached opens" in n for n in report.notes)
@@ -299,7 +299,7 @@ def test_cache_misses_a_middle_repair_when_the_stamp_is_skipped(session, tmp_pat
     _rewrite_tmet(last, foreign)
     cache = tmp_path / "snap.mef3cache"
     mef3io.Reader(str(session), cache=str(cache), warn_declarations=False)
-    report = mef3io.repair_session(str(session), ["sizing.difference-bytes"], backup=False)
+    report = mef3io.repair_session(str(session), ["sizing.difference-bytes"])
     note = [f for f in report.findings if f.check_id == "provenance.last-segment"][0]
     assert "Cached opens" in note.message
     assert C.load_valid(cache, str(session)) is not None

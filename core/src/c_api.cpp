@@ -643,9 +643,11 @@ int mef3io_recover_session_ex(const char* mefd_path, int apply, int backup, cons
                               const mef3io_cancel_token* cancel, mef3io_progress_fn progress,
                               void* user_data) {
   if (!mefd_path) return fail_argument("mefd_path must not be NULL");
+  if (backup == 0)
+    return fail_argument("recovery always keeps a backup of what it drops; pass backup = 1");
   return guarded([&] {
     const auto report =
-        mef3io::recover_session(mefd_path, apply != 0, backup != 0, password ? password : "",
+        mef3io::recover_session(mefd_path, apply != 0, password ? password : "",
                                 make_control(cancel, progress, user_data));
     if (out_segments) *out_segments = static_cast<int64_t>(report.segments.size());
     if (out_summary && out_summary_bytes) {
@@ -673,9 +675,10 @@ int mef3io_archive_session_ex(const char* session_dir, const char* tar_path, int
                               const mef3io_cancel_token* cancel, mef3io_progress_fn progress,
                               void* user_data) {
   if (!session_dir) return fail_argument("session_dir must not be NULL");
+  if (overwrite != 0) return fail_argument("mef3io never deletes a session; remove or rename the folder yourself, or write to a new path");
   return guarded([&] {
     const std::string result =
-        mef3io::archive_session(session_dir, tar_path ? tar_path : "", overwrite != 0,
+        mef3io::archive_session(session_dir, tar_path ? tar_path : "",
                                 make_control(cancel, progress, user_data));
     if (out_path && out_path_bytes) copy_str(out_path, out_path_bytes, result);
   });
@@ -692,9 +695,10 @@ int mef3io_extract_session_ex(const char* tar_path, const char* dest_dir, int ov
                               const mef3io_cancel_token* cancel, mef3io_progress_fn progress,
                               void* user_data) {
   if (!tar_path) return fail_argument("tar_path must not be NULL");
+  if (overwrite != 0) return fail_argument("mef3io never deletes a session; remove or rename the folder yourself, or write to a new path");
   return guarded([&] {
     const std::string result =
-        mef3io::extract_session(tar_path, dest_dir ? dest_dir : "", overwrite != 0,
+        mef3io::extract_session(tar_path, dest_dir ? dest_dir : "",
                                 make_control(cancel, progress, user_data));
     if (out_path && out_path_bytes) copy_str(out_path, out_path_bytes, result);
   });
@@ -718,8 +722,9 @@ int mef3io_writer_open(const char* mefd_path, int overwrite, const char* passwor
                        const char* password_2, mef3io_writer** out) {
   if (!mefd_path || !out) return fail_argument("mefd_path and out must not be NULL");
   *out = nullptr;
+  if (overwrite != 0) return fail_argument("mef3io never deletes a session; remove or rename the folder yourself, or write to a new path");
   return guarded([&] {
-    *out = new mef3io_writer{mef3io::SessionWriter(mefd_path, overwrite != 0,
+    *out = new mef3io_writer{mef3io::SessionWriter(mefd_path,
                                                    password_1 ? password_1 : "",
                                                    password_2 ? password_2 : "")};
   });

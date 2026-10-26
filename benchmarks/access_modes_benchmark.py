@@ -198,7 +198,8 @@ def write_sessions(args, work: Path) -> dict:
 
     t = time.perf_counter()
     d = work / "s.mefd"
-    with mef3io.Writer(str(d), overwrite=True) as w:
+    shutil.rmtree(d, ignore_errors=True)  # the benchmark's own scratch data; mef3io never deletes a session
+    with mef3io.Writer(str(d)) as w:
         for i, name in enumerate(names):
             for k, a in enumerate(range(0, n, seg_n)):
                 b = min(n, a + seg_n)
@@ -217,7 +218,7 @@ def write_sessions(args, work: Path) -> dict:
 
         t = time.perf_counter()
         ld = work / "legacy.mefd"
-        w = MefWriter(str(ld), overwrite=True)
+        w = MefWriter(str(ld), overwrite=True)  # mef_tools (legacy) writer
         for i, name in enumerate(names):
             for k, a in enumerate(range(0, n, seg_n)):
                 b = min(n, a + seg_n)

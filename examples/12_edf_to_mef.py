@@ -243,7 +243,7 @@ def records_for(annotations, start_uutc):
             for onset, dur, text in annotations]
 
 
-def convert(edf_path, mef_path, timezone=None, copy_patient=False, overwrite=False,
+def convert(edf_path, mef_path, timezone=None, copy_patient=False,
             password1="", password2="") -> dict:
     """Write the session; returns what verify() needs.
 
@@ -257,14 +257,12 @@ def convert(edf_path, mef_path, timezone=None, copy_patient=False, overwrite=Fal
             "recording was made in, e.g. timezone='Europe/Prague' or '+01:00'."
         )
     tz = parse_timezone(timezone)
-    if not overwrite and Path(mef_path).exists():
-        raise FileExistsError(f"{mef_path} exists; pass overwrite=True to replace it")
+    if Path(mef_path).exists():  # mef3io never deletes a session: this example refuses to extend one
+        raise FileExistsError(f"{mef_path} exists; remove or rename it, or write to a new path")
 
-    with open_edf(str(edf_path)) as edf:  # opened first: a bad path deletes nothing
+    with open_edf(str(edf_path)) as edf:  # opened first: a bad path creates nothing
         if edf["record_s"] <= 0:
             raise ValueError(f"{edf_path} holds annotations only, no signal data")
-        if overwrite:
-            mef3io.Writer(mef_path, overwrite=True, **keys).close()
         start_uutc = local_to_uutc(edf["start"], tz)
         subject = mef3io.Subject(
             gmt_offset=int(edf["start"].replace(tzinfo=tz).utcoffset().total_seconds()))
@@ -366,7 +364,6 @@ def main(argv=None) -> int:
                     help="zone of the EDF start time: Europe/Prague, +01:00 (+HH:MM) or UTC")
     ap.add_argument("--copy-patient", action="store_true",
                     help="copy the EDF patient name and code (off by default)")
-    ap.add_argument("--overwrite", action="store_true", help="replace an existing session")
     ap.add_argument("--encrypt", action="store_true",
                     help="protect the session with two passwords (asked for, not typed here)")
     a = ap.parse_args(argv)
@@ -388,11 +385,11 @@ def main(argv=None) -> int:
             ap.error("use two different passwords")
     if a.edf is None:  # demo
         tmp = Path(tempfile.mkdtemp())
-        a.edf, a.mefd, a.timezone, a.overwrite = str(tmp / "demo.edf"), str(tmp / "demo.mefd"), "UTC", True
+        a.edf, a.mefd, a.timezone = str(tmp / "demo.edf"), str(tmp / "demo.mefd"), "UTC"
         make_demo_edf(a.edf)
     if a.mefd is None:
         ap.error("give the output session path (ending in .mefd)")
-    result = convert(a.edf, a.mefd, a.timezone, a.copy_patient, a.overwrite, **keys)
+    result = convert(a.edf, a.mefd, a.timezone, a.copy_patient, **keys)
     verify(a.mefd, result, keys.get("password2", ""))
     with mef3io.Reader(a.mefd, keys.get("password2", "")) as r:
         for name, ch in result["channels"].items():

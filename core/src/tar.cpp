@@ -411,7 +411,7 @@ void write_member_data(std::ofstream& out, const std::string& file_path, std::ui
 }  // namespace
 
 std::string archive_session(const std::string& session_dir, const std::string& tar_path,
-                            bool overwrite, const Control& ctl) {
+                            const Control& ctl) {
   fs::path src(session_dir);
   if (src.filename().empty()) src = src.parent_path();  // tolerate a trailing '/'
   if (!fs::is_directory(src)) throw IoError("session path is not a directory: " + session_dir);
@@ -423,10 +423,11 @@ std::string archive_session(const std::string& session_dir, const std::string& t
     throw IoError("session archive must end with .mefd.tar: " + tar_path);
 
   const std::string out_path = tar_path.empty() ? src.string() + ".tar" : tar_path;
-  if (fs::exists(out_path)) {
-    if (!overwrite) throw IoError("archive target already exists (pass overwrite=true): " + out_path);
-    if (fs::is_directory(out_path)) throw IoError("archive target is a directory: " + out_path);
-  }
+  // mef3io never deletes or replaces stored data: an existing target is refused.
+  if (fs::exists(out_path))
+    throw IoError("archive target already exists: " + out_path +
+                  "; mef3io never deletes or replaces data, so remove or rename it yourself, "
+                  "or archive to a new path");
   {
     // A target inside the source would archive (a growing) itself.
     const std::string s = fs::weakly_canonical(src).generic_string() + "/";
@@ -484,13 +485,17 @@ std::string archive_session(const std::string& session_dir, const std::string& t
     fs::remove(tmp_path, ec);  // includes Cancelled: no partial archive left behind
     throw;
   }
-  if (overwrite && fs::exists(out_path)) fs::remove(out_path);  // Windows rename won't replace
+  if (fs::exists(out_path)) {  // appeared while archiving: not ours, never replaced
+    std::error_code ec;
+    fs::remove(tmp_path, ec);
+    throw IoError("archive target appeared while archiving: " + out_path);
+  }
   fs::rename(tmp_path, out_path);
   return out_path;
 }
 
 std::string extract_session(const std::string& tar_path, const std::string& dest_dir,
-                            bool overwrite, const Control& ctl) {
+                            const Control& ctl) {
   if (!path_has_suffix(tar_path, ".mefd.tar"))
     throw IoError("session archive must end with .mefd.tar: " + tar_path);
   if (!dest_dir.empty() && !path_has_suffix(dest_dir, ".mefd"))
@@ -502,12 +507,11 @@ std::string extract_session(const std::string& tar_path, const std::string& dest
   // Default target strips ".tar": "name.mefd.tar" -> "name.mefd".
   const std::string dest =
       dest_dir.empty() ? tar_path.substr(0, tar_path.size() - 4) : dest_dir;
-  if (fs::exists(dest)) {
-    if (!overwrite)
-      throw IoError("extraction target already exists (pass overwrite=true): " + dest);
-    if (!fs::is_directory(dest))
-      throw IoError("extraction target exists and is not a directory: " + dest);
-  }
+  // mef3io never deletes or replaces stored data: an existing target is refused.
+  if (fs::exists(dest))
+    throw IoError("extraction target already exists: " + dest +
+                  "; mef3io never deletes or replaces data, so remove or rename it yourself, "
+                  "or extract to a new path");
 
   // Members are written under `dest` with the session root stripped, so
   // extract_session("name.mefd.tar") reproduces "name.mefd" regardless of how
@@ -528,9 +532,7 @@ std::string extract_session(const std::string& tar_path, const std::string& dest
 
   // Unpack into a temporary SIBLING (same filesystem, so the final move is a
   // rename) and move it into place only once it is whole. A cancelled or
-  // failed extraction then leaves nothing, and with `overwrite` the existing
-  // target is not touched until the replacement is complete — it used to be
-  // deleted first, so a failure part-way lost both. The name is unique per
+  // failed extraction then leaves nothing. The name is unique per
   // call so a leftover from a crashed run is never mistaken for ours, and
   // nothing that is not ours is ever removed.
   fs::path final_path(dest);
@@ -546,9 +548,7 @@ std::string extract_session(const std::string& tar_path, const std::string& dest
   }
   const fs::path staging =
       final_path.parent_path() / (final_path.filename().string() + ".mef3io-extract-" + tag);
-  const fs::path retired =
-      final_path.parent_path() / (final_path.filename().string() + ".mef3io-replaced-" + tag);
-  if (fs::exists(staging) || fs::exists(retired))
+  if (fs::exists(staging))
     throw IoError("staging directory already exists: " + staging.string());
 
   std::ifstream in(tar_path, std::ios::binary);
@@ -587,8 +587,7 @@ std::string extract_session(const std::string& tar_path, const std::string& dest
       out.flush();
       if (!out) throw IoError("write failed: " + out_path.string());
     }
-    // The last point a cancel or a throwing callback can stop the call; past
-    // here the target is replaced.
+    // The last point a cancel or a throwing callback can stop the call.
     ctl.check();
     progress.finish();
   } catch (...) {
@@ -597,37 +596,19 @@ std::string extract_session(const std::string& tar_path, const std::string& dest
     throw;
   }
 
-  // Swap in. An existing target (overwrite, checked above) is renamed aside
-  // first and deleted only after the new tree is in place, so no failure here
-  // can lose both: if the second rename fails the old one is put back.
-  const bool replacing = fs::exists(final_path);
-  if (replacing && !overwrite) {
-    // It was absent when we started; someone created it since. Not ours.
+  // Move into place. The target was absent when we started; if someone created
+  // it since it is not ours and is never replaced.
+  if (fs::exists(final_path)) {
     std::error_code ec;
     fs::remove_all(staging, ec);
-    throw IoError("extraction target appeared while extracting (pass overwrite=true to "
-                  "replace it): " + dest);
+    throw IoError("extraction target appeared while extracting: " + dest);
   }
   try {
-    if (replacing) fs::rename(final_path, retired);
-    try {
-      fs::rename(staging, final_path);
-    } catch (...) {
-      std::error_code ec;
-      if (replacing) fs::rename(retired, final_path, ec);
-      throw;
-    }
+    fs::rename(staging, final_path);
   } catch (...) {
     std::error_code ec;
     fs::remove_all(staging, ec);
     throw;
-  }
-  if (replacing) {
-    // The extraction succeeded; failing the call now would only make a caller
-    // redo it. A leftover (e.g. a file held open by a virus scanner on
-    // Windows) is named "<dest>.mef3io-replaced-<hex>" and safe to delete.
-    std::error_code ec;
-    fs::remove_all(retired, ec);
   }
   return dest;
 }

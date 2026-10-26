@@ -71,7 +71,9 @@ struct RecoveryReport {
 ///
 /// @param path      `.mefd` session directory. Tar archives are refused.
 /// @param apply     false (default) reports what it WOULD do and writes nothing.
-/// @param backup    copy each file to `<session>.recover-backup/` before writing.
+/// Whatever is changed or dropped is ALWAYS copied to `<session>.recover-backup/`
+/// first (there is no switch to turn that off; mef3io never discards data).
+///
 /// @param password  needed only to read encrypted metadata (the offset and
 ///                  rate, at a non-zero recording-time offset).
 ///
@@ -118,7 +120,7 @@ struct RecoveryReport {
 /// (negated) form is rewritten (in that form), else a note. The .tmet header
 /// is backed up and stamped Recovery; a stale end alone makes a channel's
 /// last segment need recovery there.
-RecoveryReport recover_session(const std::string& path, bool apply = false, bool backup = true,
+RecoveryReport recover_session(const std::string& path, bool apply = false,
                                const std::string& password = "", const Control& ctl = {});
 
 }  // namespace mef3io

@@ -223,7 +223,7 @@ def test_a_repair_is_recorded_and_survives_a_later_append(tmp_path):
     struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH])))
     tmet.write_bytes(bytes(raw))
 
-    report = mef3io.repair_session(str(path), ["sizing.difference-bytes"], backup=False)
+    report = mef3io.repair_session(str(path), ["sizing.difference-bytes"])
     assert report.repaired, report.summary()
     r = _region(tmet)
     assert r["last_op"] == REPAIR and r["mask"] == _bit(CREATE, REPAIR)
@@ -246,7 +246,7 @@ def test_a_recovery_is_recorded(tmp_path):
     struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:UH])))
     tidx.write_bytes(bytes(raw))
 
-    done = mef3io.recover_session(str(path), apply=True, backup=False)
+    done = mef3io.recover_session(str(path), apply=True)
     assert done.applied
     # Recovery then re-derives the declarations through repair_session (2.0),
     # which may stamp header-repair last; the recovery stays in the mask.

@@ -56,7 +56,7 @@ RECORD_HEADER_BYTES = 24
 
 def _write_session(path, channels=("ch1", "ch2"), session_text="session",
                    channel_text="channel", annotate=True):
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         for ch in channels:
             w.write(ch, np.sin(np.arange(2560) / 10.0), START, FS, precision=3)
         if annotate:
@@ -179,7 +179,7 @@ def test_legacy_session_records_agree_with_the_legacy_reader(tmp_path):
     from mef_tools.io import MefReader, MefWriter
 
     path = str(tmp_path / "legacy.mefd")
-    w = MefWriter(path, overwrite=True)
+    w = MefWriter(path)
     w.record_offset = START - 10 * 86400 * SECOND
     w.write_data(np.arange(5000, dtype=np.int32) * 1.0, "ch1", START, FS, precision=0)
     w.write_annotations(pd.DataFrame([{"time": START + SECOND, "type": "Note", "text": "s"}]))
@@ -552,7 +552,7 @@ def test_records_written_into_a_legacy_offset_session_agree_with_the_legacy_read
     from mef_tools.io import MefReader, MefWriter
 
     path = str(tmp_path / "legacy.mefd")
-    w = MefWriter(path, overwrite=True)
+    w = MefWriter(path)
     w.record_offset = START - 10 * 86400 * SECOND
     w.write_data(np.arange(5000, dtype=np.int32) * 1.0, "ch1", START, FS, precision=0)
     del w
@@ -658,7 +658,7 @@ def test_lntp_si4_layout_is_not_mistaken_for_int64(tmp_path, values):
 
 def _two_segment_session(path):
     """ch1 with two segments; channel-level and segment-0 records."""
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         w.write("ch1", np.zeros(2560), START, FS, precision=0)
         w.write("ch1", np.zeros(2560), START + 20 * SECOND, FS, precision=0, new_segment=True)
     _add_segment_records(path, text="segment")
@@ -711,7 +711,7 @@ def _legacy_session(path, rto, annotate=True, chans=("ch1",)):
     pd = pytest.importorskip("pandas")
     from mef_tools.io import MefWriter
 
-    w = MefWriter(str(path), overwrite=True)
+    w = MefWriter(str(path))
     w.record_offset = rto
     for ch in chans:
         w.write_data(np.arange(5000, dtype=np.int32) * 1.0, ch, START, FS, precision=0)
@@ -1019,7 +1019,7 @@ def test_a_level_1_writer_refuses_what_needs_the_locked_offset(tmp_path):
 
     rto = START - 10 * 86400 * SECOND
     path = str(tmp_path / "locked.mefd")
-    lw = MefWriter(path, overwrite=True, password1="lvl1", password2="lvl2")
+    lw = MefWriter(path, password1="lvl1", password2="lvl2")
     lw.record_offset = rto
     lw.write_data(np.arange(5000, dtype=np.int32) * 1.0, "ch1", START, FS, precision=0)
     del lw
@@ -1193,11 +1193,11 @@ def test_unreadable_metadata_beside_offset_zero_is_skipped_with_a_warning(tmp_pa
     path = tmp_path / "zero.mefd"
     _write_session(path, annotate=False)
     _corrupt_tmet(next(Path(path).glob("ch2.timd/*.segd/*.tmet")))
-    cw = CompatWriter(str(path), overwrite=False)
+    cw = CompatWriter(str(path))
     with pytest.warns(mef3io.UnreadableSegmentWarning, match="ch2"):
         cw.write_annotations([{"type": "Note", "time": START, "text": "ok"}])
     cw.close()
-    cw = CompatWriter(str(path), overwrite=False)       # a fresh writer reports it again
+    cw = CompatWriter(str(path))       # a fresh writer reports it again
     with pytest.warns(mef3io.UnreadableSegmentWarning, match="ch2"):
         cw.write_data(np.arange(512.0), "ch4", START, FS, precision=0)
     cw.close()
@@ -1223,7 +1223,7 @@ def test_a_refused_write_leaves_the_tree_untouched_and_the_channel_usable(tmp_pa
 
     def attempt(t):
         if how == "compat write_data":
-            cw = CompatWriter(str(path), overwrite=False)
+            cw = CompatWriter(str(path))
             try:
                 cw.write_data(np.arange(512.0), ch, t, FS, precision=0)
             finally:
@@ -1249,7 +1249,7 @@ def test_a_refused_write_leaves_the_tree_untouched_and_the_channel_usable(tmp_pa
 
 def _segment_layout(path, numbers, empty):
     """ch1 with real segments at `numbers` and metadata-less dirs at `empty`."""
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    with mef3io.Writer(str(path)) as w:
         for k in range(len(numbers)):
             w.write("ch1", np.arange(512.0), START + k * 100 * SECOND, FS, precision=0,
                     new_segment=k > 0)
@@ -1303,7 +1303,7 @@ def test_writers_warn_on_open_about_directories_without_metadata(tmp_path):
     with pytest.warns(mef3io.UnreadableSegmentWarning, match="without metadata"):
         mef3io.Writer(str(path)).close()
     with pytest.warns(mef3io.UnreadableSegmentWarning, match="without metadata"):
-        CompatWriter(str(path), overwrite=False).close()
+        CompatWriter(str(path)).close()
 
 
 S3 = 13312          # section 3; recording_time_offset is its first si8

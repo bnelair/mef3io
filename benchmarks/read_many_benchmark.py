@@ -39,7 +39,8 @@ def build(path: Path, channels: int) -> list[str]:
     n = int(FS * (WINDOW_S + 60))
     i = np.arange(n)
     names = [f"ch{c:03d}" for c in range(channels)]
-    with mef3io.Writer(str(path), overwrite=True) as w:
+    shutil.rmtree(path, ignore_errors=True)  # the benchmark's own scratch data; mef3io never deletes a session
+    with mef3io.Writer(str(path)) as w:
         for c, name in enumerate(names):
             x = (800 * np.sin(i / (7.0 + c)) + (i * 2654435761 % 32)).astype(np.int32)
             w.write_int32(name, x, 1.0, START, FS)

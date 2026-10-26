@@ -402,17 +402,21 @@ int mef3io_record_list_seizure_channel(const mef3io_record_list* list, int32_t i
 /* Pack a session directory into a single uncompressed tar archive (readable
  * directly by mef3io_reader_open; the directory is left untouched).
  * tar_path NULL or "" derives "<session_dir>.tar". The resulting archive path
- * is copied into out_path (may be NULL when not wanted). */
+ * is copied into out_path (may be NULL when not wanted). An existing target is
+ * refused (MEF3IO_ERR_IO). `overwrite` is kept only for ABI stability: any
+ * non-zero value returns MEF3IO_ERR_ARGUMENT (mef3io never deletes data). */
 int mef3io_archive_session(const char* session_dir, const char* tar_path, int overwrite,
                            char* out_path, size_t out_path_bytes);
 
 /* Inverse: unpack a session archive back into a directory. dest_dir NULL or
  * "" strips the ".tar" suffix ("name.mefd.tar" -> "name.mefd"). Refuses an
- * existing target unless overwrite. The directory path lands in out_path. */
+ * existing target; `overwrite` must be 0 (non-zero = MEF3IO_ERR_ARGUMENT, kept
+ * for ABI stability). The directory path lands in out_path. */
 /* ----- recovery ---------------------------------------------------------- */
 
 /* Make each segment's block index and data agree again after an interrupted
- * write. `apply` 0 reports what it WOULD do and writes nothing. `backup` saves
+ * write. `apply` 0 reports what it WOULD do and writes nothing. `backup` must be
+ * 1 (kept for ABI stability; 0 returns MEF3IO_ERR_ARGUMENT): recovery ALWAYS saves
  * what changes (never the whole .tdat, which may be tens of gigabytes) under
  * "<session>.recover-backup". A human-readable summary lands in `out_summary`.
  * `out_segments` receives the number of segments needing work (may be NULL).
@@ -447,8 +451,8 @@ int mef3io_recover_session_ex(const char* mefd_path, int apply, int backup, cons
 /* ----- writer ------------------------------------------------------------ */
 
 /* The writer's argument rules (#83), for a caller that must refuse BEFORE
- * mef3io_writer_open — which removes an existing session when overwrite is
- * set. MEF3IO_ERR_ARGUMENT (message in mef3io_last_error) when the block
+ * mef3io_writer_open (which fails the same way for any bad argument).
+ * MEF3IO_ERR_ARGUMENT (message in mef3io_last_error) when the block
  * length exceeds MEF3IO_MAX_BLOCK_SAMPLES (<= 0 = derive from the rate is
  * fine), or fs is not finite > 0, or ufact is 0 / NaN / infinite (negative
  * is a polarity inversion and allowed). Every write call checks the same. */
@@ -456,7 +460,11 @@ int mef3io_recover_session_ex(const char* mefd_path, int apply, int backup, cons
 int mef3io_check_block_length(int64_t samples_per_block);
 int mef3io_check_signal_parameters(double sampling_frequency, double units_conversion_factor);
 
-/* Rejects tar archives: tar sessions are read-only. */
+/* Rejects tar archives: tar sessions are read-only. An existing session is
+ * reopened for appending; mef3io never deletes one. `overwrite` is kept only
+ * for ABI stability: any non-zero value returns MEF3IO_ERR_ARGUMENT ("mef3io
+ * never deletes a session; remove or rename the folder yourself, or write to a
+ * new path"). */
 int mef3io_writer_open(const char* mefd_path, int overwrite, const char* password_1,
                        const char* password_2, mef3io_writer** out);
 void mef3io_writer_close(mef3io_writer* w);

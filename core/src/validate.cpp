@@ -1667,7 +1667,7 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       const std::string tmet_path = src->describe(files.tmet_rel);
       const std::string tidx_path = src->describe(files.tidx_rel);
       const std::string tdat_path = src->describe(files.tdat_rel);
-      if (repair->backup) {
+      {
         const fsys::path backup_root = backup_root_for(path);
         if (buffer.tmet_dirty) back_up(tmet_path, backup_root, files.tmet_rel);
         if (buffer.tidx_dirty) back_up(tidx_path, backup_root, files.tidx_rel);
@@ -1777,13 +1777,10 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
                   "this segment's files as no longer agreeing)";
         // Only name a backup that exists. Sending an operator to a directory
         // that was never created, mid-incident, is worse than saying nothing.
-        if (repair->backup)
-          reason += "; restore from " + backup_root_for(path).string() +
-                    " (the PRISTINE original — a backup is taken once and never "
-                    "overwritten, so restoring it also undoes any earlier successful "
-                    "repair of this segment)";
-        else
-          reason += "; no backup was taken (backup=false)";
+        reason += "; restore from " + backup_root_for(path).string() +
+                  " (the PRISTINE original — a backup is taken once and never "
+                  "overwritten, so restoring it also undoes any earlier successful "
+                  "repair of this segment)";
       }
       skip(reason);
     }
@@ -1815,7 +1812,7 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       continue;
     }
     try {
-      if (repair->backup) back_up(stamp.tmet.string(), backup_root_for(path), rel);
+      back_up(stamp.tmet.string(), backup_root_for(path), rel);
       detail::write_last_segment_stamp(stamp);
       note.stored = "written";
       note.message = "last segment stamped segment-repaired (header only): " + rel +
@@ -1824,8 +1821,7 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     } catch (const std::exception& e) {
       std::string reason = std::string("aborted stamping segment-repaired: ") + e.what() +
                            " — MAY ALREADY BE MODIFIED: " + rel;
-      reason += repair->backup ? "; restore from " + backup_root_for(path).string()
-                               : "; no backup was taken (backup=false)";
+      reason += "; restore from " + backup_root_for(path).string();
       reason += ".";
       reason += detail::STAMP_SKIPPED_CONSEQUENCE;
       report.skipped.push_back({channel,
