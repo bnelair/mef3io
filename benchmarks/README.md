@@ -180,7 +180,7 @@ inconsistent session is not a fast run.
 
 ### Measured (12-core laptop, ext4, 1.x `durability="full"`)
 
-Measured before 2.0, with the 1.x `durability="full"` barriers (three flushes
+Measured before 2.0, with the 1.x `durability="full"` barriers (five flushes
 per channel per append); 2.0 flushes only the `.tmet`, so these per-block
 times are an upper bound.
 

@@ -731,7 +731,24 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   the index or data — repair_session never does, which is what keeps it safe
   on anything. Index-ahead-of-data drops entries; data-ahead-of-index
   REBUILDS them from the RED block headers (CRC-checked). Dry run by
-  default. ONE declaration it does write (#83): at a NON-ZERO rto, where the
+  default. CRASH STATES (review of #153, all pinned in
+  tests/test_p44_crash_states.py, built by mixing old/new file images):
+  an index failing its OWN CRC (header + entries from different writes) is
+  NOT refused — entries kept up to the longest prefix the stored body CRC
+  covers (rolling CRC), then each only if the RED header at its offset agrees
+  (304 B per entry), rest rebuilt from .tdat; in each channel's LAST segment
+  the last append's blocks (back to its discontinuity-flagged first block,
+  <= 64 MiB) are block-CRC-checked, so entries pointing at zero pages drop.
+  DECLARATIONS: with apply, every segment it changed + every last segment
+  whose .tmet counts disagree with the index (index.block-count /
+  sample-count / header.entry-count, checked in the scan with
+  exact_difference_bytes=false; the .tmet NEWER than its data is the
+  dominant post-crash state since 1.x fast's best-effort header fdatasyncs
+  — which flushed the whole files — are gone) get ALL their repairable
+  findings fixed by CALLING repair_session per segment (exact difference
+  bytes; `RecoveredSegment.declarations`). The CLI's --apply also chains
+  repair on every apply (not only when recovery changed something). ONE
+  declaration recovery writes ITSELF (#83): at a NON-ZERO rto, where the
   validator's time checks stand down, it corrects the END TIME of the three
   UHs (.tmet = what info() reports) from the last kept block
   (`plan_end_times`, needs rto + fs from the .tmet, so `password=` matters).
@@ -765,14 +782,29 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   fsync before the `.tidx` that points at it, the `.tidx` fsync before its
   header patch, and the header-patch flushes (1.x's default "fast" was
   documented as "no flushes" but still flushed both patched headers
-  best-effort — 2 fsyncs/channel). Never flushed: a FRESH write (nothing
-  underneath to lose) and the DIRECTORY entry after the rename (losing it
-  keeps the previous complete file). Measured on ext4, 128 ch x 10-min
+  best-effort — 2 fsyncs/channel, and since fdatasync is per FILE that also
+  made the appended data/index durable before the .tmet: dropping it is what
+  made ".tmet newer than its data" the common crash state, hence recovery's
+  declaration step). ALSO flushed: a NEW segment or channel in a session that
+  held data when the SessionWriter opened it (`session_preexisted_` ONLY —
+  including "channel already has a segment" made test_p31's 2400-segment
+  fixture take 200 s: 3 fsyncs per segment kills conversions) — all three
+  fresh files before each rename (`SegmentSpec::flush_new_files`), since a
+  zero-length new .tidx/.tdat/.tmet fails the strict open of the WHOLE
+  session (verified). Unflushed new segments of a self-created session:
+  recovery REMOVES a channel's last segment whose files are missing/short
+  and whose .tdat holds no CRC-valid block (moved to the backup, empty .timd
+  too); with samples but no .tmet it is skipped with advice (a .tmet is not
+  rebuilt).
+  Never flushed: a brand-new session (nothing underneath to lose) and the
+  DIRECTORY entry after a rename (losing it keeps the previous complete file).
+  An append now THROWS if the .tmet flush fails (1.x fast ignored it). Measured on ext4, 128 ch x 10-min
   256 Hz append: 1.x full 6.0-6.5 s, 1.x fast 3.8 s, 2.0 2.5-2.8 s, no flush
   at all 0.74 s (~15 ms/channel for the .tmet). Pinned per file by the
   `detail::fsync_observer` test hook (core/tests/test_durability.cpp: fresh
   write 0 flushes; cached + reopened append = one `.tmet.mef3io-tmp` per
-  channel; new segment 0). Repair, rename, recovery and the copies keep their
+  channel; new segment / new channel in an existing session = 3; a failed
+  append's rollback publishes the restored .tidx flushed). Repair, rename, recovery and the copies keep their
   OWN flush rules — only the WRITER's option went.
   THE FLUSH IS THREE DIFFERENT CALLS with three different rules, and the
   platform differences are load-bearing: Linux `fdatasync`, macOS

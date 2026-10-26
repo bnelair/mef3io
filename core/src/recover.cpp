@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <map>
 #include <set>
 
 #include "durability.hpp"
@@ -19,6 +20,7 @@
 #include "mef3io/metadata.hpp"
 #include "mef3io/source.hpp"
 #include "mef3io/time.hpp"
+#include "mef3io/validate.hpp"
 
 namespace fsys = std::filesystem;
 
@@ -227,6 +229,58 @@ struct SegmentDir {
   bool is_last = false;  ///< the channel's last segment (last_segment_dir's rule)
 };
 
+/// After the index and the data agree, bring each target segment's
+/// DECLARATIONS (.tmet section 2 + the three universal headers) back to what
+/// they hold — through repair_session, so it is exactly the validator's own
+/// repair (stored images edited, never re-serialized; backups; provenance
+/// HeaderRepair; the last-segment stamp). Every repairable finding of the
+/// segment is fixed: once the index changed, all derived declarations follow
+/// it. Exact difference bytes: blocks the old .tmet never described may need
+/// a larger buffer than it declares (an allocation contract).
+void rederive_declarations(const std::string& path, const std::string& password, bool backup,
+                           const std::vector<std::pair<std::string, int>>& targets,
+                           RecoveryReport& report) {
+  std::set<std::pair<std::string, int>> done;
+  for (const auto& key : targets) {
+    if (!done.insert(key).second) continue;
+    ValidateOptions vo;
+    vo.password = password;
+    vo.channels = {key.first};
+    vo.segments = {key.second};
+    const std::string where = key.first + " segment " + std::to_string(key.second);
+    try {
+      const Report v = validate_session(path, vo);
+      std::vector<std::string> ids;
+      for (const auto& f : v.findings)
+        if (f.repairable && std::find(ids.begin(), ids.end(), f.check_id) == ids.end())
+          ids.push_back(f.check_id);
+      for (const auto& s : v.skipped)
+        report.notes.push_back(where + ": declarations not re-derived: " + s.reason);
+      if (ids.empty()) continue;
+      RepairSelection sel;
+      sel.check_ids = ids;
+      sel.channels = {key.first};
+      sel.segments = {key.second};
+      sel.backup = backup;
+      const Report r = repair_session(path, sel, vo);
+      std::vector<std::string> repaired;
+      for (const auto& f : r.findings)
+        if (f.repaired && std::find(repaired.begin(), repaired.end(), f.check_id) == repaired.end())
+          repaired.push_back(f.check_id);
+      for (auto& seg : report.segments)
+        if (seg.channel == key.first && seg.segment_number == key.second)
+          seg.declarations = repaired;
+      for (const auto& n : r.findings)
+        if (n.check_id == "provenance.last-segment") report.notes.push_back(where + ": " + n.message);
+      if (backup && r.segments_repaired > 0)
+        report.notes.push_back(where + ": declarations re-derived (" + std::to_string(repaired.size()) +
+                               " check(s)); originals under " + path + ".repair-backup");
+    } catch (const std::exception& e) {
+      report.notes.push_back(where + ": declarations not re-derived: " + e.what());
+    }
+  }
+}
+
 }  // namespace
 
 RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
@@ -292,6 +346,16 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
   progress.start();
 
   std::vector<PlannedRecovery> plan;
+  // Channels' last segments whose index and data agree: their DECLARATIONS
+  // are checked after the scan (the .tmet may be newer or older than the
+  // index after a power cut — see declaration_checks below).
+  std::vector<std::pair<std::string, int>> last_segments;
+  struct Removal {
+    fsys::path channel_dir, dir;
+    std::string channel;
+    std::size_t report_index;
+  };
+  std::vector<Removal> removals;
   std::uint64_t seg_base = 0;  // progress at the start of the current segment
 
   // ---- phase 1: scan (reads only; cancellable) ----------------------------
@@ -313,9 +377,50 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
     const std::string description = channel + "/" + base;
     ++report.segments_examined;
 
-    if (!fsys::exists(tidx) || !fsys::exists(tdat)) {
-      report.skipped.push_back(description + ": segment is incomplete (missing .tidx or .tdat)");
-      continue;
+    // A NEW segment (or channel) cut off by a power cut: one of its files is
+    // missing, empty or shorter than its header — the classic outcome of
+    // renaming an unflushed file to a new name — so a strict open of the
+    // whole session fails on it. If it is the channel's LAST segment and its
+    // .tdat holds no whole, CRC-valid block, it holds no sample either, and
+    // recovery REMOVES it (moved to the backup). With samples on disk it is
+    // left alone: a lost .tmet cannot be rebuilt (skipped, with what to do).
+    {
+      const fsys::path tmet_path = seg / (base + ".tmet");
+      std::error_code e1, e2, e3;
+      const auto sz_tidx = fsys::exists(tidx) ? fsys::file_size(tidx, e1) : 0;
+      const auto sz_tdat = fsys::exists(tdat) ? fsys::file_size(tdat, e2) : 0;
+      const auto sz_tmet = fsys::exists(tmet_path) ? fsys::file_size(tmet_path, e3) : 0;
+      const bool incomplete = sz_tidx < fmt::UNIVERSAL_HEADER_BYTES ||
+                              sz_tdat < fmt::UNIVERSAL_HEADER_BYTES ||
+                              sz_tmet < fmt::METADATA_FILE_BYTES;
+      if (incomplete) {
+        bool has_block = false;
+        if (sz_tdat >= fmt::UNIVERSAL_HEADER_BYTES + fmt::RED_BLOCK_HEADER_BYTES) {
+          std::ifstream in(tdat, std::ios::binary);
+          fmt::RedBlockHeader h;
+          has_block = in && block_looks_real(in, static_cast<std::uint64_t>(sz_tdat),
+                                             fmt::UNIVERSAL_HEADER_BYTES, h);
+        }
+        if (sd.is_last && !has_block) {
+          RecoveredSegment out;
+          out.channel = channel;
+          out.segment_number = segment_number;
+          out.path = description;
+          out.action = "the segment's files are missing, empty or shorter than their headers "
+                       "and its data holds no block (a new segment cut off before its data "
+                       "reached the disk): the segment is removed";
+          report.segments.push_back(std::move(out));
+          if (apply) removals.push_back({sd.channel_dir, seg, channel, report.segments.size() - 1});
+        } else {
+          report.skipped.push_back(
+              description + ": segment is incomplete (a file is missing or shorter than its "
+                            "header" +
+              std::string(has_block ? ", while its data holds samples" : "") +
+              "); it cannot be rebuilt. Open with strict=False to read the rest of the "
+              "session" + (has_block ? "" : ", and remove this segment folder"));
+        }
+        continue;
+      }
     }
 
     // The .tidx is read whole (56 bytes per block — megabytes at most). The
@@ -344,10 +449,22 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
 
     // Recovery DECIDES what to keep from these bytes, and then truncates —
     // unlike declaration repair, which never touches the index or the data.
-    // So the index has to verify first. A CRC mismatch means the block table
-    // itself is damaged, and "interrupted append" is then a guess: the same
-    // pattern is produced by a corrupted offset, and acting on it would drop
-    // real blocks or truncate real samples.
+    // When the index passes its own CRC its entries are trusted as written.
+    //
+    // When it does NOT, the header and the entries came from different
+    // writes — the normal outcome of a power cut, since an append extends the
+    // entries and patches the header in place with no flush between (2.0):
+    // entries without their header, a header without its entries, entries
+    // zero-extended. Refusing there left intact samples unreadable. Instead
+    // no entry is taken on trust beyond what a CRC vouches for: the longest
+    // prefix the stored body CRC covers (an old header over new entries), and
+    // past it, each entry only if the RED block header at its offset — the
+    // placement authority, covered by the block CRC — says the same thing.
+    // From the first entry that does not, the index is rebuilt from the
+    // CRC-checked blocks in .tdat, as for any unindexed tail. Streaming: one
+    // 304-byte header per unverified entry, never the data file whole.
+    std::size_t crc_trusted = static_cast<std::size_t>(-1);  // all: CRC passed
+    bool index_crc_bad = false;
     {
       const ui4 stored_header = byteio::read<ui4>(index_bytes, 0);
       const ui4 stored_body = byteio::read<ui4>(index_bytes, 4);
@@ -367,10 +484,22 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
       const bool body_ok = stored_body == real_body || stored_body == real_body_to_eof ||
                            stored_body == fmt::CRC_NO_ENTRY;
       if (!header_ok || !body_ok) {
-        report.skipped.push_back(
-            description + ": the block index does not pass its own CRC, so it cannot be used "
-                          "to decide what the data file should contain; nothing was changed");
-        continue;
+        index_crc_bad = true;
+        crc_trusted = 0;
+        if (header_ok) {
+          // The longest whole-entry prefix the stored body CRC was taken
+          // over (the rolling CRC needs one pass over the in-memory index).
+          ui4 rolling = fmt::CRC_START_VALUE;
+          const std::size_t n = whole / fmt::TIME_SERIES_INDEX_BYTES;
+          for (std::size_t i = 0; i < n; ++i) {
+            rolling = crc::calculate(
+                std::span<const ui1>(index_bytes)
+                    .subspan(fmt::UNIVERSAL_HEADER_BYTES + i * fmt::TIME_SERIES_INDEX_BYTES,
+                             fmt::TIME_SERIES_INDEX_BYTES),
+                rolling);
+            if (rolling == stored_body) crc_trusted = i + 1;
+          }
+        }
       }
     }
 
@@ -389,11 +518,27 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
     for (std::size_t i = 0; i < n_entries; ++i) {
       auto e = fmt::TimeSeriesIndex::parse(
           entries.subspan(i * fmt::TIME_SERIES_INDEX_BYTES, fmt::TIME_SERIES_INDEX_BYTES));
-      const bool sane = e.file_offset >= fmt::UNIVERSAL_HEADER_BYTES &&
-                        e.file_offset >= previous_end - 1 &&
-                        e.number_of_samples != fmt::UI4_NO_ENTRY &&
-                        e.block_bytes != fmt::UI4_NO_ENTRY &&
-                        static_cast<std::uint64_t>(e.file_offset) + e.block_bytes <= data_size;
+      bool sane = e.file_offset >= fmt::UNIVERSAL_HEADER_BYTES &&
+                  e.file_offset >= previous_end - 1 &&
+                  e.number_of_samples != fmt::UI4_NO_ENTRY &&
+                  e.block_bytes != fmt::UI4_NO_ENTRY &&
+                  static_cast<std::uint64_t>(e.file_offset) + e.block_bytes <= data_size;
+      if (sane && i >= crc_trusted) {
+        // No CRC vouches for this entry: keep it only if the block header at
+        // its offset agrees (the header's own CRC is checked by the decoder).
+        ctl.check();
+        const auto head = read_range(data_in, static_cast<std::uint64_t>(e.file_offset),
+                                     fmt::RED_BLOCK_HEADER_BYTES);
+        sane = head.size() == fmt::RED_BLOCK_HEADER_BYTES;
+        if (sane) {
+          const auto h = fmt::RedBlockHeader::parse(head);
+          sane = h.start_time == e.start_time && h.number_of_samples == e.number_of_samples &&
+                 h.block_bytes == e.block_bytes;
+        }
+        if (sane && i > 0 && e.start_sample != last_kept.start_sample +
+                                                   static_cast<si8>(last_kept.number_of_samples))
+          sane = false;
+      }
       if (!sane) {                       // this entry and everything after it
         index_ahead = true;              // describes bytes that are not there
         break;
@@ -401,6 +546,43 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
       previous_end = e.file_offset + e.block_bytes;
       last_kept = e;
       ++kept;
+    }
+    // The LAST append of a channel's last segment is the one a power cut can
+    // tear without the index noticing: its entries landed, but some of the
+    // .tdat pages they point at did not (they read back as zeros, or as old
+    // bytes past a size the file system already extended). So the blocks of
+    // that append are CRC-checked against their entries, walking back from
+    // the end to the append's first block (the writer flags it as a
+    // discontinuity), at most 64 MiB of data — the bytes just written, not
+    // the file. Everything from the first bad block on is treated as never
+    // written: its entries are dropped, and the data from there on is a torn
+    // tail (backed up, then truncated), as after any interrupted append.
+    if (sd.is_last && kept > 0) {
+      constexpr std::uint64_t kVerifyBytes = 64ull << 20;
+      std::uint64_t verified = 0;
+      std::size_t first_bad = kept;
+      for (std::size_t j = kept; j-- > 0;) {
+        ctl.check();
+        const auto e = fmt::TimeSeriesIndex::parse(
+            entries.subspan(j * fmt::TIME_SERIES_INDEX_BYTES, fmt::TIME_SERIES_INDEX_BYTES));
+        fmt::RedBlockHeader h;
+        const bool ok = block_looks_real(data_in, data_size,
+                                         static_cast<std::uint64_t>(e.file_offset), h) &&
+                        h.start_time == e.start_time &&
+                        h.number_of_samples == e.number_of_samples &&
+                        h.block_bytes == e.block_bytes;
+        if (!ok) first_bad = j;
+        verified += e.block_bytes;
+        if ((e.red_block_flags & fmt::RedBlockHeader::DISCONTINUITY_MASK) || verified >= kVerifyBytes)
+          break;
+      }
+      if (first_bad < kept) {
+        kept = first_bad;
+        index_ahead = true;
+        if (kept > 0)
+          last_kept = fmt::TimeSeriesIndex::parse(entries.subspan(
+              (kept - 1) * fmt::TIME_SERIES_INDEX_BYTES, fmt::TIME_SERIES_INDEX_BYTES));
+      }
     }
     const si8 dropped = static_cast<si8>(n_entries) - static_cast<si8>(kept);
 
@@ -468,7 +650,8 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
     std::vector<ui1> tmet_header;
     std::string end_note;
     const fsys::path tmet = seg / (base + ".tmet");
-    const bool needs_work = dropped != 0 || recovered != 0 || tail != 0 || stale_headers != 0;
+    const bool needs_work =
+        dropped != 0 || recovered != 0 || tail != 0 || stale_headers != 0 || index_crc_bad;
     const bool is_last = sd.is_last;
     if (n_after > 0 && (needs_work || is_last) && data_head.size() >= fmt::UNIVERSAL_HEADER_BYTES) {
       try {
@@ -504,8 +687,10 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
 
     if (!end_note.empty())
       report.notes.push_back(description + ": end time left as is: " + end_note);
-    if (dropped == 0 && recovered == 0 && tail == 0 && stale_headers == 0 && stale_end == 0)
-      continue;  // segment is fine
+    if (!needs_work && stale_end == 0) {
+      if (is_last) last_segments.push_back({channel, segment_number});
+      continue;  // segment is fine (its declarations are checked below)
+    }
 
     RecoveredSegment out;
     out.channel = channel;
@@ -517,13 +702,18 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
     out.blocks_dropped = dropped;
     out.tdat_bytes_dropped = tail;
     std::string what;
+    if (index_crc_bad)
+      what += "the block index failed its CRC (its header and entries are from different "
+              "writes); kept " + std::to_string(kept) +
+              " entr(ies) that match their RED block headers; ";
     if (recovered)
       what += "recovered " + std::to_string(recovered) +
               " block(s) that reached .tdat but were never indexed";
     if (dropped) {
       if (!what.empty()) what += "; ";
       what += "dropped " + std::to_string(dropped) +
-              " index entr(ies) pointing past the end of .tdat";
+              " index entr(ies) pointing past the end of .tdat or at blocks that never "
+              "fully reached it";
     }
     if (tail) {
       if (!what.empty()) what += "; ";
@@ -544,6 +734,8 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
               " universal header(s) and is set from the last block (the segment has a "
               "recording-time offset, where repair_session leaves times alone)";
     }
+    while (what.size() >= 2 && what.compare(what.size() - 2, 2, "; ") == 0)
+      what.resize(what.size() - 2);
     out.action = what;
     report.segments.push_back(std::move(out));
 
@@ -570,6 +762,63 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
     p.tmet_header = std::move(tmet_header);
     plan.push_back(std::move(p));
   }
+  // ---- declarations of the segments whose index and data agree ------------
+  // 2.0 flushes only the .tmet, so after a power cut the published .tmet can
+  // be NEWER than the index and data it describes (the common case on ext4:
+  // the rename is committed within seconds, the in-place extensions later),
+  // or OLDER (the rename itself was lost). Either way the index and the data
+  // agree, the loop above sees nothing, and the segment declares blocks and
+  // samples it does not hold (readers report an end with NaN behind it, and
+  // a recorder re-sending its buffer is refused as overlapping) or fails to
+  // declare ones it does (meflib reads the segment short). Only an append
+  // extends a segment, so only each channel's LAST segment is checked: the
+  // validator's count checks, metadata + index only (no block reads).
+  std::vector<std::pair<std::string, int>> declaration_targets;
+  if (!last_segments.empty()) {
+    ValidateOptions vo;
+    vo.password = password;
+    vo.exact_difference_bytes = false;
+    vo.check_ids = {"index.block-count", "index.sample-count", "header.entry-count"};
+    std::set<std::string> chs;
+    std::set<int> nums;
+    for (const auto& [c, n] : last_segments) {
+      chs.insert(c);
+      nums.insert(n);
+    }
+    vo.channels.assign(chs.begin(), chs.end());
+    vo.segments.assign(nums.begin(), nums.end());
+    Control inner;
+    inner.cancel = ctl.cancel;  // cancel only: progress is this call's own
+    const Report v = validate_session(path, vo, inner);
+    std::map<std::pair<std::string, int>, std::vector<const Finding*>> by_seg;
+    for (const auto& f : v.findings) {
+      const auto key = std::make_pair(f.channel, f.segment_number);
+      if (std::find(last_segments.begin(), last_segments.end(), key) == last_segments.end())
+        continue;
+      if (f.check_id.rfind("crc.", 0) == 0) continue;  // not ours to fix
+      by_seg[key].push_back(&f);
+    }
+    for (const auto& [key, fs] : by_seg) {
+      RecoveredSegment out;
+      out.channel = key.first;
+      out.segment_number = key.second;
+      out.path = fs.front()->path;
+      std::string what =
+          "the metadata (.tmet) does not describe what the index and data hold — the "
+          "segment's last append was published without its data, or the other way round: ";
+      for (std::size_t i = 0; i < fs.size(); ++i) {
+        if (std::find(out.declarations.begin(), out.declarations.end(), fs[i]->check_id) ==
+            out.declarations.end())
+          out.declarations.push_back(fs[i]->check_id);
+        what += (i ? "; " : "") + fs[i]->message;
+      }
+      what += apply ? " — re-derived from the index" : " — would be re-derived from the index";
+      out.action = what;
+      report.segments.push_back(std::move(out));
+      declaration_targets.push_back(key);
+    }
+  }
+
   // The last point at which a cancel is honoured. Nothing has been written.
   ctl.check();
   // finish() belongs HERE, before anything is written: progress measures the
@@ -740,6 +989,49 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
         last && detail::segment_number_of(last->stem().string()) != p.segment_number)
       channels_to_stamp.insert(p.channel_dir);
   }
+  // Dataless segments cut off by a power cut (see the scan): moved to the
+  // backup (or deleted without one); a channel folder left without segments
+  // goes with them — it held no sample.
+  for (const auto& rm : removals) {
+    std::error_code ec;
+    if (backup) {
+      report.backup_root = backup_root.string();
+      const fsys::path dest = backup_root / rm.channel / rm.dir.filename();
+      fsys::create_directories(dest.parent_path());
+      fsys::remove_all(dest, ec);
+      fsys::rename(rm.dir, dest, ec);
+    } else {
+      fsys::remove_all(rm.dir, ec);
+    }
+    if (ec) {
+      report.skipped.push_back(report.segments[rm.report_index].path +
+                               ": could not be removed: " + ec.message());
+      withdrawn[rm.report_index] = true;
+      continue;
+    }
+    bool any = false;
+    for (const auto& e : fsys::directory_iterator(rm.channel_dir, ec))
+      if (e.is_directory() && e.path().extension() == ".segd") any = true;
+    if (!any && !ec) {
+      if (backup) {
+        // Keep whatever else the folder held (channel records) in the backup.
+        const fsys::path dest = backup_root / rm.channel / "channel-folder";
+        fsys::remove_all(dest, ec);
+        fsys::rename(rm.channel_dir, dest, ec);
+      } else {
+        fsys::remove_all(rm.channel_dir, ec);
+      }
+      if (!ec)
+        report.notes.push_back(rm.channel + ": the channel held no other segment, so its "
+                                            "folder was removed too");
+    }
+  }
+
+  for (const auto& p : plan)
+    if (!withdrawn[p.report_index])
+      declaration_targets.insert(declaration_targets.begin(), {p.channel, p.segment_number});
+  if (apply) rederive_declarations(path, password, backup, declaration_targets, report);
+
   if (std::find(withdrawn.begin(), withdrawn.end(), true) != withdrawn.end()) {
     std::vector<RecoveredSegment> still;
     for (std::size_t i = 0; i < report.segments.size(); ++i)

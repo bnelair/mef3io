@@ -55,32 +55,64 @@ not durable, so without that flush a power cut could publish the new name over
 bytes still in cache — a short `.tmet`, which makes the **whole session** fail
 to open, not just one segment. That barrier stays, whatever it costs.
 
+A NEW segment, or a new channel, in a session that already held data when the
+`Writer` opened it is flushed too: its three fresh files (`.tdat`, `.tidx`,
+`.tmet`), each before it is renamed into place. A zero-length file there — the
+classic outcome of renaming an unflushed file to a new name — would fail the
+strict open of the whole session, days of data included. That is three flushes
+per new segment, once a day or so (measured: a new segment on all 128
+channels of a reopened session, ~5 s on ext4). A session the `Writer` created
+itself is not flushed (see the limits below).
+
 Nothing else is flushed. The `.tdat` and `.tidx` are extended **in place**
-(rewriting either whole would be `O(session)`), and the headers patched in
-place, without a barrier between them. So a power cut or OS crash mid-append
-(a crash of only the *process* is harmless — the OS still writes what it was
-given) can leave the **last append of a segment** torn:
+(rewriting either whole would be `O(session)`), and their headers patched in
+place, with no barrier between them. So a power cut or OS crash mid-append (a
+crash of only the *process* is harmless — the OS still writes what it was
+given) can leave the **last append of a segment** in any mix of old and new
+bytes. `recover --apply` restores each of them to a valid session holding every
+sample whose bytes reached the disk (pinned state by state in
+`tests/test_p44_crash_states.py`, built from real old/new file images):
 
-| state after a power cut | detected by | repaired by |
+| what reached the disk | what you see before recovery | what `recover --apply` does |
 |---|---|---|
-| index references bytes that never landed | `index.block-offsets` | `recover_session` drops the entries |
-| blocks in `.tdat` the index never mentioned | `index.data-coverage` | `recover_session` rebuilds them from the RED headers |
-| torn tail on either file | the body CRCs | `recover_session` drops the fragment |
-| stale universal-header counts | `header.entry-count` | `recover_session`, then `repair_session` |
-| the `.tmet` rename lost (old `.tmet` kept) | the checks above | `recover_session` |
+| the `.tmet` only (data and index not) — the most likely state on ext4 for some seconds after an append, since the rename is committed before the in-place extensions | the end time covers samples that read as NaN; a recorder re-sending its buffer is refused as overlapping | reports the segment; re-derives its declarations from the index (the validator's own repairs) |
+| data and index, not the `.tdat`/`.tidx` header patches | `header.entry-count` (a meflib reader reads the segment short) | rewrites the headers' counts |
+| data and index, not the `.tmet` (its rename lost) | the appended samples are invisible | reports the segment; re-derives its declarations |
+| `.tidx` entries without their header, a header without its entries, or entries zero-extended (the index fails its CRC) | the appended samples read as NaN; the validator skips the segment | keeps the entries the stored CRC covers, and past them each entry whose RED block header agrees; rebuilds the rest from the CRC-checked blocks in `.tdat` |
+| the index, not all of the data (entries past the end, or pointing at pages that read back as zeros) | a read may fail, or return NaN | CRC-checks the last append's blocks, drops the entries from the first bad one, truncates the torn tail (backed up) |
+| the data, not the index | the appended samples read as NaN | indexes the CRC-valid blocks from their RED headers |
+| part of the data (a torn `.tdat`) | | keeps every whole, CRC-valid block, drops the fragment |
+| a new segment or channel whose files are empty (renamed before their bytes landed) | the strict open of the whole session fails | removes the segment when its data holds no block |
 
-So the failure mode is **"run `recover` after an unclean shutdown"**, not "lose
-the recording" — and data committed by an *earlier* append is never at risk,
-because nothing rewrites it. A fresh write flushes nothing at all: there is
-nothing underneath it to lose, and a crash leaves an incomplete session either
-way.
+Every segment recovery changes, and every last segment whose `.tmet` disagrees
+with its index, then has its declarations re-derived from the index, so
+recovery alone leaves a session that validates clean, and a recorder can carry
+on — or re-send what was lost — from where the data really ends. Data
+committed by an *earlier* append is never at risk, because nothing rewrites it.
+
+Limits, stated exactly:
+
+- Within the torn append, blocks that follow a hole (a block that did not land
+  while later ones did) are dropped with the torn tail; they are in the backup.
+  The CRC check reaches back to the append's first block, at most 64 MiB.
+- New segments and channels written by the `Writer` that CREATED the session
+  are not flushed (a conversion writing thousands of segments would pay three
+  flushes each). If a power cut leaves one of them with empty files, recovery
+  removes it when its data holds no block (nothing is lost; it goes to the
+  backup). If its samples landed but its `.tmet` did not, the `.tmet` cannot
+  be rebuilt: recovery skips the segment and says so, and the session opens
+  with `strict=False`.
+- An append FAILS if the `.tmet` flush fails (1.x's default ignored flush
+  errors). On a mount whose flush returns an error, writes stop with the OS
+  error rather than claim a durability they do not have.
 
 !!! note "Changed in 2.0"
     1.x had a `durability=` option (`"fast"`, the default, or `"full"`, which
     also flushed the `.tdat` before the `.tidx` that points at it and the
     `.tidx` before its header). 2.0 removed it: every write takes the path
     above, and passing `durability=` raises `TypeError`. The torn states the
-    extra barriers prevented are exactly the ones `recover_session` repairs.
+    extra barriers prevented are the ones in the table above; recovery
+    (extended in 2.0 for the ones 1.x could not reach) repairs them.
 
 !!! note "Still more than the reference implementation"
     meflib does no durability work at all. Its single `fflush` is explicitly
@@ -89,7 +121,9 @@ way.
     `FlushFileBuffers`, and it writes files directly rather than through a
     temp-and-rename, so a power cut can leave it a short `.tmet`.
 
-The cost is one `fdatasync` per channel per append. Measured on ext4, 128
+The cost is one `fdatasync` per channel per append (Linux; macOS uses
+`F_FULLFSYNC`, Windows `FlushFileBuffers` — not measured, and typically slower
+per call). Measured on ext4, 128
 channels × 10-minute blocks at 256 Hz, one `Writer` held open (median of five
 appends, three runs each):
 
@@ -114,8 +148,8 @@ python -m mef3io recover SESSION.mefd            # dry run, writes nothing
 python -m mef3io recover SESSION.mefd --apply
 ```
 
-An interrupted append leaves one of two shapes, and they are **not** treated the
-same, because one has lost data and the other has not:
+What it does per state is in the table above. Two shapes are **not** treated
+the same, because one has lost data and the other has not:
 
 - **Index ahead of data** — entries reference bytes that never landed. Those
   samples do not exist, so the entries are dropped.
@@ -125,10 +159,12 @@ same, because one has lost data and the other has not:
   flag, which is everything an index entry needs. Only blocks whose CRC
   verifies are indexed — a torn tail is not a block.
 
-Recovery is deliberately separate from `repair_session`. Repair only ever
-rewrites declarations, which is what makes it safe to run on anything; recovery
-may change the index, so it is a dry run by default and backs up what it
-changes first. The CLI re-derives the declarations afterwards for you.
+Recovery alone may change the index and the data. Its declaration step goes
+through `repair_session`, which only ever rewrites declarations — so the
+declarations are fixed by exactly the code the validator's repairs use (stored
+images edited, backups, provenance). Recovery is a dry run by default and
+backs up what it changes first. The CLI's `--apply` then also repairs anything
+else the validator still reports as repairable.
 
 On a session of hundreds of gigabytes, validation (with exact
 `maximum_difference_bytes`) and a recovery that has a long unindexed tail to

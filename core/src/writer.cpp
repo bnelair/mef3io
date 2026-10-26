@@ -60,7 +60,8 @@ using detail::copy_file_identity;
 using detail::replace_file;
 using detail::fsync_file_or_throw;
 
-void write_file_atomic(const std::string& path, std::span<const ui1> bytes) {
+void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
+                       bool flush_new = false) {
   const fs::path target(path);
   const fs::path tmp = target.parent_path() / (target.filename().string() + ".mef3io-tmp");
   std::error_code ignored;
@@ -76,9 +77,14 @@ void write_file_atomic(const std::string& path, std::span<const ui1> bytes) {
   // confined to the last append of one segment, detected by the validator and
   // fixed by `recover_session`.
   //
-  // A FRESH file is not flushed: there is nothing underneath to lose, and a
-  // crash part-way leaves an incomplete session either way (a 128-channel
-  // session writes ~400 files; flushing each cost ~3x the wall clock).
+  // A FRESH file is flushed only when the caller says so (`flush_new`): a new
+  // segment, or a new channel, in a session that already held data. There a
+  // zero-length .tmet, .tidx or .tdat — the classic outcome of renaming an
+  // unflushed file to a NEW name — fails the strict open of the WHOLE
+  // session, days of data included (review of #153). A fresh SESSION is not
+  // flushed: nothing underneath it to lose, and a crash part-way leaves an
+  // incomplete session either way (a 128-channel session writes ~400 files;
+  // flushing each cost ~3x the wall clock).
   const bool replacing = fs::exists(target, ignored);
   fs::remove(tmp, ignored);
   try {
@@ -91,7 +97,7 @@ void write_file_atomic(const std::string& path, std::span<const ui1> bytes) {
     // Flush the CONTENT before the rename, but not the directory entry after
     // it. Losing the rename is harmless: the old file is still there, complete
     // and consistent, which is worth more than keeping the last append.
-    if (replacing) fsync_file_or_throw(tmp.string());
+    if (replacing || flush_new) fsync_file_or_throw(tmp.string());
     replace_file(tmp, target);
   } catch (...) {
     fs::remove(tmp, ignored);
@@ -118,8 +124,8 @@ std::array<ui1, 16> random_uuid() {
   return u;
 }
 
-void write_file(const std::string& path, const std::vector<ui1>& bytes) {
-  write_file_atomic(path, bytes);
+void write_file(const std::string& path, const std::vector<ui1>& bytes, bool flush_new = false) {
+  write_file_atomic(path, bytes, flush_new);
 }
 
 // Same, for `.tmet` — a FIXED-length record. The body CRC must be bounded by
@@ -362,7 +368,7 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     uh.serialize(file);
     file.insert(file.end(), tdat_body.begin(), tdat_body.end());
     finalize_crcs(file);
-    write_file((fs::path(segment_dir) / (base + ".tdat")).string(), file);
+    write_file((fs::path(segment_dir) / (base + ".tdat")).string(), file, spec.flush_new_files);
   }
 
   // --- .tidx ---
@@ -377,7 +383,7 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
       file.insert(file.end(), entry.begin(), entry.end());
     }
     finalize_crcs(file);
-    write_file((fs::path(segment_dir) / (base + ".tidx")).string(), file);
+    write_file((fs::path(segment_dir) / (base + ".tidx")).string(), file, spec.flush_new_files);
   }
 
   // --- .tmet ---
@@ -468,7 +474,7 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     // Equivalent here (this image is exactly METADATA_FILE_BYTES), but stated
     // explicitly so the fixed-length rule holds for every .tmet we write.
     finalize_metadata_crcs(file);
-    write_file((fs::path(segment_dir) / (base + ".tmet")).string(), file);
+    write_file((fs::path(segment_dir) / (base + ".tmet")).string(), file, spec.flush_new_files);
   }
 
   if (out_max_difference_bytes) *out_max_difference_bytes = max_difference_bytes;

@@ -86,7 +86,8 @@ def test_data_ahead_of_index_is_recovered_not_discarded(tmp_path):
     done = mef3io.recover_session(str(path), apply=True)
     assert done.applied
     assert _entries(tidx) == full
-    mef3io.repair_session(str(path), mef3io.Validator(str(path)).validate().repairable_check_ids)
+    # Recovery re-derives the declarations itself (2.0): nothing is left to repair.
+    assert mef3io.Validator(str(path)).validate().repairable_check_ids == []
 
     with mef3io.Reader(str(path)) as r:
         got = r.read("ch1")
@@ -113,8 +114,7 @@ def test_index_ahead_of_data_drops_the_unbacked_entries(tmp_path):
     assert seg.blocks_dropped > 0
     assert _entries(tidx) < full
 
-    mef3io.repair_session(str(path), mef3io.Validator(str(path)).validate().repairable_check_ids)
-    assert mef3io.Validator(str(path)).validate().ok, "recovery must leave a valid session"
+    assert mef3io.Validator(str(path)).validate().ok, "recovery alone must leave a valid session"
     with mef3io.Reader(str(path)) as r:
         assert len(r.read("ch1")) > 0, "the surviving blocks must still read"
 
@@ -195,28 +195,32 @@ def test_the_durability_option_is_gone(tmp_path):
     )
 
 
-def test_recovery_refuses_an_index_that_fails_its_own_crc(tmp_path):
-    """Recovery DECIDES what to keep from the index, then truncates.
+def test_an_index_that_fails_its_own_crc_is_rebuilt_from_the_blocks(tmp_path):
+    """An index that does not pass its own CRC is not trusted (1.x refused it).
 
-    Declaration repair never touches the index, so it can afford to work on one
-    it has not verified. Recovery cannot: a corrupted offset produces the same
-    shape as an interrupted append, and acting on it would drop real blocks or
-    truncate real samples.
+    No entry is kept on trust: past the prefix the stored CRC covers, an entry
+    stays only if the RED block header at its offset (the placement
+    authority, covered by the block CRC) agrees, and from the first that does
+    not the index is rebuilt from the CRC-checked blocks in .tdat. A corrupted
+    offset therefore cannot drop real blocks: here the very first entry is
+    damaged, and every sample still reads back.
     """
     path, tidx, tdat = _session(tmp_path)
+    with mef3io.Reader(str(path)) as r:
+        expected = r.read("ch1")
+    data_before = tdat.read_bytes()[UH:]
     raw = bytearray(tidx.read_bytes())
-    # Corrupt an entry and leave the body CRC stale — the index no longer
-    # describes itself.
     struct.pack_into("<q", raw, UH + 0, 999_999_999)      # first entry file_offset
     tidx.write_bytes(bytes(raw))
-    before = {f: f.read_bytes() for f in Path(path).rglob("*") if f.is_file()}
 
     report = mef3io.recover_session(str(path), apply=True)
-    assert report.skipped, "a segment whose index fails its CRC must be reported"
-    assert any("CRC" in s for s in report.skipped), report.summary()
-    assert not report.segments, "nothing should have been recovered from it"
-    for f, data in before.items():
-        assert f.read_bytes() == data, f"{f.name} was modified despite the bad CRC"
+    assert not report.skipped, report.summary()
+    assert report.segments and "CRC" in report.segments[0].action, report.summary()
+    assert report.segments[0].blocks_recovered == _entries(tidx)
+    assert tdat.read_bytes()[UH:] == data_before, "no sample byte may change"
+    assert mef3io.Validator(str(path)).validate().ok
+    with mef3io.Reader(str(path)) as r:
+        np.testing.assert_array_equal(r.read("ch1"), expected)
 
 
 def test_recovery_reports_a_stale_universal_header_count(tmp_path):
@@ -330,16 +334,17 @@ def test_recovery_sets_the_end_time_at_a_nonzero_offset(tmp_path, lose_index):
     assert mef3io.recover_session(str(path)).nothing_to_do
 
 
-def test_at_offset_zero_recovery_leaves_the_metadata_to_repair(tmp_path):
-    """Negative control: at rto 0 the validator owns the times (its
-    segment-bounds repair fixes the end), so recovery does not touch .tmet,
-    and the end comes out the same either way."""
+def test_at_offset_zero_recovery_rederives_the_metadata_through_repair(tmp_path):
+    """At rto 0 the validator owns the times (its segment-bounds repair fixes
+    the end). Since 2.0 recovery runs that repair itself on the segments it
+    touched, so recovery ALONE gives the right end, and the .tmet says it was
+    rewritten by a header repair (not by recovery's own end-time path)."""
     path, tmet, true_end = _crashed_append(tmp_path, 0)
-    before = tmet.read_bytes()
     mef3io.recover_session(str(path), apply=True)
-    assert tmet.read_bytes() == before
-    ids = mef3io.Validator(str(path)).validate().repairable_check_ids
-    mef3io.repair_session(str(path), ids)
+    assert mef3io.Validator(str(path)).validate().ok
+    with mef3io.Reader(str(path)) as r:
+        prov = r.segments("ch1")[-1]["provenance"]
+    assert "header-repair" in str(prov), prov
     with mef3io.Reader(str(path)) as r:
         assert r.info("ch1")["end_time"] == true_end
 

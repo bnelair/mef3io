@@ -93,6 +93,12 @@ struct SegmentSpec {
   /// it must be a true maximum, since a reader allocates its difference buffer
   /// from the result and an under-declaration truncates that buffer.
   ui4 known_difference_bytes = 0;
+  /// Fresh segment only: flush the new `.tdat`, `.tidx` and `.tmet` before
+  /// each is renamed into place (3 flushes). Set by `SessionWriter` for a new
+  /// segment or channel in a session that already held data, where a
+  /// zero-length file left by a power cut would fail the strict open of the
+  /// whole session. An APPEND always flushes its `.tmet` (only).
+  bool flush_new_files = false;
 };
 
 /// Largest RED block, in samples, that the format can describe: a block's

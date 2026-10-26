@@ -124,6 +124,8 @@ SessionWriter::SessionWriter(const std::string& mefd_path, bool overwrite, std::
   // or rolled back — its journal would otherwise restore stale headers.
   detail::refuse_if_mid_operation(mefd_path_);
   if (overwrite && fs::exists(mefd_path_)) fs::remove_all(mefd_path_);
+  // Held data before this writer: its new segments/channels are flushed.
+  session_preexisted_ = fs::exists(mefd_path_);
   fs::create_directories(mefd_path_);
   session_name_ = fs::path(mefd_path_).stem().string();
 
@@ -673,6 +675,14 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   // Only a NEW segment takes the session's offset; an append keeps the one
   // already in the segment it extends (append_time_series_segment).
   if (!append) spec.recording_time_offset = new_segment_rto(channel, st);
+  // A new segment or channel in a session that held data when this writer
+  // opened it: flushed, since a zero-length file there would fail the strict
+  // open of everything already recorded. NOT a session this writer created:
+  // flushing every new segment there made a conversion that writes thousands
+  // of segments pay three flushes each (a 2400-segment channel: minutes).
+  // What a power cut leaves of such a segment is recovery's job: a last
+  // segment whose files are empty and whose data holds no block is removed.
+  if (!append) spec.flush_new_files = session_preexisted_;
 
   // Only pass on a maximum this writer measured itself. A segment adopted from
   // disk leaves the flag false, so the append bounds the blocks it cannot see

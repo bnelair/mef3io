@@ -101,8 +101,13 @@ metadata loader and takes the WHOLE SESSION down — the one outcome
 `recover_session` cannot be relied on to undo. Pinned per file by the
 `fsync_observer` hook in core/tests/test_durability.cpp.
 
-Nothing else a write does is flushed: not a fresh write (nothing underneath
-to lose), not the directory entry after the rename (losing it keeps the
+A NEW segment or channel in a session that held data when the Writer opened
+it flushes its three fresh files before each rename (`SegmentSpec::
+flush_new_files`): a zero-length `.tidx`/`.tdat`/`.tmet` there fails the
+strict open of the whole session. Not in a session the Writer created (a conversion
+writes thousands of segments); there recovery removes a last segment whose
+files are short and whose data holds no block. Nothing else a write does is flushed: not a
+brand-new session (nothing underneath to lose), not the directory entry after the rename (losing it keeps the
 previous complete file), not the `.tdat`/`.tidx` extended in place, not the
 headers patched in place. So a power cut can leave the LAST append of a
 segment torn — a short tail, an index ahead of or behind the data, a stale
@@ -120,7 +125,15 @@ default and backed up before it writes. Its one declaration write: at a
 non-zero recording-time offset, where repair's time checks stand down, it sets
 the segment's end time (all three universal headers) from the last block it
 kept: only an end before the last block's start (or before rebuilt blocks),
-never earlier, each header in its own stored form (#83).
+never earlier, each header in its own stored form (#83). Since 2.0, with
+`apply` it also re-derives the DECLARATIONS of every segment it changed and of
+every channel's last segment whose `.tmet` counts disagree with the index —
+but only by CALLING `repair_session` for that segment (never its own
+declaration code), so the two stay apart in code while `recover --apply`
+alone leaves a valid session. An index failing its own CRC is rebuilt
+(entries kept only where the stored CRC or the RED header at their offset
+vouches for them), and the last append's blocks are CRC-checked (<= 64 MiB).
+Pinned state by state in tests/test_p44_crash_states.py.
 
 ## 6. Round trips cannot prove compatibility
 

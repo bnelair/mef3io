@@ -664,6 +664,9 @@ class RecoveredSegment:
     blocks_dropped: int = 0
     tdat_bytes_dropped: int = 0
     action: str = ""
+    #: Validator check ids whose declarations disagreed with the index: found
+    #: (dry run), or re-derived from the recovered index (``apply=True``).
+    declarations: tuple[str, ...] = ()
 
     def __str__(self) -> str:  # pragma: no cover - convenience
         return f"{self.path}: {self.action}"
@@ -704,12 +707,9 @@ class RecoveryReport:
             lines.append("")
             lines.append("To apply:  mef3io.recover_session(path, apply=True)")
         if self.segments and self.applied:
-            lines.append("")
-            lines.append(
-                "Now re-derive the declarations from the repaired index:\n"
-                "    mef3io.repair_session(path, "
-                "mef3io.Validator(path).validate().repairable_check_ids)"
-            )
+            fixed = sorted({c for s in self.segments for c in s.declarations})
+            if fixed:
+                lines.append("  declarations re-derived from the index: " + ", ".join(fixed))
         return "\n".join(lines)
 
 
@@ -776,8 +776,12 @@ def recover_session(
 
     Notes
     -----
-    Declarations are not updated here. Run :func:`repair_session` afterwards —
-    ``python -m mef3io recover`` does it for you.
+    With ``apply=True`` the declarations of every segment it changed (and of
+    a channel's last segment whose ``.tmet`` is newer or older than its index,
+    which a power cut can leave) are re-derived from the index through
+    :func:`repair_session` — so recovery alone leaves a valid session after
+    an unclean shutdown. ``python -m mef3io recover --apply`` additionally
+    repairs whatever else the validator still reports as repairable.
     """
     raw = _backend().recover_session(
         str(path), bool(apply), bool(backup), password or "", **_hooks(cancel, progress)
@@ -785,7 +789,8 @@ def recover_session(
     fields = {f.name for f in dataclasses.fields(RecoveredSegment)}
     return RecoveryReport(
         segments=tuple(
-            RecoveredSegment(**{k: v for k, v in s.items() if k in fields})
+            RecoveredSegment(**{k: (tuple(v) if k == "declarations" else v)
+                                for k, v in s.items() if k in fields})
             for s in raw["segments"]
         ),
         skipped=tuple(raw["skipped"]),
@@ -830,15 +835,17 @@ def _recover_main(argv) -> int:
 
     print(report.summary())
 
-    # A recovered index means the declarations derived from it are now stale.
-    # Doing it here keeps the two operations separate in the API but joined in
-    # the workflow, which is what an operator actually wants.
-    if report.applied and report.segments and not args.no_repair:
+    # recover_session already re-derives the declarations of every segment it
+    # touched (and of a last segment whose .tmet is newer or older than its
+    # index). Anything else the validator can repair is offered here on EVERY
+    # --apply, not only when recovery changed something: "recover --apply"
+    # after an unclean shutdown is meant to be the whole procedure.
+    if report.applied and not args.no_repair:
         outstanding = Validator(args.path, password=args.password).validate()
         ids = outstanding.repairable_check_ids
         if ids:
             print()
-            print(f"re-deriving declarations from the recovered index: {', '.join(ids)}")
+            print(f"re-deriving declarations from the index: {', '.join(ids)}")
             repair_session(args.path, ids, password=args.password)
         final = Validator(args.path, password=args.password).validate()
         print()

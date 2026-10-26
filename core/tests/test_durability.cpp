@@ -17,6 +17,8 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
+#include <iterator>
 #include <mutex>
 #include <vector>
 #include <string>
@@ -200,9 +202,23 @@ TEST_CASE("a write flushes only the .tmet it replaces, before the rename", "[dur
       INFO(p);
       REQUIRE(ends_with(p, ".tmet.mef3io-tmp"));
     }
-    // A forced new segment creates fresh files: still nothing to flush.
+    // A forced new segment in a session THIS writer created: not flushed
+    // (a conversion writing thousands of segments would pay 3 flushes each;
+    // a dataless segment cut off by a power cut is removed by recovery).
     w.write_int32("ch1", a, 0.5, start + 2 * step, rate, {}, /*new_segment=*/true);
     REQUIRE(log.take().empty());
+  }
+  {
+    // A new segment in a session that held data when the writer opened it:
+    // its three fresh files ARE flushed before each is renamed into place —
+    // a zero-length one would fail the strict open of the whole session.
+    SessionWriter w(session, false);
+    w.write_int32("ch3", a, 0.5, start + 2 * step, rate, {}, /*new_segment=*/true);
+    auto fresh = log.take();
+    REQUIRE(fresh.size() == 3);
+    for (const char* ext : {".tdat.mef3io-tmp", ".tidx.mef3io-tmp", ".tmet.mef3io-tmp"})
+      REQUIRE(std::count_if(fresh.begin(), fresh.end(),
+                            [&](const std::string& p) { return ends_with(p, ext); }) == 1);
   }
   {
     // A REOPENED writer appends through the slow path (walks the index once):
@@ -210,11 +226,57 @@ TEST_CASE("a write flushes only the .tmet it replaces, before the rename", "[dur
     SessionWriter w(session, false);
     w.write_int32("ch2", a, 0.5, start + 2 * step, rate);
     auto got = log.take();
+    INFO(got.size());
     REQUIRE(got.size() == 1);
     REQUIRE(ends_with(got[0], ".tmet.mef3io-tmp"));
     REQUIRE(got[0].find("ch2.timd") != std::string::npos);
   }
-  // The temp file is gone: it was renamed over the .tmet.
+  {
+    // A NEW CHANNEL in a session that already held data when the writer
+    // opened it: flushed the same way (3 files).
+    SessionWriter w(session, false);
+    w.write_int32("ch4", a, 0.5, start, rate);
+    REQUIRE(log.take().size() == 3);
+  }
+  // The temp files are gone: each was renamed into place.
   for (const auto& e : fs::recursive_directory_iterator(dir.dir))
     REQUIRE_FALSE(ends_with(e.path().string(), ".mef3io-tmp"));
+}
+
+TEST_CASE("a failed append's rollback publishes the restored .tidx flushed", "[durability]") {
+  const Scratch dir("rollback_flush");
+  const auto session = (dir.dir / "s.mefd").string();
+  const si8 start = 1577836800000000;
+  const sf8 rate = 256.0;
+  std::vector<si4> a(2560);
+  for (std::size_t i = 0; i < a.size(); ++i) a[i] = static_cast<si4>(i % 991) - 300;
+  const si8 step = static_cast<si8>(a.size() / rate * 1e6);
+  { SessionWriter w(session, true); w.write_int32("ch1", a, 0.5, start, rate); }
+
+  fs::path seg;
+  for (const auto& e : fs::directory_iterator(dir.dir / "s.mefd" / "ch1.timd")) seg = e.path();
+  const std::string base = seg.stem().string();
+  const auto read = [](const fs::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  };
+  const std::string tidx_before = read(seg / (base + ".tidx"));
+  // Make the .tmet publish fail AFTER the data and index were extended: a
+  // non-empty directory where its temp file must go.
+  const fs::path blocker = seg / (base + ".tmet.mef3io-tmp");
+  fs::create_directories(blocker / "x");
+
+  FlushLog log;
+  {
+    // A REOPENED writer: the slow path, whose rollback writes the original
+    // .tidx back whole (padding included) through write_file_atomic.
+    SessionWriter w(session, false);
+    REQUIRE_THROWS(w.write_int32("ch1", a, 0.5, start + step, rate));
+  }
+  const auto got = log.take();
+  REQUIRE(got.size() == 1);
+  REQUIRE(ends_with(got[0], ".tidx.mef3io-tmp"));  // flushed BEFORE its rename
+  REQUIRE(read(seg / (base + ".tidx")) == tidx_before);
+  REQUIRE_FALSE(fs::exists(seg / (base + ".tidx.mef3io-tmp")));
+  fs::remove_all(blocker);
 }

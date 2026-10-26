@@ -264,6 +264,7 @@ class SessionWriter {
   SessionMetadata metadata_;
   si8 block_length_override_ = 0;
   std::atomic<int> n_threads_{0};
+  bool session_preexisted_ = false;  // the folder existed (not overwritten) at open
   std::map<std::string, ChannelState> channels_;
 };
 

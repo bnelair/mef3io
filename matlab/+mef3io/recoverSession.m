@@ -19,6 +19,12 @@ function [summary, nSegments] = recoverSession(path, opts)
 %                           flag, which is everything an index entry needs.
 %                           Only blocks whose CRC verifies are indexed.
 %
+%   With Apply=true it also re-derives the declarations (.tmet section 2,
+%   universal headers) of every segment it changed, and of a channel's last
+%   segment whose .tmet is newer or older than its index, through the same
+%   repairs as repair_session - so recovery alone leaves a valid session. An
+%   index that fails its own CRC is rebuilt from the CRC-checked blocks.
+%
 %   It is a DRY RUN unless Apply=true, and backs up what it changes to
 %   <session>.recover-backup first - the .tidx, the .tdat's 1024-byte header
 %   and any dropped fragment, never the whole data file, which may be tens of

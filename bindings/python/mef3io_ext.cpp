@@ -752,6 +752,9 @@ NB_MODULE(_mef3io, m) {
           d["blocks_dropped"] = s.blocks_dropped;
           d["tdat_bytes_dropped"] = s.tdat_bytes_dropped;
           d["action"] = s.action;
+          nb::list decl;
+          for (const auto& c : s.declarations) decl.append(c);
+          d["declarations"] = decl;
           segs.append(d);
         }
         nb::list skipped;

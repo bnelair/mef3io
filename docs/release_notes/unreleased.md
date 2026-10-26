@@ -66,19 +66,56 @@ See [Threads](../threads.md) for the rule.
   segment's `.tmet`, before it is renamed over the previous one, because a
   short `.tmet` would make the whole session fail to open. Nothing else is
   flushed (1.x's default `"fast"` still flushed the two headers an append
-  patches; that is gone too). A fresh write flushes nothing.
-- **What a power cut can now do**: leave the *last* append of a segment
-  torn — a short `.tdat` or `.tidx` tail, an index pointing past the data,
-  blocks the index never listed, or a stale header count. With
-  `durability="full"` 1.x prevented these; now they can happen whatever you
-  pass. `validate_session` detects each one and
-  `recover_session` (`python -m mef3io recover SESSION --apply`,
-  `mef3io.recoverSession` in MATLAB) repairs it. Earlier appends are never at
-  risk: nothing rewrites them. If you relied on `"full"`, run `recover` after
-  every unclean shutdown.
+  patches, and with them the appended data and index; that is gone too, so
+  the `.tmet` can now reach the disk BEFORE the data it describes). A new
+  segment or channel in a session that already held data when the Writer
+  opened it flushes its three fresh files before each is renamed into place
+  (a zero-length file there would fail the strict open of the whole
+  session); a session the Writer created flushes nothing else.
+- **What a power cut can now do**: leave the *last* append of a segment in
+  any mix of old and new bytes — the `.tmet` newer or older than the data and
+  index, the `.tidx` header and entries from different writes (the index then
+  fails its CRC), entries pointing at data that never landed, a torn `.tdat`
+  tail, stale header counts. **`recover_session` now repairs every one of
+  them by itself** (`python -m mef3io recover SESSION --apply`,
+  `mef3io.recoverSession(path, Apply=true)` in MATLAB), leaving a session that
+  validates clean and holds every sample whose bytes reached the disk; a
+  recorder can then re-send what was lost. Earlier appends are never at risk:
+  nothing rewrites them. Run `recover --apply` after every unclean shutdown.
+  The per-state table is in [Long recordings](../long_recordings.md#durability-and-what-it-costs).
+- **An append fails if the `.tmet` flush fails.** 1.x's default ignored flush
+  errors; now the OS error is raised (`IoError` / `RuntimeError`) rather than
+  the write claiming a durability it does not have. The flush cost was
+  measured on ext4 only; macOS (`F_FULLFSYNC`) and Windows
+  (`FlushFileBuffers`) are unmeasured and typically slower per call.
 - **Faster appends**: measured on ext4, a 128-channel append of 10-minute
   blocks takes 2.5–2.8 s, against 3.8 s with 1.x's default and 6.0–6.5 s with
   `"full"` (see [Long recordings](../long_recordings.md#durability-and-what-it-costs)).
+
+## Recovery covers every crash state (behaviour change)
+
+- `recover_session(apply=True)` **re-derives the declarations itself** for
+  every segment it changes and for every channel's last segment whose `.tmet`
+  declares other block, sample or entry counts than its index (a `.tmet`
+  published before or after its data). It goes through `repair_session`
+  (the same repairs, backups under `<session>.repair-backup/` and provenance).
+  The dry run reports such a segment as needing recovery; 1.x called it
+  healthy. New field `RecoveredSegment.declarations` lists the check ids.
+- **An index that fails its own CRC is no longer refused**: entries the
+  stored CRC covers are kept, then each entry whose RED block header agrees,
+  and the rest is rebuilt from the CRC-checked blocks in `.tdat` (streaming:
+  one 304-byte header per unverified entry). Intact samples become readable
+  again.
+- In each channel's last segment, the blocks of the last append (back to its
+  first block, at most 64 MiB) are CRC-checked against their entries, so
+  entries pointing at data that never landed are dropped.
+- A channel's last segment whose files are missing, empty or shorter than
+  their headers and whose data holds no block (a new segment cut off by a
+  power cut, which failed the strict open of the whole session) is REMOVED
+  (moved to the backup). One whose samples landed is skipped with advice.
+- `python -m mef3io recover --apply` now runs the follow-up `repair` whenever
+  the validator still has repairable findings, not only when recovery changed
+  something.
 
 ## New
 
