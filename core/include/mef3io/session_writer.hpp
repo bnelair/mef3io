@@ -22,11 +22,55 @@ namespace mef3io {
 // Summary returned by each write, so callers (and MATLAB/Python) can tell what
 // happened without inspecting the tree — notably distinguishing an all-NaN
 // no-op from a real write.
+/// How a write turned its input into stored int32 counts.
+enum class Quantization {
+  Counts,   ///< write_int32: the caller's counts, stored as given.
+  Decimal,  ///< float data rounded to 10^-precision (the default path).
+  Step,     ///< float data that is a whole multiple of the factor: stored exactly.
+};
+
 struct WriteSummary {
   si8 samples_written = 0;
   si8 blocks = 0;
   si8 gaps_skipped = 0;
   int segment = -1;
+  /// The conversion factor the written counts carry (counts * factor = value).
+  sf8 units_conversion_factor = 0.0;
+  Quantization quantization = Quantization::Counts;
+  /// Precision::step() only: empty when the data was stored on its step,
+  /// else why it was not (the write then took the fallback path).
+  std::string step_fallback;
+  /// Float writes: samples whose count would leave int32 at the factor, or
+  /// +-inf, stored as the nearest storable count +-(2^31 - 1) (meflib's
+  /// RED_POSITIVE/NEGATIVE_INFINITY) instead of wrapping. Includes
+  /// `clamped_infinite`.
+  si8 clamped = 0;
+  /// Of `clamped`, how many were +-inf.
+  si8 clamped_infinite = 0;
+};
+
+/// How many samples a float conversion clamped (see WriteSummary::clamped).
+struct ClampCount {
+  si8 finite = 0;    ///< finite values whose count left int32
+  si8 infinite = 0;  ///< +-inf
+  si8 total() const { return finite + infinite; }
+};
+
+/// The `precision` of a float write: a number of decimals, inferred, or the
+/// data's own quantization step (#81).
+struct Precision {
+  /// >= 0: conversion factor 10^-digits; < 0: inferred (the default).
+  int digits = -1;
+  /// Detect the data's quantization step and store whole counts of it.
+  bool step = false;
+  /// Implicit, so every `write_float(..., 3)` call keeps compiling.
+  constexpr Precision(int d = -1) noexcept : digits(d) {}
+  /// Opt-in step detection (Python `precision="step"`); see write_float().
+  static constexpr Precision detect_step() noexcept {
+    Precision p;
+    p.step = true;
+    return p;
+  }
 };
 
 /// High-level MEF 3.0 writer: float64 quantization with precision inference,
@@ -63,8 +107,32 @@ class SessionWriter {
   /// except on in-segment append, where the segment's factor is reused so the
   /// append cannot conflict. Data is quantized as `round(data * 10^precision)`.
   /// Segment semantics match write_int32().
+  ///
+  /// `Precision::detect_step()` (opt-in, #81) stores the data as whole counts
+  /// of its own quantization step instead (e.g. an ADC's 0.195 uV), which
+  /// RED compresses far better. The step is estimated from a bounded sample
+  /// (detect_step) and EVERY value is verified while it is converted
+  /// (quantize_to_step); nothing is stored off its value by more than float64
+  /// rounding. On a NEW channel, data that is not a whole multiple of one
+  /// step (filtered, resampled), shows too little of one (fewer than 16
+  /// distinct magnitudes in the sample: a DC level, a square wave), or whose
+  /// counts overflow int32 falls back to the default (inferred power-of-ten)
+  /// path for that write. On a channel that already has segments — an
+  /// append, or a new segment — the factor is the channel's: the reader
+  /// scales a whole channel by one factor, so it is never changed. Data that
+  /// is a whole multiple of it is stored exactly; other data is REFUSED
+  /// (WriteConflictError, nothing written) — never rounded. The summary says
+  /// which happened (`quantization`, `step_fallback`).
+  ///
+  /// Every path CLAMPS a value whose count would leave int32, and +-inf, to
+  /// the nearest storable count instead of wrapping it; the write succeeds
+  /// and the summary counts them (`clamped`). The default
+  /// path refuses (WriteConflictError) an in-segment append to a segment
+  /// whose factor is not a power of ten (written with the step or
+  /// write_int32): use the step or write_int32 there.
   WriteSummary write_float(const std::string& channel, std::span<const sf8> data, si8 start_uutc,
-                           sf8 sampling_frequency, int precision = -1, bool new_segment = false);
+                           sf8 sampling_frequency, Precision precision = {},
+                           bool new_segment = false);
 
   /// Write records (annotations). @p channel nullopt -> session-level (in the
   /// `.mefd` root), otherwise channel-level. Replaces the records at that level.
@@ -223,6 +291,37 @@ class SessionWriter {
 
 // Quantization helpers (exposed for testing / reuse).
 int infer_precision(std::span<const sf8> data);
-std::vector<si4> quantize_to_int32(std::span<const sf8> data, int precision);
+/// round(data * 10^precision) as counts. NaN -> 0 (a gap). A count beyond
+/// int32, or +-inf, is clamped to +-(2^31 - 1) and counted in @p clamped —
+/// never wrapped, never INT32_MIN (RED_NAN).
+std::vector<si4> quantize_to_int32(std::span<const sf8> data, int precision,
+                                   ClampCount* clamped = nullptr);
+
+/// The estimate of detect_step(): the step, or why there is none.
+struct StepEstimate {
+  std::optional<sf8> step;
+  /// Why there is no step. Empty with no step: the sample holds nothing but
+  /// 0 and NaN, which any factor stores exactly (no step needed).
+  std::string reason;
+};
+/// Estimate the data's quantization step (#81) from a BOUNDED sample — the
+/// first 65,536 values and 16 windows of 2,048 spread through the rest; NaN
+/// ignored — so its cost does not grow with the data (only a sample of
+/// nothing but 0 and NaN scans on, for the first non-zero values). The value is snapped
+/// to the step's own float64 value where the sample allows (the shortest
+/// decimal reproducing every sampled value exactly, e.g. 0.195). A sample
+/// with fewer than 16 distinct non-zero magnitudes (a DC level, a square
+/// wave) gives no step: too little evidence. Only an estimate:
+/// quantize_to_step() decides.
+StepEstimate detect_step(std::span<const sf8> data);
+/// Convert @p data to counts of @p step in one pass, verifying every value:
+/// false (and @p why) as soon as one finite value is not a whole multiple
+/// within 64 float64 roundings (`|x - double(k) * step| <= 64 eps |x|`).
+/// A value ON the step whose count leaves int32, and +-inf, is clamped to
+/// +-(2^31 - 1) and counted in @p clamped. NaN -> count 0, valid 0. A negative @p step (a polarity-inverting factor) is allowed; 0
+/// or non-finite returns false. The outputs are unspecified after a false.
+bool quantize_to_step(std::span<const sf8> data, sf8 step, std::vector<si4>& counts,
+                      std::vector<ui1>& valid, std::string* why = nullptr,
+                      ClampCount* clamped = nullptr);
 
 }  // namespace mef3io

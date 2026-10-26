@@ -344,13 +344,22 @@ class MefWriter:
         start_uutc: int,
         sampling_freq: float,
         end_uutc: Optional[int] = None,
-        precision: Optional[int] = None,
+        precision: "int | str | None" = None,
         new_segment: bool = False,
         discont_handler: bool = True,
         reload_metadata: bool = True,
     ):
-        self._apply_metadata()
+        from ._writer import _is_step, warn_clamped, warn_step_fallback
+
         data = np.atleast_1d(np.asarray(data_write))
+        step = _is_step(precision)
+        if step and np.issubdtype(data.dtype, np.integer):
+            raise ValueError(
+                "precision='step' is for float data; integer data is stored as "
+                "counts with the factor 10**-precision (mef3io.Writer.write_int32 "
+                "takes any factor)"
+            )
+        self._apply_metadata()
         if np.issubdtype(data.dtype, np.integer):
             # Treat as raw int32 with a precision-derived ufact if given.
             from ._writer import _as_int32_counts
@@ -364,11 +373,14 @@ class MefWriter:
                 )
         else:
             with reporting_unreadable_metadata(self._w, self._path):
-                self._w.write_float(
+                summary = self._w.write_float(
                     channel, np.ascontiguousarray(data, np.float64), int(start_uutc),
-                    float(sampling_freq), int(precision) if precision is not None else -1,
-                    bool(new_segment),
+                    float(sampling_freq),
+                    -1 if step or precision is None else int(precision),
+                    bool(new_segment), step,
                 )
+            warn_step_fallback(channel, summary, path=self._path)
+            warn_clamped(channel, summary, path=self._path)
         return True
 
     def write_annotations(self, annotations, channel: Optional[str] = None):

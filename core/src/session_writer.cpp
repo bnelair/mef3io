@@ -17,6 +17,8 @@
 #include "mef3io/writer.hpp"
 #include "mef3io/time.hpp"
 #include "last_segment.hpp"
+#include "clamp.hpp"
+#include "number_text.hpp"
 
 namespace fs = std::filesystem;
 
@@ -24,9 +26,12 @@ namespace mef3io {
 namespace {
 
 bool int32_range_ok(sf8 xmin, sf8 xmax, sf8 alpha) {
-  // Matches mef_tools check_int32_dynamic_range: bad only if BOTH ends overflow.
-  return !(xmin * alpha < std::numeric_limits<si4>::min() &&
-           xmax * alpha > std::numeric_limits<si4>::max());
+  // BOTH ends must fit (INT32_MIN excluded: RED's NaN). mef_tools'
+  // check_int32_dynamic_range called a range bad only when both ends
+  // overflowed, so one-sided data wrapped silently; quantize_to_int32 now
+  // refuses that, and the inference must not choose it.
+  const sf8 lim = static_cast<sf8>(std::numeric_limits<si4>::max());
+  return std::abs(std::round(xmin * alpha)) <= lim && std::abs(std::round(xmax * alpha)) <= lim;
 }
 
 std::string segment_name(const std::string& channel, int seg) {
@@ -42,8 +47,10 @@ int infer_precision(std::span<const sf8> data) {
   sf8 sum = 0.0;
   si8 count = 0;
   sf8 prev = std::numeric_limits<sf8>::quiet_NaN();
+  // +-inf is ignored like NaN: it is clamped on write (quantize_to_int32),
+  // and must not drag the precision of the ordinary samples down to 0.
   for (sf8 v : data) {
-    if (!std::isnan(v) && !std::isnan(prev)) {
+    if (std::isfinite(v) && std::isfinite(prev)) {
       sum += std::abs(v - prev);
       ++count;
     }
@@ -59,11 +66,11 @@ int infer_precision(std::span<const sf8> data) {
 
   sf8 dmax = -std::numeric_limits<sf8>::infinity(), dmin = std::numeric_limits<sf8>::infinity();
   for (sf8 v : data)
-    if (!std::isnan(v)) {
+    if (std::isfinite(v)) {
       dmax = std::max(dmax, v);
       dmin = std::min(dmin, v);
     }
-  if (!std::isfinite(dmax)) return 0;  // all NaN
+  if (!std::isfinite(dmax)) return 0;  // nothing finite
 
   sf8 alpha = std::pow(10.0, precision);
   while (!int32_range_ok(dmin, dmax, alpha) && precision != 0) {
@@ -73,17 +80,27 @@ int infer_precision(std::span<const sf8> data) {
   return precision;
 }
 
-std::vector<si4> quantize_to_int32(std::span<const sf8> data, int precision) {
+std::vector<si4> quantize_to_int32(std::span<const sf8> data, int precision,
+                                   ClampCount* clamped) {
   const sf8 scale = std::pow(10.0, precision);
   std::vector<si4> out(data.size());
+  ClampCount c;
   for (std::size_t i = 0; i < data.size(); ++i) {
     if (std::isnan(data[i])) {
       out[i] = 0;  // gap position, not stored
       continue;
     }
     sf8 rounded = std::round(data[i] * scale);  // round(data,prec)*10^prec == round(data*10^prec)
-    out[i] = static_cast<si4>(std::llround(rounded));
+    // Never wrap (it used to): a count beyond int32, or +-inf, is CLAMPED to
+    // the nearest storable count (detail::clamp_count; maintainer decision,
+    // #149) and counted, so the caller can say so.
+    if (!(std::abs(rounded) <= kMaxStorableCount)) {
+      out[i] = detail::clamp_count(rounded, std::isfinite(data[i]), c);
+      continue;
+    }
+    out[i] = static_cast<si4>(rounded);
   }
+  if (clamped) *clamped = c;
   return out;
 }
 
@@ -472,29 +489,95 @@ WriteSummary SessionWriter::write_int32(const std::string& channel, std::span<co
                                         std::span<const ui1> valid, bool new_segment) {
   check_signal_parameters(fs, ufact);
   std::vector<si4> buf(samples.begin(), samples.end());
-  return write_blocks(channel, buf, valid, ufact, start_uutc, fs, new_segment);
+  WriteSummary s = write_blocks(channel, buf, valid, ufact, start_uutc, fs, new_segment);
+  s.quantization = Quantization::Counts;
+  return s;
 }
 
 WriteSummary SessionWriter::write_float(const std::string& channel, std::span<const sf8> data,
-                                        si8 start_uutc, sf8 fs, int precision, bool new_segment) {
+                                        si8 start_uutc, sf8 fs, Precision precision_arg,
+                                        bool new_segment) {
   check_signal_parameters(fs, 1.0);  // the factor is checked once it is known
+  int precision = precision_arg.digits;
+  std::string step_fallback;
+  if (precision_arg.step) {
+    // #81, opt-in: the data's own step as the factor. Everything below is
+    // decided before write_blocks, so a refused write leaves the tree as is.
+    std::vector<si4> counts;
+    std::vector<ui1> valid;
+    auto it = channels_.find(channel);
+    if (it != channels_.end() && it->second.n_segments > 0) {
+      // A channel's factor is fixed once it has segments: the reader scales
+      // the WHOLE channel by one factor, so neither an append nor a new
+      // segment may change it (#150 may lift this for new segments). Data on
+      // it is stored exactly; anything else is refused — rounding it would
+      // be lossier than the caller asked for, and silently so.
+      hydrate(channel, it->second);
+      const sf8 u = it->second.units_conversion_factor;
+      std::string why;
+      ClampCount clamped;
+      if (!quantize_to_step(data, u, counts, valid, &why, &clamped)) {
+        throw WriteConflictError(
+            "precision='step': the data for channel " + channel + " is not stored on the "
+            "channel's conversion factor " + detail::shortest_number(u) + " (" + why + "); nothing "
+            "was written. A channel keeps one factor: quantize the data yourself and write the "
+            "counts with write_int32 at that factor, or write it to a new channel");
+      }
+      WriteSummary s = write_blocks(channel, counts, valid, u, start_uutc, fs, new_segment);
+      s.quantization = Quantization::Step;
+      s.clamped = clamped.total();
+      s.clamped_infinite = clamped.infinite;
+      return s;
+    } else {
+      const StepEstimate est = detect_step(data);
+      std::string why = est.reason;
+      ClampCount clamped;
+      if (est.step && quantize_to_step(data, *est.step, counts, valid, &why, &clamped)) {
+        WriteSummary s =
+            write_blocks(channel, counts, valid, *est.step, start_uutc, fs, new_segment);
+        s.quantization = Quantization::Step;
+        s.clamped = clamped.total();
+        s.clamped_infinite = clamped.infinite;
+        return s;
+      }
+      // Nothing but 0 and NaN (no reason given): any factor stores that
+      // exactly, so the default path is no fallback.
+      if (!why.empty())
+        step_fallback = why + "; stored with the default (inferred power-of-ten) precision";
+      precision = -1;
+    }
+  }
   if (precision < 0) {
     // In-segment appends must keep the segment's conversion factor, so reuse
     // its precision instead of re-inferring (which could differ and conflict).
     auto it = channels_.find(channel);
     if (!new_segment && it != channels_.end() && it->second.n_segments > 0) {
       hydrate(channel, it->second);
-      precision =
-          static_cast<int>(std::llround(-std::log10(it->second.units_conversion_factor)));
+      const sf8 u = it->second.units_conversion_factor;
+      precision = u > 0.0 ? static_cast<int>(std::llround(-std::log10(u))) : 0;
+      // A factor that is no power of ten (precision='step', write_int32)
+      // has no precision to reuse: say so instead of the generic conflict.
+      if (!(u > 0.0) || std::abs(std::pow(10.0, -precision) - u) > 1e-12 * u)
+        throw WriteConflictError(
+            "cannot append to channel " + channel + " with an inferred precision: its "
+            "conversion factor " + detail::shortest_number(u) + " is not a power of ten (written with "
+            "precision='step' or write_int32). Append with precision='step' (data on that "
+            "factor is stored exactly) or with write_int32 at that factor");
     } else {
       precision = infer_precision(data);
     }
   }
   sf8 ufact = std::pow(10.0, -precision);
-  auto samples = quantize_to_int32(data, precision);
+  ClampCount clamped;
+  auto samples = quantize_to_int32(data, precision, &clamped);
   std::vector<ui1> valid(data.size());
   for (std::size_t i = 0; i < data.size(); ++i) valid[i] = std::isnan(data[i]) ? 0 : 1;
-  return write_blocks(channel, samples, valid, ufact, start_uutc, fs, new_segment);
+  WriteSummary s = write_blocks(channel, samples, valid, ufact, start_uutc, fs, new_segment);
+  s.quantization = Quantization::Decimal;
+  s.clamped = clamped.total();
+  s.clamped_infinite = clamped.infinite;
+  s.step_fallback = std::move(step_fallback);
+  return s;
 }
 
 WriteSummary SessionWriter::write_blocks(const std::string& channel,
@@ -541,6 +624,7 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   }
 
   WriteSummary summary;
+  summary.units_conversion_factor = ufact;
   summary.gaps_skipped = static_cast<si8>(runs.size()) > 0 ? static_cast<si8>(runs.size()) - 1 : 0;
   if (runs.empty()) {
     // All-NaN / no valid data: no-op on disk, but report it explicitly.

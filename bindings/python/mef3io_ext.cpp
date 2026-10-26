@@ -1620,6 +1620,20 @@ NB_MODULE(_mef3io, m) {
     d["blocks"] = s.blocks;
     d["gaps_skipped"] = s.gaps_skipped;
     d["segment"] = s.segment;
+    d["units_conversion_factor"] = s.units_conversion_factor;
+    const char* q = "int32";
+    switch (s.quantization) {
+      case mef3io::Quantization::Counts: q = "int32"; break;
+      case mef3io::Quantization::Decimal: q = "decimal"; break;
+      case mef3io::Quantization::Step: q = "step"; break;
+    }
+    d["quantization"] = q;
+    if (s.step_fallback.empty())
+      d["step_fallback"] = nb::none();
+    else
+      d["step_fallback"] = s.step_fallback;
+    d["clamped"] = s.clamped;
+    d["clamped_infinite"] = s.clamped_infinite;
     return d;
   };
   nb::class_<mef3io::SessionWriter>(m, "SessionWriter")
@@ -1675,18 +1689,22 @@ NB_MODULE(_mef3io, m) {
           "write_float",
           [summary_dict](mef3io::SessionWriter& w, const std::string& ch,
                          nb::ndarray<const mef3io::sf8, nb::ndim<1>, nb::c_contig> data,
-                         nb::object start, double fs, int precision, bool new_segment) {
+                         nb::object start, double fs, int precision, bool new_segment,
+                         bool step) {
             std::span<const mef3io::sf8> s(data.data(), data.size());
             const mef3io::si8 start_us = to_si8(start, "start_uutc");
+            // step=True is precision="step" (#81); `precision` is then unused.
+            const mef3io::Precision p =
+                step ? mef3io::Precision::detect_step() : mef3io::Precision(precision);
             mef3io::WriteSummary r;
             {
               nb::gil_scoped_release rel;
-              r = w.write_float(ch, s, start_us, fs, precision, new_segment);
+              r = w.write_float(ch, s, start_us, fs, p, new_segment);
             }
             return summary_dict(r);
           },
           nb::arg("channel"), nb::arg("data"), nb::arg("start_uutc"), nb::arg("fs"),
-          nb::arg("precision") = -1, nb::arg("new_segment") = false)
+          nb::arg("precision") = -1, nb::arg("new_segment") = false, nb::arg("step") = false)
       .def(
           "write_int32",
           [summary_dict](mef3io::SessionWriter& w, const std::string& ch,
@@ -1746,6 +1764,23 @@ NB_MODULE(_mef3io, m) {
             w.write_records(ch, recs);
           },
           nb::arg("channel").none(), nb::arg("records"));
+
+  // #81: the step estimate alone (tests, and callers that want to know the
+  // step before writing). The write verifies every value; this does not.
+  m.def("detect_step", [](nb::ndarray<const mef3io::sf8, nb::ndim<1>, nb::c_contig> d) {
+    mef3io::StepEstimate e;
+    {
+      nb::gil_scoped_release rel;  // bounded sample; the argument keeps it alive
+      e = mef3io::detect_step(std::span<const mef3io::sf8>(d.data(), d.size()));
+    }
+    nb::dict out;
+    if (e.step)
+      out["step"] = *e.step;
+    else
+      out["step"] = nb::none();
+    out["reason"] = e.reason;
+    return out;
+  });
 
   // The ONE thread rule's resolver (parallel.hpp): what "automatic" means.
   // Python asks here instead of re-deriving it (MultiReader's budget).
