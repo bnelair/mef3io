@@ -97,6 +97,22 @@ class BlockCopyWarning(MefWarning):
     """
 
 
+class UnscaledSamplesWarning(MefWarning):
+    """Values read from a segment whose conversion factor is not set.
+
+    A segment stores ``units_conversion_factor`` 0 — MEF's "no entry", which
+    meflib's and pymef's section-2 templates hold until a writer sets it — so
+    there is no factor to convert its counts into units. :meth:`Reader.read`,
+    :meth:`Reader.block_envelope`, :class:`MultiReader` and the compat
+    ``MefReader.get_data`` then return those samples as the RAW STORED COUNTS
+    (factor 1); before 2.0 they read back as zeros. Emitted once per Reader
+    and channel, the first time such a segment is read.
+    :meth:`Reader.segments` shows which segments store 0, and
+    :meth:`Reader.read_raw` reports the factor as stored (0) in
+    ``units_conversion_factors``. ``w.message.details`` holds the channel name.
+    """
+
+
 class LegacyPasswordWarning(MefWarning):
     """The password opened this session only through mef3io's OLD byte mapping.
 
@@ -277,18 +293,37 @@ def _flush(pending: list, stacklevel: int) -> None:
 
 
 def _usable_factor(f) -> bool:
-    """A conversion factor that scales counts: finite and non-zero (#150)."""
-    return f != 0 and f == f and f not in (float("inf"), float("-inf"))
+    """A conversion factor a read in units accepts: finite (#150)."""
+    return f == f and f not in (float("inf"), float("-inf"))
+
+
+def _effective_factor(f):
+    """The factor a read scales by: 0 (not set, MEF's "no entry") counts as 1."""
+    return 1.0 if f == 0 else f
+
+
+def _note_unscaled(impl, announced, path, channel: str, pending: list) -> None:
+    """UnscaledSamplesWarning once per reader and channel, after the backend
+    recorded that this channel returned raw counts (factor not set)."""
+    if impl is None or channel not in impl.unscaled_channels():
+        return
+    if announced.new("unscaled", [channel], lambda c: c):
+        pending.append((UnscaledSamplesWarning, _unscaled_warning_text(channel),
+                        dict(path=path, details=channel, also=_identity_of(impl))))
+
+
+def _unscaled_warning_text(channel: str) -> str:
+    return (f"channel {channel}: a segment read here has no conversion factor set "
+            "(units_conversion_factor 0, MEF's \"no entry\"), so its values are the raw "
+            "stored counts, not physical units; segments() shows which segments store 0")
 
 
 def _unusable_factor_message(channel: str, f: float, alternative: str) -> str:
     # Reader's text exactly (unusable_factor_message in session.cpp), so a
     # MultiReader raises the same words.
-    value = "nan" if f != f else ("-inf" if f == float("-inf") else
-                                  "inf" if f == float("inf") else "0")
-    no_entry = ' (MEF\'s "no entry")' if f == 0 else ""
+    value = "nan" if f != f else ("-inf" if f < 0 else "inf")
     return (f"channel {channel}: samples in this window come from a segment that stores "
-            f"units_conversion_factor {value}{no_entry}, so they have no value in units; "
+            f"units_conversion_factor {value}, so they have no value in units; "
             f"{alternative} returns the stored counts, and segments() lists each segment's "
             "factor")
 
@@ -719,14 +754,16 @@ class Reader:
             1-D float64 array on the sampling grid. Discontinuity gaps are
             filled with ``NaN``; each value is scaled by the units-conversion
             factor of the segment it comes from (segments of one channel may
-            store different ones).
+            store different ones). A segment whose factor is not set (``0``,
+            MEF's "no entry") gives its raw stored counts (factor 1), with
+            one :class:`UnscaledSamplesWarning` per Reader and channel.
 
         Raises
         ------
         mef3io.FormatError
-            A sample in the window comes from a segment whose factor cannot
-            scale: ``0`` (MEF's "no entry"), NaN or infinite. Nothing is
-            decoded; :meth:`read_raw` still returns the counts.
+            A sample in the window comes from a segment whose factor is
+            invalid: NaN or infinite. Nothing is decoded; :meth:`read_raw`
+            still returns the counts.
 
         See Also
         --------
@@ -738,7 +775,14 @@ class Reader:
             raise NotImplementedError("cancel=/progress= need the C++ backend")
         # The thread count is the Reader's (n_threads); there is no per-call
         # override (removed in 2.0, see the threads guide).
-        return impl.read(channel, t0, t1, **hooks)
+        out = impl.read(channel, t0, t1, **hooks)
+        pending: list = []
+        self._note_unscaled(channel, pending)
+        _flush(pending, stacklevel=2)
+        return out
+
+    def _note_unscaled(self, channel: str, pending: list) -> None:
+        _note_unscaled(self._impl, self._announced, self._path, channel, pending)
 
     def read_raw(
         self,
@@ -774,7 +818,9 @@ class Reader:
             per run of valid samples sharing a factor, sorted, each from its
             first valid sample to just past its last; one span for an
             ordinary window, none when nothing in it is valid.
-            ``units_conversion_factor`` is that span's factor, ``None`` when
+            Factors are as stored: ``0`` means "not set" (:meth:`read` then
+            gives the counts unscaled). ``units_conversion_factor`` is that
+            span's factor, ``None`` when
             the window holds samples of segments with different factors, and
             :meth:`info`'s value when nothing is valid.
             ``block_copy_mismatches`` (list of dict) lists any block whose
@@ -886,12 +932,21 @@ class Reader:
         mef3io.FormatError
             A block that :meth:`read` of the same window would take samples
             from (decided by read's own window and grid rule) comes from a
-            segment whose conversion factor cannot scale, as :meth:`read`
-            refuses it; :meth:`toc` returns the counts. A block of such a
+            segment whose conversion factor is NaN or infinite, as
+            :meth:`read` refuses it; :meth:`toc` returns the counts. A block of such a
             segment that the read would not touch (one overlapping the
             window by less than half a sample) gets NaN ``min``/``max``.
         """
-        return self._ensure_impl().block_envelope(channel, t0, t1)
+        pending: list = []
+        out = self._block_envelope(channel, t0, t1, pending)
+        _flush(pending, stacklevel=2)
+        return out
+
+    def _block_envelope(self, channel, t0, t1, pending: list) -> dict:
+        # block_envelope with its warning collected into `pending` (MultiReader).
+        out = self._ensure_impl().block_envelope(channel, t0, t1)
+        self._note_unscaled(channel, pending)
+        return out
 
     def toc(self, channel: str) -> list[dict]:
         """Block-level table of contents, for seeking and viewers.

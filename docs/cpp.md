@@ -33,8 +33,9 @@ const mef3io::ChannelInfo& ci = r.info("ch1");     // fs, ufact, times, counts,
 
 // Float64 on the fs grid over [t0, t1) (defaults: whole channel);
 // gaps = NaN, each value scaled by its own SEGMENT's conversion factor
-// (segments may store different ones; FormatError for a factor of 0 /
-// NaN / inf, which cannot scale).
+// (segments may store different ones). A factor not set (0) reads as the
+// raw counts (factor 1; session().unscaled_channels() lists them); NaN /
+// inf throws FormatError.
 std::vector<double> x = r.read("ch1", t0, t1);
 
 // Or the raw form: int32 counts + validity mask (0 in gaps), and

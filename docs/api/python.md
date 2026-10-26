@@ -184,6 +184,8 @@ see [Warnings carry the path as data](../python.md#warnings-carry-the-path-as-da
 
 ::: mef3io.BlockCopyWarning
 
+::: mef3io.UnscaledSamplesWarning
+
 ::: mef3io.LegacyPasswordWarning
 
 ::: mef3io.PasswordInteropWarning

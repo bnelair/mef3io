@@ -42,12 +42,16 @@ inline bool same_units_conversion_factor(sf8 a, sf8 b) {
   return a == b || (std::isnan(a) && std::isnan(b));
 }
 
-/// A conversion factor that turns counts into values: finite and non-zero
-/// (negative = a polarity inversion, allowed). 0 is meflib's NO_ENTRY
-/// (meflib.h:439, TIME_SERIES_METADATA_UNITS_CONVERSION_FACTOR_NO_ENTRY).
-inline bool usable_units_conversion_factor(sf8 f) {
-  return f != 0.0 && std::isfinite(f);
-}
+/// A conversion factor a read in units accepts: finite (negative = a
+/// polarity inversion, allowed). NaN and +-inf are invalid and refused.
+inline bool usable_units_conversion_factor(sf8 f) { return std::isfinite(f); }
+
+/// The factor a read in units SCALES by: the stored one, except 0 —
+/// meflib's NO_ENTRY ("not set", meflib.h:439), which meflib's and pymef's
+/// section-2 templates hold until a writer sets it — read as 1, so such a
+/// segment reads as its raw counts (maintainer decision on #151; the Python
+/// Reader warns, UnscaledSamplesWarning).
+inline sf8 effective_units_conversion_factor(sf8 f) { return f == 0.0 ? 1.0 : f; }
 
 namespace detail {
 // read()'s grid (reader.cpp), here so block_envelope can apply the SAME
@@ -73,8 +77,8 @@ inline si8 grid_slot(si8 t, si8 t0, sf8 fs) {
 
 }  // namespace detail
 
-/// Why a read in units refuses samples whose segment stores an unusable
-/// factor (see usable_units_conversion_factor). Never names a segment, path
+/// Why a read in units refuses samples whose segment stores an invalid
+/// factor (NaN or infinite; see usable_units_conversion_factor). Never names a segment, path
 /// or time: the same text is raised by Python's MultiReader, whose segment
 /// numbering differs. `alternative` names the call that returns the counts.
 std::string unusable_factor_message(const std::string& channel, sf8 factor,
@@ -322,6 +326,19 @@ class Session {
     return problems_;
   }
 
+  /// Channels a read() or block_envelope() has returned values for from a
+  /// segment whose conversion factor is not set (0): those values are the
+  /// raw counts. Grows as such segments are read; sorted.
+  std::vector<std::string> unscaled_channels() const {
+    std::lock_guard<std::mutex> lock(state_mu_);
+    return {unscaled_channels_.begin(), unscaled_channels_.end()};
+  }
+  /// INTERNAL (Reader::read): record that `channel` returned unscaled values.
+  void note_unscaled(const std::string& channel) {
+    std::lock_guard<std::mutex> lock(state_mu_);
+    unscaled_channels_.insert(channel);
+  }
+
   /// Record (.rdat) files read so far whose password matched only through
   /// the byte mapping mef3io used up to 1.2.0 (issue #84). Grows as records
   /// are read; deduplicated. (Metadata is reported per channel instead, via
@@ -517,6 +534,7 @@ class Session {
   mutable std::mutex index_mu_;
   std::vector<SegmentProblem> problems_;
   std::vector<std::string> legacy_password_record_files_;
+  std::set<std::string> unscaled_channels_;  // state_mu_
   std::set<std::string> reported_record_files_;  // record files already in problems_
   std::vector<std::string> record_only_channels_;  // records but no segments (yet)
 };

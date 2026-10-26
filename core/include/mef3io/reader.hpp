@@ -34,7 +34,8 @@ struct RawData {
   /// the channel's (ChannelInfo::units_conversion_factor).
   std::optional<sf8> units_conversion_factor = 1.0;
   /// Where each factor applies (#150): units = samples[i] * the factor of the
-  /// span holding i. Canonical, so it depends on the samples only, never on
+  /// span holding i. Factors are AS STORED: 0 means "not set" (read() then
+  /// returns the counts, i.e. factor 1). Canonical, so it depends on the samples only, never on
   /// how they are split into segments or blocks: the valid slots in order,
   /// grouped into maximal runs of one factor, each span running from its
   /// first valid slot to just past its last (gaps inside it included, gaps
@@ -128,9 +129,12 @@ class Reader {
   /// Read `[t0, t1)` as float64 (`= counts * units_conversion_factor` of each
   /// sample's OWN segment, #150), with discontinuity gaps filled with NaN.
   /// Parameters as in read_raw().
+  /// A segment whose factor is not set (0, MEF's "no entry") is read with
+  /// factor 1: its values are the raw counts (Session::unscaled_channels()
+  /// lists the channels that returned such values; Python warns).
   /// @throws FormatError  a sample in the window comes from a segment whose
-  ///         factor cannot scale: 0 (MEF's "no entry"), NaN or infinite.
-  ///         Nothing is decoded then; read_raw() still returns the counts.
+  ///         factor is invalid: NaN or infinite. Nothing is decoded then;
+  ///         read_raw() still returns the counts.
   std::vector<sf8> read(const std::string& channel, std::optional<si8> t0 = std::nullopt,
                         std::optional<si8> t1 = std::nullopt, const Control& ctl = {});
 
@@ -153,7 +157,8 @@ class Reader {
   /// Min/max of each data block of @p channel overlapping [t0, t1), from the
   /// block index alone (nothing decoded): a fast envelope for viewers. Scaled
   /// like read() (each block by its own segment's factor); NaN where a writer
-  /// left a block's extremes unset. An unusable factor (see read()) throws
+  /// left a block's extremes unset; a factor not set (0) gives the raw
+  /// counts, as read() does. An invalid factor (see read()) throws
   /// FormatError for a block read() of the same window would take samples
   /// from (read()'s window and grid rule); such a block that read() would
   /// not touch gets NaN extremes.

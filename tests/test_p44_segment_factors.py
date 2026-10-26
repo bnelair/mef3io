@@ -13,9 +13,11 @@ no warning. Pinned here:
   canonical spans) and gives one ``units_conversion_factor`` only when the
   window's samples share it; info() is None for a mixed channel, segments()
   gives each segment's; inspect() the same;
-* a factor that cannot scale (0 = MEF's "no entry", NaN, inf) is REFUSED by
-  read() and block_envelope() for the windows that touch it, never turned into
-  zeros, and never contained as a "damaged segment" by a lenient open;
+* a factor that is not set (0 = MEF's "no entry") reads as the raw counts
+  (factor 1) with ONE UnscaledSamplesWarning per Reader and channel
+  (maintainer decision on #151); NaN / inf are REFUSED by read() and
+  block_envelope() for the windows read() would take samples from, and never
+  contained as a "damaged segment" by a lenient open;
 * copies (transform cut across the boundary, anonymize, merge) keep every
   segment's factor, and a MultiReader over mixed parts equals their merge;
 * the pymef oracle agrees: its channel-level factor is NO_ENTRY (0.0) and its
@@ -211,13 +213,76 @@ def test_compat_get_data_is_per_segment(mixed):
 
 
 # ---------------------------------------------------------------------------
-# a factor that cannot scale
+# a factor that is not set (0) reads as the counts; NaN / inf are refused
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("bad, shown", [(0.0, "0 (MEF's \"no entry\")"), (float("nan"), "nan"),
-                                        (float("inf"), "inf")])
+def _caught(fn):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        out = fn()
+    return out, [x for x in w if issubclass(x.category, mef3io.UnscaledSamplesWarning)]
+
+
 @pytest.mark.parametrize("strict", [True, False])
-def test_unusable_factor_is_refused_not_zeroed(tmp_path, bad, shown, strict):
+def test_unset_factor_reads_raw_counts_and_warns_once(tmp_path, strict):
+    # Maintainer decision (#151): 0 = MEF's "no entry" = not set -> factor 1.
+    p = _write_mixed(tmp_path / "z.mefd")
+    _set_factor(_tmets(p)[1], 0.0)
+    want = _expected()
+    g = int(20 * FS)
+    want[g:g + N] = _counts(1).astype(np.float64)  # the raw counts, not zeros
+    with mef3io.Reader(str(p), strict=strict) as r:
+        # A window that does not touch it: no warning.
+        x, w = _caught(lambda: r.read("A", START, START + 10 * SECOND))
+        np.testing.assert_array_equal(x, want[:N])
+        assert w == []
+        # The mixed channel: each segment by its own (1 for the unset one).
+        x, w = _caught(lambda: r.read("A"))
+        np.testing.assert_array_equal(x, want)
+        assert len(w) == 1
+        msg = str(w[0].message)
+        assert msg.startswith("channel A: a segment read here has no conversion factor set")
+        assert "raw stored counts" in msg and str(tmp_path) not in msg
+        assert w[0].message.details == ("A",) and w[0].message.path is not None
+        # Once per Reader and channel: not again, from read or the envelope.
+        (x, env), w = _caught(lambda: (r.read("A"), r.block_envelope("A")))
+        assert w == []
+        k = list(env["start_uutc"]).index(START + 20 * SECOND)
+        assert env["min"][k] == _counts(1).min() and env["max"][k] == _counts(1).max()
+        # What is stored is reported as stored.
+        assert [s["units_conversion_factor"] for s in r.segments("A")] == [0.01, 0.0, -0.5]
+        raw = r.read_raw("A")
+        assert raw["units_conversion_factors"][1]["units_conversion_factor"] == 0.0
+        assert r.problems == []
+    # A fresh Reader warns again, first from the envelope this time.
+    with mef3io.Reader(str(p), strict=strict) as r:
+        _, w = _caught(lambda: r.block_envelope("A"))
+        assert len(w) == 1
+        _, w = _caught(lambda: r.read("A"))
+        assert w == []
+    # compat get_data: the same counts, the same warning.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        mr = mef3io.MefReader(str(p))
+    x, w = _caught(lambda: mr.get_data("A"))
+    np.testing.assert_array_equal(x, want)
+    assert len(w) == 1
+
+
+def test_whole_channel_unset_reads_counts(tmp_path):
+    p = _write_mixed(tmp_path / "u.mefd", [(0, 0.5, False)])
+    _set_factor(_tmets(p)[0], 0.0)
+    with mef3io.Reader(str(p)) as r:
+        assert r.info("A")["units_conversion_factor"] == 0.0
+        x, w = _caught(lambda: r.read("A"))
+        np.testing.assert_array_equal(x, _counts(0).astype(np.float64))
+        assert len(w) == 1
+
+
+@pytest.mark.parametrize("bad, shown", [(float("nan"), "nan"), (float("inf"), "inf"),
+                                        (float("-inf"), "-inf")])
+@pytest.mark.parametrize("strict", [True, False])
+def test_invalid_factor_is_refused(tmp_path, bad, shown, strict):
     p = _write_mixed(tmp_path / "z.mefd")
     _set_factor(_tmets(p)[1], bad)
     with mef3io.Reader(str(p), strict=strict) as r:
@@ -243,11 +308,11 @@ def test_unusable_factor_is_refused_not_zeroed(tmp_path, bad, shown, strict):
 
 
 def test_envelope_refuses_exactly_what_read_refuses(tmp_path):
-    # A block of a factor-0 segment starting less than half a sample before
+    # A block of a NaN-factor segment starting less than half a sample before
     # t1 overlaps the window by time but owns no slot of read()'s grid: read()
     # accepts that window, so block_envelope must too (that row is NaN).
     p = _write_mixed(tmp_path / "e.mefd")
-    _set_factor(_tmets(p)[1], 0.0)
+    _set_factor(_tmets(p)[1], float("nan"))
     t1 = START + 20 * SECOND + 1000  # 1 ms < half a period (1.95 ms) into segment 1
     with mef3io.Reader(str(p)) as r:
         assert len(r.read("A", START, t1)) == 2 * N
@@ -263,20 +328,43 @@ def test_envelope_refuses_exactly_what_read_refuses(tmp_path):
             r.block_envelope("A", START, t1)
 
 
+def _two_parts(tmp_path, factor_b):
+    # Not "a.mefd": a warning scrubs the session NAME as a whole word.
+    a = _write_mixed(tmp_path / "part1.mefd", [(0, 0.01, False)])
+    b = _write_mixed(tmp_path / "part2.mefd", [(0, 0.2, False)], start=START + 20 * SECOND)
+    _set_factor(_tmets(b)[0], factor_b)
+    _quiet(mef3io.merge_sessions, [str(a), str(b)], str(tmp_path / "ab.mefd"))
+    return a, b, tmp_path / "ab.mefd"
+
+
 def test_multireader_refuses_with_readers_words(tmp_path):
-    a = _write_mixed(tmp_path / "a.mefd", [(0, 0.01, False)])
-    b = _write_mixed(tmp_path / "b.mefd", [(0, 0.2, False)], start=START + 20 * SECOND)
-    _set_factor(_tmets(b)[0], 0.0)
-    merged = _quiet(mef3io.merge_sessions, [str(a), str(b)], str(tmp_path / "ab.mefd"))
-    del merged
-    with _quiet(mef3io.Reader, str(tmp_path / "ab.mefd")) as r, \
-            _quiet(mef3io.MultiReader, [a, b]) as mr:
+    a, b, ab = _two_parts(tmp_path, float("inf"))
+    with _quiet(mef3io.Reader, str(ab)) as r, _quiet(mef3io.MultiReader, [a, b]) as mr:
         with pytest.raises(mef3io.FormatError) as e1:
             r.read("A")
         with pytest.raises(mef3io.FormatError) as e2:
             mr.read("A")
         assert str(e1.value) == str(e2.value)
         _same(mr.read_raw("A"), r.read_raw("A"))
+
+
+def test_multireader_unset_factor_equals_the_merge_and_warns_once(tmp_path):
+    a, b, ab = _two_parts(tmp_path, 0.0)
+    with _quiet(mef3io.Reader, str(ab)) as r, _quiet(mef3io.MultiReader, [a, b]) as mr:
+        x, w1 = _caught(lambda: r.read("A"))
+        y, w2 = _caught(lambda: mr.read("A"))
+        np.testing.assert_array_equal(x, y)
+        np.testing.assert_array_equal(y[~np.isnan(y)][N:], _counts(0).astype(np.float64))
+        assert len(w1) == len(w2) == 1 and str(w1[0].message) == str(w2[0].message)
+        (e1, e2), w = _caught(lambda: (r.block_envelope("A"), mr.block_envelope("A")))
+        _same(e1, e2)
+        assert w == []  # both already warned for this channel
+        _same(mr.read_raw("A"), r.read_raw("A"))
+    with _quiet(mef3io.MultiReader, [a, b]) as mr:
+        _, w = _caught(lambda: mr.block_envelope("A"))
+        assert len(w) == 1
+        _, w = _caught(lambda: mr.read("A"))
+        assert w == []
 
 
 # ---------------------------------------------------------------------------

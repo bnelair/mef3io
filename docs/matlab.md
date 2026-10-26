@@ -112,7 +112,8 @@ no extra threads; `r.setThreads(n)` changes it from the next call and
 `info` returns `sampling_frequency`, `units_conversion_factor` (NaN when the
 channel's segments store different factors: `segments` gives each segment's,
 `read` scales each sample by its own segment's, and `readRaw` lists the spans
-in `units_conversion_factors`, 1-based and inclusive),
+in `units_conversion_factors`, 1-based and inclusive; a segment whose factor
+is not set, 0, reads as its raw counts, with no warning in MATLAB yet),
 `units_description`, `start_time`/`end_time` (int64 uUTC),
 `number_of_samples` (stored samples; gaps not counted), `n_segments`,
 `section3_available` and the subject metadata fields (empty under a level-1

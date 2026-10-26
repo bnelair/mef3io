@@ -222,10 +222,13 @@ warning once per session, not once per process.
 Float64 samples on the uniform fs grid over `[t0, t1)` (whole channel by
 default): `N = round((t1 - t0) * fs / 1e6)` samples, discontinuity gaps
 filled with NaN, each value scaled by the conversion factor of the segment
-it comes from (segments of one channel may store different ones). A sample
-from a segment whose factor is 0 (MEF's "no entry"), NaN or infinite is
-refused with `mef3io.FormatError` rather than read back as 0: `read_raw`
-still returns its counts. Windowed reads
+it comes from (segments of one channel may store different ones). A segment
+whose factor is not set (0, MEF's "no entry": what meflib's and pymef's
+templates hold until a writer sets it) reads as its **raw stored counts**
+(factor 1), with one `mef3io.UnscaledSamplesWarning` per Reader and channel;
+before 2.0 it read back as zeros. A factor that is NaN or infinite is
+invalid and refused with `mef3io.FormatError` (`read_raw` still returns the
+counts). Windowed reads
 fetch only the needed bytes — cheap on huge sessions. `cancel=` /
 `progress=`: see [Cancelling and progress](#cancelling-and-progress). The
 thread count is the Reader's `n_threads`; there is no per-call override
@@ -251,7 +254,8 @@ x[raw["valid"] == 0] = np.nan      # == r.read("ch1", t0, t1)
 ```
 
 There is one span for an ordinary window and none when nothing in it is
-valid. `units_conversion_factor` is that one span's factor, `None` when the
+valid. Factors are as stored: a span with factor `0` is a segment whose
+factor is not set (`read()` returns those counts unscaled). `units_conversion_factor` is that one span's factor, `None` when the
 window holds samples of segments with different factors, and `info()`'s
 value when nothing is valid.
 
@@ -295,8 +299,9 @@ env["min"], env["max"]                            # float64, in the channel's un
   default (1-second blocks at 5 kHz and above); other writers choose their
   own. A day of one channel in 10-second blocks is 8,640 rows.
 - Values are scaled like `read()`: each block by its own segment's
-  conversion factor, swapped for a negative one, with the same refusal of an
-  unusable factor for the blocks `read()` of the same window would take
+  conversion factor, swapped for a negative one (a factor not set reads as
+  the counts, with the same warning), with the same refusal of a NaN or
+  infinite factor for the blocks `read()` of the same window would take
   samples from (read's grid rule; `toc()` returns the counts). A block of
   such a segment that the read would not touch gets NaN. A block whose writer left its
   extremes unset gives NaN.

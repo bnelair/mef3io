@@ -248,13 +248,9 @@ std::string unusable_factor_message(const std::string& channel, sf8 factor,
                                     const std::string& alternative) {
   // Spelled like Python's "{:g}" for the values that can get here, so
   // MultiReader can raise the same text.
-  const std::string value = std::isnan(factor)  ? "nan"
-                            : std::isinf(factor) ? (factor < 0 ? "-inf" : "inf")
-                                                 : "0";
+  const std::string value = std::isnan(factor) ? "nan" : (factor < 0 ? "-inf" : "inf");
   return "channel " + channel + ": samples in this window come from a segment that stores " +
-         "units_conversion_factor " + value +
-         (factor == 0.0 ? " (MEF's \"no entry\")" : "") +
-         ", so they have no value in units; " + alternative +
+         "units_conversion_factor " + value + ", so they have no value in units; " + alternative +
          " returns the stored counts, and segments() lists each segment's factor";
 }
 
@@ -857,6 +853,7 @@ BlockEnvelope Session::block_envelope(const std::string& channel, std::optional<
   // segment, and containing it would mark the segment unreadable for reads
   // of its counts too.
   std::optional<sf8> unusable;
+  bool unscaled_seen = false;  // a row came from a segment with no factor set
   // Which blocks a read() of this window would take samples from: read()'s
   // window (unset ends = the channel's start and end) and its grid rule, so
   // the envelope never refuses a window read() accepts (#151 review). A
@@ -897,16 +894,19 @@ BlockEnvelope Session::block_envelope(const std::string& channel, std::optional<
             }
             out.start_uutc.push_back(b0);
             out.end_uutc.push_back(b1);
+            // Not set (0): the raw counts, as read() gives them.
+            const sf8 sf = effective_units_conversion_factor(uf);
+            if (usable && uf == 0.0) unscaled_seen = true;
             const sf8 smin = !usable || e.minimum_sample_value == fmt::RED_NAN
                                  ? nan
-                                 : static_cast<sf8>(e.minimum_sample_value) * uf;
+                                 : static_cast<sf8>(e.minimum_sample_value) * sf;
             const sf8 smax = !usable || e.maximum_sample_value == fmt::RED_NAN
                                  ? nan
-                                 : static_cast<sf8>(e.maximum_sample_value) * uf;
+                                 : static_cast<sf8>(e.maximum_sample_value) * sf;
             // A negative factor (a polarity inversion) turns the largest
             // count into the smallest value (#83; pymef3_file.c:972-978).
-            out.minimum.push_back(uf < 0.0 ? smax : smin);
-            out.maximum.push_back(uf < 0.0 ? smin : smax);
+            out.minimum.push_back(sf < 0.0 ? smax : smin);
+            out.maximum.push_back(sf < 0.0 ? smin : smax);
           }
         })) {
       out.start_uutc.resize(mark);
@@ -918,6 +918,7 @@ BlockEnvelope Session::block_envelope(const std::string& channel, std::optional<
   }
   trim_index_cache();  // safe point: nothing holds a span into a cached index
   if (unusable) throw FormatError(unusable_factor_message(channel, *unusable, "toc()"));
+  if (unscaled_seen) note_unscaled(channel);
   return out;
 }
 

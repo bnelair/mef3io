@@ -1818,6 +1818,11 @@ NB_MODULE(_mef3io, m) {
           "Record files read so far that the password opened only through the "
           "byte mapping mef3io used up to 1.2.0 (issue #84).")
       .def(
+          "unscaled_channels",
+          [](mef3io::Reader& r) { return r.session().unscaled_channels(); },
+          "Channels read() or block_envelope() returned raw counts for, from a "
+          "segment whose conversion factor is not set (0).")
+      .def(
           "session_identity",
           [](mef3io::Reader& r) {
             return std::vector<std::string>{r.session().location(), r.session().session_name()};

@@ -769,7 +769,7 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   cold windowed read therefore walks every index once, as before.
   Per-block min/max are the INDEX
   copies (raw counts, scaled by the block's OWN SEGMENT's ufact like read(),
-  #150; swapped when negative; unusable ufact refused); RED_NAN ->
+  #150; swapped when negative; unset ufact = counts, NaN/inf refused); RED_NAN ->
   NaN. Times come from the index entries, not the RED headers (reading those
   would mean touching .tdat); read() places by the header copy, which agrees
   on any consistent file. Python + C++ only (no C ABI/MATLAB yet).
@@ -784,11 +784,20 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   `std::optional` (nullopt = differ; Python None; C ABI/MATLAB NaN).
   `factor_spans` are CANONICAL (valid slots grouped into maximal runs of one
   factor, first valid to last valid + 1) so a MultiReader can rebuild the
-  merged session's exactly. A factor that cannot scale (0 = NO_ENTRY, NaN,
-  inf; `usable_units_conversion_factor`) is REFUSED by read()/block_envelope
-  (FormatError, before decoding; block_envelope throws OUTSIDE with_segment
-  so a lenient session never marks the segment failed), never multiplied
-  into zeros; read_raw/toc still give counts. pymef oracle in test_p44:
+  merged session's exactly. MAINTAINER DECISION (#151): a factor NOT SET
+  (0 = NO_ENTRY, meflib/pymef template default, so real files have it) is
+  read as 1 (`effective_units_conversion_factor`): read(), block_envelope,
+  MultiReader and compat get_data return the RAW COUNTS, the core records
+  the channel (`Session::unscaled_channels`, under state_mu_) and Python
+  emits ONE `UnscaledSamplesWarning` per Reader/MultiReader and channel
+  (`_announced` "unscaled"); spans/info/segments keep the STORED 0. NaN/inf
+  are invalid: REFUSED by read()/block_envelope (FormatError, before
+  decoding; block_envelope decides by read()'s window + grid
+  (`detail::grid_slot`) and throws OUTSIDE with_segment so a lenient
+  session never marks the segment failed); read_raw/toc still give counts.
+  C ABI/MATLAB: raw counts, no warning yet. `mef3io_reader_segment_table`
+  = every segment's info/provenance/factor from ONE segment map (the MEX
+  uses it; per-index loops were O(n^2)). pymef oracle in test_p44:
   its session_md arrays point into memory close() frees — copy them first.
   C ABI: `mef3io_reader_segment_units_conversion_factor`,
   `mef3io_reader_read_raw_factors` + `mef3io_factor_span` (no struct grew).

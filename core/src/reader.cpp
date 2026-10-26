@@ -116,8 +116,8 @@ RawData Reader::read_raw_impl(const std::string& channel, std::optional<si8> t0_
     }
   }
 
-  // A read in units refuses a factor that cannot scale, BEFORE decoding:
-  // multiplying by 0 (meflib's NO_ENTRY) would return zeros that look real.
+  // A read in units refuses an invalid factor (NaN, inf) BEFORE decoding. A
+  // factor that is not set (0) is read as 1 instead (see read()).
   if (in_units)
     for (std::size_t j = 0; j < n_jobs; ++j)
       if (count[j] != 0 && !usable_units_conversion_factor(jobs.jobs[j].units_conversion_factor))
@@ -195,9 +195,10 @@ std::vector<sf8> Reader::read(const std::string& channel, std::optional<si8> t0,
   const sf8 nan = std::numeric_limits<sf8>::quiet_NaN();
   std::vector<sf8> out(raw.samples.size(), nan);
   // Each sample by its own segment's factor (#150); every valid slot lies in
-  // exactly one span.
+  // exactly one span. A factor not set (0, NO_ENTRY) gives the raw counts.
   for (const auto& sp : raw.factor_spans) {
-    const sf8 uf = sp.units_conversion_factor;
+    if (sp.units_conversion_factor == 0.0) session_.note_unscaled(channel);
+    const sf8 uf = effective_units_conversion_factor(sp.units_conversion_factor);
     for (si8 i = sp.start_index; i < sp.end_index; ++i) {
       const auto k = static_cast<std::size_t>(i);
       if (raw.valid[k]) out[k] = static_cast<sf8>(raw.samples[k]) * uf;

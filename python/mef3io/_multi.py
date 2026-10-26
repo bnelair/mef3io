@@ -23,7 +23,8 @@ from typing import Callable, Optional
 import numpy as np
 
 from ._cancel import CancelToken, Cancelled, _hooks
-from ._reader import (Reader, _format_error, _check_threads, _flush,
+from ._reader import (Reader, UnscaledSamplesWarning, _Announced, _check_threads,
+                      _effective_factor, _flush, _format_error, _unscaled_warning_text,
                       _unusable_factor_message, _usable_factor)
 from ._warnings import MefWarning, emit as _emit, identity_of as _identity_of
 
@@ -320,6 +321,7 @@ class MultiReader:
         self._n_threads = _check_threads(n_threads)
         self._closed = False
         self._lock = threading.Lock()
+        self._announced = _Announced()  # warnings given once (UnscaledSamplesWarning)
         self._segment_maps: dict = {}
         self._declaration_issues_global = None
 
@@ -851,16 +853,28 @@ class MultiReader:
             uf = ufs[0] if ufs else 1.0
             if ufs and not _usable_factor(uf):
                 raise _format_error(_unusable_factor_message(channel, uf, "read_raw()"))
-            out = samples.astype(np.float64) * uf
+            unscaled = bool(ufs) and uf == 0
+            out = samples.astype(np.float64) * _effective_factor(uf)
         else:
             fac = self._factor_slots(n, results, owner)
-            bad = (valid != 0) & ~((fac != 0) & np.isfinite(fac))
+            bad = (valid != 0) & ~np.isfinite(fac)
             if bad.any():
                 uf = float(fac[np.flatnonzero(bad)[0]])
                 raise _format_error(_unusable_factor_message(channel, uf, "read_raw()"))
+            zero = (valid != 0) & (fac == 0)
+            unscaled = bool(zero.any())
+            fac[fac == 0] = 1.0  # not set: the raw counts, as Reader.read
             out = samples.astype(np.float64) * fac
         out[valid == 0] = np.nan
+        if unscaled:
+            self._warn_unscaled(channel, stacklevel=3)
         return out
+
+    def _warn_unscaled(self, channel: str, stacklevel: int) -> None:
+        # Once per MultiReader and channel, as a Reader does.
+        if self._announced.new("unscaled", [channel], lambda c: c):
+            _flush([(UnscaledSamplesWarning, _unscaled_warning_text(channel),
+                     dict(path=self._paths[0], details=channel))], stacklevel=stacklevel)
 
     def _flush_results(self, results) -> None:
         for _, pending in results:
@@ -1018,8 +1032,11 @@ class MultiReader:
                     if not (self._readers[k].info(channel)["start_time"] >= hi + margin
                             or self._readers[k].info(channel)["end_time"] + margin <= lo)]
             ks = keep or ks[:1]
-        parts = _run(lambda k: self._readers[k].block_envelope(channel, t0, t1), ks,
-                     self._workers())
+        pendings = {k: [] for k in ks}
+        parts = _run(lambda k: self._readers[k]._block_envelope(channel, t0, t1, pendings[k]),
+                     ks, self._workers())
+        if any(c is UnscaledSamplesWarning for p in pendings.values() for c, _, _ in p):
+            self._warn_unscaled(channel, stacklevel=3)
         if len(parts) == 1:
             return parts[0]
         order = np.argsort(np.concatenate([p["start_uutc"] for p in parts]), kind="stable")

@@ -412,7 +412,8 @@ with the factor of the segment the sample is stored in. The factor lives in
 each segment's section 2, and the segments of one channel may store different
 ones; meflib's channel-level aggregate then reads `NO_ENTRY` (`0.0`,
 meflib.h:439; meflib.c:5494 and 6176). mef3io scales every block by its own
-segment's factor and refuses to scale by `0`, NaN or infinity.
+segment's factor; a factor of `0` ("not set") is read as 1 (the raw
+counts, with a warning in Python), and NaN or infinity is refused.
 
 ## Records (`.rdat` + `.ridx`) — annotations
 

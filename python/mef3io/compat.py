@@ -25,6 +25,7 @@ from ._reader import (
     SessionDeclarationWarning,
     _declaration_warning_text,
     _flush,
+    _note_unscaled,
     _warn_legacy_password,
     _Announced,
     _warning_on_legacy_records,
@@ -135,9 +136,15 @@ class MefReader:
         # Reader.read scales each sample by its OWN segment's factor (#150);
         # counts * ufact[0] was wrong for a channel whose segments differ
         # (ufact is then [None]).
-        if isinstance(channels, list):
-            return [self._r.read(ch, t_stamp1, t_stamp2) for ch in self._pick(channels)]
-        return self._r.read(self._pick([channels])[0], t_stamp1, t_stamp2)
+        picked = self._pick(channels if isinstance(channels, list) else [channels])
+        if not isinstance(channels, list):
+            picked = picked[:1] or [channels]  # an unknown name: the backend's error
+        out = [self._r.read(ch, t_stamp1, t_stamp2) for ch in picked]
+        pending: list = []
+        for ch in picked:  # a segment with no factor set read as raw counts
+            _note_unscaled(self._r, self._announced, self._path_str, ch, pending)
+        _flush(pending, stacklevel=2)
+        return out if isinstance(channels, list) else out[0]
 
     def block_envelope(self, channel: str, t_stamp1=None, t_stamp2=None) -> dict:
         """Per-block minimum and maximum from the block index alone.
@@ -149,7 +156,11 @@ class MefReader:
         data block overlapping ``[t_stamp1, t_stamp2)``, scaled like
         :meth:`get_data`.
         """
-        return self._r.block_envelope(channel, t_stamp1, t_stamp2)
+        out = self._r.block_envelope(channel, t_stamp1, t_stamp2)
+        pending: list = []
+        _note_unscaled(self._r, self._announced, self._path_str, channel, pending)
+        _flush(pending, stacklevel=2)
+        return out
 
     def get_annotations(self, channel: Optional[str] = None):
         """Records as a list of dicts (legacy ``mef_tools`` signature).

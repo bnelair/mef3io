@@ -251,23 +251,32 @@ Overlaps that the rule only notes ("12" in "LAH12", "P3", a session called
     where the factor changes.
   - The compat `MefReader`'s `ufact` is `[None]` for such a channel, and
     `get_data` scales each sample by its own segment's factor.
-- **A conversion factor of 0 (MEF's "no entry"), NaN or infinity is refused
-  by `read()` and `block_envelope()`** (`mef3io.FormatError`, C ABI
-  `MEF3IO_ERR_FORMAT`) for a window holding samples of such a segment, before
-  anything is decoded. It used to read back as zeros (or NaN) that looked
-  like data. `read_raw()` and `toc()` still return the counts; other windows
-  read as before; a lenient Reader does not treat it as a damaged segment.
+- **A segment whose conversion factor is not set reads as raw counts, with
+  a warning; NaN or infinite factors are refused.** 0 is MEF's "no entry"
+  for the factor ("not set"). `read()`, `block_envelope()`, `MultiReader`
+  and the compat `MefReader.get_data` now return such a segment's samples
+  as the **raw stored counts** (factor 1) and emit one new
+  `mef3io.UnscaledSamplesWarning` per Reader and channel the first time
+  such a segment is read. Before, they read back as all zeros. In a channel
+  that mixes such a segment with real factors, every segment is scaled by
+  its own (1 for the unset one). `info()`, `segments()` and `read_raw()`'s
+  `units_conversion_factors` keep reporting the stored value (0). A factor
+  that is NaN or infinite is invalid: `read()` and `block_envelope()` raise
+  `mef3io.FormatError` (C ABI `MEF3IO_ERR_FORMAT`) for a window holding such
+  samples, before anything is decoded. `read_raw()` and `toc()` still return
+  the counts, and a lenient Reader does not count it as a damaged segment.
+  The C ABI and MATLAB read unset factors as raw counts too, without a
+  warning (C++: `Session::unscaled_channels()`).
 
   **Such files exist — check yours (migration).** 0 is what meflib's and
   pymef's section-2 templates hold until a writer sets the factor
-  (meflib.c:4564; pymef's `MefSession._initialize_tmd2`), so a session
-  written through pymef or a meflib-based recorder that never set it, or
-  with `write_int32(ufact=0)` by mef3io before 2.0, stores 0. mef_tools
-  read those as all zeros (`counts * 0`), and so did mef3io before 2.0. Now
-  `read()` raises, and the message says that `read_raw()` still returns the
-  stored counts. mef_tools and mef3io's own writers never store 0 by default
-  (mef_tools writes `10**-precision`, 1.0 for precision 0). To keep reading
-  such a file, scale the counts yourself with the factor you know:
+  (meflib.c:4564; pymef's `MefSession._initialize_tmd2`). So a session
+  written through pymef or by a meflib-based recorder that never set it,
+  or by mef3io before 2.0 with `write_int32(ufact=0)`, stores 0. mef_tools
+  read those as all zeros (`counts * 0`), and so did mef3io before 2.0; now
+  they read as the raw counts, with the warning. mef_tools and mef3io's own
+  writers never store 0 by default (mef_tools writes `10**-precision`, 1.0
+  for precision 0). If you know the real factor, scale the counts yourself:
 
   ```python
   raw = r.read_raw("ch1", t0, t1)

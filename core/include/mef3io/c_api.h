@@ -198,9 +198,10 @@ int mef3io_reader_read_size(mef3io_reader* r, const char* channel, int64_t t0, i
                             int64_t* out_n);
 /* Float64 read: gaps are NaN, each value scaled by the conversion factor of
  * the segment it comes from (segments may store different ones).
- * MEF3IO_ERR_FORMAT when a sample in the window comes from a segment whose
- * factor cannot scale (0 = MEF's "no entry", NaN, infinite); the raw reads
- * still return its counts.
+ * A segment whose factor is not set (0, MEF's "no entry") reads as its raw
+ * counts (factor 1), without a warning here. MEF3IO_ERR_FORMAT when a sample
+ * in the window comes from a segment whose factor is NaN or infinite; the raw
+ * reads still return its counts.
  * `buf` must hold at least the value from mef3io_reader_read_size. */
 int mef3io_reader_read(mef3io_reader* r, const char* channel, int64_t t0, int64_t t1,
                        double* buf, int64_t buf_len, int64_t* out_n);
@@ -223,7 +224,8 @@ int mef3io_reader_read_raw_ex(mef3io_reader* r, const char* channel, int64_t t0,
                               mef3io_progress_fn progress, void* user_data);
 
 /* Output samples [start_index, end_index) (0-based, half-open) whose valid
- * samples come from segments storing `units_conversion_factor`. */
+ * samples come from segments storing `units_conversion_factor` (as stored:
+ * 0 = not set, read by mef3io_reader_read as factor 1). */
 typedef struct {
   int64_t start_index;
   int64_t end_index;
