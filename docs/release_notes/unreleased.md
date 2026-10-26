@@ -23,9 +23,10 @@ notes at release time (this one is planned as 2.0.1).
     removed), drops only a torn fragment after the last one, and rebuilds the
     `.ridx` and the headers. The dry run lists such files (`record_files`);
     healthy and legacy files are never listed. A damaged record *header*
-    (e.g. a corrupt length field) is never mistaken for a torn tail: if the
-    index lists intact records beyond the stopping point, both files are left
-    untouched and a note says so. Until then the next
+    (e.g. a corrupt length field) is never mistaken for a torn tail: a tail is
+    dropped only if the index exists, lists nothing at or beyond the stopping
+    point, and no intact record follows it; otherwise (and always without an
+    index) both files are left untouched and a note says so. Until then the next
     `write_annotations` to a torn file is refused, naming `recover_session`.
   - A `strict=False` reader no longer skips a whole annotation file for one
     damaged record: it returns every intact record (resynchronising through

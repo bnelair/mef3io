@@ -243,7 +243,13 @@ def test_every_crash_state_recovers_without_losing_a_stored_record(tmp_path, ima
     if healthy:
         assert not rep.record_files
 
-    mef3io.recover_session(str(p), apply=True)
+    rep = mef3io.recover_session(str(p), apply=True)
+    if rdat_k in ("torn", "zero") and ridx_k in ("new", "torn") and (rdat.read_bytes(), ridx.read_bytes()) == snapshot:
+        # the index lists the cut record (it may have landed before the data):
+        # that is indistinguishable from a damaged length, so NOTHING is
+        # dropped; both files stay as they are and the note says so.
+        assert "damaged, not modified" in " ".join(rep.notes)
+        return
     got = _notes(p)  # strict open
     texts = [t for _, t in got]
     for _, t in [(x["time"], x["text"]) for x in OLD]:
@@ -464,7 +470,7 @@ def test_a_corrupt_length_field_is_damage_not_a_torn_tail(tmp_path):
         assert (rdat.read_bytes(), ridx.read_bytes()) == before
         assert not rep.record_files and not rep.skipped
         txt = " ".join(rep.notes)
-        assert "damaged, not modified" in txt and "listed by the index beyond the damage" in txt
+        assert "damaged, not modified" in txt and "at or beyond the damage" in txt
         assert "torn" not in txt
     # the lenient reader still gets every record the index can locate
     with mef3io.Reader(str(p), strict=False) as r:
@@ -504,6 +510,71 @@ def test_a_torn_tail_after_a_damaged_record_drops_only_the_tail(tmp_path):
     mef3io.recover_session(str(p), apply=True)
     assert len(rdat.read_bytes()) == size  # only the fragment went
     assert len(ridx.read_bytes()) == len(ent)
+
+
+def test_last_record_with_a_flipped_length_is_damage_even_with_an_index(tmp_path):
+    for bit in (0x01, 0x20, 0x80):
+        p, rdat, ridx, offs = _five_notes(tmp_path / str(bit))
+        raw = bytearray(rdat.read_bytes())
+        raw[offs[4] + 12] ^= bit  # record 5's length (the index lists it AT the stop)
+        rdat.write_bytes(bytes(raw))
+        before = (rdat.read_bytes(), ridx.read_bytes())
+        for apply in (False, True):
+            rep = mef3io.recover_session(str(p), apply=apply)
+            assert (rdat.read_bytes(), ridx.read_bytes()) == before
+            txt = " ".join(rep.notes)
+            assert "damaged, not modified" in txt and "listed by neither" not in txt
+
+
+def test_without_an_index_nothing_is_dropped_and_intact_records_still_read(tmp_path):
+    for kind in ("length", "zeros"):
+        p, rdat, ridx, offs = _five_notes(tmp_path / kind)
+        raw = bytearray(rdat.read_bytes())
+        if kind == "length":
+            raw[offs[1] + 13] ^= 0x40
+        else:
+            raw[offs[1]:offs[2]] = b"\x00" * (offs[2] - offs[1])
+        rdat.write_bytes(bytes(raw))
+        ridx.unlink()
+        for apply in (False, True):
+            mef3io.recover_session(str(p), apply=apply)
+            assert rdat.read_bytes() == bytes(raw)
+            assert not ridx.exists()
+        with mef3io.Reader(str(p), strict=False) as r:
+            with pytest.warns(mef3io.UnreadableSegmentWarning):
+                got = [x["text"] for x in r.records()]
+        assert "n1" in got and got[0] == "n1"
+
+
+def test_an_intact_record_after_the_damage_blocks_a_drop_even_without_entries(tmp_path):
+    p, rdat, ridx, offs = _five_notes(tmp_path)
+    raw = bytearray(rdat.read_bytes())
+    raw[offs[1] + 13] ^= 0x40
+    rdat.write_bytes(bytes(raw))
+    # an index that stops before the damage: only the scan can see records 3-5
+    ent = ridx.read_bytes()
+    ridx.write_bytes(ent[:UH + 24])
+    before = (rdat.read_bytes(), ridx.read_bytes())
+    rep = mef3io.recover_session(str(p), apply=True)
+    assert (rdat.read_bytes(), ridx.read_bytes()) == before
+    assert "intact record follows" in " ".join(rep.notes)
+
+
+def test_a_non_utf8_type_byte_never_breaks_a_lenient_read(tmp_path):
+    p, rdat, ridx, offs = _five_notes(tmp_path)
+    raw = bytearray(rdat.read_bytes())
+    raw[offs[1] + 4] = 0xD8  # type byte that is not UTF-8
+    rdat.write_bytes(bytes(raw))
+    with mef3io.Reader(str(p), strict=False) as r:
+        with pytest.warns(mef3io.UnreadableSegmentWarning):
+            got = [x["text"] for x in r.records()]
+        probs = r.problems
+    assert got == ["n1", "n3", "n4", "n5"]
+    assert all(isinstance(q["reason"], str) for q in probs)
+    assert any("\\xd8" in q["reason"] for q in probs)
+    with pytest.raises(Exception) as ei:
+        mef3io.Reader(str(p)).records()
+    str(ei.value)
 
 
 def test_session_append_targets_the_file_the_reader_uses(tmp_path):

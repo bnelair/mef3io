@@ -28,6 +28,19 @@ constexpr ui1 PAD_BYTE = 0x7e;
 constexpr si8 UNKNOWN_NUMBER_OF_ENTRIES = -1;  // meflib.h:232
 constexpr ui4 CRC_NO_ENTRY = 0;                // meflib.h:234
 
+// A record type read from a damaged file can hold any bytes; messages (which
+// become Python strings) must stay valid UTF-8, so non-printable-ASCII bytes
+// are shown as \xNN.
+std::string safe_type(const std::string& t) {
+  static const char* hex = "0123456789abcdef";
+  std::string o;
+  for (unsigned char c : t) {
+    if (c >= 0x20 && c < 0x7f) o += static_cast<char>(c);
+    else { o += "\\x"; o += hex[c >> 4]; o += hex[c & 15]; }
+  }
+  return o;
+}
+
 // ---- body layouts (mefrec.h), offsets relative to the start of the BODY ----
 // Seiz 1.0 (mefrec.h:110-131)
 constexpr std::size_t SEIZ_BYTES = 1312, SEIZ_MARKER_BYTES = 128, SEIZ_ANNOTATION_BYTES = 1024,
@@ -348,7 +361,7 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
 
     std::size_t body_off = off + fmt::RECORD_HEADER_BYTES;
     if (body_bytes > rdat.size() - body_off && info.tolerate_damage) {
-      if (skip_damaged(off, "record " + std::to_string(seen) + " (" + type + ") claims " +
+      if (skip_damaged(off, "record " + std::to_string(seen) + " (" + safe_type(type) + ") claims " +
                                 std::to_string(body_bytes) + " body bytes but only " +
                                 std::to_string(rdat.size() - body_off) + " remain (corrupt length)",
                        std::nullopt))
@@ -365,12 +378,12 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
         crc::calculate(rdat.subspan(off + 4, fmt::RECORD_HEADER_BYTES - 4 + body_bytes)) !=
             stored_crc) {
       if (info.tolerate_damage) {
-        if (skip_damaged(off, "record " + std::to_string(seen) + " (" + type + ") fails its CRC: the record is corrupt",
+        if (skip_damaged(off, "record " + std::to_string(seen) + " (" + safe_type(type) + ") fails its CRC: the record is corrupt",
                          body_off + body_bytes))
           continue;
         break;
       }
-      throw CrcError("record " + std::to_string(out.size()) + " (" + type +
+      throw CrcError("record " + std::to_string(out.size()) + " (" + safe_type(type) +
                      ") fails its CRC: the record is corrupt");
     }
 
