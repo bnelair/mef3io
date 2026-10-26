@@ -10,6 +10,7 @@
 // Not a public header: it is included by .cpp files inside core/src only.
 #pragma once
 
+#include <cctype>
 #include <algorithm>
 #include <atomic>
 #include <mutex>
@@ -159,8 +160,9 @@ inline void fsync_file_or_throw(const std::string& path) {
 ///  * Windows: FlushFileBuffers on a directory handle (FILE_FLAG_BACKUP_SEMANTICS,
 ///    GENERIC_WRITE). NTFS commonly refuses it (ERROR_ACCESS_DENIED) because it
 ///    journals directory metadata itself; the call is made and a refusal is
-///    reported as false, which flush_files treats as "nothing more can be
-///    done" on Windows (documented in long_recordings.md).
+///    reported as false with an "[ntfs-refused]" marker, which flush_files
+///    alone ignores on Windows; every other failure (cannot open the folder,
+///    other errors) is a failed flush (documented in long_recordings.md).
 inline bool fsync_directory(const fsys::path& dir, std::string* why = nullptr) {
 #ifndef _WIN32
   const int fd = ::open(dir.string().c_str(), O_RDONLY);
@@ -189,9 +191,12 @@ inline bool fsync_directory(const fsys::path& dir, std::string* why = nullptr) {
     return false;
   }
   const bool ok = FlushFileBuffers(h) != 0;
+  const DWORD err = ok ? 0 : GetLastError();
   if (!ok && why) {
-    const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
+    const std::error_code ec(static_cast<int>(err), std::system_category());
     *why = "FlushFileBuffers on a folder: " + ec.message();
+    // Marker for flush_files: NTFS's refusal of a directory handle.
+    if (err == ERROR_ACCESS_DENIED) *why += " [ntfs-refused]";
   }
   CloseHandle(h);
   return ok;
@@ -354,14 +359,21 @@ inline void flush_files(const std::vector<fsys::path>& files) {
     fsys::path d = f.parent_path();
     for (int level = 0; level < 4 && !d.empty(); ++level, d = d.parent_path()) {
       if (std::find(dirs.begin(), dirs.end(), d) == dirs.end()) dirs.push_back(d);
+      // Never above the session folder: its parent is not ours to flush.
+      std::string leaf = d.filename().string();
+      for (auto& ch : leaf) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+      if (leaf.size() >= 5 && leaf.compare(leaf.size() - 5, 5, ".mefd") == 0) break;
       if (d == d.parent_path()) break;
     }
   }
   for (const auto& d : dirs) {
     std::string why;
 #ifdef _WIN32
-    // NTFS may refuse a folder flush; nothing further can be done there.
-    (void)fsync_directory(d, &why);
+    // NTFS may refuse a folder flush (ERROR_ACCESS_DENIED): only that one
+    // refusal is ignored; anything else is a failed flush.
+    if (!fsync_directory(d, &why) && why.find("[ntfs-refused]") == std::string::npos)
+      throw IoError("could not flush to disk, the write is not durable: " + d.string() +
+                    (why.empty() ? "" : " (" + why + ")"));
 #else
     if (!fsync_directory(d, &why))
       throw IoError("could not flush to disk, the write is not durable: " + d.string() +

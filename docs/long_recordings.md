@@ -141,14 +141,19 @@ What covers the **new folders** (`.mefd`, `.timd`, `.segd`) on each system:
 
 - **Linux:** `syncfs` — folders and renames included.
 - **macOS:** every file with `F_FULLFSYNC` (plain `fsync` where the file
-  system lacks it), then each folder from the file's own up to the session's
-  parent with `F_FULLFSYNC` (fallback `fsync`).
+  system lacks it), then each folder from the file's own up to the session
+  folder (`.mefd`, never above it) with `F_FULLFSYNC` (fallback `fsync`).
 - **Windows:** every file with `FlushFileBuffers`, then each folder the same
   way through a directory handle. NTFS journals folder entries itself and often
   refuses a flush on a folder handle (access denied); mef3io makes the call and
-  treats a refusal as "nothing more can be done there". On Windows the new
+  ignores exactly that refusal (access denied); any other folder-flush error
+  fails the write like on the other systems. On Windows the new
   folder entries are therefore as durable as NTFS makes them, not more — this
   is the one platform difference that cannot be removed.
+
+After a failed flush the `Writer` stays failed: with `wait_for_disk=True` every
+later `write()` raises that failure too (never reports data as written when it
+may not be), and `flush()`/`close()` rethrow it.
 
 Nothing else is flushed. The `.tdat` and `.tidx` are extended **in place**
 (rewriting either whole would be `O(session)`), and their headers patched in

@@ -407,12 +407,10 @@ TEST_CASE("wait_for_disk: each write returns after ITS files, in one batch", "[d
       for (const auto& p : got[0]) REQUIRE(p.find(std::string(ch) + ".timd") != std::string::npos);
     }
   }
-  // flush()/close() cover what a write touched in EVERY mode (the folders
-  // it created are made durable with the files).
+  // Everything was flushed by its own write (files and folders), so nothing
+  // is owed: flush()/close() must not re-flush the whole history.
   w.flush();
-  auto left = batches.take();
-  REQUIRE(left.size() == 1);
-  REQUIRE(count_suffix(left[0], ".tmet") == 2);
+  REQUIRE(batches.take().empty());
   w.flush();
   REQUIRE(batches.take().empty());
 }
@@ -451,6 +449,10 @@ TEST_CASE("a failed wait_for_disk flush inside a write is sticky too", "[durabil
   REQUIRE_THROWS_AS(w.write_int32("ch1", a, 0.5, 1577836800000000, 256.0), IoError);
   detail::flush_batch_observer = nullptr;
   REQUIRE_THROWS_AS(w.flush(), IoError);
+  // The disk "recovered", but a later write must still refuse to report
+  // success: the earlier data may be lost.
+  REQUIRE_THROWS_AS(w.write_int32("ch1", a, 0.5, 1577836800000000, 256.0), IoError);
+  REQUIRE_THROWS_AS(w.write_int32("ch2", a, 0.5, 1577836800000000, 256.0), IoError);
 }
 
 TEST_CASE("flush_each_concurrently overlaps the waits", "[durability]") {

@@ -185,6 +185,12 @@ void SessionWriter::check_still_writable() const {
     throw IoError("the session folder is no longer there (renamed or moved since this writer "
                   "opened it?): " + mefd_path_ + "; open a writer on its new path");
   detail::refuse_if_mid_operation(mefd_path_);
+  // wait_for_disk promises "returned = on disk": after a failed flush no later
+  // write may return normally (the earlier data may be lost).
+  if (wait_for_disk_ && flush_failure_)
+    throw IoError(*flush_failure_ +
+                  " (an earlier flush failed: data written since the last successful flush may "
+                  "be lost; run recover_session)");
 }
 
 void SessionWriter::hydrate(const std::string& channel, ChannelState& st) {
@@ -467,10 +473,12 @@ void SessionWriter::write_records(std::optional<std::string> channel,
   }
   const std::vector<fs::path> files = {fs::path(dir) / (base + ".rdat"),
                                        fs::path(dir) / (base + ".ridx")};
-  // Always owed to flush()/close() too (the folders they live in with them);
-  // wait_for_disk additionally waits now.
-  unflushed_.insert(files.begin(), files.end());
-  if (wait_for_disk_) flush_recording_failure(files);
+  // wait_for_disk waits now (files and their folders), so nothing is owed
+  // later; otherwise flush()/close() owe them.
+  if (wait_for_disk_)
+    flush_recording_failure(files);
+  else
+    unflushed_.insert(files.begin(), files.end());
 }
 
 SessionWriter::~SessionWriter() {
@@ -793,11 +801,14 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   st.max_difference_bytes = std::max(st.max_difference_bytes, written_difference_bytes);
 
   {
-    // Owed to the next flush() / close() in EVERY mode (wait_for_disk too:
-    // the folders this write created are made durable with them).
-    const std::string stem = fs::path(seg_dir).stem().string();
-    for (const char* ext : {".tdat", ".tidx", ".tmet"})
-      unflushed_.insert(fs::path(seg_dir) / (stem + ext));
+    // Owed to the next flush() / close(). In wait_for_disk mode this write
+    // already flushed them (and their folders): not kept, so close() does not
+    // re-flush the whole history (one F_FULLFSYNC per file on macOS).
+    if (!wait_for_disk_) {
+      const std::string stem = fs::path(seg_dir).stem().string();
+      for (const char* ext : {".tdat", ".tidx", ".tmet"})
+        unflushed_.insert(fs::path(seg_dir) / (stem + ext));
+    }
   }
 
   st.sampling_frequency = fs;

@@ -641,7 +641,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
                                " from its complete, CRC-valid .tmet.mef3io-tmp (a write whose "
                                "rename did not reach the disk)");
               } else {
-              if (sd.prev.empty())
+                if (sd.prev.empty())
                 throw FormatError("the .tmet of a channel's first segment is lost, and there is "
                                   "no previous segment's .tmet to rebuild it from");
               auto rebuilt = rebuild_tmet(sd.prev / (sd.prev.stem().string() + ".tmet"), tdat,
@@ -652,7 +652,8 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool backup,
                              (sz_tmet ? "shorter than a metadata record"
                                       : (fsys::exists(tmet_path) ? "empty" : "missing")) +
                              ": " + (apply ? "rebuilt" : "would be rebuilt") +
-                             " from the previous segment's .tmet and this segment's own files");}
+                             " from the previous segment's .tmet and this segment's own files");
+              }
             }
             // A header source of THIS segment for whatever else is lost.
             std::vector<ui1> source;
