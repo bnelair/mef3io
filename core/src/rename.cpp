@@ -530,7 +530,7 @@ void patch(const fs::path& dir, const std::string& rel, bool desc, const Plan& p
       const auto plain = crypto::aes128_ecb_decrypt(s2, *key);
       std::copy(plain.begin(), plain.end(), s2.begin());
     }
-    // The stored image is edited, never re-serialized (CLAUDE.md: a full
+    // The stored image is edited, never re-serialized (for_agents/notes/large-files-and-append.md: a full
     // serialize wipes meflib's protected and discretionary regions).
     byteio::write_string(s2, S2_SESSION_DESC, S2_DESC_BYTES, p.new_name);
     if (key) {
@@ -538,7 +538,7 @@ void patch(const fs::path& dir, const std::string& rel, bool desc, const Plan& p
       std::copy(enc.begin(), enc.end(), s2.begin());
     }
     // Bounded by the fixed record length: a foreign writer's padding past it
-    // is not part of the body (CLAUDE.md, ".tmet is a FIXED-length record").
+    // is not part of the body (for_agents/notes/format-gotchas.md, ".tmet is a FIXED-length record").
     if (uh.body_crc != fmt::CRC_NO_ENTRY)
       byteio::write<ui4>(bytes, 4,
                          crc::calculate(std::span<const ui1>(bytes).subspan(

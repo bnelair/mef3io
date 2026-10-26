@@ -7,7 +7,7 @@
 // list_dir() here but opendir + getdents + close (+ a stat per entry on some
 // file systems) below. Replacing three exists() per segment by one listing
 // per .segd halved this count and ADDED syscalls (strace), so it was reverted;
-// see CLAUDE.md. A count pin also cannot see a call that got more expensive
+// see for_agents/notes/threads-gil-concurrency.md. A count pin also cannot see a call that got more expensive
 // (a tar list_dir that scanned the whole archive made the opens quadratic),
 // hence the scaling cases at the end.
 //

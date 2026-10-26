@@ -76,7 +76,7 @@ def _set_rto(path, rto, channels=None, segments=None):
     .tmet this offset.
 
     The fixed-length .tmet body CRC is bounded by METADATA_FILE_BYTES — never
-    to EOF (CLAUDE.md, ".tmet is a FIXED-length record")."""
+    to EOF (for_agents/notes/format-gotchas.md, ".tmet is a FIXED-length record")."""
     for tmet in sorted(Path(path).glob("*.timd/*.segd/*.tmet")):
         if channels is not None and tmet.parent.parent.name[:-5] not in channels:
             continue

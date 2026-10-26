@@ -52,7 +52,7 @@ TimeRange time_range(const std::string& path, const std::string& password, const
       if (!md.section3_available) r.offset_known = false;
       const si8 rto = md.section3_available ? segment_rto(md) : 0;
       // A recording-time offset with times stored non-negated cannot be told
-      // apart from absolute times (CLAUDE.md, "sign conventions").
+      // apart from absolute times (for_agents/notes/format-gotchas.md, "sign conventions").
       if (rto != 0 && (s >= 0 || e >= 0)) r.offset_known = false;
       for (const si8 v : {s, e}) {
         if (v == fmt::UUTC_NO_ENTRY) continue;

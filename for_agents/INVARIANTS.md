@@ -4,7 +4,7 @@ Read this before changing the writer, the append path, the validator or the
 read path. Everything here was learned by shipping the mistake first. Each entry
 says what the rule is, what went wrong without it, and what pins it now.
 
-`CLAUDE.md` is the working context; this is the short list of things that have
+`CLAUDE.md` is the working context (its index points to `for_agents/notes/`, one file per area); this is the short list of things that have
 already cost a release cycle.
 
 ---
@@ -304,7 +304,7 @@ and tar, damaged + incomplete segments, with a scrambling source
 
 `tests/test_p25_public_text.py` (and the docs workflow's site check) fail if
 public text names a private third-party product. CLAUDE.md, tests and scripts
-are exempt; this folder is public, so keep such names out of it.
+are exempt; this folder (incl. `notes/`) is public, so keep such names out of it.
 
 ## 14. One copy engine: a transform changes only what it was asked to
 

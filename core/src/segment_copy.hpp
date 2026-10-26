@@ -2,7 +2,7 @@
 //
 // Copies one segment's `.tidx` + `.tdat` from a SessionSource to two fresh
 // files, block by block, never holding more than a bounded batch of blocks in
-// memory (CLAUDE.md: "NEVER READ OR COPY A .tdat WHOLE"). Each block is handed
+// memory (for_agents/notes/large-files-and-append.md: "NEVER READ OR COPY A .tdat WHOLE"). Each block is handed
 // to a caller hook that may edit its bytes in place (a header field, the
 // statistics encryption) or drop it; the engine then
 //
