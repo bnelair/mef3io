@@ -4,11 +4,17 @@
 // These lived in duplicate in writer.cpp and validate.cpp, and drifted: the
 // repair path fsynced and preserved mode/owner while the append — which writes
 // the SAMPLES, not just declarations — did neither. One copy, one contract.
+// (Since 2.0 the writer itself flushes only a replaced `.tmet`; repair,
+// rename, recovery and the copies keep their own flush rules.)
 //
 // Not a public header: it is included by .cpp files inside core/src only.
 #pragma once
 
+#include <cctype>
 #include <algorithm>
+#include <atomic>
+#include <mutex>
+#include <thread>
 #include <filesystem>
 #include <span>
 #include <fstream>
@@ -33,6 +39,18 @@ namespace mef3io::detail {
 
 namespace fsys = std::filesystem;
 
+/// TEST HOOK: when set, called with the path of every flush `fsync_file`
+/// attempts (successful or not). Lets a test pin WHICH files a write path
+/// flushes — the writer may flush only the `.tmet` it replaces — without
+/// patching the OS. Set it only while no other thread writes; the observer
+/// itself must be thread-safe (several channels may be written at once).
+inline void (*fsync_observer)(const std::string& path) = nullptr;
+
+/// TEST HOOK: called with the files of every flush_files batch, before the
+/// batch's one combined wait (syncfs on Linux; elsewhere the per-file flushes
+/// run concurrently, and each also reaches fsync_observer).
+inline void (*flush_batch_observer)(const std::vector<fsys::path>& files) = nullptr;
+
 /// Flush a file's contents all the way to stable storage.
 ///
 /// A rename is ORDERED, not durable: without this a power cut can leave the
@@ -47,11 +65,13 @@ namespace fsys = std::filesystem;
 /// carry the write right and fails with ERROR_ACCESS_DENIED without it —
 /// unlike POSIX, where fsync on an O_RDONLY descriptor is perfectly legal.
 /// Opening for read cost nothing on Linux and macOS and made every flush on
-/// Windows a no-op that reported failure: `durability="full"` threw on the
-/// first append, and the paths that ignore the result — `durability="fast"`
-/// and the recovery backups — silently had no durability at all. Do not
-/// "simplify" this back to GENERIC_READ.
+/// Windows a no-op that reported failure: 1.x's `durability="full"` threw on
+/// the first append, and the paths that ignore the result — then
+/// `durability="fast"`, still the recovery backups — silently had no
+/// durability at all. The writer's `.tmet` flush (fsync_file_or_throw) relies
+/// on this today. Do not "simplify" this back to GENERIC_READ.
 [[nodiscard]] inline bool fsync_file(const std::string& path, std::string* why = nullptr) {
+  if (fsync_observer) fsync_observer(path);
 #ifdef _WIN32
   const auto fail = [&](const char* what) {
     if (why) {
@@ -132,16 +152,54 @@ inline void fsync_file_or_throw(const std::string& path) {
                   (why.empty() ? "" : " (" + why + ")"));
 }
 
-/// A rename is only durable once the DIRECTORY entry is flushed too. Windows
-/// exposes no directory handle to flush and does not need one.
-inline void fsync_directory(const fsys::path& dir) {
+/// A rename (or a new file/folder) is only durable once the DIRECTORY entry is
+/// flushed too. Returns false when the flush failed; `why` gets the OS error.
+///  * Linux: fsync on the directory.
+///  * macOS: F_FULLFSYNC (the drive's cache too), falling back to fsync where
+///    the file system does not implement it.
+///  * Windows: FlushFileBuffers on a directory handle (FILE_FLAG_BACKUP_SEMANTICS,
+///    GENERIC_WRITE). NTFS commonly refuses it (ERROR_ACCESS_DENIED) because it
+///    journals directory metadata itself; the call is made and a refusal is
+///    reported as false with an "[ntfs-refused]" marker, which flush_files
+///    alone ignores on Windows; every other failure (cannot open the folder,
+///    other errors) is a failed flush (documented in long_recordings.md).
+inline bool fsync_directory(const fsys::path& dir, std::string* why = nullptr) {
 #ifndef _WIN32
   const int fd = ::open(dir.string().c_str(), O_RDONLY);
-  if (fd < 0) return;
-  ::fsync(fd);
-  ::close(fd);
+  if (fd < 0) {
+    if (why) *why = "cannot open folder: " + std::error_code(errno, std::generic_category()).message();
+    return false;
+  }
+  bool ok;
+#if defined(__APPLE__)
+  ok = ::fcntl(fd, F_FULLFSYNC) != -1;
+  if (!ok && (errno == ENOTSUP || errno == EOPNOTSUPP || errno == EINVAL)) ok = ::fsync(fd) == 0;
 #else
-  (void)dir;
+  ok = ::fsync(fd) == 0;
+#endif
+  const int saved = errno;
+  ::close(fd);
+  if (!ok && why) *why = "fsync of folder: " + std::error_code(saved, std::generic_category()).message();
+  return ok;
+#else
+  const std::wstring wide = dir.wstring();
+  HANDLE h = CreateFileW(wide.c_str(), GENERIC_WRITE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+  if (h == INVALID_HANDLE_VALUE) {
+    if (why) *why = "cannot open folder for flushing";
+    return false;
+  }
+  const bool ok = FlushFileBuffers(h) != 0;
+  const DWORD err = ok ? 0 : GetLastError();
+  if (!ok && why) {
+    const std::error_code ec(static_cast<int>(err), std::system_category());
+    *why = "FlushFileBuffers on a folder: " + ec.message();
+    // Marker for flush_files: NTFS's refusal of a directory handle.
+    if (err == ERROR_ACCESS_DENIED) *why += " [ntfs-refused]";
+  }
+  CloseHandle(h);
+  return ok;
 #endif
 }
 
@@ -236,12 +294,43 @@ inline void write_all_atomic(const std::string& path, std::span<const ui1> bytes
   if (flush) fsync_directory(target.parent_path());
 }
 
-/// Flush many files written without a flush, and their folders, in one
-/// batch. Linux: one syncfs per file system (flushing thousands of headers
-/// one fsync at a time took ~20 ms each, 38 minutes for a 64-channel x
-/// 600-segment rename). Elsewhere: each file, then each folder.
+/// Flush every file CONCURRENTLY (up to 16 at a time), so the waits
+/// overlap instead of adding up; throws the first failure. The per-file
+/// path of flush_files on systems without syncfs.
+inline void flush_each_concurrently(const std::vector<fsys::path>& files) {
+  std::vector<fsys::path> unique;
+  for (const auto& f : files)
+    if (std::find(unique.begin(), unique.end(), f) == unique.end()) unique.push_back(f);
+  std::mutex mu;
+  std::string first_error;
+  std::atomic<std::size_t> next{0};
+  const auto worker = [&] {
+    for (std::size_t i; (i = next.fetch_add(1)) < unique.size();) {
+      std::string why;
+      if (!fsync_file(unique[i].string(), &why)) {
+        std::lock_guard<std::mutex> lk(mu);
+        if (first_error.empty())
+          first_error = unique[i].string() + (why.empty() ? "" : " (" + why + ")");
+      }
+    }
+  };
+  const std::size_t n = std::min<std::size_t>(16, unique.size());
+  std::vector<std::thread> pool;
+  for (std::size_t t = 1; t < n; ++t) pool.emplace_back(worker);
+  worker();
+  for (auto& t : pool) t.join();
+  if (!first_error.empty())
+    throw IoError("could not flush to disk, the write is not durable: " + first_error);
+}
+
+/// Flush many files written without a flush, and their folders, in ONE
+/// combined wait. Linux: one syncfs per file system (flushing thousands of
+/// headers one fsync at a time took ~20 ms each, 38 minutes for a 64-channel
+/// x 600-segment rename). Elsewhere: every file concurrently
+/// (flush_each_concurrently), then every folder.
 inline void flush_files(const std::vector<fsys::path>& files) {
   if (files.empty()) return;
+  if (flush_batch_observer) flush_batch_observer(files);
 #if defined(__linux__)
   std::vector<dev_t> done;
   for (const auto& f : files) {
@@ -259,13 +348,38 @@ inline void flush_files(const std::vector<fsys::path>& files) {
     done.push_back(s.st_dev);
   }
 #else
+  flush_each_concurrently(files);
+  // Every folder a flushed file lives in AND the folders above it that this
+  // session may have just created (.segd -> .timd -> .mefd -> the .mefd's
+  // parent): a new folder's own entry is in its parent, which no file flush
+  // reaches. Four levels cover a segment file; a record file just flushes a
+  // level or two more than it needs.
   std::vector<fsys::path> dirs;
   for (const auto& f : files) {
-    fsync_file_or_throw(f.string());
-    if (std::find(dirs.begin(), dirs.end(), f.parent_path()) == dirs.end())
-      dirs.push_back(f.parent_path());
+    fsys::path d = f.parent_path();
+    for (int level = 0; level < 4 && !d.empty(); ++level, d = d.parent_path()) {
+      if (std::find(dirs.begin(), dirs.end(), d) == dirs.end()) dirs.push_back(d);
+      // Never above the session folder: its parent is not ours to flush.
+      std::string leaf = d.filename().string();
+      for (auto& ch : leaf) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+      if (leaf.size() >= 5 && leaf.compare(leaf.size() - 5, 5, ".mefd") == 0) break;
+      if (d == d.parent_path()) break;
+    }
   }
-  for (const auto& d : dirs) fsync_directory(d);
+  for (const auto& d : dirs) {
+    std::string why;
+#ifdef _WIN32
+    // NTFS may refuse a folder flush (ERROR_ACCESS_DENIED): only that one
+    // refusal is ignored; anything else is a failed flush.
+    if (!fsync_directory(d, &why) && why.find("[ntfs-refused]") == std::string::npos)
+      throw IoError("could not flush to disk, the write is not durable: " + d.string() +
+                    (why.empty() ? "" : " (" + why + ")"));
+#else
+    if (!fsync_directory(d, &why))
+      throw IoError("could not flush to disk, the write is not durable: " + d.string() +
+                    (why.empty() ? "" : " (" + why + ")"));
+#endif
+  }
 #endif
 }
 

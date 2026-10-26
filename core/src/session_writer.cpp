@@ -15,6 +15,7 @@
 #include "mef3io/metadata.hpp"
 #include "mef3io/source.hpp"
 #include "mef3io/writer.hpp"
+#include "durability.hpp"
 #include "mef3io/time.hpp"
 #include "last_segment.hpp"
 #include "clamp.hpp"
@@ -124,6 +125,8 @@ SessionWriter::SessionWriter(const std::string& mefd_path, bool overwrite, std::
   // or rolled back — its journal would otherwise restore stale headers.
   detail::refuse_if_mid_operation(mefd_path_);
   if (overwrite && fs::exists(mefd_path_)) fs::remove_all(mefd_path_);
+  // Held data before this writer: its new segments/channels are flushed.
+  session_preexisted_ = fs::exists(mefd_path_);
   fs::create_directories(mefd_path_);
   session_name_ = fs::path(mefd_path_).stem().string();
 
@@ -182,6 +185,12 @@ void SessionWriter::check_still_writable() const {
     throw IoError("the session folder is no longer there (renamed or moved since this writer "
                   "opened it?): " + mefd_path_ + "; open a writer on its new path");
   detail::refuse_if_mid_operation(mefd_path_);
+  // wait_for_disk promises "returned = on disk": after a failed flush no later
+  // write may return normally (the earlier data may be lost).
+  if (wait_for_disk_ && flush_failure_)
+    throw IoError(*flush_failure_ +
+                  " (an earlier flush failed: data written since the last successful flush may "
+                  "be lost; run recover_session)");
 }
 
 void SessionWriter::hydrate(const std::string& channel, ChannelState& st) {
@@ -462,6 +471,58 @@ void SessionWriter::write_records(std::optional<std::string> channel,
     if (created_dir) fs::remove_all(dir, ec);
     throw;
   }
+  const std::vector<fs::path> files = {fs::path(dir) / (base + ".rdat"),
+                                       fs::path(dir) / (base + ".ridx")};
+  // wait_for_disk waits now (files and their folders), so nothing is owed
+  // later; otherwise flush()/close() owe them.
+  if (wait_for_disk_)
+    flush_recording_failure(files);
+  else
+    unflushed_.insert(files.begin(), files.end());
+}
+
+SessionWriter::~SessionWriter() {
+  // After a failed flush the data may already be lost (the OS reports a
+  // writeback error once): a retry in a destructor would only look like
+  // success, and the failure was reported by the call that hit it.
+  if (flush_failure_) return;
+  try {
+    flush();
+  } catch (...) {
+    // A destructor cannot report it; flush() before closing does.
+  }
+}
+
+void SessionWriter::remember_flush_failure(const IoError& e) {
+  // A wait_for_disk write whose flush failed: same stickiness as flush().
+  if (!flush_failure_ && std::string(e.what()).find("could not flush to disk") != std::string::npos)
+    flush_failure_ = e.what();
+}
+
+void SessionWriter::flush_recording_failure(const std::vector<fs::path>& files) {
+  try {
+    detail::flush_files(files);
+  } catch (const IoError& e) {
+    if (!flush_failure_) flush_failure_ = e.what();
+    throw;
+  }
+}
+
+void SessionWriter::flush() {
+  // STICKY: the first failed flush is remembered and rethrown by every later
+  // flush()/close(). The OS reports a writeback error once and marks the pages
+  // clean, so a retry that "succeeds" would claim data that is gone.
+  if (flush_failure_)
+    throw IoError(*flush_failure_ +
+                  " (an earlier flush failed: data written since the last successful flush may "
+                  "be lost; run recover_session)");
+  if (unflushed_.empty()) return;
+  std::vector<fs::path> files;
+  std::error_code ec;
+  for (const auto& f : unflushed_)
+    if (fs::exists(f, ec)) files.push_back(f);
+  flush_recording_failure(files);  // ONE combined wait for all of them
+  unflushed_.clear();
 }
 
 si8 SessionWriter::block_length_for(sf8 fs) const {
@@ -670,10 +731,21 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   spec.password_1 = password_1_;
   spec.password_2 = password_2_;
   spec.metadata = metadata_;
-  spec.durable = durable_;
   // Only a NEW segment takes the session's offset; an append keeps the one
   // already in the segment it extends (append_time_series_segment).
   if (!append) spec.recording_time_offset = new_segment_rto(channel, st);
+  // A new segment's .tmet is flushed before it is renamed in (its .tdat and
+  // .tidx are not: a short one is rebuilt by recovery from the data):
+  //  * a channel's FIRST segment, in any session (once per channel): a short
+  //    .tmet fails the strict open of the whole session and has no previous
+  //    segment's .tmet to be rebuilt from;
+  //  * any new segment or channel in a session that held data when this
+  //    writer opened it.
+  // NOT a later segment in a session this writer created: a conversion
+  // writes thousands of those, and recovery rebuilds a lost .tmet there from
+  // the previous segment's. flush()/close()/wait_for_disk cover the rest.
+  if (!append) spec.flush_new_metadata = session_preexisted_ || st.n_segments == 0;
+  spec.wait_for_disk = wait_for_disk_;
 
   // Only pass on a maximum this writer measured itself. A segment adopted from
   // disk leaves the flag false, so the append bounds the blocks it cannot see
@@ -684,8 +756,13 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   if (append) {
     // fs / conversion-factor / start-time conflicts are validated against the
     // on-disk metadata inside append_time_series_segment.
-    append_time_series_segment(seg_dir, spec, blocks, n_threads_.load(), &written_difference_bytes,
-                               &st.index_cache);
+    try {
+      append_time_series_segment(seg_dir, spec, blocks, n_threads_.load(),
+                                 &written_difference_bytes, &st.index_cache);
+    } catch (const IoError& e) {
+      remember_flush_failure(e);
+      throw;
+    }
   } else {
     // Everything that can refuse runs BEFORE a directory exists: a refused
     // write must leave the tree exactly as it was. A directory left behind
@@ -698,6 +775,14 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
     fs::create_directories(seg_dir);
     try {
       write_time_series_segment(seg_dir, spec, blocks, n_threads_.load(), &written_difference_bytes);
+    } catch (const IoError& e) {
+      remember_flush_failure(e);
+      std::error_code ec;
+      if (created_timd)
+        fs::remove_all(timd, ec);
+      else if (created_segd)
+        fs::remove_all(seg_dir, ec);
+      throw;
     } catch (...) {
       std::error_code ec;
       if (created_timd)
@@ -714,6 +799,17 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
     st.index_cache = AppendIndexCache{};
   }
   st.max_difference_bytes = std::max(st.max_difference_bytes, written_difference_bytes);
+
+  {
+    // Owed to the next flush() / close(). In wait_for_disk mode this write
+    // already flushed them (and their folders): not kept, so close() does not
+    // re-flush the whole history (one F_FULLFSYNC per file on macOS).
+    if (!wait_for_disk_) {
+      const std::string stem = fs::path(seg_dir).stem().string();
+      for (const char* ext : {".tdat", ".tidx", ".tmet"})
+        unflushed_.insert(fs::path(seg_dir) / (stem + ext));
+    }
+  }
 
   st.sampling_frequency = fs;
   st.units_conversion_factor = ufact;

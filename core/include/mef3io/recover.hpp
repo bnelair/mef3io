@@ -19,10 +19,10 @@
 //   headers carry the sample count, byte count, start time and discontinuity
 //   flag, which is everything an index entry needs.
 //
-// With `durability="full"` (the default) an append cannot leave either state:
-// the `.tdat` is flushed before the `.tidx` that references it. They are
-// reachable with `durability="fast"`, which is what makes that trade a
-// reasonable one to offer.
+// Both are reachable after a power cut during an append: the writer flushes
+// only the `.tmet` before its rename, never the `.tdat`/`.tidx` it extends in
+// place (2.0 removed the `durability` option). This function is what makes
+// that trade safe; only the last append of a segment can be affected.
 #pragma once
 
 #include <string>
@@ -44,6 +44,11 @@ struct RecoveredSegment {
   si8 blocks_dropped = 0;    ///< entries pointing past the end of .tdat
   si8 tdat_bytes_dropped = 0;///< trailing bytes that are not a whole block
   std::string action;        ///< what happened, in words
+  /// Validator check ids whose declarations (.tmet section 2, universal
+  /// headers) disagreed with the index: in a dry run, the ones found (for a
+  /// segment whose .tmet is newer or older than its index); after `apply`,
+  /// the ones re-derived from the recovered index (via repair_session).
+  std::vector<std::string> declarations;
 };
 
 /// Result of a recovery pass. `applied` is false for a dry run.
@@ -80,9 +85,30 @@ struct RecoveryReport {
 ///                  during it is ignored and the call returns its report.
 ///                  `ctl.progress` reports bytes of .tidx + .tdat covered.
 ///
-/// Declarations are NOT updated here — run `repair_session` afterwards, which
-/// is what the CLI does. Keeping the two apart means the dangerous operation
-/// stays small and the safe one stays reusable. ONE exception (#83): at a
+/// INDEX WITH A BAD CRC: its header and entries came from different writes
+/// (a power cut between an append's in-place extension and its header patch).
+/// It is not refused: entries past the prefix the stored body CRC covers stay
+/// only if the RED block header at their offset agrees, and from the first
+/// that does not the index is rebuilt from the CRC-checked blocks in .tdat.
+/// TORN LAST APPEND: in each channel's last segment the blocks of the last
+/// append (back to its discontinuity-flagged first block, at most 64 MiB)
+/// are CRC-checked against their entries, so entries pointing at pages that
+/// never landed are dropped like entries past the end of the data.
+///
+/// DECLARATIONS (2.0): with `apply`, every segment recovery changed, and every
+/// channel's last segment whose .tmet declares other block/sample/entry counts
+/// than the index holds (a .tmet published before or after its data — a power
+/// cut can leave either), gets its declarations re-derived from the index
+/// THROUGH `repair_session` (all repairable findings of that segment, exact
+/// difference bytes; repair's backups and provenance). Recovery alone thus
+/// leaves a valid session; `RecoveredSegment::declarations` lists what was
+/// re-derived, and a segment the validator could not check is a note. The
+/// DRY RUN reports such a .tmet as a segment needing recovery and lists the
+/// exact check ids. Only reported segments are touched. LOST .tmet: a
+/// non-first segment's empty/short .tmet (data and index landed) is rebuilt
+/// from the previous segment's .tmet plus this segment's own files; a last
+/// segment with short files and no block in its data is removed (backed up).
+/// Index and data remain recovery's alone. ONE further exception (#83): at a
 /// NON-ZERO recording-time offset, where every validator time check stands
 /// down, recovery corrects the segment's END TIME in the three universal
 /// headers (the .tmet one is what readers report) from the last block it

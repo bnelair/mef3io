@@ -632,11 +632,6 @@ int mef3io_writer_legacy_password_segment(mef3io_writer* w, int32_t index, char*
   });
 }
 
-int mef3io_writer_set_durable(mef3io_writer* w, int durable) {
-  if (!w) return fail_argument("writer must not be NULL");
-  return guarded([&] { reinterpret_cast<mef3io::SessionWriter*>(w)->set_durable(durable != 0); });
-}
-
 int mef3io_recover_session(const char* mefd_path, int apply, int backup, const char* password,
                            char* out_summary, size_t out_summary_bytes, int64_t* out_segments) {
   return mef3io_recover_session_ex(mefd_path, apply, backup, password, out_summary,
@@ -776,6 +771,16 @@ int mef3io_reader_threads(mef3io_reader* r, int* out) {
 int mef3io_writer_set_threads(mef3io_writer* w, int n_threads) {
   if (!w) return fail_argument("NULL argument");
   return guarded([&] { w->impl.set_threads(n_threads); });
+}
+
+int mef3io_writer_flush(mef3io_writer* w) {
+  if (!w) return fail_argument("NULL argument");
+  return guarded([&] { w->impl.flush(); });
+}
+
+int mef3io_writer_set_wait_for_disk(mef3io_writer* w, int on) {
+  if (!w) return fail_argument("NULL argument");
+  return guarded([&] { w->impl.set_wait_for_disk(on != 0); });
 }
 
 int mef3io_writer_threads(mef3io_writer* w, int* out) {

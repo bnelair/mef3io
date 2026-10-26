@@ -248,9 +248,11 @@ def test_a_recovery_is_recorded(tmp_path):
 
     done = mef3io.recover_session(str(path), apply=True, backup=False)
     assert done.applied
+    # Recovery then re-derives the declarations through repair_session (2.0),
+    # which may stamp header-repair last; the recovery stays in the mask.
     for f in (tidx, tdat):
         r = _region(f)
-        assert r["last_op"] == RECOVERY and r["mask"] & _bit(RECOVERY), f
+        assert r["mask"] & _bit(RECOVERY), f
 
 
 def test_the_legacy_stack_still_reads_a_stamped_session(tmp_path):

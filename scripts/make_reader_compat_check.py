@@ -169,7 +169,7 @@ def build(out: Path, seconds: float) -> list[tuple[str, str, str]]:
     p = out / "01_mef3io_current.mefd"
     write_gapped(p, seconds)
     notes.append((p.name, "MUST WORK",
-                  "Written by the CURRENT build with default durability. The reference for "
+                  "Written by the CURRENT build. The reference for "
                   "what every other session should look like."))
 
     p = out / "02_mef3io_appended.mefd"
@@ -242,7 +242,7 @@ def build(out: Path, seconds: float) -> list[tuple[str, str, str]]:
                   f"WHOLE SESSION became unreadable. This file is the fix."))
 
     p9 = out / "09_recovered_after_interrupted_write.mefd"
-    write_gapped(p9, seconds, durability="fast")
+    write_gapped(p9, seconds)
     truncate_index(p9, DROP_ENTRIES)
     rec = mef3io.recover_session(str(p9), apply=True, backup=False)
     ids9 = mef3io.Validator(str(p9)).validate().repairable_check_ids
@@ -250,7 +250,7 @@ def build(out: Path, seconds: float) -> list[tuple[str, str, str]]:
         mef3io.repair_session(str(p9), ids9, backup=False)
     recovered = sum(s.blocks_recovered for s in rec.segments)
     notes.append((p9.name, "MUST WORK",
-                  f"Written with durability='fast', then an interrupted append simulated (blocks "
+                  f"Written by the current build, then an interrupted append simulated (blocks "
                   f"reached .tdat, the index was not extended), then recover_session rebuilt the "
                   f"missing entries from the RED block headers ({recovered} blocks recovered). "
                   f"Tests that recovery output is readable by the C reader."))

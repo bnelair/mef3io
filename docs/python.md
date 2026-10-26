@@ -33,7 +33,7 @@ with mef3io.Writer("session.mefd", overwrite=True, units="uV") as w:
 ```
 
 `Writer(path, overwrite=False, password1="", password2="", units=None,
-block_length=None, n_threads=0, metadata=None, durability="fast")`
+block_length=None, n_threads=0, metadata=None, wait_for_disk=False)`
 
 - `overwrite=True` deletes an existing session first. With
   `overwrite=False`, an existing session is **reopened for appending** —
@@ -87,10 +87,14 @@ block_length=None, n_threads=0, metadata=None, durability="fast")`
   appends.
 - `metadata=` sets subject and acquisition fields (see
   [Session metadata](#session-metadata-subject-acquisition)).
-- `durability="fast"` (the default) writes without flushing to disk;
-  `durability="full"` adds the flushes that make an append survive a power
-  cut. After an unclean shutdown in fast mode, run `recover_session`. See
-  [Long recordings](long_recordings.md).
+- **When is my data on disk?** `write()` returns once the data is handed to
+  the operating system. `w.flush()` returns only when everything written so
+  far is on disk (one combined wait for all channels); `close()` and leaving
+  a `with` block do the same. `wait_for_disk=True` makes every `write()`
+  return only when its own data is on disk. After a power cut, run
+  `recover_session`. See
+  [When is my data on disk?](long_recordings.md#when-is-my-data-on-disk).
+  (2.0 removed `durability=`; passing it raises `TypeError`.)
 - `block_length` overrides the RED block size (default: `fs` samples for
   fs ≥ 5000, else `10*fs`, at least 1). A block can hold at most
   858 993 396 samples (`mef3io._mef3io.MAX_BLOCK_SAMPLES`: its byte size is a

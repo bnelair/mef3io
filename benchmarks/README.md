@@ -136,10 +136,10 @@ would measure the create/append difference rather than scaling.
 `--append-threads` defaults to **1**. meflib and pymef are single-threaded, so
 single-core is the honest comparison; pass `0` to use every core.
 
-Expect mef3io to be **slower per append** than `mef_tools` and to **scale
-better**. It is paying for durability barriers that the legacy stack does not
-have at all (see [docs/long_recordings.md](../docs/long_recordings.md)), while
-keeping the append `O(new data)`.
+Expect mef3io to **scale better** than `mef_tools`. It pays for one flush
+per channel per append (the `.tmet`, before its rename), which the legacy stack
+does not have at all (see [docs/long_recordings.md](../docs/long_recordings.md)),
+while keeping the append `O(new data)`.
 
 ## Run this before publishing
 
@@ -183,7 +183,11 @@ It also validates the session and runs `recover_session` as a dry run at the
 end, and **exits non-zero if either fails** — a fast run that produced an
 inconsistent session is not a fast run.
 
-### Measured (12-core laptop, ext4, default `durability="full"`)
+### Measured (12-core laptop, ext4, 1.x `durability="full"`)
+
+Measured before 2.0, with the 1.x `durability="full"` barriers (five flushes
+per channel per append); 2.0 flushes only the `.tmet`, so these per-block
+times are an upper bound.
 
 These are the original numbers. On the 2013 Xeon in
 [docs/benchmarks.md](../docs/benchmarks.md), mef3io's per-block time was
@@ -207,5 +211,5 @@ Read phase: 40 windows × 16 channels, median **89 ms**, p95 144 ms,
 62.7 Msamples/s, **read amplification 0.338×**. Validation of the whole session
 3.0 s; recovery dry run instant, nothing to do.
 
-mef3io is **1.6× faster per block with full durability barriers the legacy
-stack does not have at all**, in a file **1.8× smaller**, with flat growth.
+mef3io was **1.6× faster per block even with the 1.x full durability barriers
+the legacy stack does not have at all**, in a file **1.8× smaller**, with flat growth.

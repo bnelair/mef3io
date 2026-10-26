@@ -130,6 +130,23 @@ def test_a_writer_open_does_not_hold_the_gil(many_segments, tmp_path):
     assert not any((tmp_path / "copy.mefd").glob("*.timd"))  # it really removed the tree
 
 
+def test_a_writer_flush_does_not_hold_the_gil(tmp_path):
+    """Writer.flush() waits for the disk (one combined wait for everything
+    written so far): without the GIL."""
+    import numpy as np
+
+    counter = iter(range(1000))
+
+    def make():
+        path = tmp_path / f"f{next(counter)}.mefd"
+        w = m.SessionWriter(str(path), True)
+        x = np.random.default_rng(0).integers(-30000, 30000, 200_000, dtype=np.int32)
+        for c in range(32):
+            w.write_int32(f"ch{c}", x, 1.0, 1577836800000000, 1000.0)
+        return w.flush
+    _assert_releases(make, runs=2)
+
+
 def test_errors_still_raise_after_the_gil_comes_back(tmp_path):
     """A constructor that throws re-acquires the GIL while unwinding."""
     with pytest.raises(mef3io.IoError):

@@ -19,6 +19,42 @@ from ._warnings import MefWarning
 _INT32_MIN, _INT32_MAX = -(2**31), 2**31 - 1
 
 
+class WriterFlushWarning(MefWarning):
+    """A :class:`Writer` that was never closed could not flush when it was
+    garbage-collected.
+
+    Only :meth:`Writer.close`, :meth:`Writer.flush` and ``with`` can raise;
+    a destructor cannot, so this warning is all it can say. Data written since
+    the last successful flush may not be on disk: run ``recover`` on the
+    session. ``w.message.path`` is the session; ``details`` is ``[reason]``.
+    """
+
+
+def _flush_on_collect(impl, path) -> None:
+    """Flush an UNCLOSED writer from its ``__del__``: with the GIL released (the
+    binding's flush does that) so a slow disk does not stall every other
+    thread inside the garbage collector, and a failure becomes a
+    :class:`WriterFlushWarning` instead of being lost in the C++ destructor."""
+    try:
+        impl.flush()
+    except Exception as e:  # noqa: BLE001 - a destructor must not raise
+        try:
+            from ._warnings import emit
+
+            emit(
+                WriterFlushWarning,
+                f"an unclosed Writer could not flush its data to disk ({e}); "
+                "data written since the last successful flush may be lost: "
+                "run recover on the session. Close the Writer (or use `with`) "
+                "to get this as an exception.",
+                path=path,
+                details=[str(e)],
+                stacklevel=1,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+
 class StepFallbackWarning(MefWarning):
     """``Writer.write(..., precision="step")`` on a NEW channel could not use a step.
 
@@ -267,32 +303,27 @@ class Writer:
     metadata : mef3io.Metadata or dict, optional
         Session-wide subject/acquisition metadata written to every channel.
         Also settable later via :meth:`set_metadata` (before writing).
-    durability : {"fast", "full"}, optional
-        How hard an **append** works to survive an unclean shutdown.
+    wait_for_disk : bool, optional
+        ``False`` (default): :meth:`write` returns once its data is handed to
+        the operating system; :meth:`flush` and :meth:`close` wait for the
+        disk. ``True``: every :meth:`write` returns only when its own data is
+        on disk (one combined wait per call). See `When is my data on disk?
+        <https://bnelair.github.io/mef3io/long_recordings/#when-is-my-data-on-disk>`_.
 
-        ``"fast"`` (default) performs no flushes. These files are built by
-        appending for days to months, so the append is the hot path, and the
-        barriers cost roughly 2.5x on it. It matches what every MEF writer
-        before this one did — the reference C library flushes nothing.
-
-        What that costs: the **order** in which the ``.tdat``, ``.tidx`` and
-        ``.tmet`` updates reach the disk is not enforced, so a crash mid-append
-        can leave the index referencing data that never landed, blocks present
-        in ``.tdat`` that the index never mentioned, or a torn tail on either.
-        Every one of those is detected by :func:`mef3io.validate_session` and
-        repaired by :func:`mef3io.recover_session`, which rebuilds missing
-        index entries from the RED block headers. So the failure mode is *"run
-        recover after an unclean shutdown"*, not *"lose the recording"* — and
-        data already committed by an earlier append is never at risk.
-
-        ``"full"`` adds the barriers: the ``.tdat`` is flushed before the
-        ``.tidx`` that references it, and each header before it publishes what
-        was flushed. An append then becomes all-or-nothing across the three
-        files with no recovery step, at ~3 flushes per channel per append.
-        Worth it when an unclean shutdown must need no operator action.
-
-        A fresh write is unaffected either way — there is nothing underneath it
-        to lose.
+    Notes
+    -----
+    **When is my data on disk?** By default :meth:`write` returns once its
+    data is handed to the operating system. Only each segment's ``.tmet`` is
+    flushed before it is published (a short ``.tmet`` would make the whole
+    session fail to open). :meth:`flush` and :meth:`close` (also leaving a
+    ``with`` block) return only when everything written so far is on disk,
+    in one combined wait. With ``wait_for_disk=True`` every write returns
+    only when its own data is on disk. A power cut before that can leave the
+    last append of a segment torn; :func:`mef3io.recover_session` with
+    ``apply=True`` restores a valid session holding every sample whose bytes
+    reached the disk. Earlier appends are never at risk: nothing rewrites
+    them. A write raises if a flush it waits for fails. The ``durability=``
+    argument of 1.x was removed in 2.0 (passing it raises ``TypeError``).
 
     Examples
     --------
@@ -310,17 +341,13 @@ class Writer:
         block_length: Optional[int] = None,
         n_threads: int = 0,
         metadata=None,
-        durability: str = "fast",
+        wait_for_disk: bool = False,
     ):
         from . import _mef3io
 
         # Validated FIRST: the SessionWriter constructor removes an existing
         # session when overwrite=True, so checking afterwards could delete a
         # good session and only then raise.
-        if durability not in ("full", "fast"):
-            raise ValueError(
-                f"durability must be 'full' or 'fast', not {durability!r}"
-            )
         if block_length is not None:
             # More than a MEF 3.0 block can describe (its size is a 32-bit
             # field): refused here, before the folder exists (#83).
@@ -339,8 +366,7 @@ class Writer:
 
         self._n_threads = _check_threads(n_threads)
         self._impl.set_threads(self._n_threads)
-        self._impl.set_durable(durability == "full")
-        self._durability = durability
+        self._impl.set_wait_for_disk(bool(wait_for_disk))
         if metadata is not None:
             self.set_metadata(metadata)
 
@@ -356,6 +382,12 @@ class Writer:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+    def __del__(self) -> None:
+        impl = getattr(self, "_impl", None)
+        if impl is not None:
+            self._impl = None
+            _flush_on_collect(impl, getattr(self, "_path", None))
 
     @property
     def n_threads(self) -> int:
@@ -375,10 +407,26 @@ class Writer:
             self._impl.set_threads(value)
         self._n_threads = value
 
+    def flush(self) -> None:
+        """Return only when everything this Writer has written so far is on
+        disk: every file it created or extended since the last flush, in ONE
+        combined wait (not one per channel). Raises ``OSError``/``RuntimeError``
+        when the system reports the flush failed, and keeps raising it on every
+        later call (a retry would otherwise claim data that is gone).
+        :meth:`close` does the same.
+        See `When is my data on disk?
+        <https://bnelair.github.io/mef3io/long_recordings/#when-is-my-data-on-disk>`_.
+        """
+        if self._impl is not None:
+            self._impl.flush()
+
     def close(self) -> None:
-        """Finalize and release the writer. Called automatically on
-        context-manager exit."""
-        self._impl = None
+        """Flush (see :meth:`flush`), then release the writer. Called
+        automatically on context-manager exit. Returns only when everything
+        written is on disk."""
+        impl, self._impl = self._impl, None
+        if impl is not None:
+            impl.flush()
 
     def write(
         self,

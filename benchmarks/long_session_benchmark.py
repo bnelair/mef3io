@@ -33,7 +33,7 @@ Examples
     python benchmarks/long_session_benchmark.py --plan
     python benchmarks/long_session_benchmark.py
     python benchmarks/long_session_benchmark.py --hours 2 --quick-read
-    python benchmarks/long_session_benchmark.py --durability fast --threads 0
+    python benchmarks/long_session_benchmark.py --threads 0
     python benchmarks/long_session_benchmark.py --with-mef-tools
 """
 from __future__ import annotations
@@ -115,7 +115,7 @@ def write_phase(cfg, path: Path) -> dict:
     # ONE writer held open, which is what a real acquisition does and what
     # keeps each append O(new data) instead of re-walking the index.
     w = mef3io.Writer(
-        str(path), n_threads=cfg.threads, durability=cfg.durability,
+        str(path), n_threads=cfg.threads,
         block_length=cfg.block_length or None,
     )
     try:
@@ -284,7 +284,6 @@ def main(argv=None) -> int:
     p.add_argument("--threads", type=int, default=0,
                    help="mef3io encode/decode threads; 0 = all cores, 1 = single-core "
                         "(the fair comparison against single-threaded meflib)")
-    p.add_argument("--durability", choices=["full", "fast"], default="full")
     p.add_argument("--reads", type=int, default=40, help="windowed reads in the read phase")
     p.add_argument("--read-min-minutes", type=float, default=5.0)
     p.add_argument("--read-max-minutes", type=float, default=20.0)
@@ -308,7 +307,7 @@ def main(argv=None) -> int:
     print(f"  {info['blocks']} appends x {cfg.channels} channels, "
           f"{info['samples']:,} samples")
     print(f"  raw {human(info['raw_bytes'])}, estimated on disk ~{human(info['estimated_on_disk'])}")
-    print(f"  threads={cfg.threads or 'all'}  durability={cfg.durability}")
+    print(f"  threads={cfg.threads or 'all'}")
     print("=" * 78)
     if cfg.plan:
         return 0

@@ -90,21 +90,39 @@ from measured.
 ## 4. Durability is scoped deliberately, and meflib has none
 
 meflib does **no** durability work: its single `fflush` is "to update stat
-structure after write", not a barrier. mef3io's `durability="full"` is
-stronger.
+structure after write", not a barrier.
 
-Load-bearing on append with `durability="full"`, do not remove for speed:
-- the `.tdat` is flushed **before** the `.tidx` that references those bytes;
-- the appended `.tidx` is flushed before its header is patched, and the
-  `.tmet` temp file before it is renamed over the original.
+2.0 removed the writer's `durability` option (Python, C++, C ABI, MATLAB,
+compat). What replaces it (maintainer decision, #153; user docs:
+docs/long_recordings.md "When is my data on disk?"):
 
-Deliberately skipped: a fresh write (nothing underneath to lose) and the
-directory entry after a rename (losing the rename keeps the previous complete
-file). The DEFAULT is `durability="fast"`, which drops the barriers. That is
-NOT atomic: `.tdat` and `.tidx` are extended in place, so a crash can leave a
-torn tail, or an index ahead of or behind the data; only `.tmet` is published
-by rename. Every such state is detectable and fixed by `recover_session`,
-which is what makes the default defensible.
+- `write()` returns once the data is handed to the OS. ONE barrier stays and
+  must not be removed for speed: a `.tmet` is flushed before it is renamed
+  into place — on every append, and for a channel's first segment (any
+  session) or a new segment/channel in a session that existed when the
+  Writer opened it (`SegmentSpec::flush_new_metadata`). A rename is ordered,
+  not durable; without the flush a power cut can publish a SHORT `.tmet`,
+  which takes the WHOLE SESSION down (a missing one only hides its segment),
+  and a first segment has no previous `.tmet` to rebuild it from.
+- `flush()` / `close()` (and the destructor) wait for EVERY file written since
+  the last flush in ONE combined wait (`flush_files`: one syncfs per file
+  system on Linux, all files concurrently elsewhere) — never one wait per
+  channel in sequence.
+- `wait_for_disk=True`: each write's files in one combined wait BEFORE its
+  `.tmet` is published.
+
+Nothing else is flushed by default: not `.tdat`/`.tidx`, not later segments of
+a self-created session, not the directory entry after a rename, not headers
+patched in place. So a power cut can leave the LAST append of a segment torn,
+or a new segment's files short. Every such state is detected and fixed by
+`recover_session` (pinned state by state in tests/test_p46_crash_states.py):
+a short `.tidx` is rebuilt from the `.tdat` blocks, a lost later-segment
+`.tmet` from the previous segment's, a dataless last segment is removed.
+Recovery repairs ONLY segments it reports — never a healthy segment's
+findings — and nothing rewrites an earlier append. Repair, rename, recovery
+and the copies keep their OWN flush rules (durability.hpp primitives).
+Pinned per file and per batch by the `fsync_observer` / `flush_batch_observer`
+hooks in core/tests/test_durability.cpp.
 
 ## 5. Repair rewrites declarations; recovery may touch the index
 
@@ -116,7 +134,15 @@ default and backed up before it writes. Its one declaration write: at a
 non-zero recording-time offset, where repair's time checks stand down, it sets
 the segment's end time (all three universal headers) from the last block it
 kept: only an end before the last block's start (or before rebuilt blocks),
-never earlier, each header in its own stored form (#83).
+never earlier, each header in its own stored form (#83). Since 2.0, with
+`apply` it also re-derives the DECLARATIONS of every segment it changed and of
+every channel's last segment whose `.tmet` counts disagree with the index —
+but only by CALLING `repair_session` for that segment (never its own
+declaration code), so the two stay apart in code while `recover --apply`
+alone leaves a valid session. An index failing its own CRC is rebuilt
+(entries kept only where the stored CRC or the RED header at their offset
+vouches for them), and the last append's blocks are CRC-checked (<= 64 MiB).
+Pinned state by state in tests/test_p46_crash_states.py.
 
 ## 6. Round trips cannot prove compatibility
 

@@ -71,9 +71,9 @@ def test_indexing_a_deleted_name_is_still_a_use(tmp_path, suite_src):
     function, so once `got` is assigned, `got(1)` INDEXES it — and reaching it
     after delete(got) is the same defect as reaching it bare."""
     broken = suite_src.replace(
-        "    summary = mef3io.recoverSession(dp);",
-        "    delete(got);\n    summary = mef3io.recoverSession(dp);\n"
-        "    assert(got(1) == 0);", 1)
+        "summary = mef3io.recoverSession(dp);",
+        "delete(got);\nsummary = mef3io.recoverSession(dp);\n"
+        "assert(got(1) == 0);", 1)
     assert broken != suite_src
     assert any("got" in p and "after delete" in p for p in _scan_text(tmp_path, broken))
 

@@ -10,15 +10,13 @@ classdef Writer < handle
     %   w.setThreads(4); n = w.threads();               % encode threads (0 = automatic)
     %   delete(w)                                       % or let it go out of scope
     %
-    % Durability: these files are built by appending for days to months, so
-    % the append is the hot path. Durability='fast' (the default) performs no
-    % flushes, matching every MEF writer before this one — the reference C
-    % library flushes nothing at all. An unclean shutdown can then leave the
-    % block index and the data disagreeing; mef3io.recoverSession detects and
-    % repairs exactly that, rebuilding missing index entries from the RED
-    % block headers. Durability='full' adds the barriers, making each append
-    % all-or-nothing across the three files with no recovery step, at roughly
-    % 2.5x the cost per append.
+    % When is my data on disk? A write returns once its data is handed to
+    % the operating system (only each segment's .tmet is flushed before it
+    % is published). w.flush() and delete(w) return only when everything
+    % written so far is on disk, in one combined wait. WaitForDisk=true makes
+    % every write return only when its own data is on disk. After a power
+    % cut, mef3io.recoverSession repairs a torn last append. See
+    % docs/long_recordings.md, "When is my data on disk?".
     %
     % Encrypted sessions: pass Password1 and Password2 (both required).
     % Times are uUTC: microseconds since the Unix epoch (int64 or double).
@@ -41,8 +39,7 @@ classdef Writer < handle
                 opts.BlockLength (1, 1) double = 0
                 opts.Threads (1, 1) double = 0
                 opts.Metadata = []   % mef3io.Metadata or a struct of fields
-                opts.Durability (1, :) char {mustBeMember(opts.Durability, ...
-                    {'fast', 'full'})} = 'fast'
+                opts.WaitForDisk (1, 1) logical = false
             end
             % Refused BEFORE writer_open, which with Overwrite=true removes
             % the existing session (#83).
@@ -51,7 +48,6 @@ classdef Writer < handle
             end
             obj.h = mef3io_mex('writer_open', path, double(opts.Overwrite), ...
                                opts.Password1, opts.Password2);
-            mef3io_mex('writer_set_durable', obj.h, double(strcmp(opts.Durability, 'full')));
             if ~isempty(opts.Units)
                 mef3io_mex('writer_set_units', obj.h, opts.Units);
             end
@@ -59,6 +55,7 @@ classdef Writer < handle
                 mef3io_mex('writer_set_block_length', obj.h, opts.BlockLength);
             end
             mef3io_mex('writer_set_threads', obj.h, opts.Threads);
+            mef3io_mex('writer_set_wait_for_disk', obj.h, double(opts.WaitForDisk));
             if ~isempty(opts.Metadata)
                 obj.setMetadata(opts.Metadata);
             end
@@ -96,9 +93,21 @@ classdef Writer < handle
 
         function delete(obj)
             if obj.h ~= 0
-                mef3io_mex('writer_close', obj.h);
+                mef3io_mex('writer_close', obj.h);   % flushes, like flush()
                 obj.h = 0;
             end
+        end
+
+        function flush(obj)
+            %FLUSH Return only when everything written so far is on disk.
+            %   w.flush()
+            %
+            % One combined wait for every file this Writer created or
+            % extended since the last flush. delete(w) does the same, but
+            % cannot report a failure; call flush() first to see one. A failed
+            % flush is remembered: every later flush() raises it again.
+            % Mirrors Python's Writer.flush().
+            mef3io_mex('writer_flush', obj.h);
         end
 
         function setThreads(obj, n)

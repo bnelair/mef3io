@@ -83,4 +83,4 @@ with mef3io.Writer("recording.mefd") as w:      # creates, or reopens and extend
 ## More
 
 [Long recordings: days to months](../long_recordings.md) explains the append
-path, the `durability` setting, recovery and the measured costs.
+path, what is flushed, recovery and the measured costs.

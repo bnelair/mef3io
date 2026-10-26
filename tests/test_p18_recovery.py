@@ -1,7 +1,8 @@
 """P18 gate: crash recovery after an interrupted write.
 
-`durability="fast"` trades the ordering barriers for speed, so a power cut can
-leave a segment's index and data disagreeing. That trade is only reasonable
+An append flushes only the `.tmet` before its rename (2.0 removed the
+`durability` option and the other barriers), so a power cut can leave a
+segment's index and data disagreeing. That trade is only reasonable
 because the disagreement is detectable and repairable — this is the suite that
 says so.
 
@@ -37,7 +38,7 @@ TSI = 56
 def _session(tmp_path, chunks=6, n=2000):
     path = tmp_path / "s.mefd"
     rng = np.random.default_rng(3)
-    w = mef3io.Writer(str(path), durability="fast")
+    w = mef3io.Writer(str(path))
     for i in range(chunks):
         w.write_int32("ch1", rng.integers(-9000, 9000, n, dtype=np.int32), 0.5,
                       START + int(i * n / FS * 1e6), FS)
@@ -85,7 +86,8 @@ def test_data_ahead_of_index_is_recovered_not_discarded(tmp_path):
     done = mef3io.recover_session(str(path), apply=True)
     assert done.applied
     assert _entries(tidx) == full
-    mef3io.repair_session(str(path), mef3io.Validator(str(path)).validate().repairable_check_ids)
+    # Recovery re-derives the declarations itself (2.0): nothing is left to repair.
+    assert mef3io.Validator(str(path)).validate().repairable_check_ids == []
 
     with mef3io.Reader(str(path)) as r:
         got = r.read("ch1")
@@ -112,8 +114,7 @@ def test_index_ahead_of_data_drops_the_unbacked_entries(tmp_path):
     assert seg.blocks_dropped > 0
     assert _entries(tidx) < full
 
-    mef3io.repair_session(str(path), mef3io.Validator(str(path)).validate().repairable_check_ids)
-    assert mef3io.Validator(str(path)).validate().ok, "recovery must leave a valid session"
+    assert mef3io.Validator(str(path)).validate().ok, "recovery alone must leave a valid session"
     with mef3io.Reader(str(path)) as r:
         assert len(r.read("ch1")) > 0, "the surviving blocks must still read"
 
@@ -160,87 +161,66 @@ def test_recovery_refuses_a_tar_archive(tmp_path):
         mef3io.recover_session(archive, apply=True)
 
 
-def test_fast_is_the_default_and_full_is_opt_in(tmp_path):
-    """The default changed to "fast" deliberately (2026-09-21).
+def test_the_durability_option_is_gone(tmp_path):
+    """2.0 removed `durability=` (Writer, MefWriter): passing it is a TypeError,
+    raised before the constructor can remove an `overwrite=True` session.
 
-    These files are built by appending for days to months, so the append is the
-    hot path and the barriers cost ~2.5x on it. Pinned because flipping it back
-    silently would be a performance regression nobody would attribute, and
-    flipping it the other way silently would weaken a documented guarantee.
+    Every append now takes one path: only the `.tmet` is flushed before its
+    rename (pinned per file in core/tests/test_durability.cpp); the torn tails
+    a power cut can leave are what the rest of this suite recovers.
     """
     import inspect
 
-    assert inspect.signature(mef3io.Writer.__init__).parameters["durability"].default == "fast"
     from mef3io.compat import MefWriter
 
-    assert inspect.signature(MefWriter.__init__).parameters["durability"].default == "fast"
+    assert "durability" not in inspect.signature(mef3io.Writer.__init__).parameters
+    assert "durability" not in inspect.signature(MefWriter.__init__).parameters
 
-    # Both settings must produce a session that reads back identically — the
-    # knob buys crash behaviour, not different output.
-    rng = np.random.default_rng(17)
-    x = rng.integers(-9000, 9000, 3000, dtype=np.int32)
-    got = {}
-    for durability in ("fast", "full"):
-        path = tmp_path / f"{durability}.mefd"
-        w = mef3io.Writer(str(path), durability=durability)
-        w.write_int32("ch1", x, 0.5, START, FS)
-        w.write_int32("ch1", x, 0.5, START + int(3000 / FS * 1e6), FS)   # append
-        w.close()
-        assert mef3io.Validator(str(path)).validate().ok
-        with mef3io.Reader(str(path)) as r:
-            got[durability] = r.read("ch1")
-    np.testing.assert_array_equal(got["fast"], got["full"])
-
-
-def test_an_unknown_durability_does_not_destroy_the_session_first(tmp_path):
-    """`overwrite=True` removes the existing session in the constructor.
-
-    Validating the option afterwards meant a typo could delete a good session
-    and only then raise, which is the worst possible order for a mistake that
-    is purely a typo.
-    """
     path = tmp_path / "s.mefd"
     w = mef3io.Writer(str(path))
-    w.write_int32("ch1", np.arange(2000, dtype=np.int32), 0.5, START, FS)
+    x = np.arange(2000, dtype=np.int32)
+    w.write_int32("ch1", x, 0.5, START, FS)
+    w.write_int32("ch1", x, 0.5, START + int(2000 / FS * 1e6), FS)   # append
     w.close()
+    assert mef3io.Validator(str(path)).validate().ok
     before = sorted(p.name for p in Path(path).rglob("*") if p.is_file())
-    assert before
 
-    with pytest.raises(ValueError, match="durability"):
-        mef3io.Writer(str(path), overwrite=True, durability="sometimes")
+    for durability in ("fast", "full"):
+        with pytest.raises(TypeError, match="durability"):
+            mef3io.Writer(str(path), overwrite=True, durability=durability)
+        with pytest.raises(TypeError, match="durability"):
+            MefWriter(str(path), overwrite=True, durability=durability)
     assert sorted(p.name for p in Path(path).rglob("*") if p.is_file()) == before, (
-        "the session was destroyed before the option was validated"
+        "the session was destroyed by a rejected argument"
     )
 
-    from mef3io.compat import MefWriter
 
-    with pytest.raises(ValueError, match="durability"):
-        MefWriter(str(path), overwrite=True, durability="sometimes")
-    assert sorted(p.name for p in Path(path).rglob("*") if p.is_file()) == before
+def test_an_index_that_fails_its_own_crc_is_rebuilt_from_the_blocks(tmp_path):
+    """An index that does not pass its own CRC is not trusted (1.x refused it).
 
-
-def test_recovery_refuses_an_index_that_fails_its_own_crc(tmp_path):
-    """Recovery DECIDES what to keep from the index, then truncates.
-
-    Declaration repair never touches the index, so it can afford to work on one
-    it has not verified. Recovery cannot: a corrupted offset produces the same
-    shape as an interrupted append, and acting on it would drop real blocks or
-    truncate real samples.
+    No entry is kept on trust: past the prefix the stored CRC covers, an entry
+    stays only if the RED block header at its offset (the placement
+    authority, covered by the block CRC) agrees, and from the first that does
+    not the index is rebuilt from the CRC-checked blocks in .tdat. A corrupted
+    offset therefore cannot drop real blocks: here the very first entry is
+    damaged, and every sample still reads back.
     """
     path, tidx, tdat = _session(tmp_path)
+    with mef3io.Reader(str(path)) as r:
+        expected = r.read("ch1")
+    data_before = tdat.read_bytes()[UH:]
     raw = bytearray(tidx.read_bytes())
-    # Corrupt an entry and leave the body CRC stale — the index no longer
-    # describes itself.
     struct.pack_into("<q", raw, UH + 0, 999_999_999)      # first entry file_offset
     tidx.write_bytes(bytes(raw))
-    before = {f: f.read_bytes() for f in Path(path).rglob("*") if f.is_file()}
 
     report = mef3io.recover_session(str(path), apply=True)
-    assert report.skipped, "a segment whose index fails its CRC must be reported"
-    assert any("CRC" in s for s in report.skipped), report.summary()
-    assert not report.segments, "nothing should have been recovered from it"
-    for f, data in before.items():
-        assert f.read_bytes() == data, f"{f.name} was modified despite the bad CRC"
+    assert not report.skipped, report.summary()
+    assert report.segments and "CRC" in report.segments[0].action, report.summary()
+    assert report.segments[0].blocks_recovered == _entries(tidx)
+    assert tdat.read_bytes()[UH:] == data_before, "no sample byte may change"
+    assert mef3io.Validator(str(path)).validate().ok
+    with mef3io.Reader(str(path)) as r:
+        np.testing.assert_array_equal(r.read("ch1"), expected)
 
 
 def test_recovery_reports_a_stale_universal_header_count(tmp_path):
@@ -293,11 +273,12 @@ def _set_rto(path, rto):
 
 def _crashed_append(tmp_path, rto, lose_index=True):
     """Six appends; the .tmet (and, with lose_index, the index) of the last
-    three never landed — what `durability="fast"` can leave after a crash."""
+    three never landed — what a power cut mid-append can leave (the .tmet's
+    rename itself is not flushed, so the old one survives)."""
     path = tmp_path / "s.mefd"
     rng = np.random.default_rng(3)
     n = 2000
-    with mef3io.Writer(str(path), durability="fast") as w:
+    with mef3io.Writer(str(path)) as w:
         for i in range(6):
             w.write_int32("ch1", rng.integers(-9000, 9000, n, dtype=np.int32), 0.5,
                           START + int(i * n / FS * 1e6), FS)
@@ -353,16 +334,17 @@ def test_recovery_sets_the_end_time_at_a_nonzero_offset(tmp_path, lose_index):
     assert mef3io.recover_session(str(path)).nothing_to_do
 
 
-def test_at_offset_zero_recovery_leaves_the_metadata_to_repair(tmp_path):
-    """Negative control: at rto 0 the validator owns the times (its
-    segment-bounds repair fixes the end), so recovery does not touch .tmet,
-    and the end comes out the same either way."""
+def test_at_offset_zero_recovery_rederives_the_metadata_through_repair(tmp_path):
+    """At rto 0 the validator owns the times (its segment-bounds repair fixes
+    the end). Since 2.0 recovery runs that repair itself on the segments it
+    touched, so recovery ALONE gives the right end, and the .tmet says it was
+    rewritten by a header repair (not by recovery's own end-time path)."""
     path, tmet, true_end = _crashed_append(tmp_path, 0)
-    before = tmet.read_bytes()
     mef3io.recover_session(str(path), apply=True)
-    assert tmet.read_bytes() == before
-    ids = mef3io.Validator(str(path)).validate().repairable_check_ids
-    mef3io.repair_session(str(path), ids)
+    assert mef3io.Validator(str(path)).validate().ok
+    with mef3io.Reader(str(path)) as r:
+        prov = r.segments("ch1")[-1]["provenance"]
+    assert "header-repair" in str(prov), prov
     with mef3io.Reader(str(path)) as r:
         assert r.info("ch1")["end_time"] == true_end
 
@@ -486,3 +468,41 @@ def test_only_the_last_segment_metadata_is_read_on_a_healthy_session(tmp_path):
     finally:
         for t in tmets:
             t.chmod(0o644)
+
+
+def test_flush_close_and_wait_for_disk(tmp_path):
+    """When data is on disk (2.0): write() returns once the data is handed to
+    the OS; flush()/close() wait for everything written; wait_for_disk=True
+    makes each write wait for its own data. Which files are flushed when is
+    pinned in core/tests/test_durability.cpp; here: the API and that every
+    mode writes the same session."""
+    import inspect
+
+    from mef3io.compat import MefWriter
+
+    assert inspect.signature(mef3io.Writer.__init__).parameters["wait_for_disk"].default is False
+    assert inspect.signature(MefWriter.__init__).parameters["wait_for_disk"].default is False
+    x = np.arange(4000, dtype=np.int32) - 2000
+    got = {}
+    for mode in ("default", "flush", "wait"):
+        path = tmp_path / f"{mode}.mefd"
+        w = mef3io.Writer(str(path), wait_for_disk=(mode == "wait"))
+        w.write_int32("ch1", x, 0.5, START, FS)
+        w.write_int32("ch1", x, 0.5, START + int(4000 / FS * 1e6), FS)
+        if mode == "flush":
+            w.flush()
+            w.flush()                     # nothing new: returns at once
+        w.close()
+        w.close()                         # idempotent
+        w.flush()                         # after close: a no-op
+        assert mef3io.Validator(str(path)).validate().ok
+        with mef3io.Reader(str(path)) as r:
+            got[mode] = r.read("ch1")
+    np.testing.assert_array_equal(got["default"], got["flush"])
+    np.testing.assert_array_equal(got["default"], got["wait"])
+
+    mw = MefWriter(str(tmp_path / "compat.mefd"), overwrite=True, wait_for_disk=True)
+    mw.write_data(x.astype(float), "ch1", START, FS, precision=0)
+    mw.flush()
+    mw.close()
+    assert mef3io.Validator(str(tmp_path / "compat.mefd")).validate().ok

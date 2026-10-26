@@ -1,5 +1,5 @@
 ---
-description: "Recording for days to months in MEF 3.0 with mef3io: appends that cost only the new data, durability settings, and recovery after a crash."
+description: "Recording for days to months in MEF 3.0 with mef3io: appends that cost only the new data, what is flushed, and recovery after a crash."
 ---
 
 # Long recordings: days to months
@@ -45,99 +45,210 @@ the first session-level annotation or new channel: that reads and
 CRC-checks every segment's `.tmet` once per Writer (about 1.4–1.8 s and
 157 MB at 64 channels × 150 segments) and nothing afterwards.
 
+## When is my data on disk?
+
+Writing to a file and the data being *on the disk* are two different moments.
+The operating system keeps what a program writes in memory and stores it a
+little later — until the operating system writes it out, typically up to
+about 30 seconds on Linux (other systems may wait longer). If the computer loses power in
+between, what was still in memory is lost. mef3io lets you choose when to wait
+for the disk:
+
+| you call | it returns when | cost (128 channels, 10-minute blocks, ext4) |
+|---|---|---|
+| `w.write(...)` (default) | the data is handed to the operating system | 2.2–2.3 s per round of 128 appends |
+| `w.flush()` | **everything** this `Writer` wrote so far is on disk — one combined wait for all channels | about 0.3 s more per round |
+| `w.close()`, or leaving a `with` block | the same as `flush()`, then the `Writer` is closed: everything this `Writer` wrote is on disk, **including the new files' names and folders** | about 0.6–0.85 s at the end |
+| `Writer(..., wait_for_disk=True)`, then `w.write(...)` | **that write's** data is on disk, **and so is its published `.tmet`** (the segment is visible after a power cut); `flush()`/`close()` still make the new folders durable on every system | 3.6–3.7 s per round (1.x `durability="full"`: 6.0–6.5 s) |
+
+```python
+with mef3io.Writer("recording.mefd") as w:   # leaving the block waits for the disk
+    for block, t0 in acquisition():
+        for ch in channels:
+            w.write(ch, block[ch], t0, fs)
+        w.flush()        # optional: every channel of this round is on disk now
+```
+
+- **Default.** `write()` is as fast as it can be. If the power fails, the most
+  recent writes — until the OS writes them out, typically up to about 30
+  seconds on Linux — may be lost or left half-written. Earlier data is never at risk: nothing rewrites it.
+- **`flush()` / `close()`.** Call `flush()` whenever you want a point after
+  which everything written so far survives a power cut, for example after
+  each round of channels. It waits once for all of them together, so it costs
+  little more than a single wait. `close()` always does it, and a `with` block
+  calls `close()`.
+- **`wait_for_disk=True`.** Every `write()` waits for its own data. Use it
+  when each call must be safe the moment it returns. It costs one wait per
+  call; calling `flush()` once per round is cheaper for the same guarantee at
+  the end of the round.
+- **After a power cut**, in any mode, run
+  `python -m mef3io recover SESSION.mefd --apply`. It puts every half-written
+  last append back into a valid session that holds every sample whose bytes
+  reached the disk (the table below says what it does in each case).
+
+Two things are flushed even in the default mode, because without them a power
+cut could stop the **whole session** from opening:
+
+- every append's `.tmet` (the segment's description), before it replaces the
+  old one;
+- a channel's **first** segment's `.tmet` (in any session), and a new
+  segment's or channel's `.tmet` in a session that already held data when the
+  `Writer` opened it.
+
+A failed flush is an error: `write()`, `flush()` and `close()` raise instead
+of claiming the data is safe. **A failure is remembered**: after one failed
+flush every later `flush()`/`close()` of that `Writer` raises again (the
+operating system reports a write error only once and then marks the pages
+clean, so a retry that "succeeded" would claim data that is gone). Data
+written since the last successful flush may be lost: run `recover`. A `Writer`
+that is garbage-collected without being closed flushes in its destructor and,
+if that fails, emits a `WriterFlushWarning` (only `close()`, `flush()` and
+`with` can raise).
+
 ## Durability, and what it costs
 
 An append updates four things across three files: the `.tdat` body, the `.tidx`
-entries, the `.tdat` header, and the `.tmet` declarations. mef3io orders them
-with real barriers:
+entries, the `.tdat` header, and the `.tmet` declarations. It flushes **exactly
+one** of them to stable storage: the `.tmet` is written to a temp file,
+flushed, and only then renamed over the previous one. A rename is ordered but
+not durable, so without that flush a power cut could publish the new name over
+bytes still in cache — a short `.tmet`, which makes the **whole session** fail
+to open, not just one segment. That barrier stays, whatever it costs.
 
-- the `.tdat` body is flushed **before** the `.tidx` that points at those bytes
-  is written — otherwise a power cut can leave an index running past the real
-  end of the data file, which no in-process rollback can repair;
-- the appended `.tidx` is flushed before its header is patched, and the `.tmet`
-  is written to a temp file, flushed, then renamed, so a crash leaves either
-  the old `.tmet` or the new one, never a torn one.
+A segment is visible only through its `.tmet`: one that is missing is
+skipped, one that is SHORT fails the strict open of the whole session, days of
+data included. So a channel's FIRST segment (in any session), and a new
+segment or channel in a session that already held data when the `Writer`
+opened it, also flush their `.tmet` before it is renamed into place — once per
+channel. Their `.tdat` and `.tidx` are not flushed; a short one is rebuilt by
+recovery (below). Measured on ext4: a fresh 128-channel session's first write,
+2.4–2.5 s (0.85 s with no flush at all); a new segment on all 128 channels of
+a reopened session, 2.55 s. Later segments of a session the `Writer` created
+itself are not flushed at all (a conversion writes thousands of them);
+recovery rebuilds what a power cut takes from them.
 
-Two things are deliberately **not** flushed: a fresh write (there is nothing
-underneath to lose — a crash leaves an incomplete session either way), and the
-directory entry after a rename (losing the rename keeps the previous complete
-file, which is worth more than keeping the last append).
+`flush()`, `close()` and `wait_for_disk=True` add the rest (see
+[When is my data on disk?](#when-is-my-data-on-disk)): `flush()` and `close()`
+wait for every file the `Writer` created or extended since the last flush in
+ONE combined wait — one `syncfs` per file system on Linux (which also covers
+every new folder and every rename), every file at once on macOS and Windows;
+`wait_for_disk=True` does that for the files of each write before its `.tmet`
+is published, so the `.tmet` never describes data that is not on disk, and
+once more after the rename, so the published name is on disk when `write()`
+returns.
 
-!!! note "This is stronger than the reference implementation"
+What covers the **new folders** (`.mefd`, `.timd`, `.segd`) on each system:
+
+- **Linux:** `syncfs` — folders and renames included.
+- **macOS:** every file with `F_FULLFSYNC` (plain `fsync` where the file
+  system lacks it), then each folder from the file's own up to the session
+  folder (`.mefd`, never above it) with `F_FULLFSYNC` (fallback `fsync`).
+- **Windows:** every file with `FlushFileBuffers`, then each folder the same
+  way through a directory handle. NTFS journals folder entries itself and often
+  refuses a flush on a folder handle (access denied); mef3io makes the call and
+  ignores exactly that refusal (access denied); any other folder-flush error
+  fails the write like on the other systems. On Windows the new
+  folder entries are therefore as durable as NTFS makes them, not more — this
+  is the one platform difference that cannot be removed.
+
+After a failed flush the `Writer` stays failed: with `wait_for_disk=True` every
+later `write()` raises that failure too (never reports data as written when it
+may not be), and `flush()`/`close()` rethrow it.
+
+Nothing else is flushed. The `.tdat` and `.tidx` are extended **in place**
+(rewriting either whole would be `O(session)`), and their headers patched in
+place, with no barrier between them. So a power cut or OS crash mid-append (a
+crash of only the *process* is harmless — the OS still writes what it was
+given) can leave the **last append of a segment** in any mix of old and new
+bytes. `recover --apply` restores each of them to a valid session holding every
+sample whose bytes reached the disk (pinned state by state in
+`tests/test_p46_crash_states.py`, built from real old/new file images):
+
+| what reached the disk | what you see before recovery | what `recover --apply` does |
+|---|---|---|
+| the `.tmet` only (data and index not) — the most likely state on ext4 for some seconds after an append, since the rename is committed before the in-place extensions | the end time covers samples that read as NaN; a recorder re-sending its buffer is refused as overlapping | reports the segment; re-derives its declarations from the index (the validator's own repairs) |
+| data and index, not the `.tdat`/`.tidx` header patches | `header.entry-count` (a meflib reader reads the segment short) | rewrites the headers' counts |
+| data and index, not the `.tmet` (its rename lost) | the appended samples are invisible | reports the segment; re-derives its declarations |
+| `.tidx` entries without their header, a header without its entries, or entries zero-extended (the index fails its CRC) | the appended samples read as NaN; the validator skips the segment | keeps the entries the stored CRC covers, and past them each entry whose RED block header agrees; rebuilds the rest from the CRC-checked blocks in `.tdat` |
+| the index, not all of the data (entries past the end, or pointing at pages that read back as zeros) | a read may fail, or return NaN | CRC-checks the last append's blocks, drops the entries from the first bad one, truncates the torn tail (backed up) |
+| the data, not the index | the appended samples read as NaN | indexes the CRC-valid blocks from their RED headers |
+| part of the data (a torn `.tdat`) | | keeps every whole, CRC-valid block, drops the fragment |
+| a later segment's `.tmet` empty or short, its data and index landed (a long-lived `Writer`'s new segment) | the strict open of the whole session fails | rebuilds the `.tmet` from the previous segment's (everything constant along the channel, byte for byte) plus this segment's own files (number, times, level UUID, start sample, native extremes), then re-derives its declarations; backed up, stamped Recovery |
+| a first (or any) segment's `.tidx` missing, empty, short or with a zeroed header, its `.tmet` flushed | the segment's read fails | rebuilds the index from the CRC-checked blocks in `.tdat` under a header taken from the `.tmet`, numbering samples channel-wide from the `.tmet`'s start sample; every whole block is kept |
+| a `.tdat` header zeroed on a full-size segment (the header page never landed) | the header says nothing (type, segment number, names) | replaces it with one built from the segment's `.tmet` (not just re-sealed) |
+| a segment's `.tmet` missing but a complete, CRC-valid `.tmet.mef3io-tmp` beside it (a `wait_for_disk` write whose rename was lost) | the segment is invisible | publishes that file (backed up if a short `.tmet` was there; stamped Recovery) |
+| a later segment's `.tmet` AND `.tidx` lost, its data landed | the strict open of the whole session fails | rebuilds both: the `.tmet` from the previous segment's, the index from the data |
+| a new segment's files empty, its data never landed | the strict open of the whole session fails | removes the segment (it holds no sample; moved to the backup) |
+
+Every segment recovery changes, and every last segment whose `.tmet` disagrees
+with its index, then has its declarations re-derived from the index — that
+segment only, and exactly the checks the dry run lists — so
+recovery alone leaves a session that validates clean, and a recorder can carry
+on — or re-send what was lost — from where the data really ends. Data
+committed by an *earlier* append is never at risk, because nothing rewrites it.
+
+Limits, stated exactly:
+
+- Within the torn append, blocks that follow a hole (a block that did not land
+  while later ones did) are dropped with the torn tail; they are in the backup.
+- The block CRC check covers each channel's last append, back to its first
+  block and **at most 64 MiB per channel**. Every checked byte is read once
+  (pinned with `/proc/self/io`), so a dry run of a healthy session reads up to
+  64 MiB per channel when its last segment was written in one call (a
+  conversion), and only the last append otherwise (a few hundred KB at
+  10-minute appends). Damage further back than that window is not looked for.
+- A channel's FIRST segment whose `.tmet` is lost has nothing to be rebuilt
+  from — unless a complete, CRC-valid `.tmet.mef3io-tmp` is beside it (what
+  `wait_for_disk` flushed before a rename that did not survive): recovery then
+  publishes that file. Otherwise (another writer's session, or a disk that
+  lied about a flush) recovery skips the segment and says so, and the session
+  opens with `strict=False`.
+- Recovery repairs only the segments it reports. A healthy segment's own
+  findings (a legacy writer's declarations, for example) are left to
+  `python -m mef3io repair`, by explicit check id.
+- A write, `flush()` or `close()` FAILS if a flush it waits for fails (1.x's
+  default ignored flush errors). On a mount whose flush returns an error, the
+  call raises the OS error rather than claim a durability it does not have.
+- `wait_for_disk=True` waits once per `write()` call. The calls of a single
+  thread come one after another, so one call's wait cannot overlap with the
+  next call's work; for one combined wait per round, use `flush()`.
+
+!!! note "Changed in 2.0"
+    1.x had a `durability=` option (`"fast"`, the default, or `"full"`, which
+    also flushed the `.tdat` before the `.tidx` that points at it and the
+    `.tidx` before its header). 2.0 removed it: every write takes the path
+    above, and passing `durability=` raises `TypeError`. The torn states the
+    extra barriers prevented are the ones in the table above; recovery
+    (extended in 2.0 for the ones 1.x could not reach) repairs them.
+
+!!! note "Still more than the reference implementation"
     meflib does no durability work at all. Its single `fflush` is explicitly
     *"to update stat structure after write"* — a stdio flush so `fstat` reports
     the right size, not a barrier. There is no `fsync`, no `fdatasync`, no
     `FlushFileBuffers`, and it writes files directly rather than through a
-    temp-and-rename. A session written by the legacy stack has no crash
-    guarantee; one written by mef3io does.
+    temp-and-rename, so a power cut can leave it a short `.tmet`.
 
-The cost is latency, not throughput: roughly three `fdatasync` calls per channel
-per append, each a disk round trip. On ext4 that is about 8 ms each, so an
-append is ~2.5× slower than one with no barriers — and a fresh write is
-unaffected.
+The cost is one `fdatasync` per channel per append (Linux; macOS uses
+`F_FULLFSYNC`, Windows `FlushFileBuffers` — not measured, and typically slower
+per call). Measured on ext4, 128
+channels × 10-minute blocks at 256 Hz, one `Writer` held open (median of five
+appends, three runs each):
 
-In the units that matter it is small. The **duty cycle** — time spent committing
-divided by the wall-clock duration of the data committed — is what decides
-whether a writer keeps up with a live acquisition:
-
-| channels | block | commit | duty cycle |
-|---|---|---|---|
-| 64 @ 250 Hz | 60 s | 2.15 s | 3.6 % |
-| 128 @ 256 Hz | 10 min | ~5 s | ~0.8 % |
-
-With 5–20 minute blocks there is one to two orders of magnitude of headroom.
-
-### The `durability` knob
-
-**`durability="fast"` is the default.** These files are built by appending for
-days to months, so the append is the hot path, and the barriers cost ~2.5x on
-it. It matches what every MEF writer before this one did — the reference C
-library flushes nothing at all.
-
-```python
-w = mef3io.Writer(path)                          # fast: the default
-w = mef3io.Writer(path, durability="full")       # add the barriers
-```
-
-Be precise about what fast gives up. The `.tdat` and `.tidx` are extended **in
-place** (rewriting either whole would be `O(session)`), so this is *not* a
-temp-and-rename story for them: without the barriers, a crash mid-append can
-leave a torn tail on either file, an index referencing data that never landed,
-or blocks in `.tdat` the index never got to mention. Only the `.tmet` is
-published by atomic rename.
-
-What makes that an acceptable trade rather than a footgun is that **every one
-of those states is detectable and repairable**:
-
-| state after a crash | detected by | repaired by |
+| | per append (128 channels) | flushes per channel |
 |---|---|---|
-| index references bytes that never landed | `index.block-offsets` | `recover_session` drops the entries |
-| blocks in `.tdat` the index never mentioned | `index.data-coverage` | `recover_session` rebuilds them from the RED headers |
-| torn tail on either file | the body CRCs | `recover_session` drops the fragment |
-| stale universal-header counts | `header.entry-count` | `recover_session`, then `repair_session` |
+| 1.x `durability="full"` | 6.0–6.5 s | 5 (data, index, both headers, `.tmet`) |
+| 1.x `durability="fast"` (the old default) | 3.8–3.9 s | 2 (both headers, best-effort) |
+| **2.0**, default | **2.2–2.3 s** | **1** (the `.tmet`) |
+| 2.0, default + `flush()` once per round | 2.5–2.6 s | 1, plus one combined wait per round |
+| 2.0, `wait_for_disk=True` | 3.6–3.7 s | one combined wait per write (data, index, `.tmet`) |
+| no flush at all (for reference, not shipped) | 0.74 s | 0 |
 
-So the failure mode is **"run `recover` after an unclean shutdown"**, not "lose
-the recording" — and data committed by an *earlier* append is never at risk,
-because nothing rewrites it.
-
-Choose `durability="full"` when an unclean shutdown must need no operator
-action at all. It makes each append all-or-nothing across the three files.
-
-Measured, 8 channels × 10-minute blocks, against the legacy stack:
-
-| | per append | vs meflib |
-|---|---|---|
-| mef_tools / meflib (single-threaded, no barriers) | 289 ms | 1.00× |
-| mef3io `durability="full"`, 1 thread | 586 ms | 0.49× |
-| mef3io `durability="full"`, all cores | 354 ms | 0.82× |
-| mef3io `durability="fast"`, 1 thread | 399 ms | 0.73× |
-| **mef3io `durability="fast"`, all cores** | **229 ms** | **1.26×** |
-
-The encode dominates, and mef3io parallelises it where meflib cannot — so
-`durability="fast"` with threads is *faster* than the reference implementation.
-What it gives up is the flush ordering: after an unclean shutdown a file can
-end in a torn tail, which the validator detects and `recover_session` fixes
-(see [The durability knob](#the-durability-knob)).
+(1.x's `"fast"` was documented as flushing nothing, but it still flushed the
+two headers each append patches, best-effort; 2.0 drops those too.) The
+remaining `.tmet` flush is about 15 ms per channel. In the units that matter
+it is small: the **duty cycle** — time spent committing divided by the
+wall-clock duration of the data committed — is 2.3 s / 600 s ≈ 0.4 % here, so
+with 5–20 minute blocks there are two orders of magnitude of headroom.
 
 ## Recovering from an interrupted write
 
@@ -146,8 +257,8 @@ python -m mef3io recover SESSION.mefd            # dry run, writes nothing
 python -m mef3io recover SESSION.mefd --apply
 ```
 
-An interrupted append leaves one of two shapes, and they are **not** treated the
-same, because one has lost data and the other has not:
+What it does per state is in the table above. Two shapes are **not** treated
+the same, because one has lost data and the other has not:
 
 - **Index ahead of data** — entries reference bytes that never landed. Those
   samples do not exist, so the entries are dropped.
@@ -157,10 +268,12 @@ same, because one has lost data and the other has not:
   flag, which is everything an index entry needs. Only blocks whose CRC
   verifies are indexed — a torn tail is not a block.
 
-Recovery is deliberately separate from `repair_session`. Repair only ever
-rewrites declarations, which is what makes it safe to run on anything; recovery
-may change the index, so it is a dry run by default and backs up what it
-changes first. The CLI re-derives the declarations afterwards for you.
+Recovery alone may change the index and the data. Its declaration step goes
+through `repair_session`, which only ever rewrites declarations — so the
+declarations are fixed by exactly the code the validator's repairs use (stored
+images edited, backups, provenance). Recovery is a dry run by default and
+backs up what it changes first. It never repairs a segment it does not
+report: the dry run lists, per segment, what `--apply` will change.
 
 On a session of hundreds of gigabytes, validation (with exact
 `maximum_difference_bytes`) and a recovery that has a long unindexed tail to

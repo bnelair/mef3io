@@ -140,9 +140,13 @@ w.write_int32("ch2", counts, /*ufact=*/0.01, start_uutc, 256.0, valid_mask);
 w.write_records("ch1", {{.type = "Note", .time = t, .text = "marker"}});
 ```
 
-A `SessionWriter` is non-durable by default (no flushes, like the Python
-`durability="fast"`); call `w.set_durable(true)` for the flush barriers
-described in [Long recordings](long_recordings.md#the-durability-knob).
+A write returns once its data is handed to the operating system (each
+segment's `.tmet` is flushed before it is published). `w.flush()` returns only
+when everything written so far is on disk, in one combined wait, and the
+destructor does the same (call `flush()` to see a failure).
+`w.set_wait_for_disk(true)` makes every write wait for its own data. See
+[When is my data on disk?](long_recordings.md#when-is-my-data-on-disk); 2.0
+removed `set_durable`.
 
 Appends are validated against the on-disk segment (fs, conversion factor,
 start after the segment end) and throw `WriteConflictError` on violation.

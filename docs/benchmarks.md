@@ -92,8 +92,9 @@ decodes on all cores; mef_tools is single-threaded.
 
 `benchmarks/long_session_benchmark.py --with-mef-tools`. 24 h × 16 channels at
 512 Hz, written as 144 ten-minute appends, then 40 windowed reads across all
-channels. mef3io uses `durability="full"` (three fsync barriers per channel
-per append) and all cores.
+channels. Measured with 1.x `durability="full"` (five flushes per channel per
+append; 2.0 flushes only the `.tmet`, so these append times are an upper bound)
+and all cores.
 
 | | mef3io | mef_tools |
 |---|---|---|
@@ -112,7 +113,7 @@ append time was ~700 ms in all three runs: 696, 698 and 708 ms. mef_tools
 took 656, 1218 and 970 ms, so the ratio moved between **0.94× and 1.74×** in
 mef3io's favour. mef_tools makes no durability barriers, so its time depends
 on when the kernel happens to write back its dirty pages. mef3io's barriers
-make it pay that cost deterministically.
+made it pay that cost deterministically (2.0 keeps one: the `.tmet`).
 
 The stable results are the file size (1.8× smaller) and flat growth.
 
@@ -143,7 +144,7 @@ constraint:
   store here holds float32. The fidelity differs, so this is not an
   equal-information comparison (see `benchmarks/README.md`).
 
-**Append scaling** (24 × 10 min × 8 channels, mef3io on 1 thread, full
+**Append scaling** (24 × 10 min × 8 channels, mef3io on 1 thread, 1.x full
 durability):
 
 | | first | median | last | growth |
@@ -151,10 +152,9 @@ durability):
 | mef_tools | 0.375 s | 0.276 s | 0.325 s | 0.87× |
 | mef3io | 0.383 s | 0.395 s | 0.385 s | **1.00×** |
 
-On one thread with barriers, mef3io appends are ~1.4× slower than mef_tools
-without any. [Long recordings](long_recordings.md#the-durability-knob) breaks down
-where that time goes, and when to use `durability="fast"` and threads to beat
-the legacy stack instead.
+On one thread with the 1.x barriers, mef3io appends were ~1.4× slower than
+mef_tools without any. [Long recordings](long_recordings.md#durability-and-what-it-costs)
+gives the 2.0 cost (one flush per channel per append).
 
 ## Compression
 

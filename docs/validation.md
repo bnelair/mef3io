@@ -311,15 +311,15 @@ report = mef3io.recover_session("session.mefd")      # DRY RUN — writes nothin
 print(report.summary())
 
 if report.segments:                                   # something to do
+    # also re-derives the declarations of every segment it changes (and of a
+    # last segment whose .tmet is newer or older than its index)
     report = mef3io.recover_session("session.mefd", apply=True)
-    # the index changed, so the declarations derived from it are now stale
-    ids = mef3io.Validator("session.mefd").validate().repairable_check_ids
-    mef3io.repair_session("session.mefd", ids)
 
 assert mef3io.Validator("session.mefd").validate().ok
 ```
 
-The CLI does the whole sequence, including the follow-up repair:
+The CLI does the same. It repairs nothing beyond the segments recovery reports
+(a healthy segment's findings are `repair`'s, by explicit id):
 
 ```bash
 python -m mef3io recover session.mefd            # dry run
@@ -328,8 +328,10 @@ python -m mef3io recover session.mefd --apply
 
 ### What it does, and why the two cases differ
 
-An interrupted append leaves one of two shapes. They are **not** treated the
-same, because one has lost data and the other has not:
+Every state a power cut can leave, and what recovery does about each, is in
+the table in [Long recordings](long_recordings.md#durability-and-what-it-costs).
+Two shapes of the index against the data are **not** treated the same,
+because one has lost data and the other has not:
 
 | shape | meaning | action |
 |---|---|---|
@@ -341,8 +343,29 @@ sample count, byte count, start time and discontinuity flag — everything an
 index entry needs. Only blocks whose **CRC verifies** are indexed: a torn tail
 is not a block, and is dropped instead.
 
-**The end time at a non-zero recording-time offset.** Normally recovery
-touches only the index and the data, and the follow-up `repair_session` fixes
+**An index that fails its own CRC** is what a power cut between an append's
+in-place extension and its header patch leaves: header and entries from
+different writes. It is not refused (1.x refused it): the entries the stored
+CRC covers are kept, then each further entry only if the RED block header at
+its offset agrees (304 bytes read per entry), and from the first that does not
+the index is rebuilt from the CRC-checked blocks in `.tdat`.
+
+**The last append is CRC-checked.** In each channel's last segment, the blocks
+of its last append (back to the append's first block, at most 64 MiB) are
+checked against their entries, so entries pointing at pages that never landed
+(zeros) are dropped like entries past the end of the data.
+
+**Declarations.** With `apply=True`, every segment recovery changed, and every
+channel's last segment whose `.tmet` declares other block, sample or entry
+counts than its index holds (published before or after its data), gets its
+declarations re-derived from the index through `repair_session`: all
+repairable findings of that segment, with exact `maximum_difference_bytes`.
+`RecoveredSegment.declarations` lists the check ids; repair's backups go to
+`<session>.repair-backup/`. A segment the validator cannot check (a locked
+section 2 without the password) is left to a note.
+
+**The end time at a non-zero recording-time offset.** Normally the
+declaration step above (the validator's `times.segment-bounds` repair) fixes
 the start and end times in the three universal headers. In a session with a
 non-zero recording-time offset (meflib's date-masking), every time check
 stands down, because writers disagree on how times are stored there. Recovery
@@ -396,30 +419,36 @@ for s in report.segments:
   `<session>.recover-backup/`. The `.tdat` itself may be tens of gigabytes —
   and that is one channel — so copying it to undo a header patch would make the
   tool unusable on exactly the sessions it is for. Pass `backup=False` to skip.
-- **A healthy session is untouched**, byte for byte.
+- **A healthy session is untouched**, byte for byte — a legacy session's
+  declaration findings included. Checking it costs one `.tmet` header per
+  channel, the validator's count checks on each channel's last segment
+  (metadata and index only), and a CRC check of the last append's blocks, each
+  byte read once: the whole last append, at most 64 MiB per channel.
 - **Recovering an older segment stamps the last one** with `segment-repaired`,
   as a repair does (header only; the old header goes to the backup).
   `report.notes` names the stamped file, or says why the stamp was skipped
   (the same three cases as for a repair) and that cached opens will not see
   the recovery.
 - **Tar archives are refused** — extract first.
-- It **streams**: the `.tdat`'s size, plus a 304-byte RED header and the one
-  block it describes, at a handful of offsets. It never loads the data file.
+- It **streams**: the `.tdat`'s size, plus 304-byte RED headers and the blocks
+  they describe, at the offsets it has to check. It never loads the data file
+  whole.
 - **Cancellable without leaving anything half-done.** Every segment is scanned
   before anything is written; `cancel=` during the scan leaves the session
   untouched (see [Stopping a run](#stopping-a-run-and-watching-it)).
 
 ### When you should need it
 
-With `durability="full"` an append cannot leave either shape: the
-`.tdat` is flushed before the `.tidx` that references it. Recovery exists for
-`durability="fast"` (see
-[Long recordings](long_recordings.md#the-durability-knob)), for storage that
-lied about a flush, and for sessions produced by tools that make no ordering
-guarantee at all — which includes the reference C library.
+After a power cut or OS crash during an append. The writer flushes only each
+segment's `.tmet` before renaming it (a short `.tmet` would make the whole
+session fail to open); the `.tdat` and `.tidx` it extends in place are not
+flushed, so the last append of a segment can be left in either shape (see
+[Long recordings](long_recordings.md#durability-and-what-it-costs)). Recovery
+also covers sessions produced by tools that make no ordering guarantee at all
+— which includes the reference C library.
 
-If you run `durability="fast"` in production, run `recover` as a routine step
-after any unclean shutdown rather than only when something looks wrong.
+Run `recover` as a routine step after any unclean shutdown rather than only
+when something looks wrong.
 
 ## When a file is damaged: what a read does about it
 

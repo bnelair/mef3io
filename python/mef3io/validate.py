@@ -664,6 +664,9 @@ class RecoveredSegment:
     blocks_dropped: int = 0
     tdat_bytes_dropped: int = 0
     action: str = ""
+    #: Validator check ids whose declarations disagreed with the index: found
+    #: (dry run), or re-derived from the recovered index (``apply=True``).
+    declarations: tuple[str, ...] = ()
 
     def __str__(self) -> str:  # pragma: no cover - convenience
         return f"{self.path}: {self.action}"
@@ -704,12 +707,9 @@ class RecoveryReport:
             lines.append("")
             lines.append("To apply:  mef3io.recover_session(path, apply=True)")
         if self.segments and self.applied:
-            lines.append("")
-            lines.append(
-                "Now re-derive the declarations from the repaired index:\n"
-                "    mef3io.repair_session(path, "
-                "mef3io.Validator(path).validate().repairable_check_ids)"
-            )
+            fixed = sorted({c for s in self.segments for c in s.declarations})
+            if fixed:
+                lines.append("  declarations re-derived from the index: " + ", ".join(fixed))
         return "\n".join(lines)
 
 
@@ -741,9 +741,10 @@ def recover_session(
       flag, which is everything an index entry needs. Only blocks whose CRC
       verifies are indexed; a torn tail is not a block.
 
-    With the default ``durability="full"`` an append cannot leave either state.
-    They are reachable with ``durability="fast"``, which is what makes that
-    trade a reasonable one to offer.
+    Both are reachable after a power cut or OS crash during an append: the
+    writer flushes only each segment's ``.tmet`` before renaming it, not the
+    ``.tdat`` or ``.tidx`` it extends in place, and this function is what makes
+    that trade safe. Only the last append of a segment can be affected.
 
     Parameters
     ----------
@@ -775,8 +776,14 @@ def recover_session(
 
     Notes
     -----
-    Declarations are not updated here. Run :func:`repair_session` afterwards —
-    ``python -m mef3io recover`` does it for you.
+    With ``apply=True`` the declarations of every segment it changed (and of
+    a channel's last segment whose ``.tmet`` is newer or older than its index,
+    which a power cut can leave) are re-derived from the index through
+    :func:`repair_session` — so recovery alone leaves a valid session after
+    an unclean shutdown. Only the segments it reports are touched (the dry
+    run lists their check ids in ``RecoveredSegment.declarations``); a
+    healthy segment's findings are left to :func:`repair_session`. A later
+    segment whose ``.tmet`` was lost is rebuilt from the previous segment's.
     """
     raw = _backend().recover_session(
         str(path), bool(apply), bool(backup), password or "", **_hooks(cancel, progress)
@@ -784,7 +791,8 @@ def recover_session(
     fields = {f.name for f in dataclasses.fields(RecoveredSegment)}
     return RecoveryReport(
         segments=tuple(
-            RecoveredSegment(**{k: v for k, v in s.items() if k in fields})
+            RecoveredSegment(**{k: (tuple(v) if k == "declarations" else v)
+                                for k, v in s.items() if k in fields})
             for s in raw["segments"]
         ),
         skipped=tuple(raw["skipped"]),
@@ -806,8 +814,10 @@ def _recover_main(argv) -> int:
         prog="python -m mef3io recover",
         description=(
             "Make each segment's block index and data agree after an interrupted "
-            "write. Dry run unless --apply. Unlike 'repair', this may change the "
-            "block index and drop an incomplete trailing block."
+            "write, and re-derive the declarations of the segments it reports. Dry "
+            "run unless --apply. Unlike 'repair', this may change the block index "
+            "and drop an incomplete trailing block; it never repairs a segment it "
+            "does not report."
         ),
     )
     p.add_argument("path", help="session .mefd directory")
@@ -815,8 +825,6 @@ def _recover_main(argv) -> int:
     p.add_argument("--no-backup", action="store_true",
                    help="do not save what changes to <session>.recover-backup/")
     p.add_argument("--password", default="", help="for encrypted sessions")
-    p.add_argument("--no-repair", action="store_true",
-                   help="skip re-deriving the declarations afterwards")
     args = p.parse_args(list(argv))
 
     try:
@@ -829,20 +837,15 @@ def _recover_main(argv) -> int:
 
     print(report.summary())
 
-    # A recovered index means the declarations derived from it are now stale.
-    # Doing it here keeps the two operations separate in the API but joined in
-    # the workflow, which is what an operator actually wants.
-    if report.applied and report.segments and not args.no_repair:
-        outstanding = Validator(args.path, password=args.password).validate()
-        ids = outstanding.repairable_check_ids
-        if ids:
-            print()
-            print(f"re-deriving declarations from the recovered index: {', '.join(ids)}")
-            repair_session(args.path, ids, password=args.password)
-        final = Validator(args.path, password=args.password).validate()
+    # recover_session itself re-derives the declarations of exactly the
+    # segments it reports (repair_session, per segment) — the dry run lists
+    # them. Nothing else is repaired here: a healthy segment's findings (e.g.
+    # a legacy writer's declarations) are `repair`'s business, never an
+    # implicit side effect of recovery.
+    if report.applied and report.segments:
         print()
-        print(final.summary())
-        return 0 if final.ok else 1
+        print("Recovered. Check the whole session with:  python -m mef3io validate "
+              + args.path)
 
     if report.skipped:
         return 1

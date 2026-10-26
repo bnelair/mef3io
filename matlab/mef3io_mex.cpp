@@ -726,12 +726,6 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     mef3io_writer_close(w);
     return;
   }
-  if (cmd == "writer_set_durable") {
-    need_args(nrhs, 3, "writer_set_durable");
-    check(mef3io_writer_set_durable(get_writer(prhs[1]),
-                                    get_int(prhs[2], "durable")));
-    return;
-  }
   if (cmd == "writer_set_units") {
     need_args(nrhs, 3, "writer_set_units");
     check(mef3io_writer_set_units(get_writer(prhs[1]),
@@ -789,6 +783,17 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     need_args(nrhs, 3, "writer_set_block_length");
     check(mef3io_writer_set_block_length(get_writer(prhs[1]),
                                          get_int64(prhs[2], "block_length")));
+    return;
+  }
+  if (cmd == "writer_flush") {
+    need_args(nrhs, 2, "writer_flush");
+    check(mef3io_writer_flush(get_writer(prhs[1])));
+    return;
+  }
+  if (cmd == "writer_set_wait_for_disk") {
+    need_args(nrhs, 3, "writer_set_wait_for_disk");
+    check(mef3io_writer_set_wait_for_disk(get_writer(prhs[1]),
+                                          get_int(prhs[2], "on")));
     return;
   }
   if (cmd == "writer_set_threads") {

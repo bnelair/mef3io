@@ -53,31 +53,40 @@ std::vector<ui1> read_whole_file(const std::string& path) {
 
 using detail::finish_stream;
 
-// File-identity and durability helpers are shared with the validator's repair
-// path (durability.hpp): the append writes the SAMPLES, so it must be at
-// least as careful as the path that rewrites 16 KB of declarations.
+// File-identity and flush helpers are shared with the validator's repair path
+// (durability.hpp), which keeps its own flush rules; the writer flushes only
+// the .tmet it replaces (write_file_atomic).
 using detail::copy_file_identity;
 using detail::replace_file;
-using detail::fsync_directory;
 using detail::fsync_file_or_throw;
 
 void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
-                       bool durable = true) {
+                       bool flush_new = false, std::vector<fs::path> flush_with = {}) {
   const fs::path target(path);
   const fs::path tmp = target.parent_path() / (target.filename().string() + ".mef3io-tmp");
   std::error_code ignored;
-  // Durability is only worth paying for when this write REPLACES something.
-  // Creating a segment's files for the first time risks nothing: a crash
-  // part-way leaves an incomplete session either way, and there is no good
-  // copy underneath to lose. Replacing — which is what every append does to
-  // the .tmet and .tidx — is different: the rename is ordered but not durable,
-  // so without a flush a power cut can publish the new name over the old
-  // bytes with the new ones still in cache, leaving a short .tmet that throws
-  // from the metadata loader and takes the whole session down.
+  // THE ONE BARRIER A WRITE STILL PAYS (2.0 removed the `durability` option
+  // and every other flush). Only a REPLACEMENT is flushed — on an append that
+  // is the `.tmet` (and a rolled-back `.tidx`). The rename is ORDERED but not
+  // durable, so without the flush a power cut can publish the new name over
+  // bytes still in cache: a SHORT `.tmet`, which throws from the metadata
+  // loader and takes the WHOLE SESSION down, not one segment — the one crash
+  // outcome `recover_session` cannot be relied on to undo. Every other torn
+  // state an append can leave (a short `.tdat`/`.tidx` tail, an index running
+  // past the data, blocks the index never mentions, a stale header count) is
+  // confined to the last append of one segment, detected by the validator and
+  // fixed by `recover_session`.
   //
-  // Scoping it this way matters: a 128-channel session writes ~400 files, and
-  // fsyncing every one of them on a fresh write cost roughly 3x the wall clock
-  // for no guarantee anyone had.
+  // A FRESH file is flushed only when the caller says so (`flush_new`,
+  // SegmentSpec::flush_new_metadata): a channel's first segment (or a new
+  // segment in a session that already held data). A zero-length .tmet — the
+  // classic outcome of renaming an unflushed file to a NEW name — fails the
+  // strict open of the WHOLE session, and a first segment has no previous
+  // .tmet to rebuild it from. Its short .tidx/.tdat are recovery's job.
+  //
+  // `flush_with` (wait_for_disk): the other files of this write are flushed
+  // TOGETHER with the temp file, in one combined wait (flush_files), before
+  // the rename — the .tmet then never declares data that is not on disk.
   const bool replacing = fs::exists(target, ignored);
   fs::remove(tmp, ignored);
   try {
@@ -87,25 +96,32 @@ void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
     if (!f) throw IoError("write failed: " + tmp.string());
     finish_stream(f, tmp.string());
     copy_file_identity(target, tmp);
-    // Flush the CONTENT before the rename, but do not flush the directory
-    // entry after it. The asymmetry is deliberate. Flushing the content is
-    // what stops the rename publishing a file whose bytes are still in cache —
-    // a short .tmet that throws from the metadata loader and takes the whole
-    // session down. Flushing the directory would only make the rename itself
-    // survive a crash, and losing it is harmless: the old file is still there,
-    // still complete, still consistent. Keeping a consistent previous state is
-    // worth more than keeping the last append, and it halves the number of
-    // fsyncs an append pays across a many-channel session.
-    if (replacing && durable) fsync_file_or_throw(tmp.string());
+    // Flush the CONTENT before the rename, but not the directory entry after
+    // it. Losing the rename is harmless: the old file is still there, complete
+    // and consistent, which is worth more than keeping the last append.
+    const bool wait = !flush_with.empty();
+    if (wait) {
+      flush_with.push_back(tmp);
+      detail::flush_files(flush_with);
+    } else if (replacing || flush_new) {
+      fsync_file_or_throw(tmp.string());
+    }
     replace_file(tmp, target);
+    // wait_for_disk: the PUBLISHED name must be durable before the write
+    // returns too, or a power cut right after leaves the data and the
+    // complete temp file but no `.tmet` (an invisible segment). One more
+    // combined wait: Linux syncfs commits the rename; elsewhere the file and
+    // the folders up to the session's parent are flushed.
+    if (wait) detail::flush_files({target});
   } catch (...) {
     fs::remove(tmp, ignored);
     throw;
   }
 }
 
-void overwrite_file_prefix(const std::string& path, std::span<const ui1> bytes,
-                           bool durable = false) {
+// No flush: a header patched in place is part of the append, whose torn
+// states recover_session repairs (see write_file_atomic).
+void overwrite_file_prefix(const std::string& path, std::span<const ui1> bytes) {
   std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
   if (!f) throw IoError("cannot open for header update: " + path);
   f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
@@ -113,14 +129,6 @@ void overwrite_file_prefix(const std::string& path, std::span<const ui1> bytes,
   if (!f) throw IoError("header update failed: " + path);
   f.close();
   if (!f) throw IoError("close failed, header may not have reached disk: " + path);
-  // The universal header is what PUBLISHES the entries flushed just before it.
-  // Leaving this best-effort meant the body could be durable while the count
-  // naming it was not, so a crash could leave .tmet claiming more blocks than
-  // the .tidx header admits — and meflib clamps the block count down to that
-  // header, so the segment would read short. When the caller asked for
-  // durability, this barrier is part of it.
-  if (durable) detail::fsync_file_or_throw(path);
-  else (void)detail::fsync_file(path);
 }
 
 std::array<ui1, 16> random_uuid() {
@@ -130,9 +138,9 @@ std::array<ui1, 16> random_uuid() {
   return u;
 }
 
-void write_file(const std::string& path, const std::vector<ui1>& bytes,
-                bool durable = true) {
-  write_file_atomic(path, bytes, durable);
+void write_file(const std::string& path, const std::vector<ui1>& bytes, bool flush_new = false,
+                std::vector<fs::path> flush_with = {}) {
+  write_file_atomic(path, bytes, flush_new, std::move(flush_with));
 }
 
 // Same, for `.tmet` — a FIXED-length record. The body CRC must be bounded by
@@ -481,7 +489,16 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     // Equivalent here (this image is exactly METADATA_FILE_BYTES), but stated
     // explicitly so the fixed-length rule holds for every .tmet we write.
     finalize_metadata_crcs(file);
-    write_file((fs::path(segment_dir) / (base + ".tmet")).string(), file);
+    const std::string tmet_path = (fs::path(segment_dir) / (base + ".tmet")).string();
+    // A segment is visible only through its .tmet (one missing is skipped,
+    // one SHORT fails the strict open of the whole session), so the .tmet is
+    // written last and renamed into place: flushed first for a channel's
+    // first segment (flush_new_metadata), and together with the .tdat and
+    // .tidx in wait_for_disk mode.
+    std::vector<fs::path> with;
+    if (spec.wait_for_disk)
+      with = {fs::path(segment_dir) / (base + ".tdat"), fs::path(segment_dir) / (base + ".tidx")};
+    write_file(tmet_path, file, spec.flush_new_metadata, std::move(with));
   }
 
   if (out_max_difference_bytes) *out_max_difference_bytes = max_difference_bytes;
@@ -963,24 +980,21 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
       if (!app) throw IoError("append failed: " + tdat_path);
       finish_stream(app, tdat_path);
     }
-    // Barrier. The .tidx written next POINTS AT these bytes, so they have to be
-    // durable before anything references them: a power cut between the two
-    // otherwise leaves an index whose entries run past the real end of .tdat —
-    // a state the in-process rollback cannot repair, because the process is
-    // gone. Ordering the samples before the references is the whole guarantee.
-    if (spec.durable) fsync_file_or_throw(tdat_path);
+    // No flush here or anywhere below until the .tmet (2.0 removed the
+    // ordering barriers with the `durability` option). The ORDER of the
+    // writes is kept — data, then the index that points at it, then the
+    // headers that count it, then the .tmet — so an orderly failure rolls back
+    // cleanly; a POWER CUT may reorder them on disk, leaving at worst the last
+    // append of this segment torn, which `recover_session` repairs.
 
     // Each flag is set BEFORE the call that might fail. These writes can throw
-    // partway — overwrite_file_prefix patches bytes in place and only then
-    // flushes — so a flag set afterwards would skip rollback for a file that
+    // partway — overwrite_file_prefix patches bytes in place — so a flag set afterwards would skip rollback for a file that
     // had already been modified. Rolling back a file that was never touched is
     // harmless; failing to roll back one that was is not.
     wrote_tidx = true;
-    // ONE write path, cached or not: append the entries in place, make them
-    // durable, and only THEN patch the header that declares them. The header is
-    // what a reader counts, so publishing it before the entries are on disk is
-    // the one ordering that could leave the index describing bytes that are not
-    // there. The index is never rewritten whole — at month scale that was a
+    // ONE write path, cached or not: append the entries in place, and only
+    // THEN patch the header that declares them. The index is never rewritten
+    // whole — at month scale that was a
     // full extra write of a multi-megabyte file for every append.
     if (!use_cache && strip_tidx_to) {
       // Trailing bytes that do not form a whole entry (foreign padding, which
@@ -998,12 +1012,15 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
       if (!app) throw IoError("append failed: " + tidx_path);
       finish_stream(app, tidx_path);
     }
-    if (spec.durable) fsync_file_or_throw(tidx_path);
-    overwrite_file_prefix(tidx_path, new_tidx_uh, spec.durable);
+    overwrite_file_prefix(tidx_path, new_tidx_uh);
     patched_tdat_header = true;
-    overwrite_file_prefix(tdat_path, new_tdat_uh, spec.durable);
+    overwrite_file_prefix(tdat_path, new_tdat_uh);
     wrote_tmet = true;
-    write_file(tmet_path, new_tmet, spec.durable);
+    // Flushed before the rename — the one barrier; with wait_for_disk, in ONE
+    // combined wait with the data and index just extended.
+    std::vector<fs::path> with;
+    if (spec.wait_for_disk) with = {fs::path(tdat_path), fs::path(tidx_path)};
+    write_file(tmet_path, new_tmet, false, std::move(with));
   } catch (...) {
     if (cache) cache->valid = false;  // the file may no longer match the summary
     std::string rollback_error;
@@ -1039,7 +1056,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
       // rather than truncating — padding is not necessarily zero.
       try {
         if (!original_tidx.empty()) {
-          write_file(tidx_path, original_tidx, spec.durable);
+          write_file(tidx_path, original_tidx);
         } else {
           std::error_code ec;
           fs::resize_file(tidx_path, static_cast<std::uintmax_t>(original_tidx_size), ec);

@@ -761,6 +761,9 @@ NB_MODULE(_mef3io, m) {
           d["blocks_dropped"] = s.blocks_dropped;
           d["tdat_bytes_dropped"] = s.tdat_bytes_dropped;
           d["action"] = s.action;
+          nb::list decl;
+          for (const auto& c : s.declarations) decl.append(c);
+          d["declarations"] = decl;
           segs.append(d);
         }
         nb::list skipped;
@@ -1663,8 +1666,17 @@ NB_MODULE(_mef3io, m) {
       .def_prop_ro("legacy_password_segments",
                    [](const mef3io::SessionWriter& w) { return w.legacy_password_segments(); })
       .def("set_threads", &mef3io::SessionWriter::set_threads)
+      .def(
+          "flush",
+          [](mef3io::SessionWriter& w) {
+            nb::gil_scoped_release release;  // a disk wait: other threads run
+            w.flush();
+          },
+          "Return only when everything this writer wrote so far is on disk "
+          "(one combined wait).")
+      .def("set_wait_for_disk", &mef3io::SessionWriter::set_wait_for_disk, nb::arg("on"))
+      .def("wait_for_disk", &mef3io::SessionWriter::wait_for_disk)
       .def("threads", &mef3io::SessionWriter::threads)
-          .def("set_durable", &mef3io::SessionWriter::set_durable, nb::arg("durable"))
       .def(
           "set_metadata",
           [](mef3io::SessionWriter& w, nb::dict d) {

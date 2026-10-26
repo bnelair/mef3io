@@ -46,7 +46,7 @@ def big_session(tmp_path_factory):
     unmistakable next to a windowed one."""
     path = tmp_path_factory.mktemp("large") / "big.mefd"
     rng = np.random.default_rng(0)
-    w = mef3io.Writer(str(path), durability="fast")
+    w = mef3io.Writer(str(path))
     for i in range(60):  # 10 h at 256 Hz
         block = rng.integers(-(2**30), 2**30, int(FS * 600), dtype=np.int32)
         w.write_int32("ch1", block, 0.1, START + i * 600_000_000, FS)
@@ -133,7 +133,7 @@ def test_an_append_does_not_rewrite_the_whole_data_file(big_session, tmp_path):
     rng = np.random.default_rng(1)
     block = rng.integers(-(2**30), 2**30, int(FS * 60), dtype=np.int32)
 
-    w = mef3io.Writer(path, durability="fast")
+    w = mef3io.Writer(path)
     before = _rchar()
     w.write_int32("ch1", block, 0.1, START + 60 * 600_000_000, FS)
     read_bytes = _rchar() - before
@@ -153,8 +153,7 @@ def _io():
     return d["rchar"], d["wchar"]
 
 
-@pytest.mark.parametrize("durability", ["full", "fast"])
-def test_an_append_never_rewrites_the_index_or_the_data(tmp_path, durability):
+def test_an_append_never_rewrites_the_index_or_the_data(tmp_path):
     """Write amplification must be bounded by the NEW data, not the session.
 
     Both files an append touches grow without limit over a months-long
@@ -165,13 +164,12 @@ def test_an_append_never_rewrites_the_index_or_the_data(tmp_path, durability):
     to use this from Python) was ~47x write amplification against a month-long
     index.
 
-    Checked for BOTH durability settings: `durability="full"` buys ordering
-    barriers, not a different write strategy.
+    (1.x checked this for both `durability=` settings; 2.0 has one path.)
     """
     path = tmp_path / "s.mefd"
     rng = np.random.default_rng(5)
     # Small blocks so the index is large relative to the data appended.
-    w = mef3io.Writer(str(path), block_length=256, durability=durability)
+    w = mef3io.Writer(str(path), block_length=256)
     for i in range(20):
         w.write_int32("ch1", rng.integers(-(2**30), 2**30, int(FS * 600), dtype=np.int32),
                       0.1, START + i * 600_000_000, FS)
@@ -185,7 +183,7 @@ def test_an_append_never_rewrites_the_index_or_the_data(tmp_path, durability):
     block = rng.integers(-(2**30), 2**30, int(FS * 600), dtype=np.int32)
 
     # A REOPENED writer: the case that used to rewrite the whole index.
-    w = mef3io.Writer(str(path), block_length=256, durability=durability)
+    w = mef3io.Writer(str(path), block_length=256)
     before = _io()
     w.write_int32("ch1", block, 0.1, START + 20 * 600_000_000, FS)
     read_bytes, written = (a - b for a, b in zip(_io(), before))
@@ -197,12 +195,12 @@ def test_an_append_never_rewrites_the_index_or_the_data(tmp_path, durability):
     grew = (tidx.stat().st_size - index_size) + (tdat.stat().st_size - data_size)
     slack = 64 * 1024 + 16 * 1024          # filesystem slop + the .tmet
     assert written < grew + slack + index_size * 0.25, (
-        f"{durability}: wrote {written / 1e6:.2f} MB while the files grew only "
+        f"wrote {written / 1e6:.2f} MB while the files grew only "
         f"{grew / 1e6:.2f} MB, against a {index_size / 1e6:.2f} MB index and a "
         f"{data_size / 1e6:.1f} MB .tdat — something is being rewritten whole"
     )
     # Reading the index once on a reopen is expected; reading the DATA never is.
-    assert read_bytes < data_size * 0.5, f"{durability}: the .tdat was read back"
+    assert read_bytes < data_size * 0.5, "the .tdat was read back"
 
 
 def test_the_block_index_cache_is_bounded_and_eviction_is_safe(tmp_path):
@@ -290,7 +288,7 @@ def test_block_time_arithmetic_is_not_done_in_32_bits(tmp_path):
 
 
 def _write_segments(path, segments, channels=("ch1", "ch2")):
-    w = mef3io.Writer(str(path), durability="fast")
+    w = mef3io.Writer(str(path))
     block = np.arange(256, dtype=np.int32)
     for ch in channels:
         for s in range(segments):
@@ -360,3 +358,32 @@ def test_the_python_side_of_an_open_is_not_per_segment(tmp_path, monkeypatch):
         monkeypatch.undo()
     assert all(n > 0 for n in control.values()), control
     assert counts[1] == counts[12], counts
+
+
+def test_a_recovery_dry_run_reads_each_checked_block_once(tmp_path):
+    """Recovery CRC-checks the blocks of each channel's last append (back to
+    its first block, at most 64 MiB a channel). On a healthy session written
+    in ONE call that is the whole segment, so this pins that each of those
+    bytes is read once: no header read twice, no buffered stream refilling
+    past a block after every seek. Small blocks make a double read visible
+    (the 304-byte header is ~40 % of a block here)."""
+    path = tmp_path / "s.mefd"
+    fs = 1000.0
+    x = np.random.default_rng(11).integers(-30000, 30000, int(fs * 600), dtype=np.int32)
+    with mef3io.Writer(str(path), block_length=256) as w:
+        w.write_int32("ch1", x, 1.0, START, fs)
+    tidx = next(Path(path).rglob("*.tidx"))
+    tdat = next(Path(path).rglob("*.tdat"))
+    checked = tdat.stat().st_size - 1024          # every block: one append
+    assert checked < 64 << 20
+    before, _ = _io()
+    rep = mef3io.recover_session(str(path))
+    read_bytes = _io()[0] - before
+    assert rep.nothing_to_do, rep.summary()
+    # Fixed costs around the blocks: the index (recovery and the validator's
+    # count checks each read it), the .tmet and a few headers.
+    overhead = 4 * tidx.stat().st_size + 64 * 1024
+    assert read_bytes <= 1.05 * checked + overhead, (
+        f"read {read_bytes / 1e6:.2f} MB for {checked / 1e6:.2f} MB of checked blocks "
+        f"(+ {overhead / 1e6:.2f} MB allowed for the index and metadata)"
+    )
