@@ -199,7 +199,8 @@ classdef Writer < handle
         function writeAnnotations(obj, records, channel)
             %WRITEANNOTATIONS Struct array with fields: time (required),
             %   type (default 'Note'), text, duration. Omit `channel` for
-            %   session-level records. Replaces records at that level.
+            %   session-level records. Appends to the records already stored at
+            %   that level (created if absent); never replaces or deletes one.
             %   Text fields and the channel may be char or string ("...").
             if nargin < 3, channel = []; end
             if isstring(channel), channel = char(channel); end

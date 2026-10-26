@@ -207,17 +207,28 @@ def _add_segment_records(path, channel="ch1", segment=0, text="segment"):
     SEGMENT-level ones (meflib.c:6026/6030: <seg>.segd/<seg>.rdat + .ridx)."""
     seg = f"{channel}-{segment:06d}"
     timd = Path(path) / f"{channel}.timd"
+    # write_annotations APPENDS (#156): park the channel's own files first, so
+    # the new records are alone in the file that is moved down a level.
+    parked = {}
+    for ext in ("rdat", "ridx"):
+        if (timd / f"{channel}.{ext}").exists():
+            parked[ext] = timd / f"{channel}.{ext}.parked"
+            shutil.move(timd / f"{channel}.{ext}", parked[ext])
     with mef3io.Writer(str(path)) as w:
         w.write_annotations([{"type": "Note", "time": START + 2 * SECOND, "text": text}], channel)
     for ext in ("rdat", "ridx"):
         shutil.move(timd / f"{channel}.{ext}", timd / f"{seg}.segd" / f"{seg}.{ext}")
+    for ext, f in parked.items():
+        shutil.move(f, timd / f"{channel}.{ext}")
 
 
 def test_segment_level_records_are_read(tmp_path):
     path = tmp_path / "seg.mefd"
     _write_session(path, channel_text="unused")
-    _add_segment_records(path)                                   # moves the channel file away
-    with mef3io.Writer(str(path)) as w:                          # ...so write a fresh one
+    _add_segment_records(path)                                   # the channel file is kept
+    for ext in ("rdat", "ridx"):                                 # ...so start a fresh one
+        (Path(path) / "ch1.timd" / f"ch1.{ext}").unlink()
+    with mef3io.Writer(str(path)) as w:
         w.write_annotations([{"type": "Note", "time": START + SECOND, "text": "channel"}], "ch1")
 
     r = mef3io.Reader(str(path))
@@ -287,9 +298,7 @@ def test_compat_get_annotations_keeps_the_legacy_channel_level_meaning(tmp_path)
 
     path = tmp_path / "seg.mefd"
     _write_session(path, channel_text="channel")
-    _add_segment_records(path)                                   # moves the channel file away
-    with mef3io.Writer(str(path)) as w:
-        w.write_annotations([{"type": "Note", "time": START + SECOND, "text": "channel"}], "ch1")
+    _add_segment_records(path)                                   # the channel file is kept
     anns = MefReader(str(path)).get_annotations("ch1")
     assert [(a["level"], a["text"]) for a in anns] == [("channel", "channel")]
     assert sorted(a["level"] for a in mef3io.Reader(str(path)).records("ch1")) == [
@@ -540,7 +549,8 @@ def test_records_written_with_rto_zero_are_stored_exactly_as_before(tmp_path):
     for f in (_rdat(path), _rdat(path).with_suffix(".ridx")):
         start, end = struct.unpack_from("<qq", f.read_bytes(), 16)
         assert (start, end) == (-START, -(START + 5 * SECOND))
-    assert _stored_times(_rdat(path)) == [-START, -(START + 5 * SECOND)]
+    # appended after the first record, in write order (readers sort)
+    assert _stored_times(_rdat(path)) == [-(START + SECOND), -START, -(START + 5 * SECOND)]
 
 
 def test_records_written_into_a_legacy_offset_session_agree_with_the_legacy_reader(tmp_path):
@@ -793,7 +803,10 @@ def test_extending_a_legacy_offset_session_keeps_its_annotations(tmp_path):
             w.write_annotations([{"type": "Note", "time": seg1, "text": "newc"}], "ch2")
 
     ours, legacy, pym = _three_readers(path)
-    assert ours == legacy == pym == [("new", START - SECOND)]
+    # APPENDED to the legacy session's own record; readers sort by time (the
+    # legacy ones keep file order, so compare as sets)
+    assert ours == [("new", START - SECOND), ("s", START + SECOND)]
+    assert sorted(legacy) == sorted(pym) == sorted(ours)
     assert [int(a["time"]) for a in MefReader(str(path)).get_annotations("ch2")] == [seg1]
 
     ms = MefSession(str(path), "")
@@ -820,12 +833,13 @@ def _two_notes(path):
     return _rdat(path)
 
 
-@pytest.mark.parametrize("damage", ["tail-truncated", "huge-body-bytes", "flipped-body-byte",
-                                    "declares-more-than-present"])
-def test_a_damaged_record_file_fails_instead_of_returning_less(tmp_path, damage):
+@pytest.mark.parametrize("damage,intact", [
+    ("tail-truncated", ["first note"]), ("huge-body-bytes", ["second note"]),
+    ("flipped-body-byte", ["second note"]), ("declares-more-than-present", ["first note", "second note"])])
+def test_a_damaged_record_file_fails_instead_of_returning_less(tmp_path, damage, intact):
     """Damage used to come back silently: a cut-off file returned fewer
     records, a flipped byte returned corrupted text. Now it raises (strict) or
-    is skipped and reported (lenient), like any other damaged file."""
+    reads every intact record and lists the damaged one (lenient)."""
     path = tmp_path / "dmg.mefd"
     rdat = _two_notes(path)
     raw = bytearray(rdat.read_bytes())
@@ -843,7 +857,7 @@ def test_a_damaged_record_file_fails_instead_of_returning_less(tmp_path, damage)
         mef3io.Reader(str(path)).records()
     r = mef3io.Reader(str(path), strict=False)
     with pytest.warns(mef3io.UnreadableSegmentWarning, match="record file"):
-        assert r.records() == []
+        assert [a["text"] for a in r.records()] == intact
     (problem,) = r.problems
     assert problem["kind"] == "records" and problem["segment_number"] == -1
 

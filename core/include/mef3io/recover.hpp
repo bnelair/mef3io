@@ -51,9 +51,24 @@ struct RecoveredSegment {
   std::vector<std::string> declarations;
 };
 
+/// One annotation (`.rdat` + `.ridx`) file pair that an interrupted write left
+/// inconsistent: a torn last record, bytes the header does not count, or an
+/// index that is short, torn or missing. Healthy files (legacy ones too) never
+/// appear here.
+struct RecoveredRecordFile {
+  std::string path;              ///< human-readable location of the .rdat
+  si8 records_before = 0;        ///< entries in the index (0 when it is missing)
+  si8 records_after = 0;         ///< whole records the file holds (damaged ones included)
+  si8 bytes_dropped = 0;         ///< trailing bytes that are not a whole record
+  si8 records_damaged = 0;       ///< whole records failing their CRC: reported, KEPT, never dropped
+  bool index_rebuilt = false;    ///< the .ridx is rebuilt from the .rdat
+  std::string action;            ///< what happened, in words
+};
+
 /// Result of a recovery pass. `applied` is false for a dry run.
 struct RecoveryReport {
   std::vector<RecoveredSegment> segments;   ///< only segments needing work
+  std::vector<RecoveredRecordFile> record_files;  ///< annotation files needing work
   std::vector<std::string> skipped;         ///< segment + reason
   si8 segments_examined = 0;
   bool applied = false;
@@ -64,7 +79,7 @@ struct RecoveryReport {
   std::vector<std::string> notes;
 
   /// True when every segment is self-consistent and nothing needs doing.
-  bool nothing_to_do() const { return segments.empty() && skipped.empty(); }
+  bool nothing_to_do() const { return segments.empty() && record_files.empty() && skipped.empty(); }
 };
 
 /// Make every segment's index and data agree.

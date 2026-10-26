@@ -160,7 +160,8 @@ class SessionWriter {
                            bool new_segment = false);
 
   /// Write records (annotations). @p channel nullopt -> session-level (in the
-  /// `.mefd` root), otherwise channel-level. Replaces the records at that level.
+  /// `.mefd` root), otherwise channel-level. APPENDS to the records already stored at that level
+  /// (created when absent); never replaces or deletes one. Readers return them in time order.
   /// Times are stored the way the reader resolves the level: -t at offset 0
   /// (every session mef3io creates; byte-identical to earlier releases) and
   /// rto - t under an anonymization offset, which keeps the real date hidden.

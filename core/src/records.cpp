@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <optional>
+#include <string>
 #include <vector>
 
 #include "mef3io/byteio.hpp"
@@ -25,6 +27,19 @@ using byteio::write_string;
 constexpr ui1 PAD_BYTE = 0x7e;
 constexpr si8 UNKNOWN_NUMBER_OF_ENTRIES = -1;  // meflib.h:232
 constexpr ui4 CRC_NO_ENTRY = 0;                // meflib.h:234
+
+// A record type read from a damaged file can hold any bytes; messages (which
+// become Python strings) must stay valid UTF-8, so non-printable-ASCII bytes
+// are shown as \xNN.
+std::string safe_type(const std::string& t) {
+  static const char* hex = "0123456789abcdef";
+  std::string o;
+  for (unsigned char c : t) {
+    if (c >= 0x20 && c < 0x7f) o += static_cast<char>(c);
+    else { o += "\\x"; o += hex[c >> 4]; o += hex[c & 15]; }
+  }
+  return o;
+}
 
 // ---- body layouts (mefrec.h), offsets relative to the start of the BODY ----
 // Seiz 1.0 (mefrec.h:110-131)
@@ -276,9 +291,44 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
   const bool count_known = declared != UNKNOWN_NUMBER_OF_ENTRIES;
   std::size_t off = fmt::UNIVERSAL_HEADER_BYTES;  // records follow the UH
 
+  // Damage-tolerant walk (lenient readers only): `seen` counts every record
+  // position, skipped ones included. A damaged record is listed and the walk
+  // goes on at the next offset the index knows, else after its own length
+  // when the header is plausible, else it stops (the rest is reported as one
+  // damaged tail). Never writes anything.
+  std::vector<std::uint64_t> idx;
+  if (info.tolerate_damage) {
+    for (si8 o : info.index_offsets)
+      if (o >= static_cast<si8>(fmt::UNIVERSAL_HEADER_BYTES) && static_cast<std::uint64_t>(o) < rdat.size())
+        idx.push_back(static_cast<std::uint64_t>(o));
+    std::sort(idx.begin(), idx.end());
+    idx.erase(std::unique(idx.begin(), idx.end()), idx.end());
+  }
+  std::size_t seen = 0;
+  // Returns true when the walk resumed at a later record.
+  auto skip_damaged = [&](std::size_t at, const std::string& reason, std::optional<std::size_t> own_end) {
+    info.damaged.push_back({seen, at, reason});
+    ++seen;
+    auto it = std::upper_bound(idx.begin(), idx.end(), static_cast<std::uint64_t>(at));
+    if (it != idx.end()) { off = static_cast<std::size_t>(*it); return true; }
+    if (own_end && idx.empty()) { off = *own_end; return true; }
+    return false;
+  };
+
   while (true) {
-    if (count_known && static_cast<si8>(out.size()) == declared) break;
+    if (count_known && static_cast<si8>(seen) == declared) break;
     if (off + fmt::RECORD_HEADER_BYTES > rdat.size()) {
+      if (info.tolerate_damage) {
+        const bool zeros = std::all_of(rdat.begin() + static_cast<std::ptrdiff_t>(off), rdat.end(),
+                                       [](ui1 c) { return c == 0; });
+        if (!(zeros && !count_known))
+          info.damaged.push_back({seen, off, "record file truncated: " + std::to_string(out.size()) +
+                                  " record(s) read" +
+                                  (count_known ? " of " + std::to_string(declared) + " declared" : "") +
+                                  ", then " + std::to_string(rdat.size() - off) +
+                                  " byte(s), less than a record header"});
+        break;
+      }
       // Out of bytes. Fine only when the count is unknown and nothing but
       // zero padding is left; otherwise a record was cut off.
       const bool clean_end =
@@ -294,6 +344,11 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
     // Record header (24 B).
     std::string type = read_string(rdat, off + 4, 4);
     if (type.empty() && !count_known) break;  // zero padding after the last record
+    if (type.empty() && info.tolerate_damage) {
+      if (skip_damaged(off, "record " + std::to_string(seen) + " has no type code (corrupt)", std::nullopt))
+        continue;
+      break;
+    }
     if (type.empty())
       throw FormatError("record " + std::to_string(out.size()) + " of " +
                         std::to_string(declared) + " declared has no type code (corrupt)");
@@ -305,6 +360,14 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
     si8 time = read<si8>(rdat, off + 16);
 
     std::size_t body_off = off + fmt::RECORD_HEADER_BYTES;
+    if (body_bytes > rdat.size() - body_off && info.tolerate_damage) {
+      if (skip_damaged(off, "record " + std::to_string(seen) + " (" + safe_type(type) + ") claims " +
+                                std::to_string(body_bytes) + " body bytes but only " +
+                                std::to_string(rdat.size() - body_off) + " remain (corrupt length)",
+                       std::nullopt))
+        continue;
+      break;
+    }
     if (body_bytes > rdat.size() - body_off)
       throw FormatError("record " + std::to_string(out.size()) + " claims " +
                         std::to_string(body_bytes) + " body bytes but only " +
@@ -313,9 +376,16 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
     // meflib validates (meflib.c:1839). CRC_NO_ENTRY means "not computed".
     if (stored_crc != CRC_NO_ENTRY &&
         crc::calculate(rdat.subspan(off + 4, fmt::RECORD_HEADER_BYTES - 4 + body_bytes)) !=
-            stored_crc)
-      throw CrcError("record " + std::to_string(out.size()) + " (" + type +
+            stored_crc) {
+      if (info.tolerate_damage) {
+        if (skip_damaged(off, "record " + std::to_string(seen) + " (" + safe_type(type) + ") fails its CRC: the record is corrupt",
+                         body_off + body_bytes))
+          continue;
+        break;
+      }
+      throw CrcError("record " + std::to_string(out.size()) + " (" + safe_type(type) +
                      ") fails its CRC: the record is corrupt");
+    }
 
     // Decrypt the body if encrypted.
     std::vector<ui1> body(rdat.begin() + body_off, rdat.begin() + body_off + body_bytes);
@@ -352,6 +422,7 @@ std::vector<Record> parse_records(std::span<const ui1> rdat, si8 rto,
       parse_body(rec, b, conv);
 
     out.push_back(std::move(rec));
+    ++seen;
 
     // Advance. Records are laid out contiguously; body may be padded to a
     // 16-byte boundary when the file uses encryption alignment.
@@ -457,38 +528,25 @@ void validate_records_for_write(const std::vector<Record>& records) {
   }
 }
 
-void write_records(const std::string& dir, const std::string& base,
-                   const std::string& session_name, const std::string& channel_name,
-                   int segment_number, const std::vector<Record>& records, si8 rto,
-                   const std::string& password_1, const std::string& password_2) {
-  if (records.empty()) return;
-  validate_records_for_write(records);
-  const bool encrypt = !password_1.empty();
-  crypto::ValidationFields vf =
-      encrypt ? crypto::make_validation_fields(password_1, password_2) : crypto::ValidationFields{};
-  crypto::AccessKeys keys;
-  if (encrypt)
-    keys = crypto::validate_password(password_2.empty() ? password_1 : password_2, vf.level1,
-                                     vf.level2);
+namespace {
 
-  // Records are time-ordered on disk.
-  std::vector<const Record*> ordered;
-  for (const auto& r : records) ordered.push_back(&r);
-  std::sort(ordered.begin(), ordered.end(),
-            [](const Record* a, const Record* b) { return a->time < b->time; });
+struct EncodedRecord {
+  std::vector<ui1> bytes;                  // header + padded (maybe encrypted) body, CRC set
+  std::array<ui1, fmt::RECORD_INDEX_BYTES> entry{};  // index entry; offset (8) filled by caller
+  si8 time = 0;                            // absolute uUTC
+  si8 disk_time = 0;
+};
 
-  std::vector<ui1> rdat_body;
-  std::vector<ui1> ridx_body;
-  ui4 max_entry = 0;
-  si8 min_time = fmt::UUTC_NO_ENTRY, max_time = fmt::UUTC_NO_ENTRY;  // absolute
-
+// Encode in the given order. `keys` is used only when `encrypt`.
+std::vector<EncodedRecord> encode_records(const std::vector<const Record*>& ordered, si8 rto,
+                                          bool encrypt, const crypto::AccessKeys& keys) {
+  std::vector<EncodedRecord> out;
+  out.reserve(ordered.size());
   for (const Record* rp : ordered) {
     const Record& r = *rp;
     std::vector<ui1> body = record_body(r);
     // Pad body to a 16-byte multiple with PAD_BYTE (also satisfies AES block).
-    std::size_t padded = (body.size() + 15) & ~std::size_t{15};
-    body.resize(padded, PAD_BYTE);
-
+    body.resize((body.size() + 15) & ~std::size_t{15}, PAD_BYTE);
     si1 enc = 0;
     if (encrypt) {
       enc = fmt::LEVEL_2_ENCRYPTION;  // records default to L2 (may hold PII)
@@ -496,66 +554,267 @@ void write_records(const std::string& dir, const std::string& base,
       auto e = crypto::aes128_ecb_encrypt(body, *keys.level2_key);
       std::copy(e.begin(), e.end(), body.begin());
     }
-
     // mef3io's write convention (time.hpp): -(t - rto); -t at rto 0.
     require_storable_time(r.time, rto, "record time");
-    const si8 disk_time = to_stored_time(r.time, rto);
-    si8 file_offset = fmt::UNIVERSAL_HEADER_BYTES + static_cast<si8>(rdat_body.size());
+    EncodedRecord er;
+    er.time = r.time;
+    er.disk_time = to_stored_time(r.time, rto);
+    er.bytes.assign(fmt::RECORD_HEADER_BYTES, 0);
+    write_fixed_code(er.bytes, 4, 4, r.type);
+    write<ui1>(er.bytes, 9, static_cast<ui1>(r.version_major));
+    write<ui1>(er.bytes, 10, static_cast<ui1>(r.version_minor));
+    write<si1>(er.bytes, 11, enc);
+    write<ui4>(er.bytes, 12, static_cast<ui4>(body.size()));
+    write<si8>(er.bytes, 16, er.disk_time);
+    er.bytes.insert(er.bytes.end(), body.begin(), body.end());
+    write<ui4>(er.bytes, 0, crc::calculate(std::span<const ui1>(er.bytes).subspan(4)));
+    write_fixed_code(er.entry, 0, 4, r.type);
+    write<ui1>(er.entry, 5, static_cast<ui1>(r.version_major));
+    write<ui1>(er.entry, 6, static_cast<ui1>(r.version_minor));
+    write<si1>(er.entry, 7, enc);
+    write<si8>(er.entry, 16, er.disk_time);
+    out.push_back(std::move(er));
+  }
+  return out;
+}
 
-    // Record header (24 B).
-    std::vector<ui1> hdr(fmt::RECORD_HEADER_BYTES, 0);
-    write_fixed_code(hdr, 4, 4, r.type);
-    write<ui1>(hdr, 9, static_cast<ui1>(r.version_major));
-    write<ui1>(hdr, 10, static_cast<ui1>(r.version_minor));
-    write<si1>(hdr, 11, enc);
-    write<ui4>(hdr, 12, static_cast<ui4>(body.size()));
-    write<si8>(hdr, 16, disk_time);
+std::vector<ui1> read_at(const std::string& path, std::uint64_t off, std::size_t n) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) throw IoError("cannot open for read: " + path);
+  f.seekg(static_cast<std::streamoff>(off));
+  std::vector<ui1> buf(n);
+  if (!f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(n)))
+    throw IoError("short read: " + path);
+  return buf;
+}
 
-    // Assemble the record, then CRC over [4, end).
-    std::vector<ui1> rec;
-    rec.insert(rec.end(), hdr.begin(), hdr.end());
-    rec.insert(rec.end(), body.begin(), body.end());
-    ui4 rec_crc = crc::calculate(std::span<const ui1>(rec).subspan(4));
-    write<ui4>(rec, 0, rec_crc);
+void write_at(const std::string& path, std::uint64_t off, std::span<const ui1> bytes) {
+  std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
+  if (!f) throw IoError("cannot open for append: " + path);
+  f.seekp(static_cast<std::streamoff>(off));
+  f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+  f.flush();
+  if (!f) throw IoError("append failed (disk full?): " + path);
+  f.close();
+  if (!f) throw IoError("close failed, data may not have reached disk: " + path);
+}
 
-    max_entry = std::max(max_entry, static_cast<ui4>(rec.size()));
-    rdat_body.insert(rdat_body.end(), rec.begin(), rec.end());
+constexpr const char* RECOVER_ADVICE =
+    " (a write was probably interrupted; run recover_session, which repairs it, and write again)";
 
-    // Record index entry (24 B): type[4], vmaj@5, vmin@6, enc@7, offset@8, time@16.
-    std::vector<ui1> ie(fmt::RECORD_INDEX_BYTES, 0);
-    write_fixed_code(ie, 0, 4, r.type);
-    write<ui1>(ie, 5, static_cast<ui1>(r.version_major));
-    write<ui1>(ie, 6, static_cast<ui1>(r.version_minor));
-    write<si1>(ie, 7, enc);
-    write<si8>(ie, 8, file_offset);
-    write<si8>(ie, 16, disk_time);
-    ridx_body.insert(ridx_body.end(), ie.begin(), ie.end());
+}  // namespace
 
-    if (r.time != fmt::UUTC_NO_ENTRY) {
-      if (min_time == fmt::UUTC_NO_ENTRY || r.time < min_time) min_time = r.time;
-      if (max_time == fmt::UUTC_NO_ENTRY || r.time > max_time) max_time = r.time;
+void write_records(const std::string& dir, const std::string& base,
+                   const std::string& session_name, const std::string& channel_name,
+                   int segment_number, const std::vector<Record>& records, si8 rto,
+                   const std::string& password_1, const std::string& password_2) {
+  if (records.empty()) return;
+  validate_records_for_write(records);
+  const std::string rdat_path = (fs::path(dir) / (base + ".rdat")).string();
+  const std::string ridx_path = (fs::path(dir) / (base + ".ridx")).string();
+  const bool exists = fs::exists(rdat_path);
+  // An index with no data file: never truncate it (write_file would), and do
+  // not guess. recover_session lists it; the writer refuses.
+  if (!exists && fs::exists(ridx_path))
+    throw FormatError("record index without its record file: " + ridx_path +
+                      " (the .rdat is missing; nothing was written; run recover_session, which "
+                      "reports it, and restore the .rdat or move the .ridx away)");
+  bool encrypt = !password_1.empty();
+  crypto::ValidationFields vf =
+      encrypt ? crypto::make_validation_fields(password_1, password_2) : crypto::ValidationFields{};
+  crypto::AccessKeys keys;
+
+  // Within ONE call the records go in time order (stable); across calls the
+  // file keeps write order, and readers sort.
+  std::vector<const Record*> ordered;
+  for (const auto& r : records) ordered.push_back(&r);
+  std::stable_sort(ordered.begin(), ordered.end(),
+                   [](const Record* a, const Record* b) { return a->time < b->time; });
+
+  // ---- APPEND to an existing pair: NEVER truncate, replace or rewrite -------
+  if (exists) {
+    std::error_code ec;
+    const std::uintmax_t rdat_size = fs::file_size(rdat_path, ec);
+    if (ec || rdat_size < static_cast<std::uintmax_t>(fmt::UNIVERSAL_HEADER_BYTES))
+      throw FormatError("record file is shorter than its header: " + rdat_path + RECOVER_ADVICE);
+    if (!fs::exists(ridx_path))
+      throw FormatError("record file has no index: " + ridx_path + RECOVER_ADVICE);
+    const std::uintmax_t ridx_size = fs::file_size(ridx_path, ec);
+    constexpr std::uintmax_t UH = fmt::UNIVERSAL_HEADER_BYTES;
+    if (ec || ridx_size < UH || (ridx_size - UH) % fmt::RECORD_INDEX_BYTES != 0)
+      throw FormatError("record index is short or torn: " + ridx_path + RECOVER_ADVICE);
+    auto rdat_uh_bytes = read_at(rdat_path, 0, UH);
+    auto ridx_uh_bytes = read_at(ridx_path, 0, UH);
+    auto rdat_uh = fmt::UniversalHeader::parse(rdat_uh_bytes);
+    auto ridx_uh = fmt::UniversalHeader::parse(ridx_uh_bytes);
+    if (rdat_uh.file_type_string != fmt::FILE_TYPE_RECORD_DATA ||
+        ridx_uh.file_type_string != fmt::FILE_TYPE_RECORD_INDICES)
+      throw FormatError("not a record file pair: " + rdat_path);
+    if (!rdat_uh.header_crc_valid(rdat_uh_bytes) || !ridx_uh.header_crc_valid(ridx_uh_bytes))
+      throw CrcError("record file header fails its CRC: " + rdat_path + RECOVER_ADVICE);
+    const si8 n_idx = static_cast<si8>((ridx_size - UH) / fmt::RECORD_INDEX_BYTES);
+    if ((rdat_uh.number_of_entries != UNKNOWN_NUMBER_OF_ENTRIES && rdat_uh.number_of_entries != n_idx) ||
+        (ridx_uh.number_of_entries != UNKNOWN_NUMBER_OF_ENTRIES && ridx_uh.number_of_entries != n_idx))
+      throw FormatError("record file header and index disagree on the record count: " + rdat_path +
+                        RECOVER_ADVICE);
+    // O(1) health check: the last index entry must point at the last record,
+    // and that record must end exactly where the file does.
+    si8 expect_end = static_cast<si8>(UH);
+    if (n_idx > 0) {
+      const auto last = read_at(ridx_path, ridx_size - fmt::RECORD_INDEX_BYTES,
+                                fmt::RECORD_INDEX_BYTES);
+      const si8 off = read<si8>(last, 8);
+      if (off < static_cast<si8>(UH) || static_cast<std::uintmax_t>(off) + fmt::RECORD_HEADER_BYTES > rdat_size)
+        throw FormatError("record index points outside its record file: " + ridx_path + RECOVER_ADVICE);
+      const auto rh = read_at(rdat_path, static_cast<std::uint64_t>(off), fmt::RECORD_HEADER_BYTES);
+      expect_end = off + static_cast<si8>(fmt::RECORD_HEADER_BYTES) + static_cast<si8>(read<ui4>(rh, 12));
     }
+    if (static_cast<std::uintmax_t>(expect_end) != rdat_size)
+      throw FormatError("record file ends in a partial record (or one the index does not list): " +
+                        rdat_path + RECOVER_ADVICE);
+
+    // Encryption must match the file (bodies carry their own level byte, but a
+    // header without validation fields cannot vouch for an encrypted body).
+    if (encrypt != rdat_uh.is_password_protected())
+      throw WriteConflictError(
+          std::string("record file ") + rdat_path +
+          (rdat_uh.is_password_protected() ? " is encrypted but this writer has no password"
+                                           : " is not encrypted but this writer has a password"));
+    if (encrypt) {
+      keys = crypto::validate_password(password_2.empty() ? password_1 : password_2,
+                                       rdat_uh.level_1_password_validation_field,
+                                       rdat_uh.level_2_password_validation_field);
+      if (!keys.level2_key) throw PasswordError("record file: password does not open level 2");
+    }
+
+    const auto enc = encode_records(ordered, rto, encrypt, keys);
+    std::vector<ui1> new_rdat, new_ridx;
+    si8 min_t = fmt::UUTC_NO_ENTRY, max_t = fmt::UUTC_NO_ENTRY;
+    ui4 max_entry = 0;
+    for (const auto& e : enc) {
+      auto entry = e.entry;
+      write<si8>(entry, 8, static_cast<si8>(rdat_size) + static_cast<si8>(new_rdat.size()));
+      new_rdat.insert(new_rdat.end(), e.bytes.begin(), e.bytes.end());
+      new_ridx.insert(new_ridx.end(), entry.begin(), entry.end());
+      max_entry = std::max(max_entry, static_cast<ui4>(e.bytes.size()));
+      if (e.time != fmt::UUTC_NO_ENTRY) {
+        if (min_t == fmt::UUTC_NO_ENTRY || e.time < min_t) min_t = e.time;
+        if (max_t == fmt::UUTC_NO_ENTRY || e.time > max_t) max_t = e.time;
+      }
+    }
+    // Span: old (absolute) widened by the new records, stored the way mef3io writes.
+    auto widen_span = [&](fmt::UniversalHeader& uh) {
+      si8 lo = min_t, hi = max_t;
+      if (uh.start_time != fmt::UUTC_NO_ENTRY) {
+        const si8 a = to_user_time(uh.start_time, rto);
+        lo = lo == fmt::UUTC_NO_ENTRY ? a : std::min(lo, a);
+      }
+      if (uh.end_time != fmt::UUTC_NO_ENTRY) {
+        const si8 b = to_user_time(uh.end_time, rto);
+        hi = hi == fmt::UUTC_NO_ENTRY ? b : std::max(hi, b);
+      }
+      uh.start_time = to_stored_time(lo, rto);
+      uh.end_time = to_stored_time(hi, rto);
+    };
+    const si8 new_n = n_idx + static_cast<si8>(enc.size());
+    // Rolling CRC (no re-read). A stored CRC_NO_ENTRY (0: mef_tools never
+    // computed it) is no CRC state: extending it would write a checksum the
+    // file fails, so it stays "never computed".
+    const ui4 rdat_body_crc = rdat_uh.body_crc == fmt::CRC_NO_ENTRY
+                                  ? fmt::CRC_NO_ENTRY : crc::calculate(new_rdat, rdat_uh.body_crc);
+    const ui4 ridx_body_crc = ridx_uh.body_crc == fmt::CRC_NO_ENTRY
+                                  ? fmt::CRC_NO_ENTRY : crc::calculate(new_ridx, ridx_uh.body_crc);
+    auto patched = [&](fmt::UniversalHeader uh, std::vector<ui1> head, ui4 body_crc, si8 max_size) {
+      uh.number_of_entries = new_n;
+      uh.maximum_entry_size = max_size;
+      widen_span(uh);
+      uh.body_crc = body_crc;
+      fmt::provenance::stamp_modified(uh, fmt::provenance::Operation::Append);
+      uh.serialize(head);
+      uh.update_header_crc(head);
+      return head;
+    };
+    // maximum_entry_size is an allocation contract: a stored NO_ENTRY / 0 /
+    // negative is unusable, so measure the existing records (their sizes are
+    // the gaps between the index offsets; the index is 24 B per record) rather
+    // than describe only the appended ones.
+    si8 stored_max = rdat_uh.maximum_entry_size;
+    if (stored_max <= 0 && n_idx > 0) {
+      const auto idx = read_at(ridx_path, UH, static_cast<std::size_t>(ridx_size - UH));
+      std::vector<si8> offs;
+      offs.reserve(static_cast<std::size_t>(n_idx) + 1);
+      for (si8 i = 0; i < n_idx; ++i)
+        offs.push_back(read<si8>(idx, static_cast<std::size_t>(i) * fmt::RECORD_INDEX_BYTES + 8));
+      offs.push_back(static_cast<si8>(rdat_size));
+      std::sort(offs.begin(), offs.end());
+      stored_max = 0;
+      for (std::size_t i = 1; i < offs.size(); ++i) stored_max = std::max(stored_max, offs[i] - offs[i - 1]);
+    }
+    const auto rdat_head = patched(rdat_uh, rdat_uh_bytes, rdat_body_crc,
+                                   std::max<si8>(stored_max < 0 ? 0 : stored_max, max_entry));
+    const auto ridx_head = patched(ridx_uh, ridx_uh_bytes, ridx_body_crc, fmt::RECORD_INDEX_BYTES);
+
+    // Order: data, the index that points at it, then the headers that count
+    // them (like the segment append). A failure puts everything back.
+    bool touched_rdat = false, touched_ridx = false, patched_ridx = false;
+    try {
+      touched_rdat = true;
+      write_at(rdat_path, rdat_size, new_rdat);
+      touched_ridx = true;
+      write_at(ridx_path, ridx_size, new_ridx);
+      patched_ridx = true;
+      write_at(ridx_path, 0, ridx_head);
+      write_at(rdat_path, 0, rdat_head);
+    } catch (...) {
+      std::error_code ignored;
+      try {
+        if (patched_ridx) write_at(ridx_path, 0, ridx_uh_bytes);
+      } catch (...) {}
+      try {
+        write_at(rdat_path, 0, rdat_uh_bytes);  // a torn header patch too
+      } catch (...) {}
+      if (touched_ridx) fs::resize_file(ridx_path, ridx_size, ignored);
+      if (touched_rdat) fs::resize_file(rdat_path, rdat_size, ignored);
+      throw;
+    }
+    return;
   }
 
-  const si8 n = static_cast<si8>(ordered.size());
-  // Universal-header span, in the same convention as the record times.
+  // ---- no previous file: create the pair ------------------------------------
+  if (encrypt)
+    keys = crypto::validate_password(password_2.empty() ? password_1 : password_2, vf.level1,
+                                     vf.level2);
+  const auto enc = encode_records(ordered, rto, encrypt, keys);
+  std::vector<ui1> rdat_body, ridx_body;
+  ui4 max_entry = 0;
+  si8 min_time = fmt::UUTC_NO_ENTRY, max_time = fmt::UUTC_NO_ENTRY;  // absolute
+  for (const auto& e : enc) {
+    auto entry = e.entry;
+    write<si8>(entry, 8, fmt::UNIVERSAL_HEADER_BYTES + static_cast<si8>(rdat_body.size()));
+    rdat_body.insert(rdat_body.end(), e.bytes.begin(), e.bytes.end());
+    ridx_body.insert(ridx_body.end(), entry.begin(), entry.end());
+    max_entry = std::max(max_entry, static_cast<ui4>(e.bytes.size()));
+    if (e.time != fmt::UUTC_NO_ENTRY) {
+      if (min_time == fmt::UUTC_NO_ENTRY || e.time < min_time) min_time = e.time;
+      if (max_time == fmt::UUTC_NO_ENTRY || e.time > max_time) max_time = e.time;
+    }
+  }
+  const si8 n = static_cast<si8>(enc.size());
   const si8 start_disk = to_stored_time(min_time, rto);
   const si8 end_disk = to_stored_time(max_time, rto);
-  // .rdat
   {
     auto file = base_uh_bytes(fmt::FILE_TYPE_RECORD_DATA, session_name, channel_name,
                               segment_number, n, max_entry, start_disk, end_disk, vf);
     file.insert(file.end(), rdat_body.begin(), rdat_body.end());
     finalize_crcs(file);
-    write_file((fs::path(dir) / (base + ".rdat")).string(), file);
+    write_file(rdat_path, file);
   }
-  // .ridx
   {
     auto file = base_uh_bytes(fmt::FILE_TYPE_RECORD_INDICES, session_name, channel_name,
                               segment_number, n, fmt::RECORD_INDEX_BYTES, start_disk, end_disk, vf);
     file.insert(file.end(), ridx_body.begin(), ridx_body.end());
     finalize_crcs(file);
-    write_file((fs::path(dir) / (base + ".ridx")).string(), file);
+    write_file(ridx_path, file);
   }
 }
 

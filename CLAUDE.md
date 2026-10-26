@@ -8,7 +8,7 @@ of scope. The legacy `mef_tools`/`pymef` stack is the correctness oracle.
 
 Status: read + write complete, cross-validated **both directions** vs
 pymef/mef_tools (values, NaN gaps, times, encryption none/L1+L2, fractional fs,
-records). In-segment append + per-segment map implemented. Tar session
+records). Annotation writes (`write_annotations`) ONLY APPEND, in place, creating the files when absent, never replacing/deleting (#156, notes/records-and-time.md). In-segment append + per-segment map implemented. Tar session
 archives (single-file `.mefd.tar`, read in place) implemented. Session
 validator + targeted repair + recovery implemented (+ an open-time warning).
 `inspect` (metadata-only description, #67), cancel/progress on long

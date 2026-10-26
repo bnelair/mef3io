@@ -608,12 +608,16 @@ class Reader:
 
         * ``"segment"`` — a segment that could not be read; its time span
           reads back as NaN. Found when the session is opened.
-        * ``"records"`` — one record (``.rdat``) file that could not be read
-          or placed, found by :meth:`records` (so the list can grow after the
-          open). Only its annotations are missing; the samples are unaffected.
-          ``segment`` is then the file's path, and ``segment_number`` is -1 for
+        * ``"records"`` — a record (``.rdat``) file that could not be placed
+          (nothing of it is read), or, when the file itself opened, ONE
+          damaged record in it (CRC failure, unusable header, truncated
+          tail; ``reason`` names the record and its byte offset). Every other
+          record of that file is still returned, resynchronised through the
+          ``.ridx`` offsets where one exists. Found by :meth:`records` (so the
+          list can grow after the open); the samples are unaffected.
+          ``segment`` is the file's path, and ``segment_number`` is -1 for
           a session- or channel-level file (``channel`` is ``""`` at session
-          level).
+          level). Nothing is repaired or written.
 
         Segments that fail during a read (a damaged index or data extent) are
         added when the read meets them. A multi-channel :meth:`read` reads its
@@ -1143,14 +1147,15 @@ class Reader:
         # _unannounced); segment problems were reported by the open.
         added = self._announced.new(
             "records", [p for p in impl.problems() if p.get("kind") == "records"],
-            lambda p: (p["channel"], p["segment_number"], p["segment"]))
+            lambda p: (p["channel"], p["segment_number"], p["segment"], p["reason"]))
         if added:
             # Lenient only (strict raises): a record file that could not be
             # read was skipped. Say so — a missing annotation is otherwise
             # indistinguishable from one that was never written.
             pending.append((UnreadableSegmentWarning,
-                            f"{len(added)} record file(s) could not be read and were "
-                            f"SKIPPED. First: {added[0]['segment']} — {added[0]['reason']}. "
+                            f"{len(added)} problem(s) in record files: damaged records (or whole "
+                            f"files) were SKIPPED, every intact record was read. "
+                            f"First: {added[0]['segment']} — {added[0]['reason']}. "
                             "Full list in Reader.problems. Open with strict=True to fail instead.",
                             dict(path=self._path, details=added, also=_identity_of(impl))))
         return out

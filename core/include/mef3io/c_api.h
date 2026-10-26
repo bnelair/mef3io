@@ -512,7 +512,7 @@ int mef3io_writer_write_int32(mef3io_writer* w, const char* channel, const int32
                               const uint8_t* valid, int64_t n, double ufact, int64_t start_uutc,
                               double fs, int new_segment, mef3io_write_summary* out);
 
-/* Records are collected into a list, then written (replacing that level). */
+/* Records are collected into a list, then written (APPENDED to the level's records; never replacing). */
 mef3io_records* mef3io_records_create(void);
 void mef3io_records_free(mef3io_records* list);
 /* duration < 0 means "no duration". type e.g. "Note", "EDFA", "SyLg". */

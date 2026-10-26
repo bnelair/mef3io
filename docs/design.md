@@ -183,7 +183,9 @@ ABI shim (later) converts to codes. Bindings map to Python exceptions.
 - Segment control: `new_segment` flag; append goes to last segment with
   end-time/fs/ufact consistency checks (same guards as mef_tools).
 - Records: write all supported types at session or channel level; merge with
-  existing records on append (as mef_tools does).
+  existing records on append (as mef_tools does): `write_records` always
+  appends in place (record data, index entries, then the headers; body CRCs
+  extended), creating the files when absent; readers sort by time (#156).
 - Encryption on write: none, or fully encrypted (section 2 → L1 key, section 3
   → L2 key) — a fixed pairing driven by password presence, not three
   independent modes. "Level-1 only" is not a valid MEF file; see the canonical

@@ -397,10 +397,39 @@ entries) keeps the `.tdat`'s stored checksum. It is reset to "not computed"
 only when the data file was truncated, blocks were rebuilt past what it
 covered, or the `.tdat` header predates the last append.
 
+**Annotation files.** Recovery also looks at every `.rdat` + `.ridx` pair
+(session, channel and segment level). An interrupted annotation append can
+leave a torn last record, record bytes the header does not count, or an index
+that is short, torn or missing. Recovery keeps every whole record, drops only
+the torn fragment after the last whole record (backed up), and rebuilds the `.ridx` and both headers from the
+records. They are listed in `report.record_files` (a dry run says what it
+would do); a healthy file, including one written by the legacy stack, is
+never listed. A whole record that fails its CRC (bit rot, foreign damage; not
+an interrupted append) is never removed and does not stop the walk: it stays in
+the file and the index, every record after it stays too, and it is reported in
+`report.notes` (or as `records_damaged` when the file needs other repair).
+Nothing is removed on a guess. A tail is dropped as torn only when ALL hold:
+the `.ridx` exists and is readable; no `.ridx` entry at or beyond the stopping point
+points at bytes that are present and non-zero (an entry whose bytes run past
+the end of the file, or are all zero to the end, is a write the index got ahead
+of, and is torn; one whose bytes are there but fail their length or CRC check
+is damage); no whole CRC-valid record sits anywhere in the remaining bytes
+(and the rest is not one complete record with a damaged length); and the
+remaining bytes are shorter than a record or fail as one. Otherwise (a corrupt
+length or type field, an index ahead of the data, no index at all) the stop is
+damage, recovery leaves both files byte for byte as they are and notes it
+("record file damaged, not modified"). Without a `.ridx` nothing is ever
+dropped. A lenient
+reader still returns the records the index can locate and lists the damaged
+one in `problems`. A `.ridx` without its `.rdat` is only reported (nothing can be rebuilt from an
+index; it is kept, and writing is refused there). The check reads each record file once (annotation files are
+small next to the data) and only in recovery, never on a write.
+
 ### Reading the report
 
 ```python
 report.segments          # tuple[RecoveredSegment, ...] — only segments needing work
+report.record_files      # tuple[RecoveredRecordFile, ...] — annotation files needing work
 report.skipped           # segments that could not be examined, with reasons
 report.segments_examined # how many were looked at
 report.applied           # False for a dry run

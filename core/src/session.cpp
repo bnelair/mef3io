@@ -397,8 +397,42 @@ void Session::read_record_file(std::vector<Record>& out, const std::string& rdat
     auto uh = fmt::UniversalHeader::parse(bytes);
     crypto::AccessKeys keys = crypto::validate_password(
         password_, uh.level_1_password_validation_field, uh.level_2_password_validation_field);
-    bool offset_dependent = false;
-    auto recs = parse_records(bytes, rto.value_or(0), keys, &offset_dependent);
+    RecordParseInfo info;
+    std::vector<Record> recs;
+    try {
+      recs = parse_records(bytes, rto.value_or(0), keys, info);
+    } catch (const PasswordError&) {
+      throw;
+    } catch (const std::exception&) {
+      if (strict_) throw;
+      // Lenient: read every record that is intact and list the damaged ones.
+      // The .ridx (when present and readable) gives each record's offset, to
+      // resync past a damaged one. Nothing is written.
+      info = RecordParseInfo{};
+      info.tolerate_damage = true;
+      try {
+        auto ridx_path = rdat_path.substr(0, rdat_path.size() - 5) + ".ridx";
+        if (rdat_path.size() > 5 && source_->exists(ridx_path)) {
+          const auto ib = source_->read_all(ridx_path);
+          for (std::size_t o = fmt::UNIVERSAL_HEADER_BYTES; o + fmt::RECORD_INDEX_BYTES <= ib.size();
+               o += fmt::RECORD_INDEX_BYTES)
+            info.index_offsets.push_back(byteio::read<si8>(ib, o + 8));
+        }
+      } catch (const std::exception&) {
+        info.index_offsets.clear();  // an unreadable index just means no resync points
+      }
+      recs = parse_records(bytes, rto.value_or(0), keys, info);
+      for (const auto& d : info.damaged) {
+        std::lock_guard<std::mutex> lock(state_mu_);
+        if (reported_record_files_.insert(rdat_path + "@" + std::to_string(d.offset)).second)
+          problems_.push_back(SegmentProblem{
+              channel, segment, source_->describe(rdat_path),
+              "records: " + d.reason + " (byte offset " + std::to_string(d.offset) +
+                  "); the other records of this file were read",
+              "records"});
+      }
+    }
+    const bool offset_dependent = info.offset_dependent;
     // A disputed offset only matters to times stored negated (offset
     // applied); non-negative times are absolute whatever the offset is.
     // DELIBERATE DIVERGENCE: meflib, in its default RTO_REMOVE_ON_INPUT mode
@@ -422,7 +456,8 @@ void Session::read_record_file(std::vector<Record>& out, const std::string& rdat
                                                : "")));
     // Only a file that was actually read: one that failed above is a problem,
     // not a successful read through the old password mapping.
-    if (keys.legacy_password_mapping) {
+    // (a lenient file whose every record was damaged read nothing: no evidence)
+    if (keys.legacy_password_mapping && !(info.tolerate_damage && recs.empty())) {
       const auto where = source_->describe(rdat_path);
       std::lock_guard<std::mutex> lock(state_mu_);
       if (std::find(legacy_password_record_files_.begin(), legacy_password_record_files_.end(),
@@ -434,6 +469,11 @@ void Session::read_record_file(std::vector<Record>& out, const std::string& rdat
       rec.channel = channel;
       rec.segment = segment;
     }
+    // File order is WRITE order (write_records only ever appends, so a later
+    // call can add an earlier time); readers return time order. Stable: equal
+    // times keep the order they were written in.
+    std::stable_sort(recs.begin(), recs.end(),
+                     [](const Record& a, const Record& b) { return a.time < b.time; });
     // Nothing is appended until the whole file parsed: a half-read file is
     // worse than a skipped one.
     out.insert(out.end(), std::make_move_iterator(recs.begin()),

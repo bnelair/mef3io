@@ -585,8 +585,14 @@ class Writer:
     def write_annotations(self, annotations, channel: Optional[str] = None) -> None:
         """Write records (annotations).
 
-        Replaces the records at the given level. In encrypted sessions record
-        bodies are level-2 encrypted.
+        Always **appends** to the records already stored at the given level
+        (the files are created the first time); it never replaces or deletes a
+        stored record. The new records are added in place, so the cost does not
+        grow with the number already stored. A record earlier than the stored
+        ones is appended as well; :meth:`mef3io.Reader.records` returns them
+        sorted by time. In encrypted sessions record bodies are level-2
+        encrypted. A file left torn by a power cut is refused until
+        :func:`mef3io.recover_session` has repaired it.
 
         Parameters
         ----------
