@@ -70,10 +70,10 @@ See [Threads](../threads.md) for the rule.
   the `.tmet` can now reach the disk BEFORE the data it describes). A new
   segment or channel in a session that already held data when the Writer
   opened it, and every channel's first segment in any session, flushes its
-  three fresh files before each is renamed into place (a zero-length file
-  there would fail the strict open of the whole session). Measured on ext4:
-  the first write of a fresh 128-channel session went from 0.85 s to 5.0 s
-  (three flushes per channel, once); appends are unaffected.
+  three fresh files in one batch before its `.tmet` is renamed into place (a
+  short file there would fail the strict open of the whole session).
+  Measured on ext4: the first write of a fresh 128-channel session went from
+  0.85 s to 3.6 s (one batch per channel, once); appends are unaffected.
 - **What a power cut can now do**: leave the *last* append of a segment in
   any mix of old and new bytes — the `.tmet` newer or older than the data and
   index, the `.tidx` header and entries from different writes (the index then

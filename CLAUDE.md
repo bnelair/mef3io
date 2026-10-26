@@ -803,8 +803,11 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   channel: nothing to rebuild its .tmet from) — NOT later segments of a
   self-created session ("channel already has a segment" made test_p31's
   2400-segment fixture take 200 s: 3 fsyncs per segment kills conversions;
-  recovery rebuilds their lost .tmet instead) — all three
-  fresh files before each rename (`SegmentSpec::flush_new_files`), since a
+  recovery rebuilds their lost .tmet instead) — all three fresh files in
+  ONE batch (`detail::flush_files`: one syncfs on Linux, per file elsewhere;
+  the .tmet sits in a temp file and is renamed in only AFTER the batch — a
+  segment is visible only through its .tmet, a missing one is skipped, a
+  SHORT one fails the strict open) (`SegmentSpec::flush_new_files`), since a
   zero-length new .tidx/.tdat/.tmet fails the strict open of the WHOLE
   session (verified). Unflushed new segments of a self-created session:
   recovery REBUILDS a lost .tmet (see recover_session above), and REMOVES a
@@ -813,7 +816,11 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   Never flushed: later segments of a self-created session and the
   DIRECTORY entry after a rename (losing it keeps the previous complete file).
   Cost of the first-segment flush: a fresh 128-ch session's first write
-  0.85 s -> 5.0 s (once).
+  0.85 s -> 5.0 s with 3 fdatasyncs per channel, 3.6 s with the per-call
+  batch (per-call syncfs; a .tmet-only fdatasync measured 2.2 s). Reaching
+  ~0.85 s needs ONE batch across calls, i.e. delayed visibility (open
+  question to the maintainer, 2026-10-26). Reopened new segment, 128 ch:
+  5.1 s -> 4.2-4.4 s.
   An append now THROWS if the .tmet flush fails (1.x fast ignored it). Measured on ext4, 128 ch x 10-min
   256 Hz append: 1.x full 6.0-6.5 s, 1.x fast 3.8 s, 2.0 2.5-2.8 s, no flush
   at all 0.74 s (~15 ms/channel for the .tmet). Pinned per file by the

@@ -102,8 +102,9 @@ metadata loader and takes the WHOLE SESSION down — the one outcome
 `fsync_observer` hook in core/tests/test_durability.cpp.
 
 A NEW segment or channel in a session that held data when the Writer opened
-it flushes its three fresh files before each rename (`SegmentSpec::
-flush_new_files`): a zero-length `.tidx`/`.tdat`/`.tmet` there fails the
+it flushes its three fresh files in ONE batch (`flush_files`) and only then
+renames its `.tmet` into place (`SegmentSpec::flush_new_files`; a segment is
+visible only through its `.tmet`): a zero-length `.tidx`/`.tdat`/`.tmet` there fails the
 strict open of the whole session; so does a channel's FIRST segment in any
 session (once per channel). Not later segments of a session the Writer
 created (a conversion writes thousands); there recovery rebuilds a lost

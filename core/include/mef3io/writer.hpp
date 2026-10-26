@@ -93,8 +93,10 @@ struct SegmentSpec {
   /// it must be a true maximum, since a reader allocates its difference buffer
   /// from the result and an under-declaration truncates that buffer.
   ui4 known_difference_bytes = 0;
-  /// Fresh segment only: flush the new `.tdat`, `.tidx` and `.tmet` before
-  /// each is renamed into place (3 flushes). Set by `SessionWriter` for a
+  /// Fresh segment only: write the new `.tdat` and `.tidx`, the `.tmet` to a
+  /// temp file, flush all three in ONE batch (`flush_files`: one syncfs on
+  /// Linux, per file elsewhere), then rename the `.tmet` into place — a
+  /// segment is visible only through its `.tmet`. Set by `SessionWriter` for a
   /// channel's FIRST segment (nothing to rebuild a lost .tmet from) and for
   /// any new segment in a session that already held data, where a zero-length
   /// file left by a power cut would fail the strict open of the whole

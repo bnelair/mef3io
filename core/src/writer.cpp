@@ -366,7 +366,7 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     uh.serialize(file);
     file.insert(file.end(), tdat_body.begin(), tdat_body.end());
     finalize_crcs(file);
-    write_file((fs::path(segment_dir) / (base + ".tdat")).string(), file, spec.flush_new_files);
+    write_file((fs::path(segment_dir) / (base + ".tdat")).string(), file);
   }
 
   // --- .tidx ---
@@ -381,7 +381,7 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
       file.insert(file.end(), entry.begin(), entry.end());
     }
     finalize_crcs(file);
-    write_file((fs::path(segment_dir) / (base + ".tidx")).string(), file, spec.flush_new_files);
+    write_file((fs::path(segment_dir) / (base + ".tidx")).string(), file);
   }
 
   // --- .tmet ---
@@ -472,7 +472,38 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     // Equivalent here (this image is exactly METADATA_FILE_BYTES), but stated
     // explicitly so the fixed-length rule holds for every .tmet we write.
     finalize_metadata_crcs(file);
-    write_file((fs::path(segment_dir) / (base + ".tmet")).string(), file, spec.flush_new_files);
+    const std::string tmet_path = (fs::path(segment_dir) / (base + ".tmet")).string();
+    if (!spec.flush_new_files) {
+      write_file(tmet_path, file);
+    } else {
+      // A segment is visible to readers only through its .tmet (one missing
+      // is skipped; one SHORT fails the strict open of the whole session). So
+      // the .tdat and .tidx above went out unflushed, the .tmet goes to a
+      // temp file, all three are flushed in ONE batch (flush_files: one
+      // syncfs per file system on Linux, per file elsewhere), and only then
+      // is the .tmet renamed into place: no visible file of this segment can
+      // be short after a power cut.
+      const fs::path tmp = tmet_path + ".mef3io-tmp";
+      std::error_code ignored;
+      fs::remove(tmp, ignored);
+      try {
+        {
+          std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+          if (!f) throw IoError("cannot open for write: " + tmp.string());
+          f.write(reinterpret_cast<const char*>(file.data()),
+                  static_cast<std::streamsize>(file.size()));
+          if (!f) throw IoError("write failed: " + tmp.string());
+          finish_stream(f, tmp.string());
+        }
+        detail::flush_files({fs::path(segment_dir) / (base + ".tdat"),
+                             fs::path(segment_dir) / (base + ".tidx"), tmp});
+        if (detail::fsync_observer) detail::fsync_observer("batch:" + tmp.string());
+        replace_file(tmp, tmet_path);
+      } catch (...) {
+        fs::remove(tmp, ignored);
+        throw;
+      }
+    }
   }
 
   if (out_max_difference_bytes) *out_max_difference_bytes = max_difference_bytes;

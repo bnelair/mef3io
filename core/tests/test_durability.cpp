@@ -169,6 +169,25 @@ bool ends_with(const std::string& s, const std::string& suffix) {
   return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
+/// A NEW segment's files are flushed in ONE batch (flush_files) before its
+/// .tmet is renamed into place; the writer marks each batch "batch:<tmp>".
+/// Inside it, Linux issues one syncfs (no per-file event) and other systems
+/// flush each file (an event per file). Returns the number of batches and
+/// requires every other event to be one of those segments' files.
+std::size_t new_segment_batches(const std::vector<std::string>& events) {
+  std::size_t batches = 0;
+  for (const auto& p : events) {
+    if (p.rfind("batch:", 0) == 0) {
+      ++batches;
+      REQUIRE(ends_with(p, ".tmet.mef3io-tmp"));
+    } else {
+      INFO(p);
+      REQUIRE((ends_with(p, ".tdat") || ends_with(p, ".tidx") || ends_with(p, ".tmet.mef3io-tmp")));
+    }
+  }
+  return batches;
+}
+
 }  // namespace
 
 // 2.0 removed the `durability` option. What stays is ONE barrier: the .tmet
@@ -191,12 +210,10 @@ TEST_CASE("a write flushes only the .tmet it replaces, before the rename", "[dur
     SessionWriter w(session, true);
     for (const char* ch : channels) w.write_int32(ch, a, 0.5, start, rate);
     // A FRESH session: each channel's FIRST segment flushes its three files
-    // (once per channel: no previous segment a lost .tmet could be rebuilt
-    // from). Nothing else.
+    // in ONE batch before its .tmet is renamed into place (once per channel:
+    // no previous segment a lost .tmet could be rebuilt from). Nothing else.
     {
-      const auto first = log.take();
-      REQUIRE(first.size() == 3 * 3);
-      for (const auto& p : first) REQUIRE(ends_with(p, ".mef3io-tmp"));
+      REQUIRE(new_segment_batches(log.take()) == 3);  // one batch per channel
     }
 
     // An append through the SAME writer (cached index path): exactly one flush
@@ -216,15 +233,12 @@ TEST_CASE("a write flushes only the .tmet it replaces, before the rename", "[dur
   }
   {
     // A new segment in a session that held data when the writer opened it:
-    // its three fresh files ARE flushed before each is renamed into place —
-    // a zero-length one would fail the strict open of the whole session.
+    // its three fresh files ARE flushed, in one batch, before its .tmet is
+    // renamed into place — a short one would fail the strict open of the
+    // whole session (one MISSING is only skipped).
     SessionWriter w(session, false);
     w.write_int32("ch3", a, 0.5, start + 2 * step, rate, {}, /*new_segment=*/true);
-    auto fresh = log.take();
-    REQUIRE(fresh.size() == 3);
-    for (const char* ext : {".tdat.mef3io-tmp", ".tidx.mef3io-tmp", ".tmet.mef3io-tmp"})
-      REQUIRE(std::count_if(fresh.begin(), fresh.end(),
-                            [&](const std::string& p) { return ends_with(p, ext); }) == 1);
+    REQUIRE(new_segment_batches(log.take()) == 1);
   }
   {
     // A REOPENED writer appends through the slow path (walks the index once):
@@ -242,7 +256,7 @@ TEST_CASE("a write flushes only the .tmet it replaces, before the rename", "[dur
     // opened it: flushed the same way (3 files).
     SessionWriter w(session, false);
     w.write_int32("ch4", a, 0.5, start, rate);
-    REQUIRE(log.take().size() == 3);
+    REQUIRE(new_segment_batches(log.take()) == 1);
   }
   // The temp files are gone: each was renamed into place.
   for (const auto& e : fs::recursive_directory_iterator(dir.dir))

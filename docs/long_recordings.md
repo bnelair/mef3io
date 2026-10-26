@@ -56,16 +56,17 @@ bytes still in cache — a short `.tmet`, which makes the **whole session** fail
 to open, not just one segment. That barrier stays, whatever it costs.
 
 A NEW segment, or a new channel, in a session that already held data when the
-`Writer` opened it is flushed too: its three fresh files (`.tdat`, `.tidx`,
-`.tmet`), each before it is renamed into place. A zero-length file there — the
-classic outcome of renaming an unflushed file to a new name — would fail the
-strict open of the whole session, days of data included. That is three flushes
-per new segment, once a day or so (measured: a new segment on all 128
-channels of a reopened session, ~5 s on ext4). A channel's FIRST segment is
-flushed the same way in any session, once per channel: it has no previous
-segment a lost `.tmet` could be rebuilt from. That is the cost a fresh
-session's first write pays (measured: 128 channels × 10 minutes, 0.85 s
-without it, 5.0 s with it); every later write of that session is unaffected. Later segments of a session the
+`Writer` opened it is flushed too. A segment is visible only through its
+`.tmet` (one that is missing is skipped; one that is SHORT fails the strict
+open of the whole session, days of data included), so the `.tdat` and `.tidx`
+are written, the `.tmet` goes to a temp file, all three are flushed in ONE
+batch (one `syncfs` on Linux; each file on macOS and Windows), and only then
+is the `.tmet` renamed into place. Measured on ext4: a new segment on all 128
+channels of a reopened session, 4.2–4.4 s, once a day or so. A channel's
+FIRST segment is flushed the same way in any session, once per channel: it
+has no previous segment a lost `.tmet` could be rebuilt from. That is the cost
+a fresh session's first write pays (128 channels × 10 minutes: 0.85 s without
+it, 3.6 s with it); every later write of that session is unaffected. Later segments of a session the
 `Writer` created itself are not flushed (a conversion writes thousands of
 them); recovery rebuilds what a power cut takes from them (below).
 
