@@ -209,8 +209,9 @@ ABI shim (later) converts to codes. Bindings map to Python exceptions.
 - **Durability: one barrier.** An append extends `.tdat`/`.tidx` in place and
   patches their headers without flushing; only the `.tmet` is written to a
   temp file, flushed and renamed over the original, since a short `.tmet`
-  makes the whole session fail to open (a new segment or channel in a session
-  that held data flushes its three fresh files likewise). A power cut can
+  makes the whole session fail to open (a channel's first segment, and a new
+  segment or channel in a session that held data, flush their three fresh
+  files likewise). A power cut can
   therefore tear the last append of a segment in any mix of old and new
   bytes; `recover_session(apply=True)` restores a valid session from each
   (index and data itself, declarations through `repair_session`). There is

@@ -675,14 +675,17 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   // Only a NEW segment takes the session's offset; an append keeps the one
   // already in the segment it extends (append_time_series_segment).
   if (!append) spec.recording_time_offset = new_segment_rto(channel, st);
-  // A new segment or channel in a session that held data when this writer
-  // opened it: flushed, since a zero-length file there would fail the strict
-  // open of everything already recorded. NOT a session this writer created:
-  // flushing every new segment there made a conversion that writes thousands
-  // of segments pay three flushes each (a 2400-segment channel: minutes).
-  // What a power cut leaves of such a segment is recovery's job: a last
-  // segment whose files are empty and whose data holds no block is removed.
-  if (!append) spec.flush_new_files = session_preexisted_;
+  // Fresh files flushed before each rename (3 flushes):
+  //  * any new segment or channel in a session that held data when this
+  //    writer opened it — a zero-length file there fails the strict open of
+  //    everything already recorded;
+  //  * a channel's FIRST segment, in any session (once per channel): it has
+  //    no previous segment a lost .tmet could be rebuilt from.
+  // NOT a later segment in a session this writer created: a conversion
+  // writes thousands of those (3 flushes each took a 2400-segment channel to
+  // minutes), and recovery rebuilds a lost .tmet there from the previous
+  // segment's, or removes a segment whose data never landed.
+  if (!append) spec.flush_new_files = session_preexisted_ || st.n_segments == 0;
 
   // Only pass on a maximum this writer measured itself. A segment adopted from
   // disk leaves the flag false, so the append bounds the blocks it cannot see

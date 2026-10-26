@@ -746,8 +746,20 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   dominant post-crash state since 1.x fast's best-effort header fdatasyncs
   — which flushed the whole files — are gone) get ALL their repairable
   findings fixed by CALLING repair_session per segment (exact difference
-  bytes; `RecoveredSegment.declarations`). The CLI's --apply also chains
-  repair on every apply (not only when recovery changed something). ONE
+  bytes; `RecoveredSegment.declarations`; the dry run lists the EXACT ids for
+  declaration-only segments via the same `segment_repairable_ids`). NEVER
+  repair a segment recovery does not report (review r2: the CLI's
+  session-wide chain rewrote all 12 files of a HEALTHY mef_tools session;
+  removed, with `--no-repair`; test_p46 pins a legacy session byte-identical).
+  LOST .tmet of a NON-FIRST segment (`rebuild_tmet`): previous segment's .tmet
+  byte for byte + this segment's .tdat UH (segment number, times, level UUID)
+  + first index entry's start_sample + native extremes from the index
+  min/max, new file UUID, Recovery stamp; then the declaration step. A
+  channel's FIRST segment has no source, hence the writer flushes it (below).
+  `block_looks_real` reads each byte ONCE (rolling CRC over the header in
+  hand) and the .tdat streams are UNBUFFERED (`pubsetbuf(nullptr, 0)`; a
+  buffered stream refilled after every seek) — test_p17 pins a healthy dry
+  run at <= 1.05x the checked bytes + index overhead. ONE
   declaration recovery writes ITSELF (#83): at a NON-ZERO rto, where the
   validator's time checks stand down, it corrects the END TIME of the three
   UHs (.tmet = what info() reports) from the last kept block
@@ -786,23 +798,27 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   made the appended data/index durable before the .tmet: dropping it is what
   made ".tmet newer than its data" the common crash state, hence recovery's
   declaration step). ALSO flushed: a NEW segment or channel in a session that
-  held data when the SessionWriter opened it (`session_preexisted_` ONLY —
-  including "channel already has a segment" made test_p31's 2400-segment
-  fixture take 200 s: 3 fsyncs per segment kills conversions) — all three
+  held data when the SessionWriter opened it (`session_preexisted_`), and a
+  channel's FIRST segment in any session (`n_segments == 0`, once per
+  channel: nothing to rebuild its .tmet from) — NOT later segments of a
+  self-created session ("channel already has a segment" made test_p31's
+  2400-segment fixture take 200 s: 3 fsyncs per segment kills conversions;
+  recovery rebuilds their lost .tmet instead) — all three
   fresh files before each rename (`SegmentSpec::flush_new_files`), since a
   zero-length new .tidx/.tdat/.tmet fails the strict open of the WHOLE
   session (verified). Unflushed new segments of a self-created session:
-  recovery REMOVES a channel's last segment whose files are missing/short
-  and whose .tdat holds no CRC-valid block (moved to the backup, empty .timd
-  too); with samples but no .tmet it is skipped with advice (a .tmet is not
-  rebuilt).
-  Never flushed: a brand-new session (nothing underneath to lose) and the
+  recovery REBUILDS a lost .tmet (see recover_session above), and REMOVES a
+  channel's last segment whose files are missing/short and whose .tdat holds
+  no CRC-valid block (moved to the backup, empty .timd too).
+  Never flushed: later segments of a self-created session and the
   DIRECTORY entry after a rename (losing it keeps the previous complete file).
+  Cost of the first-segment flush: a fresh 128-ch session's first write
+  0.85 s -> 5.0 s (once).
   An append now THROWS if the .tmet flush fails (1.x fast ignored it). Measured on ext4, 128 ch x 10-min
   256 Hz append: 1.x full 6.0-6.5 s, 1.x fast 3.8 s, 2.0 2.5-2.8 s, no flush
   at all 0.74 s (~15 ms/channel for the .tmet). Pinned per file by the
   `detail::fsync_observer` test hook (core/tests/test_durability.cpp: fresh
-  write 0 flushes; cached + reopened append = one `.tmet.mef3io-tmp` per
+  session = 3 per channel (first segments), later new segment there 0; cached + reopened append = one `.tmet.mef3io-tmp` per
   channel; new segment / new channel in an existing session = 3; a failed
   append's rollback publishes the restored .tidx flushed). Repair, rename, recovery and the copies keep their
   OWN flush rules — only the WRITER's option went.

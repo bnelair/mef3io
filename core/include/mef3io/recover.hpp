@@ -103,8 +103,12 @@ struct RecoveryReport {
 /// difference bytes; repair's backups and provenance). Recovery alone thus
 /// leaves a valid session; `RecoveredSegment::declarations` lists what was
 /// re-derived, and a segment the validator could not check is a note. The
-/// DRY RUN reports such a .tmet as a segment needing recovery. Index and data
-/// remain recovery's alone. ONE further exception (#83): at a
+/// DRY RUN reports such a .tmet as a segment needing recovery and lists the
+/// exact check ids. Only reported segments are touched. LOST .tmet: a
+/// non-first segment's empty/short .tmet (data and index landed) is rebuilt
+/// from the previous segment's .tmet plus this segment's own files; a last
+/// segment with short files and no block in its data is removed (backed up).
+/// Index and data remain recovery's alone. ONE further exception (#83): at a
 /// NON-ZERO recording-time offset, where every validator time check stands
 /// down, recovery corrects the segment's END TIME in the three universal
 /// headers (the .tmet one is what readers report) from the last block it

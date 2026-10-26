@@ -272,9 +272,10 @@ class Writer:
     -----
     **Durability.** An append flushes exactly one thing to stable storage:
     each segment's ``.tmet``, before it is renamed over the previous one
-    (a short ``.tmet`` would make the whole session fail to open). A new
-    segment or channel in a session that already held data when this Writer
-    opened it also flushes its three fresh files before each is renamed in.
+    (a short ``.tmet`` would make the whole session fail to open). A
+    channel's first segment, and any new segment or channel in a session that
+    already held data when this Writer opened it, also flushes its three
+    fresh files before each is renamed in.
     The ``.tdat`` and ``.tidx`` are extended in place without flushing, so a
     power cut or OS crash mid-append can leave the **last** append of a
     segment in any mix of old and new bytes; :func:`mef3io.recover_session`

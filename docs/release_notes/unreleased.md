@@ -69,9 +69,11 @@ See [Threads](../threads.md) for the rule.
   patches, and with them the appended data and index; that is gone too, so
   the `.tmet` can now reach the disk BEFORE the data it describes). A new
   segment or channel in a session that already held data when the Writer
-  opened it flushes its three fresh files before each is renamed into place
-  (a zero-length file there would fail the strict open of the whole
-  session); a session the Writer created flushes nothing else.
+  opened it, and every channel's first segment in any session, flushes its
+  three fresh files before each is renamed into place (a zero-length file
+  there would fail the strict open of the whole session). Measured on ext4:
+  the first write of a fresh 128-channel session went from 0.85 s to 5.0 s
+  (three flushes per channel, once); appends are unaffected.
 - **What a power cut can now do**: leave the *last* append of a segment in
   any mix of old and new bytes — the `.tmet` newer or older than the data and
   index, the `.tidx` header and entries from different writes (the index then
@@ -109,13 +111,19 @@ See [Threads](../threads.md) for the rule.
 - In each channel's last segment, the blocks of the last append (back to its
   first block, at most 64 MiB) are CRC-checked against their entries, so
   entries pointing at data that never landed are dropped.
-- A channel's last segment whose files are missing, empty or shorter than
-  their headers and whose data holds no block (a new segment cut off by a
-  power cut, which failed the strict open of the whole session) is REMOVED
-  (moved to the backup). One whose samples landed is skipped with advice.
-- `python -m mef3io recover --apply` now runs the follow-up `repair` whenever
-  the validator still has repairable findings, not only when recovery changed
-  something.
+- A later segment whose `.tmet` is empty or short but whose data and index
+  landed (a long-lived Writer's new segment cut off by a power cut, which
+  failed the strict open of the whole session) gets its `.tmet` REBUILT from
+  the previous segment's plus its own files, then its declarations
+  re-derived. A channel's last segment whose files are missing, empty or
+  short and whose data holds no block is REMOVED (moved to the backup). A
+  channel's first segment with a lost `.tmet` is skipped with advice; its
+  files are now flushed when written (once per channel).
+- **`python -m mef3io recover --apply` no longer runs a session-wide repair**
+  afterwards, and `--no-repair` is gone: recovery re-derives the declarations
+  of exactly the segments it reports (the dry run lists the check ids), and a
+  healthy segment's findings are left to `repair`, by explicit id. A healthy
+  legacy session is left byte for byte.
 
 ## New
 

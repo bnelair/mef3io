@@ -104,10 +104,13 @@ metadata loader and takes the WHOLE SESSION down — the one outcome
 A NEW segment or channel in a session that held data when the Writer opened
 it flushes its three fresh files before each rename (`SegmentSpec::
 flush_new_files`): a zero-length `.tidx`/`.tdat`/`.tmet` there fails the
-strict open of the whole session. Not in a session the Writer created (a conversion
-writes thousands of segments); there recovery removes a last segment whose
-files are short and whose data holds no block. Nothing else a write does is flushed: not a
-brand-new session (nothing underneath to lose), not the directory entry after the rename (losing it keeps the
+strict open of the whole session; so does a channel's FIRST segment in any
+session (once per channel). Not later segments of a session the Writer
+created (a conversion writes thousands); there recovery rebuilds a lost
+`.tmet` from the previous segment's, and removes a last segment whose files
+are short and whose data holds no block. Recovery repairs ONLY segments it
+reports — never a healthy segment's findings. Nothing else a write does is flushed: not
+later segments of a self-created session, not the directory entry after the rename (losing it keeps the
 previous complete file), not the `.tdat`/`.tidx` extended in place, not the
 headers patched in place. So a power cut can leave the LAST append of a
 segment torn — a short tail, an index ahead of or behind the data, a stale

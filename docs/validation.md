@@ -318,8 +318,8 @@ if report.segments:                                   # something to do
 assert mef3io.Validator("session.mefd").validate().ok
 ```
 
-The CLI does the same, then repairs anything else the validator still reports
-as repairable (on every `--apply`):
+The CLI does the same. It repairs nothing beyond the segments recovery reports
+(a healthy segment's findings are `repair`'s, by explicit id):
 
 ```bash
 python -m mef3io recover session.mefd            # dry run
@@ -419,10 +419,11 @@ for s in report.segments:
   `<session>.recover-backup/`. The `.tdat` itself may be tens of gigabytes —
   and that is one channel — so copying it to undo a header patch would make the
   tool unusable on exactly the sessions it is for. Pass `backup=False` to skip.
-- **A healthy session is untouched**, byte for byte. Checking it costs one
-  `.tmet` header per channel, the validator's count checks on each channel's
-  last segment (metadata and index only), and a CRC check of the last
-  append's blocks (at most 64 MiB per channel).
+- **A healthy session is untouched**, byte for byte — a legacy session's
+  declaration findings included. Checking it costs one `.tmet` header per
+  channel, the validator's count checks on each channel's last segment
+  (metadata and index only), and a CRC check of the last append's blocks, each
+  byte read once: the whole last append, at most 64 MiB per channel.
 - **Recovering an older segment stamps the last one** with `segment-repaired`,
   as a repair does (header only; the old header goes to the backup).
   `report.notes` names the stamped file, or says why the stamp was skipped

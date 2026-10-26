@@ -358,3 +358,32 @@ def test_the_python_side_of_an_open_is_not_per_segment(tmp_path, monkeypatch):
         monkeypatch.undo()
     assert all(n > 0 for n in control.values()), control
     assert counts[1] == counts[12], counts
+
+
+def test_a_recovery_dry_run_reads_each_checked_block_once(tmp_path):
+    """Recovery CRC-checks the blocks of each channel's last append (back to
+    its first block, at most 64 MiB a channel). On a healthy session written
+    in ONE call that is the whole segment, so this pins that each of those
+    bytes is read once: no header read twice, no buffered stream refilling
+    past a block after every seek. Small blocks make a double read visible
+    (the 304-byte header is ~40 % of a block here)."""
+    path = tmp_path / "s.mefd"
+    fs = 1000.0
+    x = np.random.default_rng(11).integers(-30000, 30000, int(fs * 600), dtype=np.int32)
+    with mef3io.Writer(str(path), block_length=256) as w:
+        w.write_int32("ch1", x, 1.0, START, fs)
+    tidx = next(Path(path).rglob("*.tidx"))
+    tdat = next(Path(path).rglob("*.tdat"))
+    checked = tdat.stat().st_size - 1024          # every block: one append
+    assert checked < 64 << 20
+    before, _ = _io()
+    rep = mef3io.recover_session(str(path))
+    read_bytes = _io()[0] - before
+    assert rep.nothing_to_do, rep.summary()
+    # Fixed costs around the blocks: the index (recovery and the validator's
+    # count checks each read it), the .tmet and a few headers.
+    overhead = 4 * tidx.stat().st_size + 64 * 1024
+    assert read_bytes <= 1.05 * checked + overhead, (
+        f"read {read_bytes / 1e6:.2f} MB for {checked / 1e6:.2f} MB of checked blocks "
+        f"(+ {overhead / 1e6:.2f} MB allowed for the index and metadata)"
+    )

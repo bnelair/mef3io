@@ -15,6 +15,7 @@ method of review round 1 on PR #153), then:
 
 and the CLI (`python -m mef3io recover --apply`) does the same.
 """
+import os
 import shutil
 import subprocess
 import sys
@@ -155,6 +156,17 @@ def _check(path, state):
     return len(want)
 
 
+def _cli(*args):
+    """The CLI under THIS interpreter and THIS mef3io (an installed wheel in CI,
+    the dev tree locally): the parent of the imported package goes first on
+    the child's path, the rest of the parent's sys.path after it."""
+    pkg_root = str(Path(mef3io.__file__).resolve().parent.parent)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([pkg_root] + [p for p in sys.path if p])
+    return subprocess.run([sys.executable, "-m", "mef3io", *args],
+                          capture_output=True, text=True, env=env, cwd=str(REPO))
+
+
 def _reappend(path, have):
     """A recorder re-sends what was lost (or carries on) and the result is
     one valid session holding everything."""
@@ -188,11 +200,7 @@ def test_recover_alone_restores_every_crash_state(images, tmp_path, state):
 @pytest.mark.parametrize("state", STATES[:5] + STATES[-3:-1], ids=lambda s: s[0])
 def test_the_cli_restores_them_too(images, tmp_path, state):
     path = _build(images, tmp_path, state)
-    proc = subprocess.run(
-        [sys.executable, "-m", "mef3io", "recover", str(path), "--apply", "--no-backup"],
-        capture_output=True, text=True, cwd=str(REPO),
-        env={**__import__("os").environ, "PYTHONPATH": str(REPO / "python")},
-    )
+    proc = _cli("recover", str(path), "--apply", "--no-backup")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     _check(path, state)
 
@@ -244,17 +252,95 @@ def test_a_new_segment_cut_off_before_its_data_is_removed(tmp_path, what, empty)
     assert mef3io.Validator(str(path)).validate().ok
 
 
-def test_a_new_segment_whose_data_landed_but_not_its_tmet_is_left_with_advice(tmp_path):
-    """Samples on disk but no .tmet: it cannot be rebuilt, so it is skipped
-    (never deleted) with what to do."""
+def test_a_first_segment_whose_tmet_is_lost_is_skipped_with_advice(tmp_path):
+    """A channel's FIRST segment has no previous .tmet to rebuild from (its
+    files are flushed when written, so only another tool's session or a lying
+    disk gets here): skipped, never deleted, with what to do."""
+    path = tmp_path / "s.mefd"
+    with mef3io.Writer(str(path), block_length=BLOCK) as w:
+        w.write_int32("ch1", OLD, 1.0, START, FS)
+        w.write_int32("ch2", OLD, 1.0, START, FS)
+    folder = next(Path(path).glob("ch2.timd/*.segd"))
+    next(folder.glob("*.tmet")).write_bytes(b"")
+    rep = mef3io.recover_session(str(path), apply=True, backup=False)
+    assert rep.skipped and "strict=False" in rep.skipped[0], rep.summary()
+    assert "first segment" in rep.skipped[0]
+    assert folder.exists()
+    with pytest.warns(mef3io.UnreadableSegmentWarning):
+        r = mef3io.Reader(str(path), strict=False)
+    with r:
+        np.testing.assert_array_equal(r.read("ch1"), OLD.astype(float))
+
+
+@pytest.mark.parametrize("size", [0, 1000], ids=["empty", "short"])
+def test_a_lost_tmet_of_a_later_segment_is_rebuilt(tmp_path, size):
+    """A long-lived Writer's new segment: its files are not flushed (only a
+    channel's first segment's are), so a power cut can leave the .tmet empty
+    while the data and index landed. Recovery rebuilds it from the previous
+    segment's .tmet plus this segment's own files, then re-derives the
+    declarations: valid, every sample readable, and the recorder carries on."""
     path = tmp_path / "s.mefd"
     with mef3io.Writer(str(path), block_length=BLOCK) as w:
         w.write_int32("ch1", OLD, 1.0, START, FS)
         w.write_int32("ch1", NEW, 1.0, T_NEW, FS, new_segment=True)
+    with mef3io.Reader(str(path)) as r:
+        want = r.read("ch1")
+        info = r.info("ch1")
     folder = sorted(Path(path).glob("ch1.timd/*.segd"))[-1]
-    next(folder.glob("*.tmet")).write_bytes(b"")
-    rep = mef3io.recover_session(str(path), apply=True, backup=False)
-    assert rep.skipped and "strict=False" in rep.skipped[0], rep.summary()
-    assert folder.exists()
-    with mef3io.Reader(str(path), strict=False) as r:
-        np.testing.assert_array_equal(r.read("ch1")[: len(OLD)], OLD.astype(float))
+    tmet = next(folder.glob("*.tmet"))
+    original = tmet.read_bytes()
+    tmet.write_bytes(original[:size])
+
+    dry = mef3io.recover_session(str(path))
+    assert dry.segments and "rebuilt" in dry.segments[0].action, dry.summary()
+    assert tmet.read_bytes() == original[:size], "a dry run must not write"
+    rep = mef3io.recover_session(str(path), apply=True)
+    assert not rep.skipped, rep.summary()
+    assert mef3io.Validator(str(path)).validate().ok
+    with mef3io.Reader(str(path)) as r:
+        np.testing.assert_array_equal(r.read("ch1"), want)
+        assert r.info("ch1")["end_time"] == info["end_time"]
+        prov = r.segments("ch1")[-1]["provenance"]
+    assert "recovery" in str(prov), prov
+    # Sections 1-3 equal the lost original byte for byte, but for section 2's
+    # maximum_difference_bytes (s2 + 6388): an allocation size, which the
+    # validator only requires to be large enough — the rebuilt one may be the
+    # previous segment's larger value, never a smaller one than needed.
+    import struct
+    rebuilt = tmet.read_bytes()
+    md = 2560 + 6388
+    assert rebuilt[1024:md] == original[1024:md]
+    assert rebuilt[md + 4:] == original[md + 4:]
+    got_diff, want_diff = (struct.unpack_from("<I", b, md)[0] for b in (rebuilt, original))
+    assert got_diff >= want_diff
+    again = mef3io.recover_session(str(path))
+    assert again.nothing_to_do, again.summary()
+    more = _samples(int(5 * FS), 3)
+    with mef3io.Writer(str(path), block_length=BLOCK) as w:
+        w.write_int32("ch1", more, 1.0, START + int((OLD_S + NEW_S) * 1e6), FS)
+    assert mef3io.Validator(str(path)).validate().ok
+
+
+def test_a_healthy_legacy_session_is_left_byte_for_byte(tmp_path):
+    """recover --apply is not a "repair everything": a healthy mef_tools session
+    carries the legacy writer's declaration findings, and recovery must
+    neither report nor touch them (that is `repair`'s job, by explicit id)."""
+    mef_tools = pytest.importorskip("mef_tools.io")
+    path = tmp_path / "legacy.mefd"
+    w = mef_tools.MefWriter(str(path), overwrite=True)
+    w.mef_block_len = BLOCK
+    x = np.random.default_rng(9).normal(0, 50, int(40 * FS))
+    w.write_data(x[: len(x) // 2], "ch1", START, FS, precision=3)
+    w.write_data(x[len(x) // 2:], "ch1", START + int(20 * 1e6), FS, precision=3)
+    del w
+    assert not mef3io.Validator(str(path)).validate().ok, "fixture must carry legacy findings"
+    before = {f: f.read_bytes() for f in Path(path).rglob("*") if f.is_file()}
+
+    dry = mef3io.recover_session(str(path))
+    assert dry.nothing_to_do, dry.summary()
+    proc = _cli("recover", str(path), "--apply")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    after = {f: f.read_bytes() for f in Path(path).rglob("*") if f.is_file()}
+    assert after == before
+    assert not Path(str(path) + ".repair-backup").exists()
+    assert not Path(str(path) + ".recover-backup").exists()

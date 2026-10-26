@@ -190,8 +190,14 @@ TEST_CASE("a write flushes only the .tmet it replaces, before the rename", "[dur
   {
     SessionWriter w(session, true);
     for (const char* ch : channels) w.write_int32(ch, a, 0.5, start, rate);
-    // A FRESH write flushes nothing: there is nothing underneath it to lose.
-    REQUIRE(log.take().empty());
+    // A FRESH session: each channel's FIRST segment flushes its three files
+    // (once per channel: no previous segment a lost .tmet could be rebuilt
+    // from). Nothing else.
+    {
+      const auto first = log.take();
+      REQUIRE(first.size() == 3 * 3);
+      for (const auto& p : first) REQUIRE(ends_with(p, ".mef3io-tmp"));
+    }
 
     // An append through the SAME writer (cached index path): exactly one flush
     // per channel, of the .tmet temp file, i.e. before the rename publishes it.
@@ -202,9 +208,9 @@ TEST_CASE("a write flushes only the .tmet it replaces, before the rename", "[dur
       INFO(p);
       REQUIRE(ends_with(p, ".tmet.mef3io-tmp"));
     }
-    // A forced new segment in a session THIS writer created: not flushed
-    // (a conversion writing thousands of segments would pay 3 flushes each;
-    // a dataless segment cut off by a power cut is removed by recovery).
+    // A forced new, NON-FIRST segment in a session THIS writer created: not
+    // flushed (a conversion writing thousands of segments would pay 3 flushes
+    // each); recovery rebuilds a lost .tmet there from the previous segment's.
     w.write_int32("ch1", a, 0.5, start + 2 * step, rate, {}, /*new_segment=*/true);
     REQUIRE(log.take().empty());
   }

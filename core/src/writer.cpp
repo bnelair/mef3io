@@ -77,14 +77,12 @@ void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
   // confined to the last append of one segment, detected by the validator and
   // fixed by `recover_session`.
   //
-  // A FRESH file is flushed only when the caller says so (`flush_new`): a new
-  // segment, or a new channel, in a session that already held data. There a
-  // zero-length .tmet, .tidx or .tdat — the classic outcome of renaming an
-  // unflushed file to a NEW name — fails the strict open of the WHOLE
-  // session, days of data included (review of #153). A fresh SESSION is not
-  // flushed: nothing underneath it to lose, and a crash part-way leaves an
-  // incomplete session either way (a 128-channel session writes ~400 files;
-  // flushing each cost ~3x the wall clock).
+  // A FRESH file is flushed only when the caller says so (`flush_new`,
+  // SegmentSpec::flush_new_files): a channel's first segment, or any new
+  // segment in a session that already held data. A zero-length .tmet, .tidx
+  // or .tdat — the classic outcome of renaming an unflushed file to a NEW
+  // name — fails the strict open of the WHOLE session (review of #153).
+  // Later segments of a session the writer created are left to recovery.
   const bool replacing = fs::exists(target, ignored);
   fs::remove(tmp, ignored);
   try {

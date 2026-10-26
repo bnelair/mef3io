@@ -780,8 +780,10 @@ def recover_session(
     a channel's last segment whose ``.tmet`` is newer or older than its index,
     which a power cut can leave) are re-derived from the index through
     :func:`repair_session` — so recovery alone leaves a valid session after
-    an unclean shutdown. ``python -m mef3io recover --apply`` additionally
-    repairs whatever else the validator still reports as repairable.
+    an unclean shutdown. Only the segments it reports are touched (the dry
+    run lists their check ids in ``RecoveredSegment.declarations``); a
+    healthy segment's findings are left to :func:`repair_session`. A later
+    segment whose ``.tmet`` was lost is rebuilt from the previous segment's.
     """
     raw = _backend().recover_session(
         str(path), bool(apply), bool(backup), password or "", **_hooks(cancel, progress)
@@ -812,8 +814,10 @@ def _recover_main(argv) -> int:
         prog="python -m mef3io recover",
         description=(
             "Make each segment's block index and data agree after an interrupted "
-            "write. Dry run unless --apply. Unlike 'repair', this may change the "
-            "block index and drop an incomplete trailing block."
+            "write, and re-derive the declarations of the segments it reports. Dry "
+            "run unless --apply. Unlike 'repair', this may change the block index "
+            "and drop an incomplete trailing block; it never repairs a segment it "
+            "does not report."
         ),
     )
     p.add_argument("path", help="session .mefd directory")
@@ -821,8 +825,6 @@ def _recover_main(argv) -> int:
     p.add_argument("--no-backup", action="store_true",
                    help="do not save what changes to <session>.recover-backup/")
     p.add_argument("--password", default="", help="for encrypted sessions")
-    p.add_argument("--no-repair", action="store_true",
-                   help="skip re-deriving the declarations afterwards")
     args = p.parse_args(list(argv))
 
     try:
@@ -835,22 +837,15 @@ def _recover_main(argv) -> int:
 
     print(report.summary())
 
-    # recover_session already re-derives the declarations of every segment it
-    # touched (and of a last segment whose .tmet is newer or older than its
-    # index). Anything else the validator can repair is offered here on EVERY
-    # --apply, not only when recovery changed something: "recover --apply"
-    # after an unclean shutdown is meant to be the whole procedure.
-    if report.applied and not args.no_repair:
-        outstanding = Validator(args.path, password=args.password).validate()
-        ids = outstanding.repairable_check_ids
-        if ids:
-            print()
-            print(f"re-deriving declarations from the index: {', '.join(ids)}")
-            repair_session(args.path, ids, password=args.password)
-        final = Validator(args.path, password=args.password).validate()
+    # recover_session itself re-derives the declarations of exactly the
+    # segments it reports (repair_session, per segment) — the dry run lists
+    # them. Nothing else is repaired here: a healthy segment's findings (e.g.
+    # a legacy writer's declarations) are `repair`'s business, never an
+    # implicit side effect of recovery.
+    if report.applied and report.segments:
         print()
-        print(final.summary())
-        return 0 if final.ok else 1
+        print("Recovered. Check the whole session with:  python -m mef3io validate "
+              + args.path)
 
     if report.skipped:
         return 1

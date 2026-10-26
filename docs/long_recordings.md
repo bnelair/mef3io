@@ -61,8 +61,13 @@ A NEW segment, or a new channel, in a session that already held data when the
 classic outcome of renaming an unflushed file to a new name — would fail the
 strict open of the whole session, days of data included. That is three flushes
 per new segment, once a day or so (measured: a new segment on all 128
-channels of a reopened session, ~5 s on ext4). A session the `Writer` created
-itself is not flushed (see the limits below).
+channels of a reopened session, ~5 s on ext4). A channel's FIRST segment is
+flushed the same way in any session, once per channel: it has no previous
+segment a lost `.tmet` could be rebuilt from. That is the cost a fresh
+session's first write pays (measured: 128 channels × 10 minutes, 0.85 s
+without it, 5.0 s with it); every later write of that session is unaffected. Later segments of a session the
+`Writer` created itself are not flushed (a conversion writes thousands of
+them); recovery rebuilds what a power cut takes from them (below).
 
 Nothing else is flushed. The `.tdat` and `.tidx` are extended **in place**
 (rewriting either whole would be `O(session)`), and their headers patched in
@@ -82,10 +87,12 @@ sample whose bytes reached the disk (pinned state by state in
 | the index, not all of the data (entries past the end, or pointing at pages that read back as zeros) | a read may fail, or return NaN | CRC-checks the last append's blocks, drops the entries from the first bad one, truncates the torn tail (backed up) |
 | the data, not the index | the appended samples read as NaN | indexes the CRC-valid blocks from their RED headers |
 | part of the data (a torn `.tdat`) | | keeps every whole, CRC-valid block, drops the fragment |
-| a new segment or channel whose files are empty (renamed before their bytes landed) | the strict open of the whole session fails | removes the segment when its data holds no block |
+| a later segment's `.tmet` empty or short, its data and index landed (a long-lived `Writer`'s new segment) | the strict open of the whole session fails | rebuilds the `.tmet` from the previous segment's (everything constant along the channel, byte for byte) plus this segment's own files (number, times, level UUID, start sample, native extremes), then re-derives its declarations; backed up, stamped Recovery |
+| a new segment's files empty, its data never landed | the strict open of the whole session fails | removes the segment (it holds no sample; moved to the backup) |
 
 Every segment recovery changes, and every last segment whose `.tmet` disagrees
-with its index, then has its declarations re-derived from the index, so
+with its index, then has its declarations re-derived from the index — that
+segment only, and exactly the checks the dry run lists — so
 recovery alone leaves a session that validates clean, and a recorder can carry
 on — or re-send what was lost — from where the data really ends. Data
 committed by an *earlier* append is never at risk, because nothing rewrites it.
@@ -94,14 +101,19 @@ Limits, stated exactly:
 
 - Within the torn append, blocks that follow a hole (a block that did not land
   while later ones did) are dropped with the torn tail; they are in the backup.
-  The CRC check reaches back to the append's first block, at most 64 MiB.
-- New segments and channels written by the `Writer` that CREATED the session
-  are not flushed (a conversion writing thousands of segments would pay three
-  flushes each). If a power cut leaves one of them with empty files, recovery
-  removes it when its data holds no block (nothing is lost; it goes to the
-  backup). If its samples landed but its `.tmet` did not, the `.tmet` cannot
-  be rebuilt: recovery skips the segment and says so, and the session opens
-  with `strict=False`.
+- The block CRC check covers each channel's last append, back to its first
+  block and **at most 64 MiB per channel**. Every checked byte is read once
+  (pinned with `/proc/self/io`), so a dry run of a healthy session reads up to
+  64 MiB per channel when its last segment was written in one call (a
+  conversion), and only the last append otherwise (a few hundred KB at
+  10-minute appends). Damage further back than that window is not looked for.
+- A channel's FIRST segment whose `.tmet` is lost has nothing to be rebuilt
+  from. Its files are flushed when written, so only another writer's session
+  or a disk that lied about a flush gets there: recovery skips the segment and
+  says so, and the session opens with `strict=False`.
+- Recovery repairs only the segments it reports. A healthy segment's own
+  findings (a legacy writer's declarations, for example) are left to
+  `python -m mef3io repair`, by explicit check id.
 - An append FAILS if the `.tmet` flush fails (1.x's default ignored flush
   errors). On a mount whose flush returns an error, writes stop with the OS
   error rather than claim a durability they do not have.
@@ -163,8 +175,8 @@ Recovery alone may change the index and the data. Its declaration step goes
 through `repair_session`, which only ever rewrites declarations — so the
 declarations are fixed by exactly the code the validator's repairs use (stored
 images edited, backups, provenance). Recovery is a dry run by default and
-backs up what it changes first. The CLI's `--apply` then also repairs anything
-else the validator still reports as repairable.
+backs up what it changes first. It never repairs a segment it does not
+report: the dry run lists, per segment, what `--apply` will change.
 
 On a session of hundreds of gigabytes, validation (with exact
 `maximum_difference_bytes`) and a recovery that has a long unindexed tail to
