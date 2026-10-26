@@ -408,8 +408,11 @@ an interrupted append) is never removed and does not stop the walk: it stays in
 the file and the index, every record after it stays too, and it is reported in
 `report.notes` (or as `records_damaged` when the file needs other repair).
 Nothing is removed on a guess. A tail is dropped as torn only when ALL hold:
-the `.ridx` exists and is readable; no `.ridx` entry points at or beyond the
-stopping point; no whole CRC-valid record sits anywhere in the remaining bytes
+the `.ridx` exists and is readable; no `.ridx` entry at or beyond the stopping point
+points at bytes that are present and non-zero (an entry whose bytes run past
+the end of the file, or are all zero to the end, is a write the index got ahead
+of, and is torn; one whose bytes are there but fail their length or CRC check
+is damage); no whole CRC-valid record sits anywhere in the remaining bytes
 (and the rest is not one complete record with a damaged length); and the
 remaining bytes are shorter than a record or fail as one. Otherwise (a corrupt
 length or type field, an index ahead of the data, no index at all) the stop is

@@ -24,8 +24,8 @@ notes at release time (this one is planned as 2.0.1).
     `.ridx` and the headers. The dry run lists such files (`record_files`);
     healthy and legacy files are never listed. A damaged record *header*
     (e.g. a corrupt length field) is never mistaken for a torn tail: a tail is
-    dropped only if the index exists, lists nothing at or beyond the stopping
-    point, and no intact record follows it; otherwise (and always without an
+    dropped only if the index exists, has no entry at or beyond the stopping point whose bytes are present and
+    non-zero (an index ahead of the data is recovered), and no intact record follows it; otherwise (and always without an
     index) both files are left untouched and a note says so. Until then the next
     `write_annotations` to a torn file is refused, naming `recover_session`.
   - A `strict=False` reader no longer skips a whole annotation file for one

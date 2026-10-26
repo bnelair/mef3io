@@ -61,12 +61,13 @@ truncation and no whole-file rewrite anywhere — do not add one.
   matching every offset + counts right + header CRC ok + nothing after the
   last record. Else keep every whole record, drop the rest (backed up),
   rebuild `.ridx` + both headers. The tail is dropped ONLY when
-  provably torn: ALL of (a) readable .ridx, (b) no entry at or beyond the
-  stop, (c) no CRC-valid record at any later byte position and the rest is not
+  provably torn: ALL of (a) readable .ridx, (b) no entry at/after the stop points at
+  present non-zero bytes (bytes past EOF or zero to EOF = index ahead of data =
+  TORN, recoverable; present but failing length/CRC, or CRC-valid with the
+  length restored by the remaining size or a 1-bit flip = DAMAGE), (c) no CRC-valid record at any later byte position and the rest is not
   one complete record, (d) the rest is short or fails as a record. Else both
   files stay byte-identical and a note ("record file damaged, not modified")
-  is the only output; without a .ridx nothing is ever dropped (an index that
-  landed ahead of the data is thus also left alone). Damage messages never
+  is the only output; without a .ridx nothing is ever dropped. Damage messages never
   embed raw type bytes (`safe_type` hex-escapes: a non-UTF-8 byte raised
   UnicodeDecodeError in lenient mode). The header count is NOT evidence (without barriers it lands first).
   LENIENT READ (`Session::read_record_file`): strict parse fails -> retry with

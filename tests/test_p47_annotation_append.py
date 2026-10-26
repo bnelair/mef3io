@@ -244,12 +244,6 @@ def test_every_crash_state_recovers_without_losing_a_stored_record(tmp_path, ima
         assert not rep.record_files
 
     rep = mef3io.recover_session(str(p), apply=True)
-    if rdat_k in ("torn", "zero") and ridx_k in ("new", "torn") and (rdat.read_bytes(), ridx.read_bytes()) == snapshot:
-        # the index lists the cut record (it may have landed before the data):
-        # that is indistinguishable from a damaged length, so NOTHING is
-        # dropped; both files stay as they are and the note says so.
-        assert "damaged, not modified" in " ".join(rep.notes)
-        return
     got = _notes(p)  # strict open
     texts = [t for _, t in got]
     for _, t in [(x["time"], x["text"]) for x in OLD]:
@@ -471,7 +465,7 @@ def test_a_corrupt_length_field_is_damage_not_a_torn_tail(tmp_path):
         assert not rep.record_files and not rep.skipped
         txt = " ".join(rep.notes)
         assert "damaged, not modified" in txt and "at or beyond the damage" in txt
-        assert "torn" not in txt
+        assert "listed by neither" not in txt
     # the lenient reader still gets every record the index can locate
     with mef3io.Reader(str(p), strict=False) as r:
         with pytest.warns(mef3io.UnreadableSegmentWarning):

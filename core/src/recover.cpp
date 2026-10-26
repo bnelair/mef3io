@@ -593,10 +593,37 @@ std::optional<RecordFilePlan> plan_record_file(const fsys::path& rdat) {
     if (!has_ridx || ridx.size() < UH) {
       why = "there is no readable index (.ridx), so nothing can show these bytes are an interrupted write";
     } else {
+      // An index entry at or beyond the stop is TORN (the index landed ahead
+      // of the data) only if its bytes provably never arrived: they run past
+      // the end of the file, or every byte from there to EOF is zero. Bytes
+      // that are present and non-zero are DAMAGE. A length field that merely
+      // looks too long is not enough: if the bytes are one record whose CRC
+      // matches with the length restored (the remaining size, or the stored
+      // length with one bit flipped), it is damage too.
+      auto entry_is_damage = [&](std::uint64_t u) {
+        if (u + fmt::RECORD_HEADER_BYTES > bytes.size()) return false;  // header cut: torn
+        if (std::all_of(bytes.begin() + static_cast<std::ptrdiff_t>(u), bytes.end(), [](ui1 c) { return c == 0; }))
+          return false;  // zero-extended: torn
+        const ui4 stored = byteio::read<ui4>(bytes, u);
+        const ui4 nb = byteio::read<ui4>(bytes, u + 12);
+        const std::uint64_t room = bytes.size() - u - fmt::RECORD_HEADER_BYTES;
+        if (nb <= room) return true;  // present in full (or longer file): damage
+        if (stored == 0) return false;
+        std::vector<std::uint64_t> cands = {room};
+        for (int k = 0; k < 32; ++k) cands.push_back(nb ^ (std::uint64_t{1} << k));
+        for (auto c : cands) {
+          if (c > room) continue;
+          std::vector<ui1> tmp(bytes.begin() + static_cast<std::ptrdiff_t>(u + 4),
+                               bytes.begin() + static_cast<std::ptrdiff_t>(u + fmt::RECORD_HEADER_BYTES + c));
+          byteio::write<ui4>(tmp, 8, static_cast<ui4>(c));
+          if (crc::calculate(tmp) == stored) return true;
+        }
+        return false;  // runs past the end of the file: torn
+      };
       si8 at_or_beyond = 0;
       for (std::uint64_t o = UH; o + fmt::RECORD_INDEX_BYTES <= ridx.size(); o += fmt::RECORD_INDEX_BYTES) {
         const auto v = byteio::read<si8>(ridx, o + 8);
-        if (v >= 0 && static_cast<std::uint64_t>(v) >= off) ++at_or_beyond;
+        if (v >= 0 && static_cast<std::uint64_t>(v) >= off && entry_is_damage(static_cast<std::uint64_t>(v))) ++at_or_beyond;
       }
       auto whole_at = [&](std::uint64_t q) {  // a CRC-valid record starting at q
         if (q + fmt::RECORD_HEADER_BYTES > bytes.size()) return false;
@@ -611,18 +638,14 @@ std::optional<RecordFilePlan> plan_record_file(const fsys::path& rdat) {
       bool later_whole = false;
       for (std::uint64_t q = off + 1; q + fmt::RECORD_HEADER_BYTES <= bytes.size() && !later_whole; ++q)
         later_whole = whole_at(q);
-      bool tail_whole = false;  // the rest is one record whose length field is damaged
-      if (bytes.size() - off > fmt::RECORD_HEADER_BYTES) {
-        const ui4 stored = byteio::read<ui4>(bytes, off);
-        tail_whole = stored != 0 && crc::calculate(std::span<const ui1>(bytes).subspan(off + 4)) == stored;
-      }
+      const bool tail_whole = entry_is_damage(off);  // present, non-zero bytes at the stop
       if (at_or_beyond > 0)
         why = std::to_string(at_or_beyond) + " index entr" + (at_or_beyond == 1 ? "y points" : "ies point") +
-              " at or beyond the damage, so the record there was indexed";
+              " at or beyond the damage at bytes that are present and not zero, so the record is damaged, not torn";
       else if (later_whole)
         why = "an intact record follows the damage";
       else if (tail_whole)
-        why = "the rest of the file is one complete record with a damaged length field";
+        why = "the bytes at the stop are present and not zero (a record with a damaged field)";
     }
     if (!why.empty()) {
       p.no_change = true;
