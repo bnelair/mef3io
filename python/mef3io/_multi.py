@@ -23,8 +23,9 @@ from typing import Callable, Optional
 import numpy as np
 
 from ._cancel import CancelToken, Cancelled, _hooks
-from ._reader import (Reader, UnscaledSamplesWarning, _Announced, _check_threads,
-                      _effective_factor, _flush, _format_error, _unscaled_warning_text,
+from ._reader import (Reader, UnscaledSamplesWarning, _Announced, _channels_argument,
+                      _check_threads, _effective_factor, _float32_argument, _flush,
+                      _format_error, _one_rate_message, _unscaled_warning_text,
                       _unusable_factor_message, _usable_factor)
 from ._warnings import MefWarning, emit as _emit, identity_of as _identity_of
 
@@ -826,14 +827,15 @@ class MultiReader:
 
     def read(
         self,
-        channel: str,
+        channel,
         t0: Optional[int] = None,
         t1: Optional[int] = None,
         *,
+        dtype="float64",
         cancel: Optional["CancelToken"] = None,
         progress: Optional[Callable[[int, int], object]] = None,
     ) -> np.ndarray:
-        """Read float64 samples on the uniform sampling grid, across recordings.
+        """Read samples in units on the uniform sampling grid, across recordings.
 
         As :meth:`Reader.read`, and equal to it on the same recordings merged
         with :func:`mef3io.merge_sessions`. Time a recording does not cover
@@ -841,7 +843,60 @@ class MultiReader:
         scaled by its own units-conversion factor. The read shares
         :attr:`n_threads` between the recordings it touches; ``cancel`` stops
         every recording's read; ``progress`` reports the sum over them.
+
+        ``channel`` may be a list of names, with ``dtype=`` and the rules of
+        :meth:`Reader.read` (one rate, a 2-D array, the same errors and the
+        same defaults). Here it reads the channels one after the other, each
+        with the whole budget, so it returns what a Reader of the merged
+        session returns but without the Reader's concurrent multi-channel
+        speed-up; ``progress`` is one sequence for the whole call.
         """
+        names = _channels_argument(channel)
+        float32 = _float32_argument(dtype)
+        if names is None:
+            out, unscaled = self._read_one(channel, t0, t1, cancel, progress)
+            if unscaled:
+                self._warn_unscaled(channel, stacklevel=3)
+            return out.astype(np.float32) if float32 else out
+        self._check_open()
+        _hooks(cancel, progress)  # validate the arguments as Reader does
+        # Reader's argument rule, in its order: each name must exist and
+        # share the first one's rate; defaults = the union of their spans.
+        first = self.info(names[0])
+        fs0 = first["sampling_frequency"]
+        start, end = first["start_time"], first["end_time"]
+        for ch in names:
+            info = self.info(ch)
+            if not info["sampling_frequency"] == fs0:
+                raise ValueError(_one_rate_message(names[0], fs0, ch, info["sampling_frequency"]))
+            start, end = min(start, info["start_time"]), max(end, info["end_time"])
+        t0 = start if t0 is None else t0
+        t1 = end if t1 is None else t1
+        # One progress sequence for the call: each channel's (done, total)
+        # on top of the channels before it.
+        report = None
+        base, last = [0, 0], [0, 0]
+        if progress is not None:
+            def report(d, t):
+                last[0], last[1] = d, t
+                return progress(base[0] + d, base[1] + t)
+        rows, unscaled = [], []
+        for ch in names:
+            last[:] = [0, 0]
+            out, u = self._read_one(ch, t0, t1, cancel, report)
+            base[0] += last[0]
+            base[1] += last[1]
+            rows.append(out)
+            if u:
+                unscaled.append(ch)
+        n = max(_llround(float(int(t1) - int(t0)) * fs0 / 1e6), 0)
+        out = np.stack(rows) if rows else np.empty((0, n))
+        for ch in dict.fromkeys(unscaled):
+            self._warn_unscaled(ch, stacklevel=3)
+        return out.astype(np.float32) if float32 else out
+
+    def _read_one(self, channel, t0, t1, cancel, progress):
+        """One channel's read in units, and whether it returned raw counts."""
         fs, t0, n, touched, results = self._gather(channel, t0, t1, cancel, progress)
         # Reader.read never warns (its block-copy detail is read_raw's): the
         # warnings collected with each part are dropped here, not emitted.
@@ -866,9 +921,7 @@ class MultiReader:
             fac[fac == 0] = 1.0  # not set: the raw counts, as Reader.read
             out = samples.astype(np.float64) * fac
         out[valid == 0] = np.nan
-        if unscaled:
-            self._warn_unscaled(channel, stacklevel=3)
-        return out
+        return out, unscaled
 
     def _warn_unscaled(self, channel: str, stacklevel: int) -> None:
         # Once per MultiReader and channel, as a Reader does.
@@ -1012,16 +1065,34 @@ class MultiReader:
             return self._readers[0].segments(channel)  # Reader's own error
         return [dict(s) for s in self._segment_map(channel)[1]]
 
-    def block_envelope(self, channel: str, t0: Optional[int] = None,
+    def block_envelope(self, channel, t0: Optional[int] = None,
                        t1: Optional[int] = None) -> dict:
         """Minimum and maximum of every data block, across recordings.
 
         As :meth:`Reader.block_envelope` (same keys and dtypes): one row per
-        block, every recording's in time order.
+        block, every recording's in time order. A list of names gives a dict
+        keyed by channel, as a Reader does.
         """
+        names = _channels_argument(channel, "block_envelope")
         self._check_open()
+        if names is None:
+            out, unscaled = self._envelope_one(channel, t0, t1)
+            if unscaled:
+                self._warn_unscaled(channel, stacklevel=3)
+            return out
+        result, unscaled = {}, []
+        for ch in dict.fromkeys(names):
+            result[ch], u = self._envelope_one(ch, t0, t1)
+            if u:
+                unscaled.append(ch)
+        for ch in unscaled:
+            self._warn_unscaled(ch, stacklevel=3)
+        return result
+
+    def _envelope_one(self, channel, t0, t1):
+        """One channel's envelope, and whether a part returned raw counts."""
         if channel not in self._holders:
-            return self._readers[0].block_envelope(channel, t0, t1)
+            return self._readers[0].block_envelope(channel, t0, t1), False
         ks = self._holders[channel]
         if t0 is not None or t1 is not None:
             info = self._infos[channel]
@@ -1035,12 +1106,12 @@ class MultiReader:
         pendings = {k: [] for k in ks}
         parts = _run(lambda k: self._readers[k]._block_envelope(channel, t0, t1, pendings[k]),
                      ks, self._workers())
-        if any(c is UnscaledSamplesWarning for p in pendings.values() for c, _, _ in p):
-            self._warn_unscaled(channel, stacklevel=3)
+        unscaled = any(c is UnscaledSamplesWarning for p in pendings.values() for c, _, _ in p)
         if len(parts) == 1:
-            return parts[0]
+            return parts[0], unscaled
         order = np.argsort(np.concatenate([p["start_uutc"] for p in parts]), kind="stable")
-        return {key: np.concatenate([p[key] for p in parts])[order] for key in parts[0]}
+        return ({key: np.concatenate([p[key] for p in parts])[order] for key in parts[0]},
+                unscaled)
 
     def toc(self, channel: str) -> list[dict]:
         """Block-level table of contents, across recordings.

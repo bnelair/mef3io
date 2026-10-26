@@ -830,6 +830,39 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   NaN. Times come from the index entries, not the RED headers (reading those
   would mean touching .tdat); read() places by the header copy, which agrees
   on any consistent file. Python + C++ only (no C ABI/MATLAB yet).
+- **Multi-channel reads (#90; part of #68).** `Reader::read_many` /
+  `read_many_f32` (-> `ChannelRows<T>`: one uninitialized `new T[]`
+  row-major buffer, handed to numpy as 2-D with NO copy) and `read_f32`; ONE
+  implementation `read_many_impl<T>` serves read() too (one channel, a
+  std::vector NaN-filled at assign). Rules: arguments FIRST, before any
+  request (empty -> invalid_argument; each name channel_info -> out_of_range,
+  then rate EXACTLY equal to the first's -> invalid_argument "ONE sampling
+  rate ... separate calls"; Python's MultiReader mirrors the text,
+  `_one_rate_message`, rates as %.17g); unset t0/t1 = union of the channels'
+  spans. Phase 1 = `collect_blocks` + `plan_blocks` (claim_range) per channel
+  via `parallel_try_each(..., Work::Io)`; then IN LIST ORDER: rethrow that
+  channel's error, else refuse its unusable factor — the error a loop of
+  read() raises first. Phase 2 = parallel NaN fill of the rows (serial first
+  touch of 513 MB was 0.53 s of a 0.79 s read) then ONE `parallel_for` over
+  every (channel, job) with count != 0 — never a pool per channel; each slot
+  = T(double(count) * its job's effective factor), which equals read_raw's
+  spans applied (spans merge only EQUAL factors). float32 = static_cast of
+  that double = numpy astype. Unscaled noted per job that wrote a sample.
+  Progress total = all channels' decode bytes (constant). Lenient problems()
+  appended during phase 1 may come in any order across channels.
+  `block_envelope_many` = per-channel block_envelope on Work::Io threads,
+  first error in list order. Python: `read(str|list|tuple, dtype=)` (2-D for
+  a list; list -> binding `read_many`, `_channels_argument` /
+  `_float32_argument` in _reader.py); `block_envelope(list)` -> dict keyed by
+  name (duplicates once). MultiReader: a LOOP of its own single reads (each
+  with the whole budget; progress offset into one sequence; warnings after
+  success) — equals the merged Reader (test_p45), budget pinned in test_p42.
+  compat get_data(list): grouped by (fs, resolved t0, t1) -> read_many, an
+  unset stamp resolved to each channel's own start/end. read_raw stays
+  single-channel; C ABI/MATLAB not yet. Tests: tests/test_p45_read_many.py,
+  core/tests/test_read_many.cpp (requests == the loop's, list < loop/2 at
+  10 ms/request), GIL in test_p31; bench "[.read-many-bench]" +
+  benchmarks/read_many_benchmark.py (docs/benchmarks.md).
 - **Conversion factors are PER SEGMENT (#150).** Section 2 of each segment
   stores its own units_conversion_factor and one channel may mix them
   (`new_segment=True` with another precision, foreign recorders; meflib's

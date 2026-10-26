@@ -3,7 +3,9 @@
 // units scaling, and a block table of contents.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -47,6 +49,20 @@ struct RawData {
   /// non-empty list means the file is internally inconsistent and the header
   /// copy was used. See BlockCopyMismatch.
   std::vector<BlockCopyMismatch> block_copy_mismatches;
+};
+
+/// A multi-channel read's result (Reader::read_many): `channels` rows of
+/// `samples_per_channel` values each, row-major in one buffer, row i =
+/// the i-th channel asked for. One allocation, so a binding can hand it on
+/// as a 2-D array without a copy.
+template <class T>
+struct ChannelRows {
+  std::size_t channels = 0;
+  std::size_t samples_per_channel = 0;
+  std::unique_ptr<T[]> data;  ///< channels * samples_per_channel values
+  T* row(std::size_t i) { return data.get() + i * samples_per_channel; }
+  const T* row(std::size_t i) const { return data.get() + i * samples_per_channel; }
+  std::size_t size() const { return channels * samples_per_channel; }
 };
 
 /// High-level MEF 3.0 reader: windowed reads on a uniform sample grid with
@@ -138,6 +154,44 @@ class Reader {
   std::vector<sf8> read(const std::string& channel, std::optional<si8> t0 = std::nullopt,
                         std::optional<si8> t1 = std::nullopt, const Control& ctl = {});
 
+  /// read() as float32: each value is the float64 value read() returns,
+  /// rounded to the nearest float32 (exactly `read(...)` cast to float), NaN
+  /// in gaps. float32 holds 24 significant bits, so a value keeps about 7
+  /// significant decimal digits (relative error <= 2^-24); counts up to
+  /// 2^24 in magnitude stay exact with factor 1. Half the memory of read().
+  std::vector<sf4> read_f32(const std::string& channel, std::optional<si8> t0 = std::nullopt,
+                            std::optional<si8> t1 = std::nullopt, const Control& ctl = {});
+
+  /// Read several channels over ONE window into one row-major array
+  /// (ChannelRows): `channels.size()` rows of n samples each (row i = channels[i], in the
+  /// order given, duplicates allowed), n = the window's grid count. Every row
+  /// is exactly what read() of that channel over the same `[t0, t1)` returns
+  /// (same grid, NaN gaps, per-segment scaling, refusals), so the result is
+  /// byte-identical to stacking per-channel reads, at any thread count.
+  ///
+  /// One call does the work of the whole list: every channel's index and
+  /// data reads are issued concurrently on this Reader's threads (file
+  /// access, threads() as for the open), then ONE decode pool runs over all
+  /// blocks of all channels. `ctl.cancel` and `ctl.progress` cover the whole
+  /// call (progress: compressed bytes of every block decoded, all channels).
+  ///
+  /// @param t0,t1  unset = the earliest start / latest end of the listed
+  ///               channels (for one channel, read()'s defaults).
+  /// @throws std::invalid_argument  `channels` is empty, or the channels do
+  ///         not all share one sampling frequency (exact equality: one grid
+  ///         for every row). Read each rate in its own call.
+  /// @throws std::out_of_range  an unknown channel (checked, with the rates,
+  ///         before anything is read).
+  /// Errors raised while reading are those of the first channel, in list
+  /// order, that fails — what a loop of read() calls raises.
+  ChannelRows<sf8> read_many(const std::vector<std::string>& channels,
+                             std::optional<si8> t0 = std::nullopt,
+                             std::optional<si8> t1 = std::nullopt, const Control& ctl = {});
+  /// read_many() as float32 (see read_f32() for the precision).
+  ChannelRows<sf4> read_many_f32(const std::vector<std::string>& channels,
+                                 std::optional<si8> t0 = std::nullopt,
+                                 std::optional<si8> t1 = std::nullopt, const Control& ctl = {});
+
   /// INTERNAL — not part of the public API (Python's MultiReader only).
   /// read_raw() with this call's decode thread count given explicitly instead
   /// of the Reader's. A MultiReader splits ONE budget between the recordings a
@@ -167,6 +221,15 @@ class Reader {
     return session_.block_envelope(channel, t0, t1);
   }
 
+  /// block_envelope() of each channel in @p channels (same order, one
+  /// envelope each; any mix of sampling rates). The channels' indices are
+  /// read concurrently on this Reader's threads (file access); still index
+  /// only, nothing decoded and no .tdat byte read. Errors: the first
+  /// channel's, in list order, that fails.
+  std::vector<BlockEnvelope> block_envelope_many(const std::vector<std::string>& channels,
+                                                 std::optional<si8> t0 = std::nullopt,
+                                                 std::optional<si8> t1 = std::nullopt);
+
   /// Per-segment map of @p channel: each segment's time and sample ranges and
   /// block count, from metadata only (nothing decoded). Locates data across
   /// large gaps; complements toc(), which is block-level.
@@ -192,6 +255,10 @@ class Reader {
   RawData read_raw_impl(const std::string& channel, std::optional<si8> t0,
                         std::optional<si8> t1, int n_threads, const Control& ctl,
                         bool in_units);
+  /// `alloc(n)` -> {n slots, whether they already hold NaN}.
+  template <class T, class Alloc>
+  void read_many_impl(const std::vector<std::string>& channels, std::optional<si8> t0,
+                      std::optional<si8> t1, const Control& ctl, Alloc&& alloc);
 
   Session session_;  // holds the thread count too (one atomic, one place)
 };

@@ -139,12 +139,32 @@ class MefReader:
         picked = self._pick(channels if isinstance(channels, list) else [channels])
         if not isinstance(channels, list):
             picked = picked[:1] or [channels]  # an unknown name: the backend's error
-        out = [self._r.read(ch, t_stamp1, t_stamp2) for ch in picked]
+            out = [self._r.read(ch, t_stamp1, t_stamp2) for ch in picked]
+        else:
+            out = self._read_many(picked, t_stamp1, t_stamp2)
         pending: list = []
         for ch in picked:  # a segment with no factor set read as raw counts
             _note_unscaled(self._r, self._announced, self._path_str, ch, pending)
         _flush(pending, stacklevel=2)
         return out if isinstance(channels, list) else out[0]
+
+    def _read_many(self, picked, t_stamp1, t_stamp2) -> list:
+        # One multi-channel read (#90) per group of channels sharing a rate
+        # and a window: the legacy API takes any mix of rates, and an unset
+        # stamp means each channel's OWN start/end, which is what the backend
+        # defaults to for one channel. So the values are those of the
+        # per-channel loop this replaced, row for row.
+        groups: dict = {}
+        for ch in picked:
+            info = self._r.info(ch)
+            a = info["start_time"] if t_stamp1 is None else t_stamp1
+            b = info["end_time"] if t_stamp2 is None else t_stamp2
+            groups.setdefault((info["sampling_frequency"], a, b), []).append(ch)
+        rows = {}
+        for (_, a, b), names in groups.items():
+            for ch, row in zip(names, self._r.read_many(names, a, b)):
+                rows[ch] = row
+        return [rows[ch] for ch in picked]
 
     def block_envelope(self, channel: str, t_stamp1=None, t_stamp2=None) -> dict:
         """Per-block minimum and maximum from the block index alone.

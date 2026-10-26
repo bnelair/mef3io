@@ -51,6 +51,14 @@ nb::ndarray<nb::numpy, T> vec_to_numpy(std::vector<T>&& v) {
   size_t n = heap->size();
   return nb::ndarray<nb::numpy, T>(heap->data(), {n}, owner);
 }
+// A multi-channel read's rows as a 2-D array (channels x n), no copy: numpy
+// owns the buffer through a capsule.
+template <typename T>
+nb::ndarray<nb::numpy, T> rows_to_numpy(mef3io::ChannelRows<T>&& r) {
+  T* data = r.data.release();
+  nb::capsule owner(data, [](void* p) noexcept { delete[] static_cast<T*>(p); });
+  return nb::ndarray<nb::numpy, T>(data, {r.channels, r.samples_per_channel}, owner);
+}
 }  // namespace
 
 namespace {
@@ -1918,18 +1926,44 @@ NB_MODULE(_mef3io, m) {
       .def(
           "read",
           [opt_time](mef3io::Reader& r, const std::string& ch, nb::object t0, nb::object t1,
-                     const mef3io::CancelToken* cancel, nb::object progress) {
+                     bool float32, const mef3io::CancelToken* cancel, nb::object progress) {
             // Resolve the Python arguments BEFORE releasing the GIL —
             // nb::cast is Python C API and crashes without a thread state
             // (bit us with float timestamps, e.g. t0 + 10*1e6).
             auto a = opt_time(t0), b = opt_time(t1);
             PyHooks hooks(cancel, std::move(progress));
+            if (float32) {
+              std::vector<mef3io::sf4> v = hooks.run(
+                  [&](const mef3io::Control& ctl) { return r.read_f32(ch, a, b, ctl); });
+              return nb::cast(vec_to_numpy(std::move(v)));
+            }
             std::vector<mef3io::sf8> v = hooks.run(
                 [&](const mef3io::Control& ctl) { return r.read(ch, a, b, ctl); });
-            return vec_to_numpy(std::move(v));
+            return nb::cast(vec_to_numpy(std::move(v)));
           },
           nb::arg("channel"), nb::arg("t0") = nb::none(), nb::arg("t1") = nb::none(),
-          nb::kw_only(), nb::arg("cancel").none() = nb::none(),
+          nb::kw_only(), nb::arg("float32") = false, nb::arg("cancel").none() = nb::none(),
+          nb::arg("progress") = nb::none())
+      .def(
+          "read_many",
+          [opt_time](mef3io::Reader& r, const std::vector<std::string>& chs, nb::object t0,
+                     nb::object t1, bool float32, const mef3io::CancelToken* cancel,
+                     nb::object progress) {
+            auto a = opt_time(t0), b = opt_time(t1);  // see read: cast needs the GIL
+            PyHooks hooks(cancel, std::move(progress));
+            // One call for the whole list (#90): concurrent file access, one
+            // decode pool, all without the GIL. Row-major (channels x n).
+            if (float32) {
+              auto v = hooks.run(
+                  [&](const mef3io::Control& ctl) { return r.read_many_f32(chs, a, b, ctl); });
+              return nb::cast(rows_to_numpy(std::move(v)));
+            }
+            auto v = hooks.run(
+                [&](const mef3io::Control& ctl) { return r.read_many(chs, a, b, ctl); });
+            return nb::cast(rows_to_numpy(std::move(v)));
+          },
+          nb::arg("channels"), nb::arg("t0") = nb::none(), nb::arg("t1") = nb::none(),
+          nb::kw_only(), nb::arg("float32") = false, nb::arg("cancel").none() = nb::none(),
           nb::arg("progress") = nb::none())
       .def(
           "read_raw",
@@ -2016,6 +2050,28 @@ NB_MODULE(_mef3io, m) {
             return d;
           },
           nb::arg("channel"), nb::arg("t0").none() = nb::none(), nb::arg("t1").none() = nb::none())
+      .def(
+          "block_envelope_many",
+          [](mef3io::Reader& r, const std::vector<std::string>& chs,
+             std::optional<std::int64_t> t0, std::optional<std::int64_t> t1) {
+            std::vector<mef3io::BlockEnvelope> es;
+            {
+              nb::gil_scoped_release rel;  // every listed channel's .tidx, concurrently
+              es = r.block_envelope_many(chs, t0, t1);
+            }
+            nb::list out;
+            for (auto& e : es) {
+              nb::dict d;
+              d["start_uutc"] = vec_to_numpy(std::move(e.start_uutc));
+              d["end_uutc"] = vec_to_numpy(std::move(e.end_uutc));
+              d["min"] = vec_to_numpy(std::move(e.minimum));
+              d["max"] = vec_to_numpy(std::move(e.maximum));
+              out.append(d);
+            }
+            return out;
+          },
+          nb::arg("channels"), nb::arg("t0").none() = nb::none(),
+          nb::arg("t1").none() = nb::none())
       .def("toc",
            [](mef3io::Reader& r, const std::string& ch) {
              std::vector<mef3io::BlockIndexEntry> entries;

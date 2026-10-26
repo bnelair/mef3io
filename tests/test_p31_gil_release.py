@@ -248,3 +248,22 @@ def test_block_envelope_does_not_hold_the_gil(envelope_segments):
     """block_envelope reads every segment's .tidx (fresh Reader: cold index cache)."""
     _assert_releases(
         lambda: (lambda r=m.Reader(envelope_segments): r.block_envelope("ch", None, None)))
+
+
+@pytest.mark.parametrize("call", [
+    pytest.param(lambda r: r.read_many(["ch"] * 4, None, None), id="_mef3io.Reader.read_many"),
+    pytest.param(lambda r: r.read_many(["ch"] * 4, None, None, float32=True),
+                 id="_mef3io.Reader.read_many-float32"),
+    pytest.param(lambda r: r.block_envelope_many(["ch"] * 3, None, None),
+                 id="_mef3io.Reader.block_envelope_many"),
+])
+def test_a_multi_channel_call_does_not_hold_the_gil(many_segments, envelope_segments, call):
+    """#90: the list read (concurrent file access + one decode pool) and the
+    list envelope run without the GIL (fresh Reader: cold index cache)."""
+    path = envelope_segments if "envelope" in str(call.__code__.co_names) else many_segments
+    _assert_releases(lambda: (lambda r=m.Reader(path, "", 2): call(r)))
+
+
+def test_the_python_list_read_does_not_hold_the_gil(many_segments):
+    _assert_releases(lambda: (lambda r=mef3io.Reader(many_segments, n_threads=2):
+                              r.read(["ch"] * 4)))

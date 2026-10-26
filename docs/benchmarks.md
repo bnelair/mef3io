@@ -276,6 +276,70 @@ of the loop (2026-10-25): **4.7-4.9 ms per read before, 0.20-0.28 ms after**.
 The first read of a freshly opened Reader takes about 45 ms here, because it
 walks all 2,400 indexes.
 
+## Reading many channels at once
+
+`Reader.read([...])` reads a window of many channels in one call (#90): every
+channel's index and data reads are in flight at once on the Reader's
+threads, then one decode pool works through every block of every channel,
+writing straight into one 2-D array. Measured 2026-10-25 on a 12-thread Linux
+workstation with an interactive desktop running (load average about 4), a
+10-minute window at 512 Hz, one segment per channel, 10-second blocks,
+warm page cache.
+
+**Through the C++ test suite's counting source**, which adds a fixed delay to
+every file request (a slow network share, simulated; local disk
+underneath). "loop" reads the channels one after the other with `read()`,
+keeping every row; "list" is one `read_many()`. Both make exactly the same
+requests (3 per channel):
+
+| delay per request | channels | n_threads | loop | list | speed-up |
+|---|---|---|---|---|---|
+| none | 64 | 1 | 2.34 s | 2.35 s | 1.0x |
+| none | 64 | 4 | 0.42 s | 0.52 s | 0.8x |
+| none | 64 | 16 | 0.19 s | 0.10 s | 1.9x |
+| none | 209 | 1 | 6.57 s | 6.55 s | 1.0x |
+| none | 209 | 4 | 1.35 s | 0.65 s | 2.1x |
+| none | 209 | 16 | 0.56 s | 0.30 s | 1.9x |
+| 5 ms | 64 | 1 | 2.70 s | 3.31 s | 0.8x |
+| 5 ms | 64 | 4 | 1.50 s | 0.56 s | 2.7x |
+| 5 ms | 64 | 16 | 1.35 s | 0.17 s | 8.0x |
+| 5 ms | 209 | 1 | 8.70 s | 7.92 s | 1.1x |
+| 5 ms | 209 | 4 | 4.80 s | 2.19 s | 2.2x |
+| 5 ms | 209 | 16 | 4.39 s | 0.52 s | 8.5x |
+| 20 ms | 64 | 1 | 6.22 s | 5.65 s | 1.1x |
+| 20 ms | 64 | 4 | 4.36 s | 1.44 s | 3.0x |
+| 20 ms | 64 | 16 | 4.24 s | 0.35 s | 12.2x |
+| 20 ms | 209 | 1 | 19.37 s | 19.54 s | 1.0x |
+| 20 ms | 209 | 4 | 14.18 s | 4.79 s | 3.0x |
+| 20 ms | 209 | 16 | 13.83 s | 1.16 s | 11.9x |
+
+A loop cannot hide the delay: each channel's requests are made one after the
+other whatever the thread count, so with 20 ms per request the loop takes
+14 s on 16 threads and the list 1.2 s. With one thread the two are the same
+call sequence. Locally the list is about twice as fast from 16 threads; at
+1-4 threads the two are within the noise of this loaded machine (the list
+holds every channel's compressed blocks at once, which costs some cache
+locality).
+
+**From Python** (`benchmarks/read_many_benchmark.py`, same session shape,
+local disk, best of 3). "loop" is `np.stack([r.read(ch, t0, t1) for ch in
+channels])`; "pool" the same reads from a pool of n Python threads with the
+Reader on one thread (what a caller had to build before); "list" is
+`r.read(channels, t0, t1)`:
+
+| channels | n | loop | pool | list | list vs loop | list vs pool |
+|---|---|---|---|---|---|---|
+| 64 | 1 | 2.29 s | 2.22 s | 2.21 s | 1.0x | 1.0x |
+| 64 | 4 | 0.51 s | 0.37 s | 0.39 s | 1.3x | 0.9x |
+| 64 | 16 | 0.32 s | 0.20 s | 0.11 s | 2.8x | 1.7x |
+| 209 | 1 | 5.30 s | 4.23 s | 4.85 s | 1.1x | 0.9x |
+| 209 | 4 | 2.66 s | 1.20 s | 1.01 s | 2.6x | 1.2x |
+| 209 | 16 | 1.19 s | 0.84 s | 0.32 s | 3.7x | 2.6x |
+
+The Python loop also pays for `np.stack`, a second copy of the whole window,
+which the list read does not make. The rows are byte-identical to the single
+reads in every case (the benchmark checks it).
+
 ## Reproducing
 
 ```bash
@@ -288,6 +352,8 @@ python benchmarks/mef_benchmark.py
 # open cost with a delay per library request (C++ test suite, hidden cases)
 build-core/mef3io_tests "[.open-bench]"
 build-core/mef3io_tests "[.open-bench-threads]"   # the thread-count table
+build-core/mef3io_tests "[.read-many-bench]"      # multi-channel read, delay per request
+python benchmarks/read_many_benchmark.py          # multi-channel read from Python
 ```
 
 `pip install "mef3io[bench]"` installs everything these need.

@@ -74,6 +74,37 @@ See [Threads](../threads.md) for the rule.
   without a lock afterwards.
 
 
+## Reading many channels in one call (#90; part of #68)
+
+- **`Reader.read(channels, t0, t1)` takes a list of channel names** and
+  returns a 2-D array, one row per name in the order given. Fixes #90. Every
+  row is byte-identical to `read()` of that channel alone (same grid, NaN
+  gaps, per-segment scaling, warnings, errors); the channels must share one
+  sampling rate (`ValueError` otherwise: read each rate in its own call).
+  All channels' file reads run at once on the Reader's threads and one decode
+  pool works through every block of every channel: with 20 ms per file
+  request (a slow share, simulated), 209 channels x 10 minutes read in 1.2 s
+  on 16 threads instead of 13.8 s for a loop; locally about 2x faster from 16
+  threads, and 3.7x faster than a Python loop with `np.stack`
+  ([benchmarks](../benchmarks.md#reading-many-channels-at-once)). `cancel=`
+  and `progress=` cover the whole call. Without `t0`/`t1` the window is the
+  union of the listed channels' spans.
+- **`dtype="float32"`** on `read` (one channel or many): the float64 value
+  rounded to the nearest float32, exactly `read(...).astype(numpy.float32)`,
+  in half the memory.
+- **`block_envelope(channels)`** takes a list too and returns a dict keyed by
+  channel name, each value the single-channel dict; the indexes are read
+  concurrently, still index only. For #68 (a multi-channel form for viewers).
+- **`MultiReader`** has the same arguments and returns what a Reader of the
+  merged session returns (it reads the listed channels one after the other,
+  within its thread budget). The legacy **`MefReader.get_data(list)`** now uses
+  the multi-channel read (one call per sampling rate and window), with the
+  same arrays as before.
+- **C++:** `Reader::read_many` / `read_many_f32` (returning
+  `mef3io::ChannelRows<T>`: one row-major buffer), `Reader::read_f32`,
+  `Reader::block_envelope_many`. `read_raw` stays one channel per call. Not in
+  the C ABI or MATLAB yet (Python and C++ only).
+
 ## De-identified copies keep the times unless you ask for a shift
 
 `anonymize_session` no longer requires a shift. **Without one (the new

@@ -313,6 +313,18 @@ def test_multireader_never_uses_more_than_its_budget(monkeypatch, days, budget):
         assert reads.shares == [budget]
 
 
+@pytest.mark.parametrize("budget", [1, 2, 5])
+def test_a_multireader_list_read_stays_within_its_budget(monkeypatch, days, budget):
+    """A multi-channel read (#90) is a loop of the MultiReader's own reads:
+    each splits the ONE budget, they never overlap each other."""
+    opens, reads = _metered(monkeypatch)
+    with _quiet(mef3io.MultiReader, days, n_threads=budget) as mr:
+        x = mr.read(["a", "a", "a"])
+        assert x.shape[0] == 3
+        assert reads.peak <= budget
+        assert len(reads.shares) >= 3 * len(days)
+
+
 def test_multireader_automatic_budget_is_the_core_s(monkeypatch, days):
     opens, reads = _metered(monkeypatch)
     with _quiet(mef3io.MultiReader, days) as mr:
