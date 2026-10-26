@@ -81,15 +81,16 @@ signal[1000:1500] = np.nan               # a gap: NaN is stored as missing data
 
 with mef3io.Writer("session.mefd", overwrite=True, units="uV") as w:
     w.write("eeg1", signal, start, fs=fs)
+    w.write("eeg2", signal[::-1].copy(), start, fs=fs)
     w.write_annotations([{"time": start, "text": "recording start"}], channel="eeg1")
 # leaving the block waits until everything is on disk (w.flush() does it mid-way):
 # https://bnelair.github.io/mef3io/long_recordings/#when-is-my-data-on-disk
 
 with mef3io.Reader("session.mefd") as r:
-    print(r.channels)                     # ['eeg1']
+    print(r.channels)                     # ['eeg1', 'eeg2']
     x = r.read("eeg1", start, start + 10_000_000)  # first 10 s, float64, gaps = NaN
     print(r.segments("eeg1"))             # what data is where
-    X = r.read(["eeg1"], start, start + 10_000_000)  # a list: 2-D, one row per channel
+    X = r.read(["eeg1", "eeg2"], start, start + 10_000_000)  # a list: 2-D, one row per channel
     env = r.block_envelope("eeg1")        # per-block min/max from the index: no decoding
     print(r.records("eeg1"))              # annotations
 ```

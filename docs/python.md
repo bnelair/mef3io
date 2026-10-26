@@ -172,8 +172,8 @@ How it works, and what it guarantees:
   can adding an offset that is not a multiple of the step (`counts * 0.195
   + 0.05` is on a 0.005 step); that step is then found and the data is
   stored exactly — losslessly, but not always smaller than the default.
-- **A channel keeps one conversion factor** for new data (the reader
-  itself scales each segment by its own, so older segments may differ), so once a channel
+- **A channel keeps one conversion factor** for new data (older segments
+  may differ; the reader scales each segment by its own). So once a channel
   has data (an append, or `new_segment=True`), `"step"` stores new data on
   the channel's factor: exactly when the data is a whole multiple of it,
   and otherwise **not at all** — the write raises `WriteConflictError` and
