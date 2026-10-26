@@ -13,24 +13,8 @@
 
 namespace mef3io {
 namespace {
-// Number of output samples of a window [t0, t1) (the C ABI's
-// mef3io_reader_n_samples mirrors it). Its argument is never negative.
-si8 grid_count(si8 t1, si8 t0, sf8 fs) {
-  return static_cast<si8>(std::llround(static_cast<sf8>(t1 - t0) * fs / 1e6));
-}
-
-// Output slot of a sample (or block start) at absolute uUTC `t`: the nearest
-// slot of the [t0, fs) grid, a TIE going to the EARLIER slot whatever the
-// sign of t - t0 (#129). So slot 0 holds the first sample at or after t0.
-// std::llround rounds halves away from zero: the block holding t0 (negative
-// offset) went one way and every later block (positive offset) the other,
-// leaving one slot no block claimed -- a NaN at the first block boundary of
-// any window starting exactly half a sample off the grid (at 500 Hz, every
-// millisecond time ending in 1 ms). One rule for every block keeps
-// consecutive blocks exactly their length apart.
-si8 grid_slot(si8 t, si8 t0, sf8 fs) {
-  return static_cast<si8>(std::ceil(static_cast<sf8>(t - t0) * fs / 1e6 - 0.5));
-}
+using detail::grid_count;
+using detail::grid_slot;
 
 // Half-open output ranges claimed by one block, and the set already claimed by
 // blocks that win over it. `covered` holds disjoint, merged intervals keyed by

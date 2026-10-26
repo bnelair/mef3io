@@ -242,6 +242,27 @@ def test_unusable_factor_is_refused_not_zeroed(tmp_path, bad, shown, strict):
         assert r.problems == []
 
 
+def test_envelope_refuses_exactly_what_read_refuses(tmp_path):
+    # A block of a factor-0 segment starting less than half a sample before
+    # t1 overlaps the window by time but owns no slot of read()'s grid: read()
+    # accepts that window, so block_envelope must too (that row is NaN).
+    p = _write_mixed(tmp_path / "e.mefd")
+    _set_factor(_tmets(p)[1], 0.0)
+    t1 = START + 20 * SECOND + 1000  # 1 ms < half a period (1.95 ms) into segment 1
+    with mef3io.Reader(str(p)) as r:
+        assert len(r.read("A", START, t1)) == 2 * N
+        env = r.block_envelope("A", START, t1)
+        assert np.isnan(env["min"][-1]) and np.isnan(env["max"][-1])
+        assert env["start_uutc"][-1] == START + 20 * SECOND
+        assert not np.isnan(env["min"][:-1]).any()
+        # One more sample's worth and both refuse.
+        t1 = START + 20 * SECOND + 2000
+        with pytest.raises(mef3io.FormatError):
+            r.read("A", START, t1)
+        with pytest.raises(mef3io.FormatError):
+            r.block_envelope("A", START, t1)
+
+
 def test_multireader_refuses_with_readers_words(tmp_path):
     a = _write_mixed(tmp_path / "a.mefd", [(0, 0.01, False)])
     b = _write_mixed(tmp_path / "b.mefd", [(0, 0.2, False)], start=START + 20 * SECOND)

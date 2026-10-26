@@ -246,7 +246,8 @@ class MultiReader:
       agree. Every other field is the value the recordings holding the
       channel agree on. A field they disagree on is ``None`` (a
       :class:`MultiReaderDifferenceWarning` names such fields once, on
-      open). A session description equal to its own recording's name
+      open; not ``units_conversion_factor``, which every read handles per
+      segment). A session description equal to its own recording's name
       (what mef3io and the legacy stack write by default) counts as unset:
       day files named by date do not "disagree" on it, and when every
       recording has only the default it is ``None`` (one recording keeps
@@ -420,7 +421,12 @@ class MultiReader:
                     combined[key] = self._session_wide[key]  # one rule: every recording
                 else:
                     combined[key] = _agree(vals)
-                    if combined[key] is None and any(v is not None for v in vals):
+                    # Different conversion factors are NOT a difference worth
+                    # a warning (#150): every read scales each segment by its
+                    # own, and a Reader of the merged session gives the same
+                    # None without one.
+                    if (combined[key] is None and key != "units_conversion_factor"
+                            and any(v is not None for v in vals)):
                         differing.add(key)
             self._infos[ch] = combined
             self._check_overlap(ch, ks, infos)

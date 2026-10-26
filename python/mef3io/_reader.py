@@ -884,9 +884,12 @@ class Reader:
         Raises
         ------
         mef3io.FormatError
-            A block in the window comes from a segment whose conversion
-            factor cannot scale (as in :meth:`read`); :meth:`toc` returns the
-            counts.
+            A block that :meth:`read` of the same window would take samples
+            from (decided by read's own window and grid rule) comes from a
+            segment whose conversion factor cannot scale, as :meth:`read`
+            refuses it; :meth:`toc` returns the counts. A block of such a
+            segment that the read would not touch (one overlapping the
+            window by less than half a sample) gets NaN ``min``/``max``.
         """
         return self._ensure_impl().block_envelope(channel, t0, t1)
 

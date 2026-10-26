@@ -464,7 +464,7 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     // Where each conversion factor applies (segments may store different
     // ones). One span is the usual case; a too-small buffer reports the size
     // it needs, and the read is repeated once with that.
-    std::vector<mef3io_factor_span> spans(4);
+    std::vector<mef3io_factor_span> spans(64);  // ~1.5 KB: the retry is practically never taken
     std::int32_t n_spans = 0;
     int rc = mef3io_reader_read_raw_factors(
         r, ch.c_str(), t0, t1, mxGetInt32s(samples),
@@ -513,15 +513,25 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     need_args(nrhs, 3, "reader_segments");
     mef3io_reader* r = get_reader(prhs[1]);
     std::string ch = get_string(prhs[2], "channel");
+    // One segment table (one segment map) for all segments: a per-index
+    // accessor loop rebuilt the map for every segment, O(n^2).
     std::int32_t n = 0;
-    check(mef3io_reader_n_segments(r, ch.c_str(), &n));
+    check(mef3io_reader_segment_table(r, ch.c_str(), nullptr, nullptr, nullptr, 0, &n));
+    std::vector<mef3io_segment_info> infos(static_cast<std::size_t>(n));
+    std::vector<mef3io_provenance> provs(static_cast<std::size_t>(n));
+    std::vector<double> factors(static_cast<std::size_t>(n));
+    {
+      std::int32_t got = 0;
+      check(mef3io_reader_segment_table(r, ch.c_str(), infos.data(), provs.data(),
+                                        factors.data(), n, &got));
+      n = got;  // a lenient session can only lose segments in between
+    }
     const char* fields[] = {"segment",        "start_time",       "end_time",
                             "start_sample",   "number_of_samples", "number_of_blocks",
                             "path",           "provenance",       "units_conversion_factor"};
     plhs[0] = mxCreateStructMatrix(n, 1, 9, fields);
     for (std::int32_t i = 0; i < n; ++i) {
-      mef3io_segment_info s{};
-      check(mef3io_reader_segment(r, ch.c_str(), i, &s));
+      const mef3io_segment_info& s = infos[static_cast<std::size_t>(i)];
       mxSetField(plhs[0], i, "segment", mxCreateDoubleScalar(s.segment_number));
       mxSetField(plhs[0], i, "start_time", make_int64(s.start_time));
       mxSetField(plhs[0], i, "end_time", make_int64(s.end_time));
@@ -529,12 +539,9 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
       mxSetField(plhs[0], i, "number_of_samples", make_int64(s.number_of_samples));
       mxSetField(plhs[0], i, "number_of_blocks", make_int64(s.number_of_blocks));
       mxSetField(plhs[0], i, "path", make_utf8_string(s.path));
-      mef3io_provenance pv{};
-      check(mef3io_reader_segment_provenance(r, ch.c_str(), i, &pv));
-      mxSetField(plhs[0], i, "provenance", provenance_struct(pv));
-      double uf = 0.0;
-      check(mef3io_reader_segment_units_conversion_factor(r, ch.c_str(), i, &uf));
-      mxSetField(plhs[0], i, "units_conversion_factor", mxCreateDoubleScalar(uf));
+      mxSetField(plhs[0], i, "provenance", provenance_struct(provs[static_cast<std::size_t>(i)]));
+      mxSetField(plhs[0], i, "units_conversion_factor",
+                 mxCreateDoubleScalar(factors[static_cast<std::size_t>(i)]));
     }
     return;
   }

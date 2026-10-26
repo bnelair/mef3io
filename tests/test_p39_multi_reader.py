@@ -310,8 +310,10 @@ def test_read_raw_lists_different_units_and_read_scales_each(tmp_path):
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         r = mef3io.MultiReader([a, b])
-    assert any(issubclass(w.category, mef3io.MultiReaderDifferenceWarning)
-               and "units_conversion_factor" in w.message.details for w in caught)
+    # Reads handle different factors, so they are no difference worth a
+    # warning (#150); info still says None, as a merged session's Reader does.
+    assert not any(issubclass(w.category, mef3io.MultiReaderDifferenceWarning)
+                   for w in caught)
     with r, _quiet(mef3io.Reader, str(a)) as ra, _quiet(mef3io.Reader, str(b)) as rb:
         assert r.info("A")["units_conversion_factor"] is None
         # Since #150 a Reader of the merged session lists where each factor

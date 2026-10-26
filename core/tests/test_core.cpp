@@ -1103,6 +1103,41 @@ TEST_CASE("per-segment conversion factors: reads, spans and the C ABI (#150)") {
   std::vector<double> x(2048);
   REQUIRE(mef3io_reader_read(r, "ch", INT64_MIN, INT64_MIN, x.data(), 2048, &n) == 0);
   REQUIRE(x[1600] == static_cast<double>(counts[2][64]) * -0.5);
+  // Every segment in one call: one segment map, not one per index.
+  int32_t n_segs = 0;
+  REQUIRE(mef3io_reader_segment_table(r, "ch", nullptr, nullptr, nullptr, 0, &n_segs) == 0);
+  REQUIRE(n_segs == 3);
+  std::array<mef3io_segment_info, 3> infos{};
+  std::array<mef3io_provenance, 3> provs{};
+  std::array<double, 3> table_factors{};
+  REQUIRE(mef3io_reader_segment_table(r, "ch", infos.data(), provs.data(), table_factors.data(),
+                                      2, &n_segs) == MEF3IO_ERR_ARGUMENT);
+  REQUIRE(n_segs == 3);
+  REQUIRE(mef3io_reader_segment_table(r, "ch", infos.data(), provs.data(), table_factors.data(),
+                                      3, &n_segs) == 0);
+  for (int32_t k = 0; k < 3; ++k) {
+    mef3io_segment_info one{};
+    REQUIRE(mef3io_reader_segment(r, "ch", k, &one) == 0);
+    const auto& t = infos[static_cast<std::size_t>(k)];
+    REQUIRE(one.segment_number == t.segment_number);
+    REQUIRE(one.start_time == t.start_time);
+    REQUIRE(one.end_time == t.end_time);
+    REQUIRE(one.start_sample == t.start_sample);
+    REQUIRE(one.number_of_samples == t.number_of_samples);
+    REQUIRE(one.number_of_blocks == t.number_of_blocks);
+    REQUIRE(std::string(one.path) == std::string(t.path));
+    mef3io_provenance pv{};
+    REQUIRE(mef3io_reader_segment_provenance(r, "ch", k, &pv) == 0);
+    const auto& q = provs[static_cast<std::size_t>(k)];
+    REQUIRE(pv.present == q.present);
+    REQUIRE(pv.last_operation == q.last_operation);
+    REQUIRE(pv.modification_count == q.modification_count);
+    REQUIRE(std::string(pv.created_by) == std::string(q.created_by));
+    REQUIRE(table_factors[static_cast<std::size_t>(k)] == factors[static_cast<std::size_t>(k)]);
+  }
+  double only_factors[3] = {0, 0, 0};
+  REQUIRE(mef3io_reader_segment_table(r, "ch", nullptr, nullptr, only_factors, 3, &n_segs) == 0);
+  REQUIRE(only_factors[2] == -0.5);
   mef3io_reader_close(r);
   fsys::remove_all(dir);
 }

@@ -857,6 +857,12 @@ BlockEnvelope Session::block_envelope(const std::string& channel, std::optional<
   // segment, and containing it would mark the segment unreadable for reads
   // of its counts too.
   std::optional<sf8> unusable;
+  // Which blocks a read() of this window would take samples from: read()'s
+  // window (unset ends = the channel's start and end) and its grid rule, so
+  // the envelope never refuses a window read() accepts (#151 review). A
+  // block of such a segment outside that grid gets NaN extremes instead.
+  const si8 g0 = t0.value_or(ch.info.start_time);
+  const si8 g_n = std::max<si8>(detail::grid_count(t1.value_or(ch.info.end_time), g0, fs), 0);
   for (auto& seg : ch.segments) {
     const std::size_t mark = out.start_uutc.size();
     if (!with_segment(channel, seg, [&] {
@@ -881,16 +887,20 @@ BlockEnvelope Session::block_envelope(const std::string& channel, std::optional<
             const si8 b1 = b0 + static_cast<si8>(std::llround(
                                     static_cast<sf8>(e.number_of_samples) * 1e6 / fs));
             if (b1 <= lo || b0 >= hi) continue;
-            if (!usable_units_conversion_factor(uf)) {
-              unusable = uf;
-              return;
+            const bool usable = usable_units_conversion_factor(uf);
+            if (!usable) {
+              const si8 slot = detail::grid_slot(b0, g0, fs);
+              if (slot < g_n && slot + static_cast<si8>(e.number_of_samples) > 0) {
+                unusable = uf;
+                return;
+              }
             }
             out.start_uutc.push_back(b0);
             out.end_uutc.push_back(b1);
-            const sf8 smin = e.minimum_sample_value == fmt::RED_NAN
+            const sf8 smin = !usable || e.minimum_sample_value == fmt::RED_NAN
                                  ? nan
                                  : static_cast<sf8>(e.minimum_sample_value) * uf;
-            const sf8 smax = e.maximum_sample_value == fmt::RED_NAN
+            const sf8 smax = !usable || e.maximum_sample_value == fmt::RED_NAN
                                  ? nan
                                  : static_cast<sf8>(e.maximum_sample_value) * uf;
             // A negative factor (a polarity inversion) turns the largest

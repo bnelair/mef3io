@@ -296,7 +296,9 @@ env["min"], env["max"]                            # float64, in the channel's un
   own. A day of one channel in 10-second blocks is 8,640 rows.
 - Values are scaled like `read()`: each block by its own segment's
   conversion factor, swapped for a negative one, with the same refusal of an
-  unusable factor (`toc()` returns the counts). A block whose writer left its
+  unusable factor for the blocks `read()` of the same window would take
+  samples from (read's grid rule; `toc()` returns the counts). A block of
+  such a segment that the read would not touch gets NaN. A block whose writer left its
   extremes unset gives NaN.
 - Gaps are absent rows: compare `end_uutc` with the next `start_uutc`.
 - `toc()` returns the same blocks for the whole channel as one dict each,
@@ -592,7 +594,8 @@ warn_declarations=True, strict=True)`
   the session description are combined over every recording (also those
   without the channel), so `info()` and `metadata` agree; `metadata` is a
   `mef3io.Metadata` built the same way. A difference raises one
-  `MultiReaderDifferenceWarning` on open naming the fields, never their
+  `MultiReaderDifferenceWarning` on open naming the fields (not
+  `units_conversion_factor`: reads scale each segment by its own factor), never their
   values; each recording's own values are in `r.metadata_by_source` (and
   `r.paths` lists the recordings in time order). Different patient names or
   IDs can mean the recordings are not the same patient's.

@@ -280,9 +280,19 @@ int mef3io_reader_segment(mef3io_reader* r, const char* channel, int32_t index,
                           mef3io_segment_info* out);
 /* Segment `index`'s section-2 units_conversion_factor, as stored (0 = MEF's
  * "no entry"). Separate from mef3io_segment_info so that struct keeps its
- * size and layout. */
+ * size and layout. Each of these per-index calls builds the channel's
+ * segment map, so for every segment use mef3io_reader_segment_table. */
 int mef3io_reader_segment_units_conversion_factor(mef3io_reader* r, const char* channel,
                                                   int32_t index, double* out);
+/* Every segment of `channel` in one call (one segment map): `infos`,
+ * `provenances` and `factors` (units_conversion_factor) each hold `len`
+ * entries, or are NULL to skip that column. `*out_n` is set to the number of
+ * segments even when `len` is too small (the call then fails with
+ * MEF3IO_ERR_ARGUMENT, "buffer too small"); all three NULL with len 0 just
+ * counts. */
+int mef3io_reader_segment_table(mef3io_reader* r, const char* channel,
+                                mef3io_segment_info* infos, mef3io_provenance* provenances,
+                                double* factors, int32_t len, int32_t* out_n);
 
 typedef struct {
   int64_t start_uutc;

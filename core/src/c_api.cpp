@@ -81,6 +81,28 @@ int fail_argument(const char* msg) {
   return MEF3IO_ERR_ARGUMENT;
 }
 
+void fill_segment_info(const mef3io::SegmentInfo& s, mef3io_segment_info* out) {
+  *out = mef3io_segment_info{};
+  out->segment_number = s.segment_number;
+  out->start_time = s.start_time;
+  out->end_time = s.end_time;
+  out->start_sample = s.start_sample;
+  out->number_of_samples = s.number_of_samples;
+  out->number_of_blocks = s.number_of_blocks;
+  copy_str(out->path, sizeof out->path, s.path);
+}
+
+void fill_provenance(const mef3io::fmt::provenance::Provenance& p, mef3io_provenance* out) {
+  *out = mef3io_provenance{};
+  out->present = p.present ? 1 : 0;
+  out->layout_version = p.layout_version;
+  out->last_operation = p.last_operation;
+  out->operations_mask = p.operations_mask;
+  out->modification_count = p.modification_count;
+  copy_str(out->created_by, sizeof out->created_by, p.created_by);
+  copy_str(out->last_modified_by, sizeof out->last_modified_by, p.last_modified_by);
+}
+
 std::optional<mef3io::si8> opt_time(int64_t t) {
   if (t == MEF3IO_TIME_UNSET) return std::nullopt;
   return t;
@@ -384,14 +406,28 @@ int mef3io_reader_segment(mef3io_reader* r, const char* channel, int32_t index,
     auto segs = r->impl.segments(channel);
     if (index < 0 || static_cast<size_t>(index) >= segs.size())
       throw std::out_of_range("segment index out of range");
-    const mef3io::SegmentInfo& s = segs[static_cast<size_t>(index)];
-    out->segment_number = s.segment_number;
-    out->start_time = s.start_time;
-    out->end_time = s.end_time;
-    out->start_sample = s.start_sample;
-    out->number_of_samples = s.number_of_samples;
-    out->number_of_blocks = s.number_of_blocks;
-    copy_str(out->path, sizeof out->path, s.path);
+    fill_segment_info(segs[static_cast<size_t>(index)], out);
+  });
+}
+
+int mef3io_reader_segment_table(mef3io_reader* r, const char* channel,
+                                mef3io_segment_info* infos, mef3io_provenance* provenances,
+                                double* factors, int32_t len, int32_t* out_n) {
+  if (!r || !channel || !out_n || len < 0 ||
+      (len > 0 && !infos && !provenances && !factors))
+    return fail_argument("NULL argument");
+  return guarded([&] {
+    // ONE segment map for the whole table (a per-index loop builds it once
+    // per segment: O(segments^2) on a long recording).
+    auto segs = r->impl.segments(channel);
+    *out_n = static_cast<int32_t>(segs.size());
+    if ((infos || provenances || factors) && static_cast<int64_t>(segs.size()) > len)
+      throw std::out_of_range("buffer too small: need " + std::to_string(segs.size()));
+    for (std::size_t i = 0; i < segs.size() && (infos || provenances || factors); ++i) {
+      if (infos) fill_segment_info(segs[i], &infos[i]);
+      if (provenances) fill_provenance(segs[i].provenance, &provenances[i]);
+      if (factors) factors[i] = segs[i].units_conversion_factor;
+    }
   });
 }
 
@@ -402,15 +438,7 @@ int mef3io_reader_segment_provenance(mef3io_reader* r, const char* channel, int3
     auto segs = r->impl.segments(channel);
     if (index < 0 || static_cast<size_t>(index) >= segs.size())
       throw std::out_of_range("segment index out of range");
-    const auto& p = segs[static_cast<size_t>(index)].provenance;
-    *out = mef3io_provenance{};
-    out->present = p.present ? 1 : 0;
-    out->layout_version = p.layout_version;
-    out->last_operation = p.last_operation;
-    out->operations_mask = p.operations_mask;
-    out->modification_count = p.modification_count;
-    copy_str(out->created_by, sizeof out->created_by, p.created_by);
-    copy_str(out->last_modified_by, sizeof out->last_modified_by, p.last_modified_by);
+    fill_provenance(segs[static_cast<size_t>(index)].provenance, out);
   });
 }
 

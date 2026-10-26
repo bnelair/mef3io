@@ -152,8 +152,11 @@ class Reader {
 
   /// Min/max of each data block of @p channel overlapping [t0, t1), from the
   /// block index alone (nothing decoded): a fast envelope for viewers. Scaled
-  /// like read() (each block by its own segment's factor, refusing the same
-  /// unusable ones); NaN where a writer left a block's extremes unset.
+  /// like read() (each block by its own segment's factor); NaN where a writer
+  /// left a block's extremes unset. An unusable factor (see read()) throws
+  /// FormatError for a block read() of the same window would take samples
+  /// from (read()'s window and grid rule); such a block that read() would
+  /// not touch gets NaN extremes.
   BlockEnvelope block_envelope(const std::string& channel, std::optional<si8> t0 = std::nullopt,
                                std::optional<si8> t1 = std::nullopt) {
     return session_.block_envelope(channel, t0, t1);

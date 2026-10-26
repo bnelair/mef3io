@@ -258,6 +258,25 @@ Overlaps that the rule only notes ("12" in "LAH12", "P3", a session called
   like data. `read_raw()` and `toc()` still return the counts; other windows
   read as before; a lenient Reader does not treat it as a damaged segment.
 
+  **Such files exist — check yours (migration).** 0 is what meflib's and
+  pymef's section-2 templates hold until a writer sets the factor
+  (meflib.c:4564; pymef's `MefSession._initialize_tmd2`), so a session
+  written through pymef or a meflib-based recorder that never set it, or
+  with `write_int32(ufact=0)` by mef3io before 2.0, stores 0. mef_tools
+  read those as all zeros (`counts * 0`), and so did mef3io before 2.0. Now
+  `read()` raises, and the message says that `read_raw()` still returns the
+  stored counts. mef_tools and mef3io's own writers never store 0 by default
+  (mef_tools writes `10**-precision`, 1.0 for precision 0). To keep reading
+  such a file, scale the counts yourself with the factor you know:
+
+  ```python
+  raw = r.read_raw("ch1", t0, t1)
+  x = np.where(raw["valid"] == 1, raw["samples"] * known_factor, np.nan)
+  ```
+
+  `r.segments("ch1")` shows which segments store 0
+  (`units_conversion_factor`).
+
 - **Invalid sampling frequencies and conversion factors are refused** (#83).
   Every write path (`Writer.write`, `write_int32`, appends, the C ABI and
   MATLAB) now raises `ValueError` (C++ `std::invalid_argument`, C ABI
