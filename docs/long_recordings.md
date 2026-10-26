@@ -71,7 +71,7 @@ crash of only the *process* is harmless — the OS still writes what it was
 given) can leave the **last append of a segment** in any mix of old and new
 bytes. `recover --apply` restores each of them to a valid session holding every
 sample whose bytes reached the disk (pinned state by state in
-`tests/test_p44_crash_states.py`, built from real old/new file images):
+`tests/test_p46_crash_states.py`, built from real old/new file images):
 
 | what reached the disk | what you see before recovery | what `recover --apply` does |
 |---|---|---|

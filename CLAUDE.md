@@ -732,7 +732,7 @@ mirrors Python method-for-method with help text; in the release MATLAB job).
   on anything. Index-ahead-of-data drops entries; data-ahead-of-index
   REBUILDS them from the RED block headers (CRC-checked). Dry run by
   default. CRASH STATES (review of #153, all pinned in
-  tests/test_p44_crash_states.py, built by mixing old/new file images):
+  tests/test_p46_crash_states.py, built by mixing old/new file images):
   an index failing its OWN CRC (header + entries from different writes) is
   NOT refused — entries kept up to the longest prefix the stored body CRC
   covers (rolling CRC), then each only if the RED header at its offset agrees

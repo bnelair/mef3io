@@ -133,7 +133,7 @@ declaration code), so the two stay apart in code while `recover --apply`
 alone leaves a valid session. An index failing its own CRC is rebuilt
 (entries kept only where the stored CRC or the RED header at their offset
 vouches for them), and the last append's blocks are CRC-checked (<= 64 MiB).
-Pinned state by state in tests/test_p44_crash_states.py.
+Pinned state by state in tests/test_p46_crash_states.py.
 
 ## 6. Round trips cannot prove compatibility
 
