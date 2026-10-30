@@ -1710,6 +1710,22 @@ NB_MODULE(_mef3io, m) {
           "(one combined wait).")
       .def("set_wait_for_disk", &mef3io::SessionWriter::set_wait_for_disk, nb::arg("on"))
       .def("wait_for_disk", &mef3io::SessionWriter::wait_for_disk)
+      .def(
+          "set_flush_mode",
+          [](mef3io::SessionWriter& w, const std::string& mode) {
+            if (mode == "each")
+              w.set_flush_mode(mef3io::FlushMode::Each);
+            else if (mode == "close")
+              w.set_flush_mode(mef3io::FlushMode::Close);
+            else
+              throw std::invalid_argument("flush must be \"each\" or \"close\", not \"" + mode +
+                                          "\"");
+          },
+          nb::arg("mode"))
+      .def("flush_mode",
+           [](const mef3io::SessionWriter& w) {
+             return w.flush_mode() == mef3io::FlushMode::Close ? "close" : "each";
+           })
       .def("threads", &mef3io::SessionWriter::threads)
       .def(
           "set_metadata",

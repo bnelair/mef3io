@@ -342,8 +342,17 @@ class Writer:
         n_threads: int = 0,
         metadata=None,
         wait_for_disk: bool = False,
+        flush: str = "each",
     ):
         from . import _mef3io
+
+        if flush not in ("each", "close"):
+            raise ValueError(f'flush must be "each" or "close", not {flush!r}')
+        if flush == "close" and wait_for_disk:
+            raise ValueError(
+                'flush="close" defers every flush to close(); it cannot be combined '
+                "with wait_for_disk=True (which waits for the disk on every write)"
+            )
 
         # Validated FIRST: the SessionWriter constructor removes an existing
         # session when overwrite=True, so checking afterwards could delete a
@@ -367,6 +376,7 @@ class Writer:
         self._n_threads = _check_threads(n_threads)
         self._impl.set_threads(self._n_threads)
         self._impl.set_wait_for_disk(bool(wait_for_disk))
+        self._impl.set_flush_mode(flush)
         if metadata is not None:
             self.set_metadata(metadata)
 

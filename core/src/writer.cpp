@@ -63,7 +63,7 @@ using detail::fsync_file_or_throw;
 
 void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
                        bool flush_new = false, std::vector<fs::path> flush_with = {},
-                       PendingPublish* defer = nullptr) {
+                       PendingPublish* defer = nullptr, bool no_flush = false) {
   const fs::path target(path);
   const fs::path tmp = target.parent_path() / (target.filename().string() + ".mef3io-tmp");
   std::error_code ignored;
@@ -108,7 +108,7 @@ void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
       // below, recorded instead of executed.
       defer->tmp = tmp;
       defer->target = target;
-      defer->flush_tmp = !wait && (replacing || flush_new);
+      defer->flush_tmp = !no_flush && !wait && (replacing || flush_new);
       defer->flush_with = std::move(flush_with);
       defer->flush_target = wait;
       return;
@@ -116,7 +116,7 @@ void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
     if (wait) {
       flush_with.push_back(tmp);
       detail::flush_files(flush_with);
-    } else if (replacing || flush_new) {
+    } else if ((replacing || flush_new) && !no_flush) {
       fsync_file_or_throw(tmp.string());
     }
     replace_file(tmp, target);
@@ -152,8 +152,9 @@ std::array<ui1, 16> random_uuid() {
 }
 
 void write_file(const std::string& path, const std::vector<ui1>& bytes, bool flush_new = false,
-                std::vector<fs::path> flush_with = {}, PendingPublish* defer = nullptr) {
-  write_file_atomic(path, bytes, flush_new, std::move(flush_with), defer);
+                std::vector<fs::path> flush_with = {}, PendingPublish* defer = nullptr,
+                bool no_flush = false) {
+  write_file_atomic(path, bytes, flush_new, std::move(flush_with), defer, no_flush);
 }
 
 // Same, for `.tmet` — a FIXED-length record. The body CRC must be bounded by
@@ -518,7 +519,8 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     std::vector<fs::path> with;
     if (spec.wait_for_disk)
       with = {fs::path(segment_dir) / (base + ".tdat"), fs::path(segment_dir) / (base + ".tidx")};
-    write_file(tmet_path, file, spec.flush_new_metadata, std::move(with), defer);
+    write_file(tmet_path, file, spec.flush_new_metadata, std::move(with), defer,
+               spec.skip_tmet_flush);
   }
 
   if (out_max_difference_bytes) *out_max_difference_bytes = max_difference_bytes;
@@ -1140,7 +1142,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     // combined wait with the data and index just extended.
     std::vector<fs::path> with;
     if (spec.wait_for_disk) with = {fs::path(tdat_path), fs::path(tidx_path)};
-    write_file(tmet_path, new_tmet, false, std::move(with), defer);
+    write_file(tmet_path, new_tmet, false, std::move(with), defer, spec.skip_tmet_flush);
   } catch (...) {
     if (cache) cache->valid = false;  // the file may no longer match the summary
     const std::string rollback_error = rb->run();

@@ -833,6 +833,7 @@ std::unique_ptr<SessionWriter::WritePlan> SessionWriter::plan_write(
   // the previous segment's. flush()/close()/wait_for_disk cover the rest.
   if (!append) spec.flush_new_metadata = session_preexisted_ || st.n_segments == 0;
   spec.wait_for_disk = wait_for_disk_;
+  spec.skip_tmet_flush = flush_mode_ == FlushMode::Close;
 
   // Only pass on a maximum this writer measured itself. A segment adopted from
   // disk leaves the flag false, so the append bounds the blocks it cannot see

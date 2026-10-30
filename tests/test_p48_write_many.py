@@ -130,3 +130,18 @@ def test_append_stays_o_new_data(tmp_path):
                              for dd, _, fs in os.walk(path) for f in fs if f.endswith(".tdat")))
     grow = np.diff(sizes)
     assert grow.max() < grow.min() * 1.5  # linear, no rewrite of the whole tdat
+
+
+def test_flush_close_option(tmp_path):
+    d = _walk(np.random.default_rng(4), (3, 5000))
+    chs = ["a", "b", "c"]
+    with pytest.raises(ValueError, match="wait_for_disk"):
+        mef3io.Writer(str(tmp_path / "x.mefd"), overwrite=True, flush="close", wait_for_disk=True)
+    with pytest.raises(ValueError, match="flush"):
+        mef3io.Writer(str(tmp_path / "x.mefd"), overwrite=True, flush="never")
+    assert not (tmp_path / "x.mefd").exists()  # refused before anything is created
+    with mef3io.Writer(str(tmp_path / "s.mefd"), overwrite=True, flush="close") as w:
+        w.write_int32_many(chs, d, 1.0, START, FS)
+        w.write_int32_many(chs, d, 1.0, START + 5_000_000, FS)
+    with mef3io.Reader(str(tmp_path / "s.mefd")) as rd:
+        assert rd.read("b", START, START + 10_000_000).shape == (10_000,)

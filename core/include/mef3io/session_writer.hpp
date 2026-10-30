@@ -11,6 +11,7 @@
 #include <set>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -76,6 +77,14 @@ struct Precision {
   }
 };
 
+/// When a writer waits for the disk (#166). Each = today's behaviour: the
+/// barriers documented in docs/long_recordings.md. Close = NO flush during
+/// writes or appends, ONE combined flush at flush()/close(): faster on a
+/// slow disk, but a power cut mid-write can leave a short `.tmet` that fails
+/// the open of the WHOLE session (recover_session cannot be relied on), so
+/// only for output the caller rebuilds after any failure.
+enum class FlushMode { Each, Close };
+
 /// High-level MEF 3.0 writer: float64 quantization with precision inference,
 /// the int32+conversion-factor primitive path, NaN = discontinuity splitting,
 /// block layout, in-segment append, and records. Times are uUTC.
@@ -110,8 +119,23 @@ class SessionWriter {
   /// Opt-in: every write returns only when ITS OWN data is on disk. The
   /// files of that write (.tdat, .tidx, .tmet; .rdat/.ridx for records) are
   /// flushed in one combined wait before its .tmet is published. Default off.
-  void set_wait_for_disk(bool on) { wait_for_disk_ = on; }
+  /// @throws std::invalid_argument together with FlushMode::Close (a write
+  /// cannot both wait for the disk and defer every flush).
+  void set_wait_for_disk(bool on) {
+    if (on && flush_mode_ == FlushMode::Close)
+      throw std::invalid_argument("wait_for_disk cannot be combined with flush=\"close\"");
+    wait_for_disk_ = on;
+  }
   bool wait_for_disk() const { return wait_for_disk_; }
+  /// FlushMode::Close: no flush during writes, one combined flush at
+  /// flush()/close() (see FlushMode). Default Each.
+  /// @throws std::invalid_argument when wait_for_disk is on.
+  void set_flush_mode(FlushMode m) {
+    if (m == FlushMode::Close && wait_for_disk_)
+      throw std::invalid_argument("flush=\"close\" cannot be combined with wait_for_disk");
+    flush_mode_ = m;
+  }
+  FlushMode flush_mode() const { return flush_mode_; }
 
   /// Primitive path: int32 counts stored verbatim with a conversion factor
   /// (e.g. amplifier V/bit).
@@ -338,6 +362,7 @@ class SessionWriter {
   std::atomic<int> n_threads_{0};
   bool session_preexisted_ = false;  // the folder existed (not overwritten) at open
   bool wait_for_disk_ = false;
+  FlushMode flush_mode_ = FlushMode::Each;
   std::set<std::filesystem::path> unflushed_;  // written since the last flush()
   std::optional<std::string> flush_failure_;   // first failed flush (sticky)
   void remember_flush_failure(const IoError& e);

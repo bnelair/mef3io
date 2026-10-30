@@ -307,3 +307,39 @@ TEST_CASE("a refused multi-channel call writes nothing", "[write_many]") {
   REQUIRE_FALSE(fs::exists(fs::path(session) / "x.timd"));
   REQUIRE(w.write_int32_many({}, {}, uf, round_start(0), kRate).empty());
 }
+
+TEST_CASE("flush=close: no flush while writing, ONE combined batch at close", "[write_many]") {
+  const Scratch dir("close");
+  const auto session = (dir.dir / "s.mefd").string();
+  const std::vector<std::string> chs = {"ch1", "ch2", "ch3"};
+  std::vector<si4> block(chs.size() * kN, 9);
+  const std::vector<sf8> uf = {0.5};
+  const Observers obs;
+  {
+    SessionWriter w(session, true);
+    w.set_flush_mode(FlushMode::Close);
+    REQUIRE_THROWS_AS(w.set_wait_for_disk(true), std::invalid_argument);
+    w.write_int32_many(chs, block, uf, round_start(0), kRate);
+    w.write_int32_many(chs, block, uf, round_start(1), kRate);
+    for (const auto& c : chs)  // per-channel appends too
+      w.write_int32(c, std::span<const si4>(block).subspan(0, kN), 0.5, round_start(2), kRate);
+    w.write_float("fl", std::vector<sf8>(kN, 1.5), round_start(0), kRate);
+    w.write_float("fl", std::vector<sf8>(kN, 2.5), round_start(1), kRate);
+    REQUIRE(Observers::take().empty());
+    REQUIRE(g_fsyncs == 0);
+  }  // close
+  const auto got = Observers::take();
+  REQUIRE(got.size() == 1);
+  REQUIRE(count_suffix(got[0], ".tmet") == 4);
+  REQUIRE(count_suffix(got[0], ".tdat") == 4);
+  REQUIRE(g_fsyncs == 0);
+  // wait_for_disk first, then close mode: refused the other way round too
+  SessionWriter w2((dir.dir / "t.mefd").string(), true);
+  w2.set_wait_for_disk(true);
+  REQUIRE_THROWS_AS(w2.set_flush_mode(FlushMode::Close), std::invalid_argument);
+  // the default is unchanged: a channel's first segment and an append fsync their .tmet
+  SessionWriter w3((dir.dir / "u.mefd").string(), true);
+  w3.write_int32("a", std::span<const si4>(block).subspan(0, kN), 0.5, round_start(0), kRate);
+  w3.write_int32("a", std::span<const si4>(block).subspan(0, kN), 0.5, round_start(1), kRate);
+  REQUIRE(g_fsyncs == 2);
+}

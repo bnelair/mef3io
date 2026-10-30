@@ -138,6 +138,23 @@ waits per round become one.
   the encoded bytes of the channels running at once. Write long runs in
   chunks of minutes, as an acquisition does anyway.
 
+### `flush="close"`: no waits until the end
+
+`Writer(path, flush="close")` removes the `.tmet` barrier too: nothing waits
+for the disk during writes or appends, and `close()` (or `flush()`) does ONE
+combined wait for everything written. "`close()` returned" still means "on
+disk". The default is `flush="each"`; it cannot be combined with
+`wait_for_disk=True` (`ValueError`).
+
+!!! warning "A power cut during writing can lose the WHOLE session"
+    Without the barrier a rename can reach the disk before the `.tmet`'s
+    bytes, and a short `.tmet` stops the whole session from opening.
+    `recover_session` **cannot be relied on** to repair that. Use this mode
+    only for output you delete and rebuild after any failure (a conversion
+    run into a scratch folder, say), never for a recording that cannot be
+    redone. The gain is small on a local SSD and grows with the cost of a
+    sync (network and array storage); see the [benchmarks](benchmarks.md).
+
 Two things are flushed even in the default mode, because without them a power
 cut could stop the **whole session** from opening:
 

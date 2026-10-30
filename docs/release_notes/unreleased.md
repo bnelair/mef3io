@@ -16,6 +16,11 @@ notes at release time.
   `write_float_many`, C ABI `mef3io_writer_write_int32_many`, MATLAB
   `Writer.writeInt32Many` (integer counts only; the float counterpart is
   Python/C++).
+- **`Writer(flush="close")`** (#166, opt-in): no waits for the disk during
+  writes; `close()`/`flush()` does one combined wait. A power cut during
+  writing can leave the whole session unreadable and `recover_session` cannot
+  be relied on: only for output you rebuild after any failure. Default
+  `flush="each"` is unchanged; refused with `wait_for_disk=True`.
 
 ## Changed
 

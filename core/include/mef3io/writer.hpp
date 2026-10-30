@@ -106,6 +106,11 @@ struct SegmentSpec {
   /// combined wait (`flush_files`) before the `.tmet` is renamed into place,
   /// so the call returns only when its data is on disk.
   bool wait_for_disk = false;
+  /// `flush="close"` mode (#166): the `.tmet` is renamed in WITHOUT the
+  /// barrier that precedes it. The caller owes one combined flush later
+  /// (SessionWriter::flush / close). A power cut before it can leave a short
+  /// `.tmet` that fails the strict open of the whole session.
+  bool skip_tmet_flush = false;
 };
 
 /// A `.tmet` written to its temp file but NOT yet renamed into place: what a

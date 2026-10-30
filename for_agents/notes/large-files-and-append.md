@@ -296,3 +296,14 @@
   the channels running at once. Tests: core/tests/test_write_many.cpp
   (byte identity vs a loop with the random UUIDs masked, one batch per call,
   rollback), tests/test_p48_write_many.py, GIL case in test_p31.
+
+- **`Writer(flush="close")` (#166, opt-in; `FlushMode::Close`).** No flush at
+  all during writes or appends (`SegmentSpec::skip_tmet_flush` drops the
+  `.tmet` barrier); `flush()`/close does ONE combined batch of everything
+  written, `.tmet` included, so "close() returned" still means on disk. A
+  power cut mid-write can leave a short `.tmet` = the WHOLE session unopenable
+  and not reliably recoverable: documented as only for output rebuilt after
+  any failure. Refused together with `wait_for_disk` (C++
+  invalid_argument, Python ValueError, checked before the folder is created).
+  There is deliberately NO "never flush" mode. Tests: the flush=close cases
+  in core/tests/test_write_many.cpp and tests/test_p48_write_many.py.
