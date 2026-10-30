@@ -867,6 +867,43 @@ static void dispatch(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     mxSetField(plhs[0], 0, "segment", mxCreateDoubleScalar(sum.segment));
     return;
   }
+  if (cmd == "writer_write_int32_many") {
+    // h, channels(cellstr), data(int32 n x n_channels), ufact(double vector), start, fs, new_segment
+    need_args(nrhs, 7, "writer_write_int32_many");
+    mef3io_writer* w = get_writer(prhs[1]);
+    if (!mxIsCell(prhs[2])) fail("channels must be a cell array of char vectors");
+    const std::size_t nc = mxGetNumberOfElements(prhs[2]);
+    std::vector<std::string> names;
+    std::vector<const char*> ptrs;
+    for (std::size_t c = 0; c < nc; ++c)
+      names.push_back(get_string(mxGetCell(prhs[2], static_cast<mwIndex>(c)), "channel"));
+    for (const auto& n : names) ptrs.push_back(n.c_str());
+    if (!mxIsInt32(prhs[3])) fail("data must be an int32 matrix");
+    require_dense_real(prhs[3], "data");
+    if (mxGetNumberOfDimensions(prhs[3]) != 2 || mxGetN(prhs[3]) != nc)
+      fail("data must be n_samples x n_channels");
+    if (!mxIsDouble(prhs[4])) fail("ufact must be a real double vector");
+    require_dense_real(prhs[4], "ufact");
+    std::int64_t start = get_time(prhs[5], "start_uutc");
+    double fs = get_scalar(prhs[6], "fs");
+    int new_segment = nrhs > 7 ? get_int(prhs[7], "new_segment") : 0;
+    std::vector<mef3io_write_summary> sums(nc);
+    check(mef3io_writer_write_int32_many(
+        w, ptrs.data(), static_cast<std::int32_t>(nc), mxGetInt32s(prhs[3]),
+        static_cast<std::int64_t>(mxGetM(prhs[3])), mxGetDoubles(prhs[4]),
+        static_cast<std::int32_t>(mxGetNumberOfElements(prhs[4])), start, fs, new_segment,
+        sums.data()));
+    const char* fields[] = {"samples_written", "blocks", "gaps_skipped", "segment"};
+    plhs[0] = mxCreateStructMatrix(static_cast<mwSize>(nc), 1, 4, fields);
+    for (std::size_t c = 0; c < nc; ++c) {
+      mxSetField(plhs[0], static_cast<mwIndex>(c), "samples_written",
+                 make_int64(sums[c].samples_written));
+      mxSetField(plhs[0], static_cast<mwIndex>(c), "blocks", make_int64(sums[c].blocks));
+      mxSetField(plhs[0], static_cast<mwIndex>(c), "gaps_skipped", make_int64(sums[c].gaps_skipped));
+      mxSetField(plhs[0], static_cast<mwIndex>(c), "segment", mxCreateDoubleScalar(sums[c].segment));
+    }
+    return;
+  }
   if (cmd == "writer_unreadable_metadata") {
     need_args(nrhs, 2, "writer_unreadable_metadata");
     mef3io_writer* w = get_writer(prhs[1]);

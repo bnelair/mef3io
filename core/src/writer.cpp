@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <random>
 #include <stdexcept>
 #include <system_error>
@@ -61,7 +62,8 @@ using detail::replace_file;
 using detail::fsync_file_or_throw;
 
 void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
-                       bool flush_new = false, std::vector<fs::path> flush_with = {}) {
+                       bool flush_new = false, std::vector<fs::path> flush_with = {},
+                       PendingPublish* defer = nullptr) {
   const fs::path target(path);
   const fs::path tmp = target.parent_path() / (target.filename().string() + ".mef3io-tmp");
   std::error_code ignored;
@@ -100,6 +102,17 @@ void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
     // it. Losing the rename is harmless: the old file is still there, complete
     // and consistent, which is worth more than keeping the last append.
     const bool wait = !flush_with.empty();
+    if (defer) {
+      // The temp is complete; the caller flushes ALL its channels' temps in
+      // one wait and renames (SessionWriter::write_many). Same decisions as
+      // below, recorded instead of executed.
+      defer->tmp = tmp;
+      defer->target = target;
+      defer->flush_tmp = !wait && (replacing || flush_new);
+      defer->flush_with = std::move(flush_with);
+      defer->flush_target = wait;
+      return;
+    }
     if (wait) {
       flush_with.push_back(tmp);
       detail::flush_files(flush_with);
@@ -139,8 +152,8 @@ std::array<ui1, 16> random_uuid() {
 }
 
 void write_file(const std::string& path, const std::vector<ui1>& bytes, bool flush_new = false,
-                std::vector<fs::path> flush_with = {}) {
-  write_file_atomic(path, bytes, flush_new, std::move(flush_with));
+                std::vector<fs::path> flush_with = {}, PendingPublish* defer = nullptr) {
+  write_file_atomic(path, bytes, flush_new, std::move(flush_with), defer);
 }
 
 // Same, for `.tmet` — a FIXED-length record. The body CRC must be bounded by
@@ -296,7 +309,7 @@ void check_segment_input(const SegmentSpec& spec, const std::vector<BlockSpec>& 
 
 si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec& spec,
                               const std::vector<BlockSpec>& blocks, int n_threads,
-                              ui4* out_max_difference_bytes) {
+                              ui4* out_max_difference_bytes, PendingPublish* defer) {
   check_threads(n_threads);  // before any file is touched
   check_segment_input(spec, blocks);
   if (!fs::is_directory(segment_dir)) throw IoError("segment dir does not exist: " + segment_dir);
@@ -327,7 +340,14 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
   });
 
   // --- assemble tdat body and index entries in order (cheap, sequential) ---
-  std::vector<ui1> tdat_body;
+  // The .tdat image is built in place (header slot first), so the encoded
+  // bytes are copied once, not into a body and then again into the file.
+  std::vector<ui1> tdat_file(fmt::UNIVERSAL_HEADER_BYTES);
+  {
+    std::size_t total = tdat_file.size();
+    for (const auto& e : encoded) total += e.size();
+    tdat_file.reserve(total);
+  }
   std::vector<fmt::TimeSeriesIndex> index;
   si8 total_samples = 0;
   si8 first_start = fmt::UUTC_NO_ENTRY, last_end = fmt::UUTC_NO_ENTRY;
@@ -342,7 +362,7 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     fmt::TimeSeriesIndex e;
     // file_offset is relative to the start of the .tdat file (i.e. includes the
     // 1024-byte universal header), matching meflib.
-    e.file_offset = static_cast<si8>(fmt::UNIVERSAL_HEADER_BYTES + tdat_body.size());
+    e.file_offset = static_cast<si8>(tdat_file.size());
     e.start_time = to_stored_time(blk.start_uutc, rto);
     e.start_sample = blk.start_sample;
     e.number_of_samples = static_cast<ui4>(blk.samples.size());
@@ -352,10 +372,11 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     e.red_block_flags = blk.discontinuity ? fmt::RedBlockHeader::DISCONTINUITY_MASK : 0;
     index.push_back(e);
 
-    tdat_body.insert(tdat_body.end(), encoded[i].begin(), encoded[i].end());
+    tdat_file.insert(tdat_file.end(), encoded[i].begin(), encoded[i].end());
     max_block_bytes = std::max(max_block_bytes, e.block_bytes);
     max_difference_bytes = std::max(max_difference_bytes, block_difference_bytes(encoded[i]));
     contiguous.add(blk.discontinuity, static_cast<si8>(blk.samples.size()), e.block_bytes);
+    std::vector<ui1>().swap(encoded[i]);  // copied into the file image: free it now
     if (!blk.samples.empty()) {
       global_max = std::max(global_max, bmax[i]);
       global_min = std::min(global_min, bmin[i]);
@@ -377,11 +398,10 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
 
   // --- .tdat ---
   {
-    std::vector<ui1> file(fmt::UNIVERSAL_HEADER_BYTES);
+    std::vector<ui1>& file = tdat_file;
     auto uh = base_uh(spec, fmt::FILE_TYPE_TS_DATA, start_disk, end_disk, n_blocks,
                       max_block_bytes, level_uuid, vf);
     uh.serialize(file);
-    file.insert(file.end(), tdat_body.begin(), tdat_body.end());
     finalize_crcs(file);
     write_file((fs::path(segment_dir) / (base + ".tdat")).string(), file);
   }
@@ -498,16 +518,102 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     std::vector<fs::path> with;
     if (spec.wait_for_disk)
       with = {fs::path(segment_dir) / (base + ".tdat"), fs::path(segment_dir) / (base + ".tidx")};
-    write_file(tmet_path, file, spec.flush_new_metadata, std::move(with));
+    write_file(tmet_path, file, spec.flush_new_metadata, std::move(with), defer);
   }
 
   if (out_max_difference_bytes) *out_max_difference_bytes = max_difference_bytes;
   return total_samples;
 }
 
+namespace {
+// Undo of an in-place append (see append_time_series_segment): puts the
+// .tmet, .tidx and .tdat back as they were. Idempotent per file: one that was
+// never modified is left alone.
+struct AppendRollback {
+  std::string tmet_path, tidx_path, tdat_path;
+  std::vector<ui1> tmet;               // the .tmet as it was
+  std::vector<ui1> original_tidx;      // slow path: the file, verbatim
+  std::vector<ui1> original_tidx_uh;   // fast path: just the header
+  std::size_t original_tidx_size = 0;
+  std::vector<ui1> tdat_uh;
+  si8 old_tdat_size = 0;
+  bool appended_tdat = false, wrote_tidx = false, patched_tdat_header = false, wrote_tmet = false;
+
+  // Returns the first failure text, "" when everything was restored.
+  std::string run() {
+    std::string rollback_error;
+    auto note_rollback = [&](const std::string& what) {
+      if (rollback_error.empty()) rollback_error = what;
+    };
+    // A rollback that fails on a file the failure never reached is not a
+    // rollback failure. The wrote_* flags are set BEFORE each call, so on an
+    // environmental failure — a read-only directory, a full disk — the flag is
+    // set, the write never happened, and the rollback rewrite then fails for
+    // exactly the same reason. Escalating that told the operator their
+    // clinical archive may be inconsistent when it was byte-identical. So:
+    // compare first, and only report a failure that left the file changed.
+    auto restore = [&](const std::string& path, const std::vector<ui1>& original,
+                       const char* label, auto&& write_back) {
+      try {
+        if (read_whole_file(path) == original) return;  // never modified
+      } catch (const std::exception&) {
+        // Cannot read it back to compare — fall through and try the restore.
+      }
+      try {
+        write_back();
+      } catch (const std::exception& e) {
+        note_rollback(std::string(label) + " rollback failed: " + e.what());
+      }
+    };
+    if (wrote_tmet)
+      restore(tmet_path, tmet, "tmet", [&] { write_file(tmet_path, tmet); });
+    if (wrote_tidx) {
+      // The file was extended in place, so the original is its first
+      // `original_tidx_size` bytes with the old header. On the slow path any
+      // stripped padding lived in those bytes, so write them back verbatim
+      // rather than truncating — padding is not necessarily zero.
+      try {
+        if (!original_tidx.empty()) {
+          write_file(tidx_path, original_tidx);
+        } else {
+          std::error_code ec;
+          fs::resize_file(tidx_path, static_cast<std::uintmax_t>(original_tidx_size), ec);
+          if (ec) note_rollback("tidx truncate rollback failed: " + ec.message());
+          else overwrite_file_prefix(tidx_path, original_tidx_uh);
+        }
+      } catch (const std::exception& e) {
+        note_rollback(std::string("tidx rollback failed: ") + e.what());
+      }
+    }
+    if (patched_tdat_header) {
+      // Only the 1024-byte header was patched in place; compare just that.
+      try {
+        std::ifstream in(tdat_path, std::ios::binary);
+        std::vector<ui1> head(fmt::UNIVERSAL_HEADER_BYTES);
+        if (in && in.read(reinterpret_cast<char*>(head.data()), fmt::UNIVERSAL_HEADER_BYTES) &&
+            head == tdat_uh) {
+          // untouched
+        } else {
+          overwrite_file_prefix(tdat_path, tdat_uh);
+        }
+      } catch (const std::exception& e) {
+        note_rollback(std::string("tdat header rollback failed: ") + e.what());
+      }
+    }
+    if (appended_tdat) {
+      std::error_code ec;
+      fs::resize_file(tdat_path, static_cast<std::uintmax_t>(old_tdat_size), ec);
+      if (ec) note_rollback("tdat truncate rollback failed: " + ec.message());
+    }
+    return rollback_error;
+  }
+};
+}  // namespace
+
 si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec& spec,
                                const std::vector<BlockSpec>& blocks, int n_threads,
-                               ui4* out_max_difference_bytes, AppendIndexCache* cache) {
+                               ui4* out_max_difference_bytes, AppendIndexCache* cache,
+                               PendingPublish* defer) {
   check_threads(n_threads);  // before any file is touched
   check_segment_input(spec, blocks);
   if (blocks.empty()) return 0;
@@ -964,10 +1070,22 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     finalize_metadata_crcs(new_tmet);
   }
 
-  bool appended_tdat = false;
-  bool wrote_tidx = false;
-  bool patched_tdat_header = false;
-  bool wrote_tmet = false;
+  // Everything needed to undo this append lives in `rb`, which outlives this
+  // call when the .tmet is deferred (PendingPublish::rollback).
+  auto rb = std::make_shared<AppendRollback>();
+  rb->tmet_path = tmet_path;
+  rb->tidx_path = tidx_path;
+  rb->tdat_path = tdat_path;
+  rb->tmet = tmet;
+  rb->original_tidx = std::move(original_tidx);
+  rb->original_tidx_uh = original_tidx_uh;
+  rb->original_tidx_size = original_tidx_size;
+  rb->tdat_uh = tdat_uh;
+  rb->old_tdat_size = old_tdat_size;
+  bool& appended_tdat = rb->appended_tdat;
+  bool& wrote_tidx = rb->wrote_tidx;
+  bool& patched_tdat_header = rb->patched_tdat_header;
+  bool& wrote_tmet = rb->wrote_tmet;
   try {
     {
       std::ofstream app(tdat_path, std::ios::binary | std::ios::app);
@@ -1015,81 +1133,27 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     overwrite_file_prefix(tidx_path, new_tidx_uh);
     patched_tdat_header = true;
     overwrite_file_prefix(tdat_path, new_tdat_uh);
-    wrote_tmet = true;
+    // Deferred: the .tmet stays a temp file (not published, so nothing to
+    // restore there) and the caller rolls the rest back through `defer`.
+    wrote_tmet = !defer;
     // Flushed before the rename — the one barrier; with wait_for_disk, in ONE
     // combined wait with the data and index just extended.
     std::vector<fs::path> with;
     if (spec.wait_for_disk) with = {fs::path(tdat_path), fs::path(tidx_path)};
-    write_file(tmet_path, new_tmet, false, std::move(with));
+    write_file(tmet_path, new_tmet, false, std::move(with), defer);
   } catch (...) {
     if (cache) cache->valid = false;  // the file may no longer match the summary
-    std::string rollback_error;
-    auto note_rollback = [&](const std::string& what) {
-      if (rollback_error.empty()) rollback_error = what;
-    };
-    // A rollback that fails on a file the failure never reached is not a
-    // rollback failure. The wrote_* flags are set BEFORE each call, so on an
-    // environmental failure — a read-only directory, a full disk — the flag is
-    // set, the write never happened, and the rollback rewrite then fails for
-    // exactly the same reason. Escalating that told the operator their
-    // clinical archive may be inconsistent when it was byte-identical. So:
-    // compare first, and only report a failure that left the file changed.
-    auto restore = [&](const std::string& path, const std::vector<ui1>& original,
-                       const char* label, auto&& write_back) {
-      try {
-        if (read_whole_file(path) == original) return;  // never modified
-      } catch (const std::exception&) {
-        // Cannot read it back to compare — fall through and try the restore.
-      }
-      try {
-        write_back();
-      } catch (const std::exception& e) {
-        note_rollback(std::string(label) + " rollback failed: " + e.what());
-      }
-    };
-    if (wrote_tmet)
-      restore(tmet_path, tmet, "tmet", [&] { write_file(tmet_path, tmet); });
-    if (wrote_tidx) {
-      // The file was extended in place, so the original is its first
-      // `original_tidx_size` bytes with the old header. On the slow path any
-      // stripped padding lived in those bytes, so write them back verbatim
-      // rather than truncating — padding is not necessarily zero.
-      try {
-        if (!original_tidx.empty()) {
-          write_file(tidx_path, original_tidx);
-        } else {
-          std::error_code ec;
-          fs::resize_file(tidx_path, static_cast<std::uintmax_t>(original_tidx_size), ec);
-          if (ec) note_rollback("tidx truncate rollback failed: " + ec.message());
-          else overwrite_file_prefix(tidx_path, original_tidx_uh);
-        }
-      } catch (const std::exception& e) {
-        note_rollback(std::string("tidx rollback failed: ") + e.what());
-      }
-    }
-    if (patched_tdat_header) {
-      // Only the 1024-byte header was patched in place; compare just that.
-      try {
-        std::ifstream in(tdat_path, std::ios::binary);
-        std::vector<ui1> head(fmt::UNIVERSAL_HEADER_BYTES);
-        if (in && in.read(reinterpret_cast<char*>(head.data()), fmt::UNIVERSAL_HEADER_BYTES) &&
-            head == tdat_uh) {
-          // untouched
-        } else {
-          overwrite_file_prefix(tdat_path, tdat_uh);
-        }
-      } catch (const std::exception& e) {
-        note_rollback(std::string("tdat header rollback failed: ") + e.what());
-      }
-    }
-    if (appended_tdat) {
-      std::error_code ec;
-      fs::resize_file(tdat_path, static_cast<std::uintmax_t>(old_tdat_size), ec);
-      if (ec) note_rollback("tdat truncate rollback failed: " + ec.message());
-    }
+    const std::string rollback_error = rb->run();
     if (!rollback_error.empty())
       throw IoError("append failed and rollback was incomplete: " + rollback_error);
     throw;
+  }
+  if (defer) {
+    defer->rollback = [rb, cache]() {
+      if (cache) cache->valid = false;
+      rb->wrote_tmet = false;
+      return rb->run();
+    };
   }
 
   if (out_max_difference_bytes) *out_max_difference_bytes = max_difference_bytes;
@@ -1113,6 +1177,29 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     cache->max_bytes = contiguous.block_bytes();
   }
   return appended_samples;
+}
+
+void flush_pending(const std::vector<PendingPublish*>& pending, bool after_publish) {
+  std::vector<fs::path> files;
+  for (const PendingPublish* p : pending) {
+    if (after_publish) {
+      if (p->flush_target) files.push_back(p->target);
+    } else if (p->flush_target) {
+      files.insert(files.end(), p->flush_with.begin(), p->flush_with.end());
+      files.push_back(p->tmp);
+    } else if (p->flush_tmp) {
+      files.push_back(p->tmp);
+    }
+  }
+  detail::flush_files(files);  // no-op when empty
+}
+
+void publish_pending(PendingPublish& p) { replace_file(p.tmp, p.target); }
+
+std::string discard_pending(PendingPublish& p) {
+  std::error_code ignored;
+  fs::remove(p.tmp, ignored);
+  return p.rollback ? p.rollback() : std::string();
 }
 
 }  // namespace mef3io

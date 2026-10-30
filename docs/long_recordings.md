@@ -109,6 +109,35 @@ with mef3io.Writer("recording.mefd") as w:   # leaving the block waits for the d
   last append back into a valid session that holds every sample whose bytes
   reached the disk (the table below says what it does in each case).
 
+### Many channels in one call
+
+A recorder that writes the same stretch of time for many channels should do
+it in ONE call:
+
+```python
+w.write_int32_many(channels, counts, ufact, t0, fs)   # counts: (n_channels, n) int32
+w.write_many(channels, floats, t0, fs)                # float64; NaN = gap, precision per channel
+```
+
+The files are the same as a loop of `write_int32` / `write` calls would
+produce (a fresh segment differs only in its random UUIDs), but the channels
+are encoded and written in parallel on the `Writer`'s `n_threads`, and the
+`.tmet` barrier above is **one combined wait per call instead of one per
+channel** (with `wait_for_disk=True`, two waits per call, covering every
+channel's files). On a disk where a sync takes milliseconds, 128 sequential
+waits per round become one.
+
+- **All or nothing before publishing.** Every refusal (duplicate channel,
+  bad arguments, an append that conflicts with what is on disk) leaves the
+  session as it was: channels that had already been written during the call
+  are rolled back. Only a failure *while* the finished `.tmet` files are
+  being renamed into place can leave some channels written; it raises
+  `mef3io.PartialWriteError`, whose `written_channels` lists them (the rest
+  were rolled back).
+- **Memory.** The call holds the data, a copy of the blocks being encoded and
+  the encoded bytes of the channels running at once. Write long runs in
+  chunks of minutes, as an acquisition does anyway.
+
 Two things are flushed even in the default mode, because without them a power
 cut could stop the **whole session** from opening:
 

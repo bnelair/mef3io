@@ -147,6 +147,26 @@ def test_a_writer_flush_does_not_hold_the_gil(tmp_path):
     _assert_releases(make, runs=2)
 
 
+@pytest.mark.parametrize("kind", ["int32", "float"])
+def test_a_multi_channel_write_does_not_hold_the_gil(tmp_path, kind):
+    """write_int32_many / write_float_many (#165): encode, files and the
+    combined flush all run without the GIL."""
+    counter = iter(range(1000))
+    rng = np.random.default_rng(0)
+    chs = [f"ch{c}" for c in range(16)]
+    if kind == "int32":
+        data = rng.integers(-30000, 30000, (16, 200_000), dtype=np.int32)
+    else:
+        data = rng.standard_normal((16, 200_000))
+
+    def make():
+        w = mef3io.Writer(str(tmp_path / f"w{next(counter)}.mefd"), overwrite=True, n_threads=1)
+        if kind == "int32":
+            return lambda: w.write_int32_many(chs, data, 1.0, START, 1000.0)
+        return lambda: w.write_many(chs, data, START, 1000.0)
+    _assert_releases(make, runs=2)
+
+
 def test_errors_still_raise_after_the_gil_comes_back(tmp_path):
     """A constructor that throws re-acquires the GIL while unwinding."""
     with pytest.raises(mef3io.IoError):

@@ -25,6 +25,8 @@ assert(s2.segment == 0);
 counts = int32(mod(0:n-1, 100))';
 valid = true(n, 1); valid(11:20) = false;
 w.writeInt32('ch2', counts, 0.01, start, fs, Valid=valid);
+sm = w.writeInt32Many({'m1', 'm2'}, [counts counts + 1], 0.01, start, fs);   % many channels, one call
+assert(numel(sm) == 2 && sm(1).samples_written == n && sm(2).segment == 0);
 
 w.writeAnnotations(struct('time', {start + 1e6, start + 2e6}, ...
                           'type', {'Note', 'EDFA'}, ...

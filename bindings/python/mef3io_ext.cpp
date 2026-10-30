@@ -668,6 +668,27 @@ NB_MODULE(_mef3io, m) {
   static nb::exception<mef3io::IoError> io_error(m, "IoError", mef_error.ptr());
   static nb::exception<mef3io::WriteConflictError> write_conflict_error(
       m, "WriteConflictError", mef_error.ptr());
+  // A multi-channel write that failed while publishing: `.written_channels`
+  // lists the channels that ARE on disk (the others were rolled back).
+  static nb::exception<mef3io::PartialWriteError> partial_write_error(
+      m, "PartialWriteError", io_error.ptr());
+  nb::register_exception_translator([](const std::exception_ptr& p, void*) {
+    try {
+      std::rethrow_exception(p);
+    } catch (const mef3io::PartialWriteError& e) {
+      PyObject* text = PyUnicode_DecodeUTF8(e.what(), static_cast<Py_ssize_t>(std::strlen(e.what())),
+                                            "replace");
+      if (!text) return;
+      PyObject* exc = PyObject_CallFunctionObjArgs(partial_write_error.ptr(), text, nullptr);
+      Py_DECREF(text);
+      if (!exc) return;
+      nb::list names;
+      for (const auto& c : e.written()) names.append(c);
+      PyObject_SetAttrString(exc, "written_channels", names.ptr());
+      PyErr_SetObject(partial_write_error.ptr(), exc);
+      Py_DECREF(exc);
+    }
+  });
   // NOT under MefError/RuntimeError: a cancellation is not a failure, and code
   // that catches MefError to report a damaged file must not catch it.
   static nb::exception<mef3io::Cancelled> cancelled_error(m, "Cancelled", PyExc_Exception);
@@ -1773,6 +1794,55 @@ NB_MODULE(_mef3io, m) {
           },
           nb::arg("channel"), nb::arg("data"), nb::arg("ufact"), nb::arg("start_uutc"),
           nb::arg("fs"), nb::arg("valid") = nb::none(), nb::arg("new_segment") = false)
+      .def(
+          "write_int32_many",
+          [summary_dict](mef3io::SessionWriter& w, std::vector<std::string> channels,
+                         nb::ndarray<const mef3io::si4, nb::ndim<2>, nb::c_contig> data,
+                         std::vector<double> ufacts, nb::object start, double fs,
+                         bool new_segment) {
+            if (static_cast<std::size_t>(data.shape(0)) != channels.size())
+              throw std::invalid_argument("data has " + std::to_string(data.shape(0)) +
+                                          " rows for " + std::to_string(channels.size()) +
+                                          " channels");
+            std::span<const mef3io::si4> s(data.data(), data.size());
+            const mef3io::si8 start_us = to_si8(start, "start_uutc");
+            std::vector<mef3io::WriteSummary> r;
+            {
+              // The whole call (encode, files, the combined flush) touches no Python.
+              nb::gil_scoped_release rel;
+              r = w.write_int32_many(channels, s, ufacts, start_us, fs, new_segment);
+            }
+            nb::list out;
+            for (const auto& x : r) out.append(summary_dict(x));
+            return out;
+          },
+          nb::arg("channels"), nb::arg("data"), nb::arg("ufact"), nb::arg("start_uutc"),
+          nb::arg("fs"), nb::arg("new_segment") = false)
+      .def(
+          "write_float_many",
+          [summary_dict](mef3io::SessionWriter& w, std::vector<std::string> channels,
+                         nb::ndarray<const mef3io::sf8, nb::ndim<2>, nb::c_contig> data,
+                         nb::object start, double fs, int precision, bool new_segment,
+                         bool step) {
+            if (static_cast<std::size_t>(data.shape(0)) != channels.size())
+              throw std::invalid_argument("data has " + std::to_string(data.shape(0)) +
+                                          " rows for " + std::to_string(channels.size()) +
+                                          " channels");
+            std::span<const mef3io::sf8> s(data.data(), data.size());
+            const mef3io::si8 start_us = to_si8(start, "start_uutc");
+            const mef3io::Precision p =
+                step ? mef3io::Precision::detect_step() : mef3io::Precision(precision);
+            std::vector<mef3io::WriteSummary> r;
+            {
+              nb::gil_scoped_release rel;
+              r = w.write_float_many(channels, s, start_us, fs, p, new_segment);
+            }
+            nb::list out;
+            for (const auto& x : r) out.append(summary_dict(x));
+            return out;
+          },
+          nb::arg("channels"), nb::arg("data"), nb::arg("start_uutc"), nb::arg("fs"),
+          nb::arg("precision") = -1, nb::arg("new_segment") = false, nb::arg("step") = false)
       .def(
           "write_records",
           [](mef3io::SessionWriter& w, nb::object channel, nb::list records) {

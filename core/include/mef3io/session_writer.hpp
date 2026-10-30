@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <set>
 #include <optional>
 #include <span>
@@ -159,6 +160,36 @@ class SessionWriter {
                            sf8 sampling_frequency, Precision precision = {},
                            bool new_segment = false);
 
+  /// The same run of data for MANY channels in one call (#165): byte-identical
+  /// to calling write_int32 for each channel in the given order (fresh
+  /// segments differ only in their random UUIDs), but the channels are written
+  /// in parallel on this writer's thread budget and their `.tmet` barriers are
+  /// ONE combined wait instead of one per channel.
+  ///
+  /// Every refusal (duplicate channel, bad arguments, an append conflict, an
+  /// offset that cannot be resolved) is decided before any byte is written.
+  /// A failure while writing or flushing rolls EVERY channel back and rethrows
+  /// the error (nothing was written); one while publishing throws
+  /// PartialWriteError naming the channels that were written.
+  /// Memory: the call holds the data, a copy per block being encoded and the
+  /// encoded blocks of the channels running at once; chunk long runs.
+  /// @param channels distinct channel names.
+  /// @param data     row-major (channels.size() x n) int32 counts.
+  /// @param ufacts   one factor, or one per channel.
+  /// @return one summary per channel, in order.
+  std::vector<WriteSummary> write_int32_many(const std::vector<std::string>& channels,
+                                             std::span<const si4> data,
+                                             std::span<const sf8> ufacts, si8 start_uutc,
+                                             sf8 sampling_frequency, bool new_segment = false);
+
+  /// Float counterpart of write_int32_many: each channel is converted exactly
+  /// as write_float would (NaN gaps, precision inferred per channel, step).
+  /// @param data row-major (channels.size() x n) float64.
+  std::vector<WriteSummary> write_float_many(const std::vector<std::string>& channels,
+                                             std::span<const sf8> data, si8 start_uutc,
+                                             sf8 sampling_frequency, Precision precision = {},
+                                             bool new_segment = false);
+
   /// Write records (annotations). @p channel nullopt -> session-level (in the
   /// `.mefd` root), otherwise channel-level. APPENDS to the records already stored at that level
   /// (created when absent); never replaces or deletes one. Readers return them in time order.
@@ -278,9 +309,24 @@ class SessionWriter {
   std::vector<std::string> unreadable_metadata_;
   std::vector<std::string> legacy_password_segments_;
   std::map<std::string, std::string> empty_segment_dirs_;  // dir -> its report entry
-  WriteSummary write_blocks(const std::string& channel, const std::vector<si4>& samples,
+  WriteSummary write_blocks(const std::string& channel, std::span<const si4> samples,
                             std::span<const ui1> valid, sf8 ufact, si8 start_uutc, sf8 fs,
                             bool new_segment);
+  // write_blocks = plan (serial, refuses, touches nothing on disk) + create
+  // folders + run (per channel, thread-safe across channels) + commit
+  // (serial state). The multi-channel writes drive the same steps.
+  struct WritePlan;
+  struct FloatPrep;
+  std::unique_ptr<WritePlan> plan_write(const std::string& channel, std::span<const si4> samples,
+                                        std::span<const ui1> valid, sf8 ufact, si8 start_uutc,
+                                        sf8 fs, bool new_segment);
+  void create_plan_dirs(WritePlan& p);
+  void run_plan(WritePlan& p, PendingPublish* defer, int threads);
+  std::string roll_back_plan(WritePlan& p);
+  void commit_plan(WritePlan& p);
+  std::vector<WriteSummary> write_many_plans(std::vector<std::unique_ptr<WritePlan>>& plans);
+  FloatPrep prepare_float(const std::string& channel, std::span<const sf8> data, sf8 fs,
+                          Precision precision, bool new_segment);
 
   std::string mefd_path_;
   std::string password_1_;
