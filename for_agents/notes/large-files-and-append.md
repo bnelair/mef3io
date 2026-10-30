@@ -275,3 +275,24 @@
   `Reader.segments(ch)` maps what data
   is where per segment. First appended block keeps discontinuity=true (readers
   are time-gridded so contiguous appends stay seamless).
+
+- **Multi-channel write (#165).** `SessionWriter::write_int32_many`/
+  `write_float_many` (Python `Writer.write_int32_many`/`write_many`, C ABI
+  `mef3io_writer_write_int32_many`, MATLAB `writeInt32Many`; float-many is
+  Python/C++ only) drive the SAME `plan_write` -> `create_plan_dirs` ->
+  `run_plan` -> `commit_plan` steps as the single-channel `write_blocks` —
+  never fork a second write path. Plans are made serially (every refusal;
+  nothing on disk), `run_plan` runs per channel in parallel (outer channels x
+  inner block threads <= n_threads: ONE thread budget, no nested pools) and
+  leaves the `.tmet` as a temp (`PendingPublish`, writer.hpp), then ONE
+  `flush_pending` batch, then the renames, then the serial commit of the
+  writer's state. A failure before the renames rolls EVERY channel back
+  (`AppendRollback` for appends, folder removal for fresh segments; the
+  append's `AppendIndexCache` is invalidated); during them
+  `PartialWriteError` (+ Python `written_channels`) names the published
+  channels. An append conflict is found INSIDE `append_time_series_segment`
+  (it reads the `.tmet`), i.e. during phase A: still all-or-nothing, by
+  rollback. Memory: the call holds data + a block copy + the encoded bytes of
+  the channels running at once. Tests: core/tests/test_write_many.cpp
+  (byte identity vs a loop with the random UUIDs masked, one batch per call,
+  rollback), tests/test_p48_write_many.py, GIL case in test_p31.
