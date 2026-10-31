@@ -33,7 +33,7 @@ with mef3io.Writer("session.mefd", overwrite=True, units="uV") as w:
 ```
 
 `Writer(path, overwrite=False, password1="", password2="", units=None,
-block_length=None, n_threads=0, metadata=None, wait_for_disk=False)`
+block_length=None, n_threads=0, metadata=None, wait_for_disk=False, flush="each")`
 
 - `overwrite=True` deletes an existing session first. With
   `overwrite=False`, an existing session is **reopened for appending** —
@@ -95,6 +95,14 @@ block_length=None, n_threads=0, metadata=None, wait_for_disk=False)`
   `recover_session`. See
   [When is my data on disk?](long_recordings.md#when-is-my-data-on-disk).
   (2.0 removed `durability=`; passing it raises `TypeError`.)
+- `flush="close"` (opt-in, default `"each"`) removes every wait for the disk
+  during writes; `close()` / `flush()` does one combined wait. **A power cut
+  while writing can leave the whole session unreadable, and `recover_session`
+  cannot be relied on to fix it**, so use it only for output you rebuild after
+  any failure. When `close()` returns, everything is on disk. Only for a
+  session this `Writer` creates (`ValueError` for one that already existed);
+  `ValueError` with `wait_for_disk=True` too. See
+  [`flush="close"`](long_recordings.md#flushclose-no-waits-until-the-end).
 - `recover_session` and `repair_session` always keep a backup of what they
   change. `backup=False` (and the CLI's `--no-backup`) is still accepted but
   ignored since 2.0.1, with one `BackupAlwaysKeptWarning`.
@@ -244,6 +252,20 @@ samples. Because counts are never altered, `data` must be integer-typed
 float data), and values outside the int32 range raise `ValueError` instead
 of silently wrapping. A `valid` mask of the wrong length raises
 `ValueError`.
+
+### `write_int32_many(channels, data, ufact, start_uutc, fs, new_segment=False)` and `write_many(channels, data, start_uutc, fs, precision=-1, new_segment=False)`
+
+The same run of samples for many channels in one call: `data` is
+`(n_channels, n_samples)` (`int32` counts with one `ufact` or one per
+channel, or float with NaN gaps and the precision decided per channel). The
+files are the same as a loop of `write_int32` / `write` calls would produce
+(a fresh segment differs only in its random UUIDs), but channels are written in parallel on the `Writer`'s `n_threads` and the
+disk is waited for once per call instead of once per channel. Returns one
+summary dict per channel. Refusals are decided before any file is touched; a
+failure before publishing rolls every channel back, one while publishing
+raises `PartialWriteError` (`written_channels`, `incomplete_channels`), and a
+roll-back that itself fails raises `RollbackIncompleteError`. Details:
+[Many channels in one call](long_recordings.md#many-channels-in-one-call).
 
 ### `write_annotations(annotations, channel=None)`
 

@@ -136,6 +136,11 @@ mef3io::WriteSummary s = w.write_float("ch1", data, start_uutc, 256.0);
 // optional validity mask marks gaps.
 w.write_int32("ch2", counts, /*ufact=*/0.01, start_uutc, 256.0, valid_mask);
 
+// Many channels in one call: data is row-major (channels x n), channels are
+// written in parallel and the disk is waited for once. write_float_many is
+// the float form. One summary per channel.
+auto sums = w.write_int32_many({"ch1", "ch2"}, counts_2xN, {0.01, 0.01}, start_uutc, 256.0);
+
 // Records (annotations); std::nullopt -> session level.
 w.write_records("ch1", {{.type = "Note", .time = t, .text = "marker"}});
 ```
@@ -144,7 +149,10 @@ A write returns once its data is handed to the operating system (each
 segment's `.tmet` is flushed before it is published). `w.flush()` returns only
 when everything written so far is on disk, in one combined wait, and the
 destructor does the same (call `flush()` to see a failure).
-`w.set_wait_for_disk(true)` makes every write wait for its own data. See
+`w.set_wait_for_disk(true)` makes every write wait for its own data.
+`w.set_flush_mode(mef3io::FlushMode::Close)` (opt-in, new sessions only)
+removes every wait until `flush()`/close, at the price that a power cut can
+leave the session unreadable. See
 [When is my data on disk?](long_recordings.md#when-is-my-data-on-disk); 2.0
 removed `set_durable`.
 
@@ -322,6 +330,8 @@ MATLAB MEX is built on it). Conventions:
   `mef3io_reader_n_problems` / `mef3io_reader_problem` list what was
   skipped); `mef3io_password_interop_issue` says why a password will not
   work as expected in other MEF readers;
+- `mef3io_writer_write_int32_many` writes the same run of int32 counts for
+  many channels in one call (see the Writer section above);
 - `mef3io_reader_open` also accepts a tar session archive;
   `mef3io_archive_session(dir, tar_path_or_NULL, overwrite, out, n)` creates
   one, `mef3io_extract_session` unpacks it back, and `mef3io_writer_open`
