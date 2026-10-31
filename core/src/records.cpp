@@ -668,7 +668,11 @@ void require_record_write_access(const std::string& session_dir,
           break;  // any protected channel protects the session
         }
       }
-      if (any) {  // only a decided session is remembered (a new one may still change)
+      // Only "protected" is remembered: it never goes back. "Unprotected" can
+      // change while this writer runs (it may add a protected channel), so it
+      // is decided again on the next call; the per-channel answers stay cached,
+      // so that costs one folder listing.
+      if (any && *any) {
         cache.session_protected = any;
         cache.session_target = prot;
       }

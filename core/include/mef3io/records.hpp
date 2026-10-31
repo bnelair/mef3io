@@ -7,7 +7,6 @@
 #include <span>
 #include <map>
 #include <set>
-#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -179,7 +178,7 @@ void validate_records_for_write(const std::vector<Record>& records);
 /// folders are scanned ONCE per writer, not on every annotation call.
 struct RecordAccessCache {
   std::map<std::string, bool> channel_protected;  ///< channel -> its first .tmet is protected
-  std::optional<bool> session_protected;  ///< any channel protected; set once a .tmet is seen
+  std::optional<bool> session_protected;  ///< set (true) once any channel is seen protected
   std::string session_target;             ///< a protected channel (when session_protected)
   std::set<std::string> access_ok;        ///< targets the writer's passwords already opened
 };

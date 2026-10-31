@@ -180,6 +180,19 @@ def test_unprotected_session_refuses_passwords(tmp_path):
     assert _tree(p) == before
 
 
+def test_a_protected_channel_added_by_the_same_writer_protects_the_session(tmp_path):
+    # Refused first (the session has no passwords yet), then this writer adds a
+    # protected channel: the session now counts as protected, not "no passwords".
+    p = _plain_session(tmp_path / "m.mefd")
+    with mef3io.Writer(str(p), password1="p1", password2="p2") as w:
+        with pytest.raises(mef3io.PasswordError, match="no passwords"):
+            w.write_annotations([_note(START + S, "x")])
+        w.write_int32("enc", np.arange(2560, dtype=np.int32), 1.0, START, 256.0)
+        w.write_annotations([_note(START + 2 * S, "SESSIONNOTE")])
+    for f in p.rglob("*.rdat"):
+        assert b"SESSIONNOTE" not in f.read_bytes()
+
+
 def test_new_encrypted_session_notes_before_and_after_data(tmp_path):
     p = tmp_path / "n.mefd"
     with mef3io.Writer(str(p), overwrite=True, password1="p1", password2="p2") as w:
