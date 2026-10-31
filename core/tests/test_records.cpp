@@ -651,6 +651,15 @@ TEST_CASE("Encrypted session: records need both passwords before anything is cre
     return n;
   };
   const auto before = count_files();
+  // open descriptors (Linux): the guard and the validator must not leak any
+  auto open_fds = [] {
+    std::error_code ec;
+    std::size_t n = 0;
+    if (!fsys::exists("/proc/self/fd", ec)) return std::size_t{0};
+    for (const auto& e : fsys::directory_iterator("/proc/self/fd", ec)) { (void)e; ++n; }
+    return n;
+  };
+  const auto fds_before = open_fds();
   for (const auto& pw : {std::pair<std::string, std::string>{"", "p2"}, {"p1", ""}, {"", ""},
                          {"p1", "bad"}, {"p2", "p2"}}) {
     for (const bool ch : {false, true}) {
@@ -660,13 +669,16 @@ TEST_CASE("Encrypted session: records need both passwords before anything is cre
     }
   }
   REQUIRE(count_files() == before);
+  REQUIRE(open_fds() == fds_before);
   {
     SessionWriter w(dir.string(), false, "p1", "p2");
     w.write_records(std::nullopt, {r});
   }
-  std::ifstream f(dir / (stem + ".rdat"), std::ios::binary);
-  const std::string raw((std::istreambuf_iterator<char>(f)), {});
-  REQUIRE(raw.find("SECRETTEXT") == std::string::npos);
+  {  // closed before the folder is removed (Windows cannot delete an open file)
+    std::ifstream f(dir / (stem + ".rdat"), std::ios::binary);
+    const std::string raw((std::istreambuf_iterator<char>(f)), {});
+    REQUIRE(raw.find("SECRETTEXT") == std::string::npos);
+  }
   auto count = [](const Report& rep) {
     int n = 0;
     for (const auto& fd : rep.findings) n += fd.check_id == "records.encryption";
@@ -689,7 +701,9 @@ TEST_CASE("Encrypted session: records need both passwords before anything is cre
                   fsys::copy_options::overwrite_existing);
   fsys::copy_file(plain / (pstem + ".ridx"), dir / (stem + ".ridx"),
                   fsys::copy_options::overwrite_existing);
+  const auto fds_validate = open_fds();
   const auto rep = validate_session(dir.string(), vo);
+  REQUIRE(open_fds() == fds_validate);
   REQUIRE(count(rep) == 1);
   REQUIRE_FALSE(rep.ok());
   for (const auto& fd : rep.findings)

@@ -213,6 +213,9 @@ def test_new_session_with_one_password_is_refused_up_front(tmp_path, pw):
             w.write_annotations([_note(START + S, "x")])
 
 
+@pytest.mark.skipif(
+    not Path("/proc/self/io").exists(), reason="needs /proc/self/io (Linux) to count read calls"
+)
 def test_guard_scans_the_session_once_not_on_every_call(tmp_path):
     """Work per annotation call must not grow with the number of segments."""
 
