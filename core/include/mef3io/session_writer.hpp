@@ -274,6 +274,7 @@ class SessionWriter {
   // The offset a NEW segment of `channel` is written with.
   si8 new_segment_rto(const std::string& channel, ChannelState& st);
   void note_unreadable(const std::string& what);
+  RecordAccessCache record_access_;  // #167: how the session is protected, scanned once
   std::optional<si8> session_rto_;  // the session's resolved offset, once known
   std::vector<std::string> unreadable_metadata_;
   std::vector<std::string> legacy_password_segments_;

@@ -1,6 +1,7 @@
 // mef3io — record handling: the one time conversion (#63), every mefrec.h body
 // (#62), segment-level records and their C ABI (#61).
 #include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -18,6 +19,7 @@
 #include "mef3io/records.hpp"
 #include "mef3io/session_writer.hpp"
 #include "mef3io/time.hpp"
+#include "mef3io/validate.hpp"
 
 using namespace mef3io;
 namespace fsys = std::filesystem;
@@ -628,10 +630,11 @@ TEST_CASE("write_records appends in place: same bytes as one call, any level, L2
   fsys::remove_all(dir);
 }
 
-#include "mef3io/validate.hpp"
 
 TEST_CASE("Encrypted session: records need both passwords before anything is created (#167)") {
-  const auto dir = fsys::temp_directory_path() / "mef3io_records_guard.mefd";
+  const auto tag = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  const auto dir = fsys::temp_directory_path() / ("mef3io_rg_" + tag + ".mefd");
+  const std::string stem = dir.stem().string();
   fsys::remove_all(dir);
   std::vector<si4> x(2560, 7);
   {
@@ -661,7 +664,7 @@ TEST_CASE("Encrypted session: records need both passwords before anything is cre
     SessionWriter w(dir.string(), false, "p1", "p2");
     w.write_records(std::nullopt, {r});
   }
-  std::ifstream f(dir / "mef3io_records_guard.rdat", std::ios::binary);
+  std::ifstream f(dir / (stem + ".rdat"), std::ios::binary);
   const std::string raw((std::istreambuf_iterator<char>(f)), {});
   REQUIRE(raw.find("SECRETTEXT") == std::string::npos);
   auto count = [](const Report& rep) {
@@ -674,20 +677,30 @@ TEST_CASE("Encrypted session: records need both passwords before anything is cre
   REQUIRE(count(validate_session(dir.string(), vo)) == 0);
 
   // Craft the #167 state: replace the record pair with an unprotected one.
-  const auto plain = fsys::temp_directory_path() / "mef3io_records_guard_plain.mefd";
+  const auto plain = fsys::temp_directory_path() / ("mef3io_rgp_" + tag + ".mefd");
+  const std::string pstem = plain.stem().string();
   fsys::remove_all(plain);
   {
     SessionWriter w(plain.string(), true);
     w.write_int32("ch1", x, 1.0, T0, 256.0);
     w.write_records(std::nullopt, {r});
   }
-  fsys::copy_file(plain / "mef3io_records_guard_plain.rdat", dir / "mef3io_records_guard.rdat",
+  fsys::copy_file(plain / (pstem + ".rdat"), dir / (stem + ".rdat"),
                   fsys::copy_options::overwrite_existing);
-  fsys::copy_file(plain / "mef3io_records_guard_plain.ridx", dir / "mef3io_records_guard.ridx",
+  fsys::copy_file(plain / (pstem + ".ridx"), dir / (stem + ".ridx"),
                   fsys::copy_options::overwrite_existing);
   const auto rep = validate_session(dir.string(), vo);
   REQUIRE(count(rep) == 1);
   REQUIRE_FALSE(rep.ok());
+  for (const auto& fd : rep.findings)
+    if (fd.check_id == "records.encryption") {
+      REQUIRE(fd.channel.empty());
+      REQUIRE(fd.segment_number == -1);
+    }
+  {  // an unprotected session refuses passwords for annotations
+    SessionWriter w(plain.string(), false, "p1", "p2");
+    REQUIRE_THROWS_AS(w.write_records(std::nullopt, {r}), PasswordError);
+  }
   fsys::remove_all(dir);
   fsys::remove_all(plain);
 }

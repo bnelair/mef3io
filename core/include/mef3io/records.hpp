@@ -5,6 +5,9 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <map>
+#include <set>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -171,17 +174,31 @@ std::vector<Record> parse_records(std::span<const ui1> rdat_bytes, si8 rto,
 /// it first; callers that create directories run it before doing so.
 void validate_records_for_write(const std::vector<Record>& records);
 
+/// What a Writer has learned about how its session's channels are protected
+/// (one entry per channel that has a `.tmet`). Held by the SessionWriter so the
+/// folders are scanned ONCE per writer, not on every annotation call.
+struct RecordAccessCache {
+  std::map<std::string, bool> channel_protected;  ///< channel -> its first .tmet is protected
+  std::optional<bool> session_protected;  ///< any channel protected; set once a .tmet is seen
+  std::string session_target;             ///< a protected channel (when session_protected)
+  std::set<std::string> access_ok;        ///< targets the writer's passwords already opened
+};
+
 /// Refuse, BEFORE any file or folder is created or touched, a record write
 /// that would not match how the session is protected (#167). The session's
-/// own channel metadata decides (the first `.tmet` found: its universal
+/// own channel metadata decides (the first `.tmet` of a channel: its universal
 /// header's password validation fields), never which passwords the caller
-/// happened to pass: on a password-protected session BOTH passwords must be
-/// given and correct (PasswordError otherwise), because the record file is
-/// created with validation fields built from them and its bodies are
-/// level-2 encrypted. A session with no channel yet, or an unprotected one,
-/// is left to write_records (unchanged behaviour).
-void require_record_write_access(const std::string& session_dir, const std::string& password_1,
-                                 const std::string& password_2);
+/// happened to pass:
+///  * protected (session level: ANY channel is; channel level: THAT channel,
+///    or the session when it has no segment): BOTH passwords must be given and
+///    correct, else PasswordError;
+///  * unprotected: any password is refused (a protected record file in an
+///    unprotected session is a defect the validator reports);
+///  * no `.tmet` yet (a session this writer is creating): both or none.
+void require_record_write_access(const std::string& session_dir,
+                                 const std::optional<std::string>& channel,
+                                 const std::string& password_1, const std::string& password_2,
+                                 RecordAccessCache& cache);
 
 /// APPEND records to `<dir>/<base>.rdat` + `<base>.ridx`, creating the pair
 /// when it does not exist. NEVER replaces, truncates or rewrites stored

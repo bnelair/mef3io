@@ -604,42 +604,124 @@ constexpr const char* RECOVER_ADVICE =
 
 }  // namespace
 
-void require_record_write_access(const std::string& session_dir, const std::string& password_1,
-                                 const std::string& password_2) {
-  std::vector<std::string> timds;
+namespace {
+
+// Is the first readable .tmet of this channel folder password-protected?
+// nullopt = the channel has no readable .tmet (new, or records only).
+std::optional<bool> channel_tmet_protected(const fs::path& timd) {
   std::error_code ec;
-  for (const auto& e : fs::directory_iterator(session_dir, ec))
-    if (e.is_directory() && e.path().extension() == ".timd") timds.push_back(e.path().string());
-  std::sort(timds.begin(), timds.end());
-  for (const auto& timd : timds) {
-    std::vector<std::string> segds;
-    for (const auto& e : fs::directory_iterator(timd, ec))
-      if (e.is_directory() && e.path().extension() == ".segd") segds.push_back(e.path().string());
-    std::sort(segds.begin(), segds.end());
-    for (const auto& segd : segds) {
-      const fs::path tmet = fs::path(segd) / (fs::path(segd).stem().string() + ".tmet");
-      std::error_code fe;
-      if (fs::file_size(tmet, fe) < fmt::UNIVERSAL_HEADER_BYTES || fe) continue;
-      std::vector<ui1> head;
-      try {
-        head = read_at(tmet.string(), 0, fmt::UNIVERSAL_HEADER_BYTES);
-      } catch (const MefError&) {
-        continue;
-      }
-      const auto uh = fmt::UniversalHeader::parse(head);
-      if (!uh.is_password_protected()) return;  // unprotected session: unchanged behaviour
-      const char* needs =
-          "both passwords (level-1 and level-2) are needed to add annotations to a "
-          "password-protected session; nothing was written";
-      if (password_1.empty() || password_2.empty()) throw PasswordError(needs);
-      const auto k1 = crypto::validate_password(password_1, uh.level_1_password_validation_field,
-                                                uh.level_2_password_validation_field);
-      const auto k2 = crypto::validate_password(password_2, uh.level_1_password_validation_field,
-                                                uh.level_2_password_validation_field);
-      if (!k1.level1_key || k1.level2_key || !k2.level2_key)
-        throw PasswordError(std::string("a password does not match this session: ") + needs);
-      return;
+  std::vector<fs::path> segds;
+  for (const auto& e : fs::directory_iterator(timd, ec))
+    if (e.is_directory() && e.path().extension() == ".segd") segds.push_back(e.path());
+  std::sort(segds.begin(), segds.end());
+  for (const auto& segd : segds) {
+    const fs::path tmet = segd / (segd.stem().string() + ".tmet");
+    std::error_code fe;
+    if (fs::file_size(tmet, fe) < fmt::UNIVERSAL_HEADER_BYTES || fe) continue;
+    try {
+      const auto head = read_at(tmet.string(), 0, fmt::UNIVERSAL_HEADER_BYTES);
+      return fmt::UniversalHeader::parse(head).is_password_protected();
+    } catch (const MefError&) {
+      continue;
     }
+  }
+  return std::nullopt;
+}
+
+}  // namespace
+
+void require_record_write_access(const std::string& session_dir,
+                                 const std::optional<std::string>& channel,
+                                 const std::string& password_1, const std::string& password_2,
+                                 RecordAccessCache& cache) {
+  // Everything below is decided ONCE per writer and remembered: later calls
+  // do map lookups, never a folder listing or a header read.
+  auto know = [&](const std::string& name) -> std::optional<bool> {
+    auto it = cache.channel_protected.find(name);
+    if (it != cache.channel_protected.end()) return it->second;
+    auto got = channel_tmet_protected(fs::path(session_dir) / (name + ".timd"));
+    if (got) cache.channel_protected[name] = *got;
+    return got;
+  };
+  std::optional<bool> state;
+  std::string target;  // a protected channel whose header the passwords are checked against
+  if (channel) {
+    state = know(*channel);
+    if (state && *state) target = *channel;
+  }
+  if (!state) {
+    if (!cache.session_protected) {
+      std::error_code ec;
+      std::optional<bool> any;
+      std::string prot;
+      std::vector<std::string> names;
+      for (const auto& e : fs::directory_iterator(session_dir, ec))
+        if (e.is_directory() && e.path().extension() == ".timd")
+          names.push_back(e.path().stem().string());
+      std::sort(names.begin(), names.end());
+      for (const auto& n : names) {
+        const auto k = know(n);
+        if (!k) continue;
+        any = any.value_or(false) || *k;
+        if (*k) {
+          prot = n;
+          break;  // any protected channel protects the session
+        }
+      }
+      if (any) {  // only a decided session is remembered (a new one may still change)
+        cache.session_protected = any;
+        cache.session_target = prot;
+      }
+      state = any;
+      target = prot;
+    } else {
+      state = cache.session_protected;
+      target = cache.session_target;
+    }
+  }
+  if (!state) {  // a session this writer is creating: its own passwords decide
+    if (password_1.empty() != password_2.empty())
+      throw PasswordError(
+          "a password-protected session needs both passwords (level-1 and level-2), or none; "
+          "got only one; nothing was written");
+    return;
+  }
+  if (!*state) {
+    if (!password_1.empty() || !password_2.empty())
+      throw PasswordError(
+          "this session has no passwords; open the Writer without passwords to add "
+          "annotations; nothing was written");
+    return;
+  }
+  const char* needs =
+      "both passwords (level-1 and level-2) are needed to add annotations to a "
+      "password-protected session; nothing was written";
+  if (password_1.empty() || password_2.empty()) throw PasswordError(needs);
+  if (cache.access_ok.count(target)) return;
+  std::vector<fs::path> segds;
+  std::error_code ec;
+  for (const auto& e : fs::directory_iterator(fs::path(session_dir) / (target + ".timd"), ec))
+    if (e.is_directory() && e.path().extension() == ".segd") segds.push_back(e.path());
+  std::sort(segds.begin(), segds.end());
+  for (const auto& segd : segds) {
+    const fs::path tmet = segd / (segd.stem().string() + ".tmet");
+    std::error_code fe;
+    if (fs::file_size(tmet, fe) < fmt::UNIVERSAL_HEADER_BYTES || fe) continue;
+    std::vector<ui1> head;
+    try {
+      head = read_at(tmet.string(), 0, fmt::UNIVERSAL_HEADER_BYTES);
+    } catch (const MefError&) {
+      continue;
+    }
+    const auto uh = fmt::UniversalHeader::parse(head);
+    const auto k1 = crypto::validate_password(password_1, uh.level_1_password_validation_field,
+                                              uh.level_2_password_validation_field);
+    const auto k2 = crypto::validate_password(password_2, uh.level_1_password_validation_field,
+                                              uh.level_2_password_validation_field);
+    if (!k1.level1_key || k1.level2_key || !k2.level2_key)
+      throw PasswordError(std::string("a password does not match this session: ") + needs);
+    cache.access_ok.insert(target);
+    return;
   }
 }
 
