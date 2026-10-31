@@ -12,7 +12,10 @@ notes at release time.
   Writer's `n_threads`, and ONE combined `.tmet` barrier per call instead of
   one per channel. A failure before the `.tmet` files are published rolls
   every channel back; one while publishing raises `PartialWriteError`
-  (`written_channels`). C++ `SessionWriter::write_int32_many` /
+  (`written_channels`, `incomplete_channels`). If a roll-back itself fails,
+  `RollbackIncompleteError` names the channels left incomplete (never a
+  silent "nothing written"). Refusals (rate, factor, start before the
+  stored end) are decided before any file is touched. C++ `SessionWriter::write_int32_many` /
   `write_float_many`, C ABI `mef3io_writer_write_int32_many`, MATLAB
   `Writer.writeInt32Many` (integer counts only; the float counterpart is
   Python/C++).
@@ -20,7 +23,9 @@ notes at release time.
   writes; `close()`/`flush()` does one combined wait. A power cut during
   writing can leave the whole session unreadable and `recover_session` cannot
   be relied on: only for output you rebuild after any failure. Default
-  `flush="each"` is unchanged; refused with `wait_for_disk=True`.
+  `flush="each"` is unchanged; refused with `wait_for_disk=True` and on a
+  session that existed when the Writer opened (earlier recordings are never
+  put at risk).
 
 ## Changed
 
