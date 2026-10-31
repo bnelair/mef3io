@@ -44,12 +44,28 @@ class IoError : public MefError {
 // call throws the underlying error instead, and nothing was written.
 class PartialWriteError : public IoError {
  public:
-  PartialWriteError(const std::string& what, std::vector<std::string> written)
-      : IoError(what), written_(std::move(written)) {}
+  PartialWriteError(const std::string& what, std::vector<std::string> written,
+                    std::vector<std::string> incomplete = {})
+      : IoError(what), written_(std::move(written)), incomplete_(std::move(incomplete)) {}
   const std::vector<std::string>& written() const { return written_; }
+  /// Channels whose rollback did not complete (their files may be torn).
+  const std::vector<std::string>& incomplete() const { return incomplete_; }
 
  private:
-  std::vector<std::string> written_;
+  std::vector<std::string> written_, incomplete_;
+};
+
+// A multi-channel write failed before anything was published, and undoing it
+// did not fully work for the channels in `incomplete()`: their files may be
+// torn (run validate / recover_session). Every other channel was restored.
+class RollbackIncompleteError : public IoError {
+ public:
+  RollbackIncompleteError(const std::string& what, std::vector<std::string> incomplete)
+      : IoError(what), incomplete_(std::move(incomplete)) {}
+  const std::vector<std::string>& incomplete() const { return incomplete_; }
+
+ private:
+  std::vector<std::string> incomplete_;
 };
 
 // Illegal write (e.g. start before existing end, fs/ufact mismatch on append).

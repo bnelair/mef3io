@@ -14,7 +14,11 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
+#ifdef __linux__
+#include <sys/stat.h>
+#endif
 
 #include "../src/durability.hpp"
 #include "mef3io/errors.hpp"
@@ -86,6 +90,21 @@ std::vector<si4> walk(std::size_t n, unsigned seed) {
     e = x;
   }
   return v;
+}
+
+// size + mtime (ns) of every file: a call that wrote nothing changes neither
+struct Stamp {
+  std::uintmax_t size;
+  std::int64_t mtime;
+  bool operator==(const Stamp& o) const { return size == o.size && mtime == o.mtime; }
+};
+std::map<std::string, Stamp> stamps(const fs::path& root) {
+  std::map<std::string, Stamp> out;
+  for (const auto& e : fs::recursive_directory_iterator(root))
+    if (e.is_regular_file())
+      out[fs::relative(e.path(), root).string()] = {
+          e.file_size(), e.last_write_time().time_since_epoch().count()};
+  return out;
 }
 
 std::mutex g_mu;
@@ -258,8 +277,12 @@ TEST_CASE("a failure before publication rolls EVERY channel back", "[write_many]
     w.write_int32("ch3", std::span<const si4>(block).subspan(0, kN), 0.5, round_start(1), kRate);
     w.flush();
     const auto before = snapshot(session);
+    const auto touched = stamps(session);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
     REQUIRE_THROWS_AS(w.write_int32_many(chs, block, uf, round_start(1), kRate), WriteConflictError);
-    REQUIRE(snapshot(session) == before);  // ch1, ch2 appended in memory of the call: undone
+    REQUIRE(snapshot(session) == before);
+    // refused BEFORE any byte was written: not even rewritten and rolled back
+    REQUIRE(stamps(session) == touched);
     // and the writer is still usable
     w.write_int32("ch1", std::span<const si4>(block).subspan(0, kN), 0.5, round_start(1), kRate);
   }
@@ -342,4 +365,201 @@ TEST_CASE("flush=close: no flush while writing, ONE combined batch at close", "[
   w3.write_int32("a", std::span<const si4>(block).subspan(0, kN), 0.5, round_start(0), kRate);
   w3.write_int32("a", std::span<const si4>(block).subspan(0, kN), 0.5, round_start(1), kRate);
   REQUIRE(g_fsyncs == 2);
+}
+
+TEST_CASE("a refused append checks rate and factor first too", "[write_many]") {
+  const Scratch dir("precheck");
+  const auto session = (dir.dir / "s.mefd").string();
+  const std::vector<std::string> chs = {"ch1", "ch2"};
+  std::vector<si4> block(chs.size() * kN, 4);
+  const std::vector<sf8> uf = {0.5};
+  SessionWriter w(session, true);
+  w.write_int32_many(chs, block, uf, round_start(0), kRate);
+  w.flush();
+  const auto touched = stamps(session);
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  REQUIRE_THROWS_AS(w.write_int32_many(chs, block, std::vector<sf8>{0.5, 0.25}, round_start(1), kRate),
+                    WriteConflictError);
+  REQUIRE_THROWS_AS(w.write_int32_many(chs, block, uf, round_start(1), 256.0), WriteConflictError);
+  REQUIRE(stamps(session) == touched);
+  // trailing NaN: the stored end is the last BLOCK's end, so an append that
+  // starts inside the trailing gap is fine
+  std::vector<sf8> fl(kN, 1.0);
+  for (std::size_t i = kN - 2000; i < kN; ++i) fl[i] = std::nan("");
+  w.write_float("fl", fl, round_start(0), kRate);
+  w.write_float("fl", std::vector<sf8>(kN, 1.0), round_start(0) + 29'000'000, kRate);
+}
+
+namespace {
+void make_read_only(const fs::path& p) {
+  fs::permissions(p, fs::perms::owner_read | fs::perms::group_read | fs::perms::others_read,
+                  fs::perm_options::replace);
+}
+fs::path tdat_of(const std::string& session, const std::string& ch) {
+  return fs::path(session) / (ch + ".timd") / (ch + "-000000.segd") / (ch + "-000000.tdat");
+}
+}  // namespace
+
+TEST_CASE("an incomplete rollback is reported, naming the channels", "[write_many]") {
+#ifdef __linux__
+  if (::geteuid() == 0) SKIP("permissions do not bind root");
+#endif
+  const Scratch dir("incomplete");
+  const auto session = (dir.dir / "s.mefd").string();
+  const std::vector<std::string> chs = {"ch1", "ch2", "ch3"};
+  std::vector<si4> block(chs.size() * kN, 11);
+  const std::vector<sf8> uf = {0.5};
+  SessionWriter w(session, true);
+  w.write_int32_many(chs, block, uf, round_start(0), kRate);
+  w.flush();
+
+  SECTION("before publication: RollbackIncompleteError") {
+    static std::string victim;
+    victim = tdat_of(session, "ch2").string();
+    detail::flush_batch_observer = [](const std::vector<fs::path>&) {
+      make_read_only(victim);  // the truncate of ch2's .tdat can no longer work
+      throw IoError("could not flush to disk, the write is not durable: injected");
+    };
+    try {
+      w.write_int32_many(chs, block, uf, round_start(1), kRate);
+      FAIL("must throw");
+    } catch (const RollbackIncompleteError& e) {
+      REQUIRE(e.incomplete() == std::vector<std::string>{"ch2"});
+      REQUIRE(std::string(e.what()).find("rollback was incomplete: ch2:") != std::string::npos);
+    }
+    detail::flush_batch_observer = nullptr;
+  }
+
+  SECTION("while publishing: PartialWriteError lists written and incomplete") {
+    static std::string victim;
+    static int calls;
+    victim = tdat_of(session, "ch3").string();
+    calls = 0;
+    detail::publish_observer = [](const fs::path&) {
+      if (++calls == 2) {
+        make_read_only(victim);
+        throw IoError("rename refused (injected)");
+      }
+    };
+    try {
+      w.write_int32_many(chs, block, uf, round_start(1), kRate);
+      FAIL("must throw");
+    } catch (const PartialWriteError& e) {
+      REQUIRE(e.written() == std::vector<std::string>{"ch1"});
+      REQUIRE(e.incomplete() == std::vector<std::string>{"ch3"});
+    }
+    detail::publish_observer = nullptr;
+  }
+}
+
+TEST_CASE("a failure while publishing: ch1 is written, the rest rolled back", "[write_many]") {
+  const Scratch dir("partial");
+  const auto session = (dir.dir / "s.mefd").string();
+  const std::vector<std::string> chs = {"ch1", "ch2", "ch3"};
+  std::vector<si4> block(chs.size() * kN, 13);
+  const std::vector<sf8> uf = {0.5};
+  SessionWriter w(session, true);
+  w.set_wait_for_disk(true);
+  w.write_int32_many(chs, block, uf, round_start(0), kRate);
+  const auto before = snapshot(session);
+  static int calls;
+  calls = 0;
+  detail::publish_observer = [](const fs::path&) {
+    if (++calls == 2) throw IoError("rename refused (injected)");
+  };
+  const Observers obs;
+  try {
+    w.write_int32_many(chs, block, uf, round_start(1), kRate);
+    FAIL("must throw");
+  } catch (const PartialWriteError& e) {
+    REQUIRE(e.written() == std::vector<std::string>{"ch1"});
+    REQUIRE(e.incomplete().empty());
+  }
+  detail::publish_observer = nullptr;
+  // wait_for_disk: what IS written (ch1's published .tmet) was flushed before the throw
+  const auto got = Observers::take();
+  REQUIRE(got.size() == 2);
+  REQUIRE(got[1].size() == 1);
+  REQUIRE(ends_with(got[1][0], "ch1-000000.tmet"));
+  // ch2 and ch3 are as before; ch1 holds the new round
+  const auto after = snapshot(session);
+  for (const char* ch : {"ch2", "ch3"}) {
+    const std::string rel = std::string(ch) + ".timd/" + ch + "-000000.segd/" + ch + "-000000.";
+    for (const char* ext : {"tdat", "tidx", "tmet"}) REQUIRE(after.at(rel + ext) == before.at(rel + ext));
+  }
+  REQUIRE(after.at("ch1.timd/ch1-000000.segd/ch1-000000.tdat").size() >
+          before.at("ch1.timd/ch1-000000.segd/ch1-000000.tdat").size());
+  // and the writer carries on, with ch1 ahead
+  REQUIRE_THROWS_AS(w.write_int32("ch1", std::span<const si4>(block).subspan(0, kN), 0.5,
+                                  round_start(1), kRate),
+                    WriteConflictError);
+}
+
+TEST_CASE("a rolled-back append keeps the index summary: the next append is O(new)", "[write_many]") {
+#ifdef __linux__
+  const Scratch dir("cache");
+  const auto session = (dir.dir / "s.mefd").string();
+  const std::vector<std::string> chs = {"ch1", "ch2"};
+  std::vector<si4> block(chs.size() * kN, 5);
+  const std::vector<sf8> uf = {0.5};
+  SessionWriter w(session, true);
+  w.set_block_length(16);  // ~1900 index entries per round
+  for (int r = 0; r < 4; ++r) w.write_int32_many(chs, block, uf, round_start(r), kRate);
+  auto rchar = [] {
+    std::ifstream f("/proc/self/io");
+    std::string key;
+    long long v;
+    while (f >> key >> v)
+      if (key == "rchar:") return v;
+    return 0LL;
+  };
+  long long t0 = rchar();
+  w.write_int32_many(chs, block, uf, round_start(4), kRate);
+  const long long normal = rchar() - t0;
+  detail::flush_batch_observer = [](const std::vector<fs::path>&) {
+    throw IoError("could not flush to disk, the write is not durable: injected");
+  };
+  REQUIRE_THROWS_AS(w.write_int32_many(chs, block, uf, round_start(5), kRate), IoError);
+  detail::flush_batch_observer = nullptr;
+  t0 = rchar();
+  w.write_int32_many(chs, block, uf, round_start(5), kRate);
+  const long long after = rchar() - t0;
+  // the full index walk would read ~2 x 5 x 1900 x 56 B = ~1 MB
+  REQUIRE(after < normal + 100000);
+#endif
+}
+
+TEST_CASE("a read-only index is not a failed rollback", "[write_many]") {
+#ifdef __linux__
+  if (::geteuid() == 0) SKIP("permissions do not bind root");
+  const Scratch dir("ro_tidx");
+  const auto session = (dir.dir / "s.mefd").string();
+  std::vector<si4> block(kN, 5);
+  {
+    SessionWriter w(session, true);
+    w.write_int32("ch1", block, 0.5, round_start(0), kRate);
+  }
+  const fs::path tidx = fs::path(session) / "ch1.timd/ch1-000000.segd/ch1-000000.tidx";
+  make_read_only(tidx);
+  const auto before = snapshot(session);
+  SessionWriter w(session);
+  try {
+    w.write_int32("ch1", block, 0.5, round_start(1), kRate);
+    FAIL("must throw");
+  } catch (const IoError& e) {
+    REQUIRE(std::string(e.what()).find("rollback was incomplete") == std::string::npos);
+  }
+  REQUIRE(snapshot(session) == before);
+#endif
+}
+
+TEST_CASE("flush=close is refused on a session that already existed", "[write_many]") {
+  const Scratch dir("close_existing");
+  const auto session = (dir.dir / "s.mefd").string();
+  std::vector<si4> block(kN, 5);
+  { SessionWriter w(session, true); w.write_int32("ch1", block, 0.5, round_start(0), kRate); }
+  SessionWriter reopened(session);
+  REQUIRE_THROWS_AS(reopened.set_flush_mode(FlushMode::Close), std::invalid_argument);
+  SessionWriter fresh(session, true);  // overwrite: this writer creates it
+  REQUIRE_NOTHROW(fresh.set_flush_mode(FlushMode::Close));
 }

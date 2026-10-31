@@ -129,10 +129,17 @@ class SessionWriter {
   bool wait_for_disk() const { return wait_for_disk_; }
   /// FlushMode::Close: no flush during writes, one combined flush at
   /// flush()/close() (see FlushMode). Default Each.
-  /// @throws std::invalid_argument when wait_for_disk is on.
+  /// @throws std::invalid_argument when wait_for_disk is on, or when the
+  /// session already existed when this writer opened it (earlier data must
+  /// never be at risk: close mode is for sessions this writer creates).
   void set_flush_mode(FlushMode m) {
     if (m == FlushMode::Close && wait_for_disk_)
       throw std::invalid_argument("flush=\"close\" cannot be combined with wait_for_disk");
+    if (m == FlushMode::Close && session_preexisted_)
+      throw std::invalid_argument(
+          "flush=\"close\" is only for a session this Writer creates (overwrite=True or a new "
+          "path): this session already existed, and without the usual waits a power cut could "
+          "make the whole session unreadable, taking the earlier data with it");
     flush_mode_ = m;
   }
   FlushMode flush_mode() const { return flush_mode_; }

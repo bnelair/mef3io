@@ -30,7 +30,7 @@ class WriterFlushWarning(MefWarning):
     """
 
 
-def _flush_on_collect(impl, path) -> None:
+def _flush_on_collect(impl, path, close_mode: bool = False) -> None:
     """Flush an UNCLOSED writer from its ``__del__``: with the GIL released (the
     binding's flush does that) so a slow disk does not stall every other
     thread inside the garbage collector, and a failure becomes a
@@ -45,8 +45,13 @@ def _flush_on_collect(impl, path) -> None:
                 WriterFlushWarning,
                 f"an unclosed Writer could not flush its data to disk ({e}); "
                 "data written since the last successful flush may be lost: "
-                "run recover on the session. Close the Writer (or use `with`) "
-                "to get this as an exception.",
+                + (
+                    'the session (flush="close") must be rewritten; it cannot be '
+                    "reliably recovered. "
+                    if close_mode
+                    else "run recover on the session. "
+                )
+                + "Close the Writer (or use `with`) to get this as an exception.",
                 path=path,
                 details=[str(e)],
                 stacklevel=1,
@@ -295,6 +300,15 @@ class Writer:
         At most ``mef3io._mef3io.MAX_BLOCK_SAMPLES`` (858 993 396: a block's
         byte size is a 32-bit field); more raises ``ValueError`` before
         anything is created, as does a rate whose derived block exceeds it.
+    flush : {"each", "close"}, optional
+        ``"each"`` (default): the waits described in the data-on-disk guide.
+        ``"close"``: no waits during writes, one combined wait at
+        :meth:`close`/:meth:`flush`. **Only for a session this Writer creates**
+        (``overwrite=True`` or a new path; an existing session raises
+        ``ValueError``) and only for output you rebuild after any failure: a
+        power cut while writing can leave the whole session unreadable and
+        ``recover_session`` cannot be relied on. Not combinable with
+        ``wait_for_disk``.
     n_threads : int, optional
         How many threads this Writer may use (RED encoding): ``0`` (default)
         = automatic, ``1`` = no extra threads. Output is byte-identical
@@ -377,6 +391,7 @@ class Writer:
         self._impl.set_threads(self._n_threads)
         self._impl.set_wait_for_disk(bool(wait_for_disk))
         self._impl.set_flush_mode(flush)
+        self._close_mode = flush == "close"
         if metadata is not None:
             self.set_metadata(metadata)
 
@@ -397,7 +412,7 @@ class Writer:
         impl = getattr(self, "_impl", None)
         if impl is not None:
             self._impl = None
-            _flush_on_collect(impl, getattr(self, "_path", None))
+            _flush_on_collect(impl, getattr(self, "_path", None), getattr(self, "_close_mode", False))
 
     @property
     def n_threads(self) -> int:
@@ -597,7 +612,10 @@ class Writer:
         """Common validation of a multi-channel call (nothing is written)."""
         if isinstance(channels, (str, bytes)):
             raise TypeError("channels must be a sequence of channel names, not one string")
-        channels = [str(c) for c in channels]
+        channels = list(channels)
+        for c in channels:
+            if not isinstance(c, str):
+                raise TypeError(f"channel names must be str, not {type(c).__name__}")
         if len(set(channels)) != len(channels):
             dup = sorted({c for c in channels if channels.count(c) > 1})
             raise ValueError(f"channels listed more than once: {dup}; nothing was written")
@@ -630,15 +648,22 @@ class Writer:
         one per channel. See `When is my data on disk?
         <https://bnelair.github.io/mef3io/long_recordings/#when-is-my-data-on-disk>`_.
 
-        Every refusal is decided before any byte is written. A failure while
-        writing or flushing rolls **every** channel of the call back and
-        raises the underlying error (nothing was written). A failure while
+        Every refusal, including an append that conflicts with what is on
+        disk (rate, factor, start before the segment's end), is decided before
+        any byte is written. A failure while writing or flushing rolls
+        **every** channel of the call back and raises the underlying error
+        (nothing was written); if a rollback itself does not complete,
+        :class:`RollbackIncompleteError` names the channels
+        (``incomplete_channels``) whose files may be torn. A failure while
         publishing raises :class:`PartialWriteError`, whose
         ``written_channels`` lists the channels that are on disk (the rest
-        were rolled back).
+        were rolled back; ``incomplete_channels`` as above).
 
-        Memory: the call holds the data, a copy of each block being encoded
-        and the encoded blocks of the channels running at once, so write long
+        Memory: besides the data, each channel being written holds a copy of
+        its samples and its encoded blocks (freed when it is written), and
+        only about ``n_threads`` channels run at once; ``write_many``
+        also holds the converted counts and mask of every channel (about 5/8
+        of the input), so write long
         recordings in chunks (minutes per call).
 
         Parameters

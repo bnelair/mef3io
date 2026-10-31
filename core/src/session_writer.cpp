@@ -192,7 +192,7 @@ void SessionWriter::check_still_writable() const {
   if (wait_for_disk_ && flush_failure_)
     throw IoError(*flush_failure_ +
                   " (an earlier flush failed: data written since the last successful flush may "
-                  "be lost; run recover_session)");
+                  "be lost; " + std::string(flush_mode_ == FlushMode::Close ? "the session must be rewritten (flush=\"close\" sessions cannot be reliably recovered)" : "run recover_session") + ")");
 }
 
 void SessionWriter::hydrate(const std::string& channel, ChannelState& st) {
@@ -526,7 +526,7 @@ void SessionWriter::flush() {
   if (flush_failure_)
     throw IoError(*flush_failure_ +
                   " (an earlier flush failed: data written since the last successful flush may "
-                  "be lost; run recover_session)");
+                  "be lost; " + std::string(flush_mode_ == FlushMode::Close ? "the session must be rewritten (flush=\"close\" sessions cannot be reliably recovered)" : "run recover_session") + ")");
   if (unflushed_.empty()) return;
   std::vector<fs::path> files;
   std::error_code ec;
@@ -710,6 +710,7 @@ struct SessionWriter::WritePlan {
   ui4 written_difference_bytes = 0;
   PendingPublish pending;
   bool pending_set = false;     // the segment is written, its .tmet unpublished
+  AppendIndexCache cache_before;  // the channel's index summary before run_plan
   bool created_timd = false, created_segd = false;
   fs::path timd;
   WriteSummary summary;
@@ -840,6 +841,22 @@ std::unique_ptr<SessionWriter::WritePlan> SessionWriter::plan_write(
   // rather than trusting a declaration it has no way to verify.
   if (append && st.difference_bytes_exact) spec.known_difference_bytes = st.max_difference_bytes;
 
+  if (append) {
+    // The conflicts append_time_series_segment would find on disk, decided
+    // HERE from the hydrated state so a multi-channel call refuses before any
+    // channel has been extended (the check there stays as defence).
+    if (std::abs(st.sampling_frequency - fs) > 1e-9 * std::max(1.0, std::abs(st.sampling_frequency)))
+      throw WriteConflictError("append fs " + std::to_string(fs) + " != segment fs " +
+                               std::to_string(st.sampling_frequency));
+    if (std::abs(st.units_conversion_factor - ufact) >
+        1e-12 * std::max(1.0, std::abs(st.units_conversion_factor)))
+      throw WriteConflictError("append units_conversion_factor " + std::to_string(ufact) +
+                               " != segment's " + std::to_string(st.units_conversion_factor));
+    const si8 slack = static_cast<si8>(std::llround(std::min(0.5e6 / st.sampling_frequency, 1e18)));
+    if (plan->blocks.front().start_uutc < st.last_end_uutc - slack)
+      throw WriteConflictError("append starts at " + std::to_string(plan->blocks.front().start_uutc) +
+                               " uUTC, before segment end " + std::to_string(st.last_end_uutc));
+  }
   if (!append) {
     // Everything that can refuse runs BEFORE a directory exists: a refused
     // write must leave the tree exactly as it was. A directory left behind
@@ -861,6 +878,7 @@ void SessionWriter::create_plan_dirs(WritePlan& p) {
 void SessionWriter::run_plan(WritePlan& p, PendingPublish* defer, int threads) {
   // Touches only the plan and its channel's state: plans of different
   // channels run concurrently.
+  p.cache_before = p.st->index_cache;
   for (std::size_t k = 0; k < p.blocks.size(); ++k) {
     const auto first = p.samples.begin() + p.block_src[k];
     p.blocks[k].samples.assign(first, first + p.block_len[k]);
@@ -875,6 +893,13 @@ void SessionWriter::run_plan(WritePlan& p, PendingPublish* defer, int threads) {
                               defer);
   }
   p.pending_set = defer != nullptr;
+  // Written: nothing below needs the samples (commit uses counts only), so
+  // the copies and a float write's counts go now, not at the end of the call.
+  for (auto& b : p.blocks) std::vector<si4>().swap(b.samples);
+  std::vector<si4>().swap(p.own_counts);
+  std::vector<ui1>().swap(p.own_valid);
+  p.samples = {};
+  p.valid = {};
 }
 
 std::string SessionWriter::roll_back_plan(WritePlan& p) {
@@ -885,7 +910,14 @@ std::string SessionWriter::roll_back_plan(WritePlan& p) {
   if (p.pending_set) {
     err = discard_pending(p.pending);
     p.pending_set = false;
-    if (p.append) p.st->index_cache.valid = false;
+    // A clean rollback leaves the files as the summary described them: keep
+    // it, so the next append is not a full .tidx walk. Otherwise forget it.
+    if (p.append) {
+      if (err.empty())
+        p.st->index_cache = p.cache_before;
+      else
+        p.st->index_cache.valid = false;
+    }
   }
   if (!p.append && !p.noop) {
     std::error_code ec;
@@ -940,8 +972,10 @@ void SessionWriter::commit_plan(WritePlan& p) {
   st.last_segment = p.seg;
   st.last_segment_stem = fs::path(p.seg_dir).stem().string();
   st.total_samples += p.stored;
-  st.last_end_uutc =
-      p.start_uutc + static_cast<si8>(std::llround(static_cast<sf8>(p.n) / p.fs * 1e6));
+  // Same expression as the writer's segment end (last block's start + its
+  // length), so the pre-check in plan_write sees what is on disk.
+  st.last_end_uutc = p.blocks.back().start_uutc +
+                     static_cast<si8>(std::llround(static_cast<sf8>(p.block_len.back()) * 1e6 / p.fs));
 
   p.summary.samples_written = p.stored;
   p.summary.blocks = static_cast<si8>(p.blocks.size());
@@ -985,16 +1019,35 @@ std::vector<WriteSummary> SessionWriter::write_many_plans(
   for (auto& p : plans)
     if (!p->noop) active.push_back(p.get());
 
-  auto roll_back_all = [&] {
-    for (WritePlan* p : active) roll_back_plan(*p);
+  // Undo plans [from, end); returns "<channel>: <why>" for every rollback
+  // that did not complete.
+  auto roll_back_from = [&](std::size_t from) {
+    std::vector<std::pair<std::string, std::string>> bad;
+    for (std::size_t j = from; j < active.size(); ++j) {
+      const std::string why = roll_back_plan(*active[j]);
+      if (!why.empty()) bad.emplace_back(active[j]->channel, why);
+    }
+    return bad;
+  };
+  // Rethrow @p cause after a rollback of everything; an incomplete rollback
+  // is reported instead, naming the channels (their files may be torn).
+  auto fail_rolled_back = [&](const std::string& cause, std::exception_ptr original) {
+    const auto bad = roll_back_from(0);
+    if (bad.empty()) std::rethrow_exception(original);
+    std::string text = cause + "; rollback was incomplete: ";
+    std::vector<std::string> names;
+    for (const auto& [ch, why] : bad) {
+      text += (names.empty() ? "" : "; ") + ch + ": " + why;
+      names.push_back(ch);
+    }
+    throw RollbackIncompleteError(text, names);
   };
 
   if (!active.empty()) {
     try {
       for (WritePlan* p : active) create_plan_dirs(*p);
-    } catch (...) {
-      roll_back_all();
-      throw;
+    } catch (const std::exception& e) {
+      fail_rolled_back(e.what(), std::current_exception());
     }
     // ONE thread budget: C channels at a time, each encoding its blocks on
     // T / C threads, so no more than ~T threads run whatever the shape.
@@ -1005,12 +1058,13 @@ std::vector<WriteSummary> SessionWriter::write_many_plans(
     });
     for (std::size_t k = 0; k < active.size(); ++k) {
       if (!errors[k]) continue;
-      roll_back_all();  // the failed append restored itself; the rest are undone here
       try {
         std::rethrow_exception(errors[k]);
       } catch (const IoError& e) {
         remember_flush_failure(e);
-        throw;
+        fail_rolled_back(e.what(), std::current_exception());
+      } catch (const std::exception& e) {
+        fail_rolled_back(e.what(), std::current_exception());
       }
     }
 
@@ -1019,12 +1073,10 @@ std::vector<WriteSummary> SessionWriter::write_many_plans(
     try {
       flush_pending(pend, false);
     } catch (const IoError& e) {
-      roll_back_all();
       if (!flush_failure_) flush_failure_ = e.what();
-      throw;
-    } catch (...) {
-      roll_back_all();
-      throw;
+      fail_rolled_back(e.what(), std::current_exception());
+    } catch (const std::exception& e) {
+      fail_rolled_back(e.what(), std::current_exception());
     }
 
     std::vector<std::string> published;
@@ -1039,12 +1091,28 @@ std::vector<WriteSummary> SessionWriter::write_many_plans(
       // Channels [0, k) are on disk and valid; the rest are undone.
       const std::string why = e.what();
       for (std::size_t j = 0; j < k; ++j) commit_plan(*active[j]);
-      for (std::size_t j = k; j < active.size(); ++j) roll_back_plan(*active[j]);
-      throw PartialWriteError("writing " + std::to_string(active.size()) + " channels failed "
-                              "while publishing channel " + active[k]->channel + " (" + why +
-                              "); " + std::to_string(k) + " channel(s) were written, the others "
-                              "were rolled back. Written: " + join_names(published),
-                              published);
+      const auto bad = roll_back_from(k);
+      // wait_for_disk promised "returned = on disk" for what IS written.
+      std::string flush_note;
+      if (wait_for_disk_ && k > 0) {
+        std::vector<PendingPublish*> done(pend.begin(), pend.begin() + static_cast<std::ptrdiff_t>(k));
+        try {
+          flush_pending(done, true);
+        } catch (const IoError& fe) {
+          if (!flush_failure_) flush_failure_ = fe.what();
+          flush_note = std::string("; flushing the written channels also failed: ") + fe.what();
+        }
+      }
+      std::string text = "writing " + std::to_string(active.size()) + " channels failed while "
+                         "publishing channel " + active[k]->channel + " (" + why + "); " +
+                         std::to_string(k) + " channel(s) were written, the others were rolled "
+                         "back. Written: " + join_names(published) + flush_note;
+      std::vector<std::string> names;
+      for (const auto& [ch, w] : bad) {
+        text += (names.empty() ? "; rollback was incomplete: " : "; ") + ch + ": " + w;
+        names.push_back(ch);
+      }
+      throw PartialWriteError(text, published, names);
     }
     for (WritePlan* p : active) p->pending_set = false;
     try {

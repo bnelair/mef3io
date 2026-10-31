@@ -668,25 +668,39 @@ NB_MODULE(_mef3io, m) {
   static nb::exception<mef3io::IoError> io_error(m, "IoError", mef_error.ptr());
   static nb::exception<mef3io::WriteConflictError> write_conflict_error(
       m, "WriteConflictError", mef_error.ptr());
-  // A multi-channel write that failed while publishing: `.written_channels`
-  // lists the channels that ARE on disk (the others were rolled back).
+  // Multi-channel write failures (SessionWriter::write_int32_many):
+  // PartialWriteError.written_channels = on disk; both carry
+  // .incomplete_channels = channels whose rollback did not complete.
   static nb::exception<mef3io::PartialWriteError> partial_write_error(
       m, "PartialWriteError", io_error.ptr());
+  static nb::exception<mef3io::RollbackIncompleteError> rollback_incomplete_error(
+      m, "RollbackIncompleteError", io_error.ptr());
   nb::register_exception_translator([](const std::exception_ptr& p, void*) {
+    auto raise = [](PyObject* type, const char* what, const std::vector<std::string>* written,
+                    const std::vector<std::string>& incomplete) {
+      PyObject* text = PyUnicode_DecodeUTF8(what, static_cast<Py_ssize_t>(std::strlen(what)),
+                                            "replace");
+      if (!text) return;
+      PyObject* exc = PyObject_CallFunctionObjArgs(type, text, nullptr);
+      Py_DECREF(text);
+      if (!exc) return;
+      if (written) {
+        nb::list w;
+        for (const auto& c : *written) w.append(c);
+        PyObject_SetAttrString(exc, "written_channels", w.ptr());
+      }
+      nb::list bad;
+      for (const auto& c : incomplete) bad.append(c);
+      PyObject_SetAttrString(exc, "incomplete_channels", bad.ptr());
+      PyErr_SetObject(type, exc);
+      Py_DECREF(exc);
+    };
     try {
       std::rethrow_exception(p);
     } catch (const mef3io::PartialWriteError& e) {
-      PyObject* text = PyUnicode_DecodeUTF8(e.what(), static_cast<Py_ssize_t>(std::strlen(e.what())),
-                                            "replace");
-      if (!text) return;
-      PyObject* exc = PyObject_CallFunctionObjArgs(partial_write_error.ptr(), text, nullptr);
-      Py_DECREF(text);
-      if (!exc) return;
-      nb::list names;
-      for (const auto& c : e.written()) names.append(c);
-      PyObject_SetAttrString(exc, "written_channels", names.ptr());
-      PyErr_SetObject(partial_write_error.ptr(), exc);
-      Py_DECREF(exc);
+      raise(partial_write_error.ptr(), e.what(), &e.written(), e.incomplete());
+    } catch (const mef3io::RollbackIncompleteError& e) {
+      raise(rollback_incomplete_error.ptr(), e.what(), nullptr, e.incomplete());
     }
   });
   // NOT under MefError/RuntimeError: a cancellation is not a failure, and code

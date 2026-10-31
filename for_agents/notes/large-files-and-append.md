@@ -293,7 +293,7 @@
   channels. An append conflict is found INSIDE `append_time_series_segment`
   (it reads the `.tmet`), i.e. during phase A: still all-or-nothing, by
   rollback. Memory: the call holds data + a block copy + the encoded bytes of
-  the channels running at once. Tests: core/tests/test_write_many.cpp
+  the channels running at once (block copies freed after run_plan). Append conflicts are PRE-CHECKED in plan_write from the hydrated state (the writer.cpp check stays as defence); `roll_back_plan` restores the AppendIndexCache snapshot after a clean rollback; incomplete rollbacks throw RollbackIncompleteError / PartialWriteError.incomplete(). Tests: core/tests/test_write_many.cpp
   (byte identity vs a loop with the random UUIDs masked, one batch per call,
   rollback), tests/test_p48_write_many.py, GIL case in test_p31.
 
@@ -303,7 +303,7 @@
   written, `.tmet` included, so "close() returned" still means on disk. A
   power cut mid-write can leave a short `.tmet` = the WHOLE session unopenable
   and not reliably recoverable: documented as only for output rebuilt after
-  any failure. Refused together with `wait_for_disk` (C++
+  any failure. Refused together with `wait_for_disk` AND on a session that existed when the Writer opened (earlier data never at risk) (C++
   invalid_argument, Python ValueError, checked before the folder is created).
   There is deliberately NO "never flush" mode. Tests: the flush=close cases
   in core/tests/test_write_many.cpp and tests/test_p48_write_many.py.

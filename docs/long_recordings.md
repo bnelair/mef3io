@@ -134,9 +134,16 @@ waits per round become one.
   being renamed into place can leave some channels written; it raises
   `mef3io.PartialWriteError`, whose `written_channels` lists them (the rest
   were rolled back).
-- **Memory.** The call holds the data, a copy of the blocks being encoded and
-  the encoded bytes of the channels running at once. Write long runs in
-  chunks of minutes, as an acquisition does anyway.
+- **Memory.** Besides your data, each channel being written holds a copy of
+  its samples and its encoded blocks until it is written (about `n_threads`
+  channels at a time); `write_many` also holds every channel's converted
+  counts and mask (about 5/8 of the input). Write long runs in chunks of
+  minutes, as an acquisition does anyway.
+- **Appends are checked first.** A different rate or factor, or data starting
+  before the segment's end, is refused before any channel is touched. If a
+  rollback itself fails, `mef3io.RollbackIncompleteError` names the channels
+  (`incomplete_channels`) whose files may be torn: run `validate` and
+  `recover` on them.
 
 ### `flush="close"`: no waits until the end
 
@@ -144,7 +151,9 @@ waits per round become one.
 for the disk during writes or appends, and `close()` (or `flush()`) does ONE
 combined wait for everything written. "`close()` returned" still means "on
 disk". The default is `flush="each"`; it cannot be combined with
-`wait_for_disk=True` (`ValueError`).
+`wait_for_disk=True` (`ValueError`). It is **only for a session this `Writer`
+creates** (`overwrite=True` or a new path): on an existing session it raises
+`ValueError`, so earlier data is never put at risk.
 
 !!! warning "A power cut during writing can lose the WHOLE session"
     Without the barrier a rename can reach the disk before the `.tmet`'s
@@ -152,7 +161,7 @@ disk". The default is `flush="each"`; it cannot be combined with
     `recover_session` **cannot be relied on** to repair that. Use this mode
     only for output you delete and rebuild after any failure (a conversion
     run into a scratch folder, say), never for a recording that cannot be
-    redone. The gain is small on a local SSD and grows with the cost of a
+    redone. After a failed flush in this mode the session must be rewritten. The gain is small on a local SSD and grows with the cost of a
     sync (network and array storage); see the [benchmarks](benchmarks.md).
 
 Two things are flushed even in the default mode, because without them a power

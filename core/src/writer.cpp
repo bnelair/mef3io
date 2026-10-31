@@ -573,15 +573,29 @@ struct AppendRollback {
       // The file was extended in place, so the original is its first
       // `original_tidx_size` bytes with the old header. On the slow path any
       // stripped padding lived in those bytes, so write them back verbatim
-      // rather than truncating — padding is not necessarily zero.
+      // rather than truncating — padding is not necessarily zero. Compare
+      // first: a file the failure never reached (a read-only index) is not
+      // a rollback failure.
       try {
+        std::error_code ec;
         if (!original_tidx.empty()) {
-          write_file(tidx_path, original_tidx);
+          if (!(fs::file_size(tidx_path, ec) == original_tidx.size() && !ec &&
+                read_whole_file(tidx_path) == original_tidx))
+            write_file(tidx_path, original_tidx);
         } else {
-          std::error_code ec;
-          fs::resize_file(tidx_path, static_cast<std::uintmax_t>(original_tidx_size), ec);
-          if (ec) note_rollback("tidx truncate rollback failed: " + ec.message());
-          else overwrite_file_prefix(tidx_path, original_tidx_uh);
+          bool untouched = false;
+          if (fs::file_size(tidx_path, ec) == original_tidx_size && !ec) {
+            std::ifstream in(tidx_path, std::ios::binary);
+            std::vector<ui1> head(fmt::UNIVERSAL_HEADER_BYTES);
+            untouched = in && in.read(reinterpret_cast<char*>(head.data()),
+                                      fmt::UNIVERSAL_HEADER_BYTES) &&
+                        head == original_tidx_uh;
+          }
+          if (!untouched) {
+            fs::resize_file(tidx_path, static_cast<std::uintmax_t>(original_tidx_size), ec);
+            if (ec) note_rollback("tidx truncate rollback failed: " + ec.message());
+            else overwrite_file_prefix(tidx_path, original_tidx_uh);
+          }
         }
       } catch (const std::exception& e) {
         note_rollback(std::string("tidx rollback failed: ") + e.what());
@@ -604,7 +618,11 @@ struct AppendRollback {
     }
     if (appended_tdat) {
       std::error_code ec;
-      fs::resize_file(tdat_path, static_cast<std::uintmax_t>(old_tdat_size), ec);
+      const auto now = fs::file_size(tdat_path, ec);
+      if (ec || now != static_cast<std::uintmax_t>(old_tdat_size)) {
+        ec.clear();
+        fs::resize_file(tdat_path, static_cast<std::uintmax_t>(old_tdat_size), ec);
+      }
       if (ec) note_rollback("tdat truncate rollback failed: " + ec.message());
     }
     return rollback_error;
@@ -1151,8 +1169,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     throw;
   }
   if (defer) {
-    defer->rollback = [rb, cache]() {
-      if (cache) cache->valid = false;
+    defer->rollback = [rb]() {
       rb->wrote_tmet = false;
       return rb->run();
     };
@@ -1196,7 +1213,10 @@ void flush_pending(const std::vector<PendingPublish*>& pending, bool after_publi
   detail::flush_files(files);  // no-op when empty
 }
 
-void publish_pending(PendingPublish& p) { replace_file(p.tmp, p.target); }
+void publish_pending(PendingPublish& p) {
+  if (detail::publish_observer) detail::publish_observer(p.target);
+  replace_file(p.tmp, p.target);
+}
 
 std::string discard_pending(PendingPublish& p) {
   std::error_code ignored;

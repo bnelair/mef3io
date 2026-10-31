@@ -145,3 +145,97 @@ def test_flush_close_option(tmp_path):
         w.write_int32_many(chs, d, 1.0, START + 5_000_000, FS)
     with mef3io.Reader(str(tmp_path / "s.mefd")) as rd:
         assert rd.read("b", START, START + 10_000_000).shape == (10_000,)
+
+
+def test_channel_names_must_be_str(tmp_path):
+    with mef3io.Writer(str(tmp_path / "s.mefd"), overwrite=True) as w:
+        with pytest.raises(TypeError, match="str"):
+            w.write_int32_many([1, 2], np.zeros((2, 10), dtype=np.int32), 1.0, START, FS)
+        with pytest.raises(TypeError, match="str"):
+            w.write_many([b"a", b"b"], np.zeros((2, 10)), START, FS)
+
+
+def test_flush_close_option(tmp_path):
+    d = _walk(np.random.default_rng(4), (3, 5000))
+    chs = ["a", "b", "c"]
+    with pytest.raises(ValueError, match="wait_for_disk"):
+        mef3io.Writer(str(tmp_path / "x.mefd"), overwrite=True, flush="close", wait_for_disk=True)
+    with pytest.raises(ValueError, match="flush"):
+        mef3io.Writer(str(tmp_path / "x.mefd"), overwrite=True, flush="never")
+    assert not (tmp_path / "x.mefd").exists()  # refused before anything is created
+    with mef3io.Writer(str(tmp_path / "s.mefd"), overwrite=True, flush="close") as w:
+        w.write_int32_many(chs, d, 1.0, START, FS)
+        w.write_int32_many(chs, d, 1.0, START + 5_000_000, FS)
+    with mef3io.Reader(str(tmp_path / "s.mefd")) as rd:
+        assert rd.read("b", START, START + 10_000_000).shape == (10_000,)
+
+
+def test_flush_close_refuses_an_existing_session(tmp_path):
+    path = str(tmp_path / "s.mefd")
+    with mef3io.Writer(path, overwrite=True) as w:
+        w.write_int32("a", np.arange(1000, dtype=np.int32), 1.0, START, FS)
+    before = _masked_files(path)
+    with pytest.raises(ValueError, match="this Writer creates"):
+        mef3io.Writer(path, flush="close")
+    assert _masked_files(path) == before
+    # overwrite=True creates it anew: allowed
+    mef3io.Writer(path, overwrite=True, flush="close").close()
+
+
+def test_append_conflict_touches_no_file(tmp_path):
+    import time
+
+    path = tmp_path / "s.mefd"
+    d = np.ones((3, 5000), dtype=np.int32)
+    chs = ["c0", "c1", "c2"]
+    with mef3io.Writer(str(path), overwrite=True, n_threads=3) as w:
+        w.write_int32_many(chs, d, 1.0, START, FS)
+        w.flush()
+        stamp = {p: (p.stat().st_size, p.stat().st_mtime_ns) for p in path.rglob("*") if p.is_file()}
+        time.sleep(0.03)
+        with pytest.raises(mef3io.WriteConflictError):
+            w.write_int32_many(chs, d, [1.0, 1.0, 2.0], START + 5_000_000, FS)  # c2: other factor
+        with pytest.raises(mef3io.WriteConflictError):
+            w.write_int32_many(chs, d, 1.0, START + 1_000_000, FS)  # starts before the end
+        assert stamp == {p: (p.stat().st_size, p.stat().st_mtime_ns)
+                         for p in path.rglob("*") if p.is_file()}
+
+
+_PEAK = r"""
+import sys, resource, numpy as np
+sys.path.insert(0, sys.argv[1])
+import mef3io
+mode, out = sys.argv[2], sys.argv[3]
+rng = np.random.default_rng(0)
+nch, n = 16, 1_000_000
+d = rng.integers(-3000, 3000, size=(nch, n), dtype=np.int32)  # no big temporaries: maxrss is a high-water mark
+chs = [f"c{i}" for i in range(nch)]
+base = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+w = mef3io.Writer(out, overwrite=True, n_threads=2)
+if mode == "many":
+    w.write_int32_many(chs, d, 1.0, 1_600_000_000_000_000, 1000.0)
+else:
+    for i, c in enumerate(chs):
+        w.write_int32(c, d[i], 1.0, 1_600_000_000_000_000, 1000.0)
+w.close()
+print((resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - base) * 1024)
+"""
+
+
+def test_peak_memory_stays_near_the_loop(tmp_path):
+    """The multi-channel call frees each channel's block copies once it is
+    written: peak growth is that of ~n_threads channels, not of all of them."""
+    import subprocess
+    import sys
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(mef3io.__file__)))
+    grow = {}
+    for mode in ("loop", "many"):
+        r = subprocess.run([sys.executable, "-c", _PEAK, root, mode, str(tmp_path / f"{mode}.mefd")],
+                           capture_output=True, text=True, check=True)
+        grow[mode] = int(r.stdout.strip())
+    one_channel = 4 * 1_000_000
+    all_channels = 16 * one_channel
+    # far below a copy of everything, and not much above the loop
+    assert grow["many"] < all_channels * 0.6, grow
+    assert grow["many"] < grow["loop"] + 6 * one_channel, grow
