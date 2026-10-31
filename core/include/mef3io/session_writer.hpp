@@ -7,9 +7,11 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <set>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -75,6 +77,14 @@ struct Precision {
   }
 };
 
+/// When a writer waits for the disk (#166). Each = today's behaviour: the
+/// barriers documented in docs/long_recordings.md. Close = NO flush during
+/// writes or appends, ONE combined flush at flush()/close(): faster on a
+/// slow disk, but a power cut mid-write can leave a short `.tmet` that fails
+/// the open of the WHOLE session (recover_session cannot be relied on), so
+/// only for output the caller rebuilds after any failure.
+enum class FlushMode { Each, Close };
+
 /// High-level MEF 3.0 writer: float64 quantization with precision inference,
 /// the int32+conversion-factor primitive path, NaN = discontinuity splitting,
 /// block layout, in-segment append, and records. Times are uUTC.
@@ -109,8 +119,30 @@ class SessionWriter {
   /// Opt-in: every write returns only when ITS OWN data is on disk. The
   /// files of that write (.tdat, .tidx, .tmet; .rdat/.ridx for records) are
   /// flushed in one combined wait before its .tmet is published. Default off.
-  void set_wait_for_disk(bool on) { wait_for_disk_ = on; }
+  /// @throws std::invalid_argument together with FlushMode::Close (a write
+  /// cannot both wait for the disk and defer every flush).
+  void set_wait_for_disk(bool on) {
+    if (on && flush_mode_ == FlushMode::Close)
+      throw std::invalid_argument("wait_for_disk cannot be combined with flush=\"close\"");
+    wait_for_disk_ = on;
+  }
   bool wait_for_disk() const { return wait_for_disk_; }
+  /// FlushMode::Close: no flush during writes, one combined flush at
+  /// flush()/close() (see FlushMode). Default Each.
+  /// @throws std::invalid_argument when wait_for_disk is on, or when the
+  /// session already existed when this writer opened it (earlier data must
+  /// never be at risk: close mode is for sessions this writer creates).
+  void set_flush_mode(FlushMode m) {
+    if (m == FlushMode::Close && wait_for_disk_)
+      throw std::invalid_argument("flush=\"close\" cannot be combined with wait_for_disk");
+    if (m == FlushMode::Close && session_preexisted_)
+      throw std::invalid_argument(
+          "flush=\"close\" is only for a session this Writer creates (overwrite=True or a new "
+          "path): this session already existed, and without the usual waits a power cut could "
+          "make the whole session unreadable, taking the earlier data with it");
+    flush_mode_ = m;
+  }
+  FlushMode flush_mode() const { return flush_mode_; }
 
   /// Primitive path: int32 counts stored verbatim with a conversion factor
   /// (e.g. amplifier V/bit).
@@ -158,6 +190,36 @@ class SessionWriter {
   WriteSummary write_float(const std::string& channel, std::span<const sf8> data, si8 start_uutc,
                            sf8 sampling_frequency, Precision precision = {},
                            bool new_segment = false);
+
+  /// The same run of data for MANY channels in one call (#165): byte-identical
+  /// to calling write_int32 for each channel in the given order (fresh
+  /// segments differ only in their random UUIDs), but the channels are written
+  /// in parallel on this writer's thread budget and their `.tmet` barriers are
+  /// ONE combined wait instead of one per channel.
+  ///
+  /// Every refusal (duplicate channel, bad arguments, an append conflict, an
+  /// offset that cannot be resolved) is decided before any byte is written.
+  /// A failure while writing or flushing rolls EVERY channel back and rethrows
+  /// the error (nothing was written); one while publishing throws
+  /// PartialWriteError naming the channels that were written.
+  /// Memory: the call holds the data, a copy per block being encoded and the
+  /// encoded blocks of the channels running at once; chunk long runs.
+  /// @param channels distinct channel names.
+  /// @param data     row-major (channels.size() x n) int32 counts.
+  /// @param ufacts   one factor, or one per channel.
+  /// @return one summary per channel, in order.
+  std::vector<WriteSummary> write_int32_many(const std::vector<std::string>& channels,
+                                             std::span<const si4> data,
+                                             std::span<const sf8> ufacts, si8 start_uutc,
+                                             sf8 sampling_frequency, bool new_segment = false);
+
+  /// Float counterpart of write_int32_many: each channel is converted exactly
+  /// as write_float would (NaN gaps, precision inferred per channel, step).
+  /// @param data row-major (channels.size() x n) float64.
+  std::vector<WriteSummary> write_float_many(const std::vector<std::string>& channels,
+                                             std::span<const sf8> data, si8 start_uutc,
+                                             sf8 sampling_frequency, Precision precision = {},
+                                             bool new_segment = false);
 
   /// Write records (annotations). @p channel nullopt -> session-level (in the
   /// `.mefd` root), otherwise channel-level. APPENDS to the records already stored at that level
@@ -278,9 +340,24 @@ class SessionWriter {
   std::vector<std::string> unreadable_metadata_;
   std::vector<std::string> legacy_password_segments_;
   std::map<std::string, std::string> empty_segment_dirs_;  // dir -> its report entry
-  WriteSummary write_blocks(const std::string& channel, const std::vector<si4>& samples,
+  WriteSummary write_blocks(const std::string& channel, std::span<const si4> samples,
                             std::span<const ui1> valid, sf8 ufact, si8 start_uutc, sf8 fs,
                             bool new_segment);
+  // write_blocks = plan (serial, refuses, touches nothing on disk) + create
+  // folders + run (per channel, thread-safe across channels) + commit
+  // (serial state). The multi-channel writes drive the same steps.
+  struct WritePlan;
+  struct FloatPrep;
+  std::unique_ptr<WritePlan> plan_write(const std::string& channel, std::span<const si4> samples,
+                                        std::span<const ui1> valid, sf8 ufact, si8 start_uutc,
+                                        sf8 fs, bool new_segment);
+  void create_plan_dirs(WritePlan& p);
+  void run_plan(WritePlan& p, PendingPublish* defer, int threads);
+  std::string roll_back_plan(WritePlan& p);
+  void commit_plan(WritePlan& p);
+  std::vector<WriteSummary> write_many_plans(std::vector<std::unique_ptr<WritePlan>>& plans);
+  FloatPrep prepare_float(const std::string& channel, std::span<const sf8> data, sf8 fs,
+                          Precision precision, bool new_segment);
 
   std::string mefd_path_;
   std::string password_1_;
@@ -292,6 +369,7 @@ class SessionWriter {
   std::atomic<int> n_threads_{0};
   bool session_preexisted_ = false;  // the folder existed (not overwritten) at open
   bool wait_for_disk_ = false;
+  FlushMode flush_mode_ = FlushMode::Each;
   std::set<std::filesystem::path> unflushed_;  // written since the last flush()
   std::optional<std::string> flush_failure_;   // first failed flush (sticky)
   void remember_flush_failure(const IoError& e);

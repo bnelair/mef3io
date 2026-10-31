@@ -111,6 +111,24 @@ docs/long_recordings.md "When is my data on disk?"):
 - `wait_for_disk=True`: each write's files in one combined wait BEFORE its
   `.tmet` is published.
 
+- `write_int32_many` / `write_float_many` (#165): the same `.tmet` barrier, but
+  ONE `flush_files` for all channels' temp files, then the renames — no rename
+  before its temp is durable. Phase A (per channel, parallel) writes
+  `.tdat`/`.tidx` and leaves the `.tmet` as a temp (`PendingPublish`); a
+  failure before the renames rolls EVERY channel back (`roll_back_plan`:
+  appends restore via `AppendRollback`, fresh segments remove their folders);
+  a failure during the renames throws `PartialWriteError` naming the
+  published channels. Writer state is committed only after publication
+  (`commit_plan`), serially. Single-channel writes run the SAME plan/run/commit
+  steps with no deferral, so the bytes cannot drift apart. One thread budget:
+  outer channels x inner blocks <= `n_threads`.
+- `Writer(flush="close")` / `FlushMode::Close` (#166, opt-in): NO flush during
+  writes (`SegmentSpec::skip_tmet_flush`); `flush()`/close does one combined
+  batch of everything written (the `.tmet` too). A power cut mid-write can
+  leave a short `.tmet` = the whole session unopenable and NOT reliably
+  recoverable — documented as only for output that is rebuilt on failure.
+  Refused together with `wait_for_disk`.
+
 Nothing else is flushed by default: not `.tdat`/`.tidx`, not later segments of
 a self-created session, not the directory entry after a rename, not headers
 patched in place. So a power cut can leave the LAST append of a segment torn,

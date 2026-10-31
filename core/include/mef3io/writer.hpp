@@ -4,6 +4,8 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
+#include <functional>
 #include <span>
 #include <string>
 #include <vector>
@@ -104,7 +106,41 @@ struct SegmentSpec {
   /// combined wait (`flush_files`) before the `.tmet` is renamed into place,
   /// so the call returns only when its data is on disk.
   bool wait_for_disk = false;
+  /// `flush="close"` mode (#166): the `.tmet` is renamed in WITHOUT the
+  /// barrier that precedes it. The caller owes one combined flush later
+  /// (SessionWriter::flush / close). A power cut before it can leave a short
+  /// `.tmet` that fails the strict open of the whole session.
+  bool skip_tmet_flush = false;
 };
+
+/// A `.tmet` written to its temp file but NOT yet renamed into place: what a
+/// segment write leaves behind when the caller asks to publish later
+/// (`defer`), so that many channels' barriers can be one combined wait
+/// (SessionWriter::write_int32_many, #165). The sequence is
+/// flush_pending (before) -> publish_pending (rename) -> flush_pending (after,
+/// wait_for_disk only); discard_pending undoes an append that was not published.
+struct PendingPublish {
+  std::filesystem::path tmp, target;
+  /// Default mode: the temp must be durable before the rename (an append, or
+  /// a first segment); `flush_with`/`flush_target` are wait_for_disk's.
+  bool flush_tmp = false;
+  std::vector<std::filesystem::path> flush_with;  ///< wait_for_disk: .tdat, .tidx
+  bool flush_target = false;                      ///< wait_for_disk: the published name too
+  /// Append only: restores the `.tdat`/`.tidx` the append extended. Returns
+  /// an error text ("" = restored). Empty for a fresh segment, whose
+  /// caller removes the folder.
+  std::function<std::string()> rollback;
+};
+
+/// ONE combined flush for the given pendings: before their renames (temps that
+/// need it, plus wait_for_disk's data files) or, with @p after_publish, the
+/// published names. No-op when nothing needs a wait.
+void flush_pending(const std::vector<PendingPublish*>& pending, bool after_publish);
+/// Rename the temp over its target.
+void publish_pending(PendingPublish& p);
+/// Remove an unpublished temp and undo an append's extension. Returns an
+/// error text for a rollback that was incomplete ("" = clean).
+std::string discard_pending(PendingPublish& p);
 
 /// Largest RED block, in samples, that the format can describe: a block's
 /// byte count is a ui4 in both its RED header and its `.tidx` entry, with
@@ -140,7 +176,8 @@ void check_block_length(si8 samples_per_block);
 /// wants to carry it into a later append as `SegmentSpec::known_difference_bytes`.
 si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec& spec,
                               const std::vector<BlockSpec>& blocks, int n_threads = 0,
-                              ui4* out_max_difference_bytes = nullptr);
+                              ui4* out_max_difference_bytes = nullptr,
+                              PendingPublish* defer = nullptr);
 
 // Append blocks to an EXISTING segment (in-segment append): extends the .tdat
 // and .tidx of the segment whose folder is `segment_dir`; its files are named
@@ -160,9 +197,13 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
 /// `cache` (optional) carries the index summary across appends. Pass the same
 /// object back on every append to the same segment and the index is never
 /// walked twice; pass nullptr, or a default-constructed one, for the full walk.
+/// `defer` (optional): leave the new `.tmet` as an unpublished temp file and
+/// fill this in (see PendingPublish); the `.tdat`/`.tidx` are extended as
+/// usual. Same for write_time_series_segment.
 si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec& spec,
                                const std::vector<BlockSpec>& blocks, int n_threads = 0,
                                ui4* out_max_difference_bytes = nullptr,
-                               AppendIndexCache* cache = nullptr);
+                               AppendIndexCache* cache = nullptr,
+                               PendingPublish* defer = nullptr);
 
 }  // namespace mef3io

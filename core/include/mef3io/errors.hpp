@@ -4,6 +4,8 @@
 
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace mef3io {
 
@@ -34,6 +36,36 @@ class PasswordError : public MefError {
 class IoError : public MefError {
  public:
   using MefError::MefError;
+};
+
+// A multi-channel write that failed while publishing: the channels in
+// `written()` ARE on disk and valid, every other channel of the call was
+// rolled back (SessionWriter::write_int32_many). A failure earlier in the
+// call throws the underlying error instead, and nothing was written.
+class PartialWriteError : public IoError {
+ public:
+  PartialWriteError(const std::string& what, std::vector<std::string> written,
+                    std::vector<std::string> incomplete = {})
+      : IoError(what), written_(std::move(written)), incomplete_(std::move(incomplete)) {}
+  const std::vector<std::string>& written() const { return written_; }
+  /// Channels whose rollback did not complete (their files may be torn).
+  const std::vector<std::string>& incomplete() const { return incomplete_; }
+
+ private:
+  std::vector<std::string> written_, incomplete_;
+};
+
+// A multi-channel write failed before anything was published, and undoing it
+// did not fully work for the channels in `incomplete()`: their files may be
+// torn (run validate / recover_session). Every other channel was restored.
+class RollbackIncompleteError : public IoError {
+ public:
+  RollbackIncompleteError(const std::string& what, std::vector<std::string> incomplete)
+      : IoError(what), incomplete_(std::move(incomplete)) {}
+  const std::vector<std::string>& incomplete() const { return incomplete_; }
+
+ private:
+  std::vector<std::string> incomplete_;
 };
 
 // Illegal write (e.g. start before existing end, fs/ufact mismatch on append).

@@ -196,6 +196,51 @@ classdef Writer < handle
             obj.warnUnreadable(before);
         end
 
+        function s = writeInt32Many(obj, channels, data, ufact, startUutc, fs, opts)
+            %WRITEINT32MANY The same run of int32 counts for many channels in one call.
+            %   data is n_samples x n_channels (integer-typed, stored verbatim);
+            %   ufact one factor or one per channel. Byte-identical to calling
+            %   writeInt32 per channel, but channels are written in parallel
+            %   on the Writer's threads with ONE combined disk barrier; a
+            %   failure before publication rolls every channel back. Returns
+            %   one summary struct per channel.
+            arguments
+                obj
+                channels (1, :) cell
+                data
+                ufact (:, 1) double
+                startUutc (1, 1) {mustBeNumeric}
+                fs (1, 1) double
+                opts.NewSegment (1, 1) logical = false
+            end
+            channels = cellfun(@char, channels, 'UniformOutput', false);
+            data = full(data);
+            if ~isinteger(data)
+                error('mef3io:type', ['writeInt32Many stores counts verbatim and ' ...
+                      'requires integer data (e.g. int32); got %s.'], class(data));
+            end
+            if any(data(:) > intmax('int32')) || any(data(:) < intmin('int32'))
+                error('mef3io:range', ['writeInt32Many: values exceed the int32 ' ...
+                      'range and would be altered; rescale them or use write().']);
+            end
+            if size(data, 2) ~= numel(channels)
+                error('mef3io:argument', 'data must be n_samples x n_channels (%d channels), got %d columns', ...
+                      numel(channels), size(data, 2));
+            end
+            if ~(isscalar(ufact) || numel(ufact) == numel(channels))
+                error('mef3io:argument', 'ufact must be one value or one per channel');
+            end
+            before = obj.unreadableMetadata();
+            try
+                s = mef3io_mex('writer_write_int32_many', obj.h, channels, int32(data), ...
+                               ufact, startUutc, fs, double(opts.NewSegment));
+            catch err
+                obj.warnUnreadable(before);
+                rethrow(err);
+            end
+            obj.warnUnreadable(before);
+        end
+
         function writeAnnotations(obj, records, channel)
             %WRITEANNOTATIONS Struct array with fields: time (required),
             %   type (default 'Note'), text, duration. Omit `channel` for

@@ -108,8 +108,10 @@ if _HAVE_CPP:
     PasswordError = _mef3io.PasswordError
     IoError = _mef3io.IoError
     WriteConflictError = _mef3io.WriteConflictError
+    PartialWriteError = _mef3io.PartialWriteError
+    RollbackIncompleteError = _mef3io.RollbackIncompleteError
 else:  # pragma: no cover - only without the extension
-    MefError = FormatError = CrcError = PasswordError = IoError = WriteConflictError = RuntimeError
+    MefError = FormatError = CrcError = PasswordError = IoError = WriteConflictError = PartialWriteError = RollbackIncompleteError = RuntimeError
 
 __all__ = [
     "Reader", "MultiReader", "Writer", "Metadata", "Subject", "Acquisition",
@@ -141,7 +143,7 @@ __all__ = [
     "WriterFlushWarning",
     "ClampedSamplesWarning",
     "MefError", "FormatError", "CrcError", "PasswordError", "IoError",
-    "WriteConflictError",
+    "WriteConflictError", "PartialWriteError", "RollbackIncompleteError",
     "CancelToken", "Cancelled",
     "have_cpp_backend", "__version__",
 ]

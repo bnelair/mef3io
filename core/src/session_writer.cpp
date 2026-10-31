@@ -10,6 +10,7 @@
 #include <stdexcept>
 
 #include <fstream>
+#include <memory>
 
 #include "mef3io/errors.hpp"
 #include "mef3io/metadata.hpp"
@@ -191,7 +192,7 @@ void SessionWriter::check_still_writable() const {
   if (wait_for_disk_ && flush_failure_)
     throw IoError(*flush_failure_ +
                   " (an earlier flush failed: data written since the last successful flush may "
-                  "be lost; run recover_session)");
+                  "be lost; " + std::string(flush_mode_ == FlushMode::Close ? "the session must be rewritten (flush=\"close\" sessions cannot be reliably recovered)" : "run recover_session") + ")");
 }
 
 void SessionWriter::hydrate(const std::string& channel, ChannelState& st) {
@@ -525,7 +526,7 @@ void SessionWriter::flush() {
   if (flush_failure_)
     throw IoError(*flush_failure_ +
                   " (an earlier flush failed: data written since the last successful flush may "
-                  "be lost; run recover_session)");
+                  "be lost; " + std::string(flush_mode_ == FlushMode::Close ? "the session must be rewritten (flush=\"close\" sessions cannot be reliably recovered)" : "run recover_session") + ")");
   if (unflushed_.empty()) return;
   std::vector<fs::path> files;
   std::error_code ec;
@@ -555,27 +556,53 @@ std::string SessionWriter::segment_stem(const std::string& channel, const Channe
   return segment_name(channel, seg);
 }
 
+namespace {
+std::string join_names(const std::vector<std::string>& v) {
+  std::string out;
+  for (const auto& n : v) out += (out.empty() ? "" : ", ") + n;
+  return out.empty() ? std::string("none") : out;
+}
+
+void check_unique_channels(const std::vector<std::string>& channels) {
+  std::set<std::string> seen;
+  for (const auto& c : channels)
+    if (!seen.insert(c).second)
+      throw std::invalid_argument("channel " + c + " is listed more than once; a multi-channel "
+                                  "write takes each channel once per call (nothing was written)");
+}
+}  // namespace
+
 WriteSummary SessionWriter::write_int32(const std::string& channel, std::span<const si4> samples,
                                         sf8 ufact, si8 start_uutc, sf8 fs,
                                         std::span<const ui1> valid, bool new_segment) {
   check_signal_parameters(fs, ufact);
-  std::vector<si4> buf(samples.begin(), samples.end());
-  WriteSummary s = write_blocks(channel, buf, valid, ufact, start_uutc, fs, new_segment);
+  WriteSummary s = write_blocks(channel, samples, valid, ufact, start_uutc, fs, new_segment);
   s.quantization = Quantization::Counts;
   return s;
 }
 
-WriteSummary SessionWriter::write_float(const std::string& channel, std::span<const sf8> data,
-                                        si8 start_uutc, sf8 fs, Precision precision_arg,
-                                        bool new_segment) {
-  check_signal_parameters(fs, 1.0);  // the factor is checked once it is known
-  int precision = precision_arg.digits;
+// What a float write stores: the counts, the gap mask and the factor, decided
+// BEFORE anything is written. Reads channels_ but never changes it (the
+// channel is hydrated by the caller), so several channels may be prepared at
+// once.
+struct SessionWriter::FloatPrep {
+  std::vector<si4> counts;
+  std::vector<ui1> valid;
+  sf8 ufact = 1.0;
+  Quantization quantization = Quantization::Decimal;
+  ClampCount clamped;
   std::string step_fallback;
+};
+
+SessionWriter::FloatPrep SessionWriter::prepare_float(const std::string& channel,
+                                                      std::span<const sf8> data, sf8 fs,
+                                                      Precision precision_arg, bool new_segment) {
+  check_signal_parameters(fs, 1.0);  // the factor is checked once it is known
+  FloatPrep prep;
+  int precision = precision_arg.digits;
   if (precision_arg.step) {
     // #81, opt-in: the data's own step as the factor. Everything below is
     // decided before write_blocks, so a refused write leaves the tree as is.
-    std::vector<si4> counts;
-    std::vector<ui1> valid;
     auto it = channels_.find(channel);
     if (it != channels_.end() && it->second.n_segments > 0) {
       // A channel's factor is fixed once it has segments: the reader scales
@@ -583,38 +610,34 @@ WriteSummary SessionWriter::write_float(const std::string& channel, std::span<co
       // segment may change it (#150 may lift this for new segments). Data on
       // it is stored exactly; anything else is refused — rounding it would
       // be lossier than the caller asked for, and silently so.
-      hydrate(channel, it->second);
       const sf8 u = it->second.units_conversion_factor;
       std::string why;
-      ClampCount clamped;
-      if (!quantize_to_step(data, u, counts, valid, &why, &clamped)) {
+      if (!quantize_to_step(data, u, prep.counts, prep.valid, &why, &prep.clamped)) {
         throw WriteConflictError(
             "precision='step': the data for channel " + channel + " is not stored on the "
             "channel's conversion factor " + detail::shortest_number(u) + " (" + why + "); nothing "
             "was written. A channel keeps one factor: quantize the data yourself and write the "
             "counts with write_int32 at that factor, or write it to a new channel");
       }
-      WriteSummary s = write_blocks(channel, counts, valid, u, start_uutc, fs, new_segment);
-      s.quantization = Quantization::Step;
-      s.clamped = clamped.total();
-      s.clamped_infinite = clamped.infinite;
-      return s;
+      prep.ufact = u;
+      prep.quantization = Quantization::Step;
+      return prep;
     } else {
       const StepEstimate est = detect_step(data);
       std::string why = est.reason;
-      ClampCount clamped;
-      if (est.step && quantize_to_step(data, *est.step, counts, valid, &why, &clamped)) {
-        WriteSummary s =
-            write_blocks(channel, counts, valid, *est.step, start_uutc, fs, new_segment);
-        s.quantization = Quantization::Step;
-        s.clamped = clamped.total();
-        s.clamped_infinite = clamped.infinite;
-        return s;
+      if (est.step && quantize_to_step(data, *est.step, prep.counts, prep.valid, &why,
+                                       &prep.clamped)) {
+        prep.ufact = *est.step;
+        prep.quantization = Quantization::Step;
+        return prep;
       }
+      prep.counts.clear();
+      prep.valid.clear();
+      prep.clamped = {};
       // Nothing but 0 and NaN (no reason given): any factor stores that
       // exactly, so the default path is no fallback.
       if (!why.empty())
-        step_fallback = why + "; stored with the default (inferred power-of-ten) precision";
+        prep.step_fallback = why + "; stored with the default (inferred power-of-ten) precision";
       precision = -1;
     }
   }
@@ -623,7 +646,6 @@ WriteSummary SessionWriter::write_float(const std::string& channel, std::span<co
     // its precision instead of re-inferring (which could differ and conflict).
     auto it = channels_.find(channel);
     if (!new_segment && it != channels_.end() && it->second.n_segments > 0) {
-      hydrate(channel, it->second);
       const sf8 u = it->second.units_conversion_factor;
       precision = u > 0.0 ? static_cast<int>(std::llround(-std::log10(u))) : 0;
       // A factor that is no power of ten (precision='step', write_int32)
@@ -638,23 +660,65 @@ WriteSummary SessionWriter::write_float(const std::string& channel, std::span<co
       precision = infer_precision(data);
     }
   }
-  sf8 ufact = std::pow(10.0, -precision);
-  ClampCount clamped;
-  auto samples = quantize_to_int32(data, precision, &clamped);
-  std::vector<ui1> valid(data.size());
-  for (std::size_t i = 0; i < data.size(); ++i) valid[i] = std::isnan(data[i]) ? 0 : 1;
-  WriteSummary s = write_blocks(channel, samples, valid, ufact, start_uutc, fs, new_segment);
-  s.quantization = Quantization::Decimal;
-  s.clamped = clamped.total();
-  s.clamped_infinite = clamped.infinite;
-  s.step_fallback = std::move(step_fallback);
+  prep.ufact = std::pow(10.0, -precision);
+  prep.counts = quantize_to_int32(data, precision, &prep.clamped);
+  prep.valid.resize(data.size());
+  for (std::size_t i = 0; i < data.size(); ++i) prep.valid[i] = std::isnan(data[i]) ? 0 : 1;
+  prep.quantization = Quantization::Decimal;
+  return prep;
+}
+
+WriteSummary SessionWriter::write_float(const std::string& channel, std::span<const sf8> data,
+                                        si8 start_uutc, sf8 fs, Precision precision_arg,
+                                        bool new_segment) {
+  check_signal_parameters(fs, 1.0);
+  check_still_writable();  // before any read of the session folder
+  {
+    // Hydrate first (a channel adopted from disk): prepare_float only reads.
+    auto it = channels_.find(channel);
+    if (it != channels_.end() && it->second.n_segments > 0) hydrate(channel, it->second);
+  }
+  FloatPrep prep = prepare_float(channel, data, fs, precision_arg, new_segment);
+  WriteSummary s = write_blocks(channel, prep.counts, prep.valid, prep.ufact, start_uutc, fs,
+                                new_segment);
+  s.quantization = prep.quantization;
+  s.clamped = prep.clamped.total();
+  s.clamped_infinite = prep.clamped.infinite;
+  s.step_fallback = std::move(prep.step_fallback);
   return s;
 }
 
-WriteSummary SessionWriter::write_blocks(const std::string& channel,
-                                         const std::vector<si4>& samples,
-                                         std::span<const ui1> valid, sf8 ufact, si8 start_uutc,
-                                         sf8 fs, bool new_segment) {
+struct SessionWriter::WritePlan {
+  std::string channel;
+  ChannelState* st = nullptr;
+  std::span<const si4> samples;
+  std::span<const ui1> valid;
+  std::vector<si4> own_counts;  // a float write's counts (samples points here)
+  std::vector<ui1> own_valid;
+  sf8 ufact = 1.0, fs = 0.0;
+  si8 start_uutc = 0;
+  bool noop = false;
+  bool append = false;
+  int seg = 0;
+  std::string seg_dir;
+  SegmentSpec spec;
+  si8 stored = 0, n = 0;
+  // One entry per block, without its samples (filled by run_plan, so the
+  // copies happen on the worker that encodes them).
+  std::vector<BlockSpec> blocks;
+  std::vector<si8> block_src, block_len;
+  ui4 written_difference_bytes = 0;
+  PendingPublish pending;
+  bool pending_set = false;     // the segment is written, its .tmet unpublished
+  AppendIndexCache cache_before;  // the channel's index summary before run_plan
+  bool created_timd = false, created_segd = false;
+  fs::path timd;
+  WriteSummary summary;
+};
+
+std::unique_ptr<SessionWriter::WritePlan> SessionWriter::plan_write(
+    const std::string& channel, std::span<const si4> samples, std::span<const ui1> valid,
+    sf8 ufact, si8 start_uutc, sf8 fs, bool new_segment) {
   // Everything about the arguments is refused BEFORE anything is read or
   // written (#83): a bad rate or factor, a block the format cannot describe,
   // and data whose times would leave the uUTC range.
@@ -694,19 +758,29 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
     runs.push_back({begin, i});
   }
 
-  WriteSummary summary;
+  auto plan = std::make_unique<WritePlan>();
+  plan->channel = channel;
+  plan->st = &st;
+  plan->samples = samples;
+  plan->valid = valid;
+  plan->ufact = ufact;
+  plan->fs = fs;
+  plan->start_uutc = start_uutc;
+  plan->n = n;
+  WriteSummary& summary = plan->summary;
   summary.units_conversion_factor = ufact;
   summary.gaps_skipped = static_cast<si8>(runs.size()) > 0 ? static_cast<si8>(runs.size()) - 1 : 0;
   if (runs.empty()) {
     // All-NaN / no valid data: no-op on disk, but report it explicitly.
     summary.segment = (!new_segment && st.n_segments > 0) ? st.last_segment
                                                           : st.last_segment + 1;
-    return summary;
+    plan->noop = true;
+    return plan;
   }
 
-  // Build blocks. start_sample is channel-wide (continues across segments);
-  // start_uutc reflects each run's actual time so gaps appear on uutc reads.
-  std::vector<BlockSpec> blocks;
+  // Describe the blocks. start_sample is channel-wide (continues across
+  // segments); start_uutc reflects each run's actual time so gaps appear on
+  // uutc reads.
   si8 stored = 0;
   const si8 seg_base_sample = st.total_samples;
   for (const Run& run : runs) {
@@ -714,23 +788,27 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
     for (si8 s = run.begin; s < run.end; s += block_len) {
       si8 len = std::min(block_len, run.end - s);
       BlockSpec b;
-      b.samples.assign(samples.begin() + s, samples.begin() + s + len);
       b.start_sample = seg_base_sample + stored;
       b.start_uutc = start_uutc + static_cast<si8>(std::llround(static_cast<sf8>(s) / fs * 1e6));
       b.discontinuity = first_block_of_run;  // first block of each run (and of segment)
-      blocks.push_back(std::move(b));
+      plan->blocks.push_back(std::move(b));
+      plan->block_src.push_back(s);
+      plan->block_len.push_back(len);
       stored += len;
       first_block_of_run = false;
     }
   }
+  plan->stored = stored;
 
   const bool append = !new_segment && st.n_segments > 0;
   const int seg = append ? st.last_segment : st.last_segment + 1;
-  std::string seg_dir =
+  plan->append = append;
+  plan->seg = seg;
+  plan->seg_dir =
       (fs::path(mefd_path_) / (channel + ".timd") / (segment_stem(channel, st, seg) + ".segd"))
           .string();
 
-  SegmentSpec spec;
+  SegmentSpec& spec = plan->spec;
   spec.session_name = session_name_;
   spec.channel_name = channel;
   spec.segment_number = seg;
@@ -756,51 +834,105 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
   // the previous segment's. flush()/close()/wait_for_disk cover the rest.
   if (!append) spec.flush_new_metadata = session_preexisted_ || st.n_segments == 0;
   spec.wait_for_disk = wait_for_disk_;
+  spec.skip_tmet_flush = flush_mode_ == FlushMode::Close;
 
   // Only pass on a maximum this writer measured itself. A segment adopted from
   // disk leaves the flag false, so the append bounds the blocks it cannot see
   // rather than trusting a declaration it has no way to verify.
   if (append && st.difference_bytes_exact) spec.known_difference_bytes = st.max_difference_bytes;
 
-  ui4 written_difference_bytes = 0;
   if (append) {
-    // fs / conversion-factor / start-time conflicts are validated against the
-    // on-disk metadata inside append_time_series_segment.
-    try {
-      append_time_series_segment(seg_dir, spec, blocks, n_threads_.load(),
-                                 &written_difference_bytes, &st.index_cache);
-    } catch (const IoError& e) {
-      remember_flush_failure(e);
-      throw;
-    }
-  } else {
+    // The conflicts append_time_series_segment would find on disk, decided
+    // HERE from the hydrated state so a multi-channel call refuses before any
+    // channel has been extended (the check there stays as defence).
+    if (std::abs(st.sampling_frequency - fs) > 1e-9 * std::max(1.0, std::abs(st.sampling_frequency)))
+      throw WriteConflictError("append fs " + std::to_string(fs) + " != segment fs " +
+                               std::to_string(st.sampling_frequency));
+    if (std::abs(st.units_conversion_factor - ufact) >
+        1e-12 * std::max(1.0, std::abs(st.units_conversion_factor)))
+      throw WriteConflictError("append units_conversion_factor " + std::to_string(ufact) +
+                               " != segment's " + std::to_string(st.units_conversion_factor));
+    const si8 slack = static_cast<si8>(std::llround(std::min(0.5e6 / st.sampling_frequency, 1e18)));
+    if (plan->blocks.front().start_uutc < st.last_end_uutc - slack)
+      throw WriteConflictError("append starts at " + std::to_string(plan->blocks.front().start_uutc) +
+                               " uUTC, before segment end " + std::to_string(st.last_end_uutc));
+  }
+  if (!append) {
     // Everything that can refuse runs BEFORE a directory exists: a refused
     // write must leave the tree exactly as it was. A directory left behind
     // would be adopted as a segment by the next Writer.
-    for (const auto& b : blocks)
+    for (const auto& b : plan->blocks)
       require_storable_time(b.start_uutc, spec.recording_time_offset, "block start time");
-    const fs::path timd = fs::path(mefd_path_) / (channel + ".timd");
-    const bool created_timd = !fs::exists(timd);
-    const bool created_segd = !fs::exists(seg_dir);
-    fs::create_directories(seg_dir);
-    try {
-      write_time_series_segment(seg_dir, spec, blocks, n_threads_.load(), &written_difference_bytes);
-    } catch (const IoError& e) {
-      remember_flush_failure(e);
-      std::error_code ec;
-      if (created_timd)
-        fs::remove_all(timd, ec);
-      else if (created_segd)
-        fs::remove_all(seg_dir, ec);
-      throw;
-    } catch (...) {
-      std::error_code ec;
-      if (created_timd)
-        fs::remove_all(timd, ec);
-      else if (created_segd)
-        fs::remove_all(seg_dir, ec);
-      throw;
+  }
+  return plan;
+}
+
+void SessionWriter::create_plan_dirs(WritePlan& p) {
+  if (p.noop || p.append) return;
+  p.timd = fs::path(mefd_path_) / (p.channel + ".timd");
+  p.created_timd = !fs::exists(p.timd);
+  p.created_segd = !fs::exists(p.seg_dir);
+  fs::create_directories(p.seg_dir);
+}
+
+void SessionWriter::run_plan(WritePlan& p, PendingPublish* defer, int threads) {
+  // Touches only the plan and its channel's state: plans of different
+  // channels run concurrently.
+  p.cache_before = p.st->index_cache;
+  for (std::size_t k = 0; k < p.blocks.size(); ++k) {
+    const auto first = p.samples.begin() + p.block_src[k];
+    p.blocks[k].samples.assign(first, first + p.block_len[k]);
+  }
+  if (p.append) {
+    // fs / conversion-factor / start-time conflicts are validated against the
+    // on-disk metadata inside append_time_series_segment.
+    append_time_series_segment(p.seg_dir, p.spec, p.blocks, threads, &p.written_difference_bytes,
+                               &p.st->index_cache, defer);
+  } else {
+    write_time_series_segment(p.seg_dir, p.spec, p.blocks, threads, &p.written_difference_bytes,
+                              defer);
+  }
+  p.pending_set = defer != nullptr;
+  // Written: nothing below needs the samples (commit uses counts only), so
+  // the copies and a float write's counts go now, not at the end of the call.
+  for (auto& b : p.blocks) std::vector<si4>().swap(b.samples);
+  std::vector<si4>().swap(p.own_counts);
+  std::vector<ui1>().swap(p.own_valid);
+  p.samples = {};
+  p.valid = {};
+}
+
+std::string SessionWriter::roll_back_plan(WritePlan& p) {
+  // After a failure BEFORE the .tmet was published. A failed append already
+  // restored itself; one that finished (pending_set) is undone here. A fresh
+  // segment is removed with the folders this write created.
+  std::string err;
+  if (p.pending_set) {
+    err = discard_pending(p.pending);
+    p.pending_set = false;
+    // A clean rollback leaves the files as the summary described them: keep
+    // it, so the next append is not a full .tidx walk. Otherwise forget it.
+    if (p.append) {
+      if (err.empty())
+        p.st->index_cache = p.cache_before;
+      else
+        p.st->index_cache.valid = false;
     }
+  }
+  if (!p.append && !p.noop) {
+    std::error_code ec;
+    if (p.created_timd)
+      fs::remove_all(p.timd, ec);
+    else if (p.created_segd)
+      fs::remove_all(p.seg_dir, ec);
+  }
+  return err;
+}
+
+void SessionWriter::commit_plan(WritePlan& p) {
+  ChannelState& st = *p.st;
+  const bool append = p.append;
+  if (!append) {
     // A fresh segment holds nothing but the blocks just encoded, so from here
     // the running maximum is exact — and the index summary from the previous
     // segment describes a file this channel is no longer appending to.
@@ -808,28 +940,28 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
     st.difference_bytes_exact = true;
     st.index_cache = AppendIndexCache{};
   }
-  st.max_difference_bytes = std::max(st.max_difference_bytes, written_difference_bytes);
+  st.max_difference_bytes = std::max(st.max_difference_bytes, p.written_difference_bytes);
 
   {
     // Owed to the next flush() / close(). In wait_for_disk mode this write
     // already flushed them (and their folders): not kept, so close() does not
     // re-flush the whole history (one F_FULLFSYNC per file on macOS).
     if (!wait_for_disk_) {
-      const std::string stem = fs::path(seg_dir).stem().string();
+      const std::string stem = fs::path(p.seg_dir).stem().string();
       for (const char* ext : {".tdat", ".tidx", ".tmet"})
-        unflushed_.insert(fs::path(seg_dir) / (stem + ext));
+        unflushed_.insert(fs::path(p.seg_dir) / (stem + ext));
     }
   }
 
-  st.sampling_frequency = fs;
-  st.units_conversion_factor = ufact;
+  st.sampling_frequency = p.fs;
+  st.units_conversion_factor = p.ufact;
   if (!append) {
     ++st.n_segments;
-    const std::string stem = fs::path(seg_dir).stem().string();
-    note_new_segment(channel, (fs::path(seg_dir) / (stem + ".tmet")).string(),
-                     spec.recording_time_offset);
+    const std::string stem = fs::path(p.seg_dir).stem().string();
+    note_new_segment(p.channel, (fs::path(p.seg_dir) / (stem + ".tmet")).string(),
+                     p.spec.recording_time_offset);
     // The slot is a real segment now: drop the stale "ignored" report.
-    const auto e = empty_segment_dirs_.find(seg_dir);
+    const auto e = empty_segment_dirs_.find(p.seg_dir);
     if (e != empty_segment_dirs_.end()) {
       unreadable_metadata_.erase(
           std::remove(unreadable_metadata_.begin(), unreadable_metadata_.end(), e->second),
@@ -837,16 +969,236 @@ WriteSummary SessionWriter::write_blocks(const std::string& channel,
       empty_segment_dirs_.erase(e);
     }
   }
-  st.last_segment = seg;
-  st.last_segment_stem = fs::path(seg_dir).stem().string();
-  st.total_samples += stored;
-  st.last_end_uutc =
-      start_uutc + static_cast<si8>(std::llround(static_cast<sf8>(n) / fs * 1e6));
+  st.last_segment = p.seg;
+  st.last_segment_stem = fs::path(p.seg_dir).stem().string();
+  st.total_samples += p.stored;
+  // Same expression as the writer's segment end (last block's start + its
+  // length), so the pre-check in plan_write sees what is on disk.
+  st.last_end_uutc = p.blocks.back().start_uutc +
+                     static_cast<si8>(std::llround(static_cast<sf8>(p.block_len.back()) * 1e6 / p.fs));
 
-  summary.samples_written = stored;
-  summary.blocks = static_cast<si8>(blocks.size());
-  summary.segment = seg;
-  return summary;
+  p.summary.samples_written = p.stored;
+  p.summary.blocks = static_cast<si8>(p.blocks.size());
+  p.summary.segment = p.seg;
+}
+
+WriteSummary SessionWriter::write_blocks(const std::string& channel,
+                                         std::span<const si4> samples,
+                                         std::span<const ui1> valid, sf8 ufact, si8 start_uutc,
+                                         sf8 fs, bool new_segment) {
+  auto plan = plan_write(channel, samples, valid, ufact, start_uutc, fs, new_segment);
+  if (plan->noop) return plan->summary;
+  try {
+    create_plan_dirs(*plan);
+    run_plan(*plan, nullptr, n_threads_.load());
+  } catch (const IoError& e) {
+    remember_flush_failure(e);
+    roll_back_plan(*plan);
+    throw;
+  } catch (...) {
+    roll_back_plan(*plan);
+    throw;
+  }
+  commit_plan(*plan);
+  return plan->summary;
+}
+
+std::vector<WriteSummary> SessionWriter::write_many_plans(
+    std::vector<std::unique_ptr<WritePlan>>& plans) {
+  // The ONE multi-channel write. Everything that can refuse was decided in
+  // plan_write (serially, nothing on disk). Then:
+  //   A  per channel, in parallel: files written / extended, the .tmet left as
+  //      a TEMP file (PendingPublish);
+  //   -  ONE combined flush of every temp (and, wait_for_disk, the data);
+  //   B  the renames;
+  //   C  serial commit of the writer's state.
+  // A failure in A or the flush rolls EVERY channel back (nothing written);
+  // one in B reports the channels already published (PartialWriteError).
+  const int T = static_cast<int>(resolve_threads(n_threads_.load()));
+  std::vector<WritePlan*> active;
+  for (auto& p : plans)
+    if (!p->noop) active.push_back(p.get());
+
+  // Undo plans [from, end); returns "<channel>: <why>" for every rollback
+  // that did not complete.
+  auto roll_back_from = [&](std::size_t from) {
+    std::vector<std::pair<std::string, std::string>> bad;
+    for (std::size_t j = from; j < active.size(); ++j) {
+      const std::string why = roll_back_plan(*active[j]);
+      if (!why.empty()) bad.emplace_back(active[j]->channel, why);
+    }
+    return bad;
+  };
+  // Rethrow @p cause after a rollback of everything; an incomplete rollback
+  // is reported instead, naming the channels (their files may be torn).
+  auto fail_rolled_back = [&](const std::string& cause, std::exception_ptr original) {
+    const auto bad = roll_back_from(0);
+    if (bad.empty()) std::rethrow_exception(original);
+    std::string text = cause + "; rollback was incomplete: ";
+    std::vector<std::string> names;
+    for (const auto& [ch, why] : bad) {
+      text += (names.empty() ? "" : "; ") + ch + ": " + why;
+      names.push_back(ch);
+    }
+    throw RollbackIncompleteError(text, names);
+  };
+
+  if (!active.empty()) {
+    try {
+      for (WritePlan* p : active) create_plan_dirs(*p);
+    } catch (const std::exception& e) {
+      fail_rolled_back(e.what(), std::current_exception());
+    }
+    // ONE thread budget: C channels at a time, each encoding its blocks on
+    // T / C threads, so no more than ~T threads run whatever the shape.
+    const int outer = std::min<int>(T, static_cast<int>(active.size()));
+    const int inner = std::max(1, T / std::max(1, outer));
+    auto errors = parallel_try_each(active.size(), outer, [&](std::size_t k) {
+      run_plan(*active[k], &active[k]->pending, inner);
+    });
+    for (std::size_t k = 0; k < active.size(); ++k) {
+      if (!errors[k]) continue;
+      try {
+        std::rethrow_exception(errors[k]);
+      } catch (const IoError& e) {
+        remember_flush_failure(e);
+        fail_rolled_back(e.what(), std::current_exception());
+      } catch (const std::exception& e) {
+        fail_rolled_back(e.what(), std::current_exception());
+      }
+    }
+
+    std::vector<PendingPublish*> pend;
+    for (WritePlan* p : active) pend.push_back(&p->pending);
+    try {
+      flush_pending(pend, false);
+    } catch (const IoError& e) {
+      if (!flush_failure_) flush_failure_ = e.what();
+      fail_rolled_back(e.what(), std::current_exception());
+    } catch (const std::exception& e) {
+      fail_rolled_back(e.what(), std::current_exception());
+    }
+
+    std::vector<std::string> published;
+    std::size_t k = 0;
+    try {
+      for (; k < active.size(); ++k) {
+        publish_pending(active[k]->pending);
+        active[k]->pending_set = false;  // published: nothing left to discard
+        published.push_back(active[k]->channel);
+      }
+    } catch (const std::exception& e) {
+      // Channels [0, k) are on disk and valid; the rest are undone.
+      const std::string why = e.what();
+      for (std::size_t j = 0; j < k; ++j) commit_plan(*active[j]);
+      const auto bad = roll_back_from(k);
+      // wait_for_disk promised "returned = on disk" for what IS written.
+      std::string flush_note;
+      if (wait_for_disk_ && k > 0) {
+        std::vector<PendingPublish*> done(pend.begin(), pend.begin() + static_cast<std::ptrdiff_t>(k));
+        try {
+          flush_pending(done, true);
+        } catch (const IoError& fe) {
+          if (!flush_failure_) flush_failure_ = fe.what();
+          flush_note = std::string("; flushing the written channels also failed: ") + fe.what();
+        }
+      }
+      std::string text = "writing " + std::to_string(active.size()) + " channels failed while "
+                         "publishing channel " + active[k]->channel + " (" + why + "); " +
+                         std::to_string(k) + " channel(s) were written, the others were rolled "
+                         "back. Written: " + join_names(published) + flush_note;
+      std::vector<std::string> names;
+      for (const auto& [ch, w] : bad) {
+        text += (names.empty() ? "; rollback was incomplete: " : "; ") + ch + ": " + w;
+        names.push_back(ch);
+      }
+      throw PartialWriteError(text, published, names);
+    }
+    for (WritePlan* p : active) p->pending_set = false;
+    try {
+      flush_pending(pend, true);  // wait_for_disk: the published names too
+    } catch (const IoError& e) {
+      for (WritePlan* p : active) commit_plan(*p);
+      if (!flush_failure_) flush_failure_ = e.what();
+      throw PartialWriteError(std::string("all channels were written but the final flush "
+                                          "failed: ") + e.what(),
+                              published);
+    }
+  }
+  std::vector<WriteSummary> out;
+  for (auto& p : plans) {
+    if (!p->noop) commit_plan(*p);
+    out.push_back(p->summary);
+  }
+  return out;
+}
+
+std::vector<WriteSummary> SessionWriter::write_int32_many(
+    const std::vector<std::string>& channels, std::span<const si4> data, std::span<const sf8> ufacts,
+    si8 start_uutc, sf8 fs, bool new_segment) {
+  const std::size_t nc = channels.size();
+  if (nc == 0) return {};
+  check_unique_channels(channels);
+  if (data.size() % nc != 0)
+    throw std::invalid_argument("data holds " + std::to_string(data.size()) +
+                                " values, not a whole number of rows for " + std::to_string(nc) +
+                                " channels");
+  if (ufacts.size() != 1 && ufacts.size() != nc)
+    throw std::invalid_argument("ufact must be one value or one per channel (" +
+                                std::to_string(nc) + "), not " + std::to_string(ufacts.size()));
+  check_signal_parameters(fs, 1.0);
+  for (sf8 u : ufacts) check_signal_parameters(fs, u);
+  const std::size_t n = data.size() / nc;
+  std::vector<std::unique_ptr<WritePlan>> plans;
+  for (std::size_t c = 0; c < nc; ++c)
+    plans.push_back(plan_write(channels[c], data.subspan(c * n, n), {},
+                               ufacts.size() == 1 ? ufacts[0] : ufacts[c], start_uutc, fs,
+                               new_segment));
+  auto out = write_many_plans(plans);
+  for (auto& s : out) s.quantization = Quantization::Counts;
+  return out;
+}
+
+std::vector<WriteSummary> SessionWriter::write_float_many(
+    const std::vector<std::string>& channels, std::span<const sf8> data, si8 start_uutc, sf8 fs,
+    Precision precision, bool new_segment) {
+  const std::size_t nc = channels.size();
+  if (nc == 0) return {};
+  check_unique_channels(channels);
+  if (data.size() % nc != 0)
+    throw std::invalid_argument("data holds " + std::to_string(data.size()) +
+                                " values, not a whole number of rows for " + std::to_string(nc) +
+                                " channels");
+  check_signal_parameters(fs, 1.0);
+  check_still_writable();
+  const std::size_t n = data.size() / nc;
+  // Serial: adopt channels from disk (prepare_float only reads channels_).
+  for (const auto& c : channels) {
+    auto it = channels_.find(c);
+    if (it != channels_.end() && it->second.n_segments > 0) hydrate(c, it->second);
+  }
+  // Quantization is the CPU-heavy part of a float write: across channels,
+  // on the writer's threads. The error reported is the lowest channel's, as
+  // a serial loop would meet it.
+  std::vector<FloatPrep> preps(nc);
+  const auto errors = parallel_try_each(nc, n_threads_.load(), [&](std::size_t c) {
+    preps[c] = prepare_float(channels[c], data.subspan(c * n, n), fs, precision, new_segment);
+  });
+  for (const auto& e : errors)
+    if (e) std::rethrow_exception(e);
+  std::vector<std::unique_ptr<WritePlan>> plans;
+  for (std::size_t c = 0; c < nc; ++c) {
+    auto plan = plan_write(channels[c], preps[c].counts, preps[c].valid, preps[c].ufact,
+                           start_uutc, fs, new_segment);
+    plan->own_counts = std::move(preps[c].counts);  // the spans stay valid: a move keeps the buffer
+    plan->own_valid = std::move(preps[c].valid);
+    plan->summary.quantization = preps[c].quantization;
+    plan->summary.clamped = preps[c].clamped.total();
+    plan->summary.clamped_infinite = preps[c].clamped.infinite;
+    plan->summary.step_fallback = std::move(preps[c].step_fallback);
+    plans.push_back(std::move(plan));
+  }
+  return write_many_plans(plans);
 }
 
 }  // namespace mef3io

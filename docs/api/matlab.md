@@ -34,6 +34,7 @@ call the same C++ core.
 | `Reader.n_threads = n` | `Reader.setThreads(n)` |
 | `Writer.write` | `Writer.write` |
 | `Writer.write_int32` | `Writer.writeInt32` |
+| `Writer.write_int32_many` | `Writer.writeInt32Many` |
 | `Writer.write_annotations` | `Writer.writeAnnotations` |
 | `Writer.n_threads` (get) | `Writer.threads()` |
 | `Writer.n_threads = n` | `Writer.setThreads(n)` |

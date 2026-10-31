@@ -824,6 +824,29 @@ int mef3io_writer_write_int32(mef3io_writer* w, const char* channel, const int32
   });
 }
 
+int mef3io_writer_write_int32_many(mef3io_writer* w, const char* const* channels,
+                                   int32_t n_channels, const int32_t* data, int64_t n_samples,
+                                   const double* ufacts, int32_t n_ufacts, int64_t start_uutc,
+                                   double fs, int new_segment, mef3io_write_summary* out) {
+  if (!w || !channels || n_channels < 0 || n_samples < 0 || !ufacts || n_ufacts < 1 ||
+      (!data && n_channels > 0 && n_samples > 0))
+    return fail_argument("bad argument");
+  return guarded([&] {
+    std::vector<std::string> names;
+    for (int32_t c = 0; c < n_channels; ++c) {
+      if (!channels[c]) throw std::invalid_argument("NULL channel name");
+      names.emplace_back(channels[c]);
+    }
+    const auto total = static_cast<size_t>(n_channels) * static_cast<size_t>(n_samples);
+    auto sums = w->impl.write_int32_many(
+        names, std::span<const mef3io::si4>(data, total),
+        std::span<const mef3io::sf8>(ufacts, static_cast<size_t>(n_ufacts)), start_uutc, fs,
+        new_segment != 0);
+    if (out)
+      for (size_t c = 0; c < sums.size(); ++c) copy_summary(sums[c], out + c);
+  });
+}
+
 mef3io_records* mef3io_records_create(void) { return new mef3io_records{}; }
 
 void mef3io_records_free(mef3io_records* list) { delete list; }
