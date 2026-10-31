@@ -7,6 +7,7 @@ and by file bytes except the random UUIDs in the C++ suite). No oracle needed.
 from __future__ import annotations
 
 import os
+import sys
 
 import numpy as np
 import pytest
@@ -222,11 +223,13 @@ print((resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - base) * 1024)
 """
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"),
+                    reason="peak RSS is only measured reliably on Linux (no `resource` on "
+                           "Windows, ru_maxrss units and baselines differ on macOS)")
 def test_peak_memory_stays_near_the_loop(tmp_path):
     """The multi-channel call frees each channel's block copies once it is
     written: peak growth is that of ~n_threads channels, not of all of them."""
     import subprocess
-    import sys
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(mef3io.__file__)))
     grow = {}

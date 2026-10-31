@@ -57,7 +57,7 @@ std::vector<unsigned char> slurp(const fs::path& p) {
 std::map<std::string, std::vector<unsigned char>> snapshot(const fs::path& root) {
   std::map<std::string, std::vector<unsigned char>> out;
   for (const auto& e : fs::recursive_directory_iterator(root))
-    if (e.is_regular_file()) out[fs::relative(e.path(), root).string()] = slurp(e.path());
+    if (e.is_regular_file()) out[fs::relative(e.path(), root).generic_string()] = slurp(e.path());
   return out;
 }
 
@@ -102,22 +102,35 @@ std::map<std::string, Stamp> stamps(const fs::path& root) {
   std::map<std::string, Stamp> out;
   for (const auto& e : fs::recursive_directory_iterator(root))
     if (e.is_regular_file())
-      out[fs::relative(e.path(), root).string()] = {
-          e.file_size(), e.last_write_time().time_since_epoch().count()};
+      out[fs::relative(e.path(), root).generic_string()] = {
+          e.file_size(), static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(e.last_write_time().time_since_epoch()).count())};
   return out;
 }
 
 std::mutex g_mu;
 std::vector<std::vector<std::string>> g_batches;
 std::atomic<int> g_fsyncs{0};
+std::atomic<int> g_batched{0};  // files named in flush batches
+// fsyncs that were NOT part of a combined batch: where flush_files is a
+// per-file fsync (macOS, Windows) the batch itself fsyncs its files.
+int loose_fsyncs() {
+#ifdef __linux__
+  return g_fsyncs;
+#else
+  return g_fsyncs - g_batched;
+#endif
+}
 
 struct Observers {
   Observers() {
     g_batches.clear();
     g_fsyncs = 0;
+    g_batched = 0;
     detail::flush_batch_observer = [](const std::vector<fs::path>& files) {
       std::vector<std::string> names;
       for (const auto& f : files) names.push_back(f.string());
+      std::sort(names.begin(), names.end());
+      g_batched += static_cast<int>(std::unique(names.begin(), names.end()) - names.begin());
       std::lock_guard<std::mutex> lk(g_mu);
       g_batches.push_back(std::move(names));
     };
@@ -233,11 +246,11 @@ TEST_CASE("a multi-channel call pays ONE combined wait (default mode)", "[write_
   got = Observers::take();
   REQUIRE(got.size() == 1);
   REQUIRE(count_suffix(got[0], ".tmet.mef3io-tmp") == 4);
-  REQUIRE(g_fsyncs == 0);  // no per-channel fsync at all
+  REQUIRE(loose_fsyncs() == 0);  // no per-channel fsync at all
   // the loop pays one wait per channel
   for (const auto& c : chs)
     w.write_int32(c, std::span<const si4>(block).subspan(0, kN), 0.5, round_start(2), kRate);
-  REQUIRE(g_fsyncs == 4);
+  REQUIRE(loose_fsyncs() == 4);
 }
 
 TEST_CASE("wait_for_disk: a multi-channel call is two waits, files included", "[write_many]") {
@@ -349,13 +362,13 @@ TEST_CASE("flush=close: no flush while writing, ONE combined batch at close", "[
     w.write_float("fl", std::vector<sf8>(kN, 1.5), round_start(0), kRate);
     w.write_float("fl", std::vector<sf8>(kN, 2.5), round_start(1), kRate);
     REQUIRE(Observers::take().empty());
-    REQUIRE(g_fsyncs == 0);
+    REQUIRE(loose_fsyncs() == 0);
   }  // close
   const auto got = Observers::take();
   REQUIRE(got.size() == 1);
   REQUIRE(count_suffix(got[0], ".tmet") == 4);
   REQUIRE(count_suffix(got[0], ".tdat") == 4);
-  REQUIRE(g_fsyncs == 0);
+  REQUIRE(loose_fsyncs() == 0);
   // wait_for_disk first, then close mode: refused the other way round too
   SessionWriter w2((dir.dir / "t.mefd").string(), true);
   w2.set_wait_for_disk(true);
@@ -364,7 +377,7 @@ TEST_CASE("flush=close: no flush while writing, ONE combined batch at close", "[
   SessionWriter w3((dir.dir / "u.mefd").string(), true);
   w3.write_int32("a", std::span<const si4>(block).subspan(0, kN), 0.5, round_start(0), kRate);
   w3.write_int32("a", std::span<const si4>(block).subspan(0, kN), 0.5, round_start(1), kRate);
-  REQUIRE(g_fsyncs == 2);
+  REQUIRE(loose_fsyncs() == 2);
 }
 
 TEST_CASE("a refused append checks rate and factor first too", "[write_many]") {
