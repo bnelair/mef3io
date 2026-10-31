@@ -36,7 +36,8 @@ delete(w);
 
 % ---- read back ------------------------------------------------------------
 r = mef3io.Reader(path);
-assert(isequal(r.channels, {'ch1'; 'ch2'}));
+assert(isequal(r.channels, {'ch1'; 'ch2'; 'm1'; 'm2'}));   % m1/m2 from writeInt32Many
+assert(r.info('m2').number_of_samples == n);
 
 info = r.info('ch1');
 assert(info.sampling_frequency == fs);
