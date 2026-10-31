@@ -109,6 +109,61 @@ with mef3io.Writer("recording.mefd") as w:   # leaving the block waits for the d
   last append back into a valid session that holds every sample whose bytes
   reached the disk (the table below says what it does in each case).
 
+### Many channels in one call
+
+A recorder that writes the same stretch of time for many channels should do
+it in ONE call:
+
+```python
+w.write_int32_many(channels, counts, ufact, t0, fs)   # counts: (n_channels, n) int32
+w.write_many(channels, floats, t0, fs)                # float64; NaN = gap, precision per channel
+```
+
+The files are the same as a loop of `write_int32` / `write` calls would
+produce (a fresh segment differs only in its random UUIDs), but the channels
+are encoded and written in parallel on the `Writer`'s `n_threads`, and the
+`.tmet` barrier above is **one combined wait per call instead of one per
+channel** (with `wait_for_disk=True`, two waits per call, covering every
+channel's files). On a disk where a sync takes milliseconds, 128 sequential
+waits per round become one.
+
+- **All or nothing before publishing.** Every refusal (duplicate channel,
+  bad arguments, an append that conflicts with what is on disk) leaves the
+  session as it was: channels that had already been written during the call
+  are rolled back. Only a failure *while* the finished `.tmet` files are
+  being renamed into place can leave some channels written; it raises
+  `mef3io.PartialWriteError`, whose `written_channels` lists them (the rest
+  were rolled back).
+- **Memory.** Besides your data, each channel being written holds a copy of
+  its samples and its encoded blocks until it is written (about `n_threads`
+  channels at a time); `write_many` also holds every channel's converted
+  counts and mask (about 5/8 of the input). Write long runs in chunks of
+  minutes, as an acquisition does anyway.
+- **Appends are checked first.** A different rate or factor, or data starting
+  before the segment's end, is refused before any channel is touched. If a
+  rollback itself fails, `mef3io.RollbackIncompleteError` names the channels
+  (`incomplete_channels`) whose files may be torn: run `validate` and
+  `recover` on them.
+
+### `flush="close"`: no waits until the end
+
+`Writer(path, flush="close")` removes the `.tmet` barrier too: nothing waits
+for the disk during writes or appends, and `close()` (or `flush()`) does ONE
+combined wait for everything written. "`close()` returned" still means "on
+disk". The default is `flush="each"`; it cannot be combined with
+`wait_for_disk=True` (`ValueError`). It is **only for a session this `Writer`
+creates** (`overwrite=True` or a new path): on an existing session it raises
+`ValueError`, so earlier data is never put at risk.
+
+!!! warning "A power cut during writing can lose the WHOLE session"
+    Without the barrier a rename can reach the disk before the `.tmet`'s
+    bytes, and a short `.tmet` stops the whole session from opening.
+    `recover_session` **cannot be relied on** to repair that. Use this mode
+    only for output you delete and rebuild after any failure (a conversion
+    run into a scratch folder, say), never for a recording that cannot be
+    redone. After a failed flush in this mode the session must be rewritten. The gain is small on a local SSD and grows with the cost of a
+    sync (network and array storage); see the [benchmarks](benchmarks.md).
+
 Two things are flushed even in the default mode, because without them a power
 cut could stop the **whole session** from opening:
 

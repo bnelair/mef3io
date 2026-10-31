@@ -51,6 +51,10 @@ inline void (*fsync_observer)(const std::string& path) = nullptr;
 /// run concurrently, and each also reaches fsync_observer).
 inline void (*flush_batch_observer)(const std::vector<fsys::path>& files) = nullptr;
 
+/// TEST HOOK: called with the target of every `.tmet` a multi-channel write
+/// is about to rename into place; may throw to simulate a failing rename.
+inline void (*publish_observer)(const fsys::path& target) = nullptr;
+
 /// Flush a file's contents all the way to stable storage.
 ///
 /// A rename is ORDERED, not durable: without this a power cut can leave the

@@ -25,6 +25,8 @@ assert(s2.segment == 0);
 counts = int32(mod(0:n-1, 100))';
 valid = true(n, 1); valid(11:20) = false;
 w.writeInt32('ch2', counts, 0.01, start, fs, Valid=valid);
+sm = w.writeInt32Many({'m1', 'm2'}, [counts counts + 1], 0.01, start, fs);   % many channels, one call
+assert(numel(sm) == 2 && sm(1).samples_written == n && sm(2).segment == 0);
 
 w.writeAnnotations(struct('time', {start + 1e6, start + 2e6}, ...
                           'type', {'Note', 'EDFA'}, ...
@@ -34,7 +36,8 @@ delete(w);
 
 % ---- read back ------------------------------------------------------------
 r = mef3io.Reader(path);
-assert(isequal(r.channels, {'ch1'; 'ch2'}));
+assert(isequal(r.channels, {'ch1'; 'ch2'; 'm1'; 'm2'}));   % m1/m2 from writeInt32Many
+assert(r.info('m2').number_of_samples == n);
 
 info = r.info('ch1');
 assert(info.sampling_frequency == fs);

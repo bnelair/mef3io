@@ -54,7 +54,7 @@ thread alone. Results stay the same; nothing aborts.
 |---|---|
 | `Reader` | the open: listing the channel folders, checking each segment's files, reading and parsing every `.tmet`. Reads: decoding (and decrypting) the blocks of the window. A multi-channel read (`read([...])`, `block_envelope([...])`): every channel's index at once (file access: automatic = at least 8), then the data a group of that many channels at a time, each group decoded by ONE pool over all its blocks, never one pool per channel |
 | `MultiReader` | the same, as a **total** shared by its recordings (below) |
-| `Writer` | encoding the RED blocks of each write |
+| `Writer` | encoding the RED blocks of each write. A multi-channel write (`write_int32_many`, `write_many`) shares the ONE count between channels and blocks: up to `n_threads` channels run at once, each encoding its blocks on `n_threads // channels_at_once` threads, so the total never exceeds the count (a quantisation of float data runs across channels on the same count). The bytes do not depend on it |
 
 Opening a session makes several requests per segment. On a local disk that is
 cheap. On a network share it is most of the open time, and spreading the

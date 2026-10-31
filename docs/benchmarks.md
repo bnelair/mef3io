@@ -356,3 +356,42 @@ python benchmarks/read_many_benchmark.py          # multi-channel read from Pyth
 ```
 
 `pip install "mef3io[bench]"` installs everything these need.
+
+## Writing many channels in one call
+
+`Writer.write_int32_many` against a loop of `write_int32`, one `Writer`,
+synthetic random-walk int32, 4 rounds of appends per run (the first is the
+fresh segment), ext4 SSD, 12-core Linux machine, wall time of the whole
+`with` block (includes the final `close()` flush). Output bytes are the same
+(random UUIDs aside).
+
+| shape | `n_threads` | loop of `write_int32` | `write_int32_many` |
+|---|---|---|---|
+| 64 ch x 10 min @ 2048 Hz | 1 | 6.76 s (11.6 M samples/s) | 4.66 s (16.9 M/s) |
+| | 4 | 5.33 s (14.8 M/s) | 1.00 s (78.8 M/s) |
+| | 8 | 5.64 s (13.9 M/s) | 0.74 s (105.8 M/s) |
+| | 12 | 5.24 s (15.0 M/s) | 0.76 s (103.0 M/s) |
+| 16 ch x 5 min @ 4096 Hz | 1 | 1.86 s | 1.11 s |
+| | 4 | 1.47 s | 0.33 s |
+| | 12 | 1.47 s | 0.29 s |
+
+The loop does not scale with `n_threads` (only the blocks of one channel are
+parallel, 20 M samples/s per call); the multi-channel call spreads channels
+and blocks over the one thread budget. `strace -c` on the 64-channel run:
+the loop issues 256 `fdatasync` (one per channel per append) plus 1 `syncfs`;
+`write_int32_many` issues 5 `syncfs` (one per call, plus the close).
+
+`Writer(flush="close")` (opt-in, see
+[When is my data on disk?](long_recordings.md#when-is-my-data-on-disk)), 64 ch
+x 10 min @ 2048 Hz, `n_threads=12`, and again with an LD_PRELOAD shim adding
+5 ms to every `fsync`/`fdatasync`/`syncfs` (a slower array):
+
+| | loop, `each` | loop, `close` | many, `each` | many, `close` |
+|---|---|---|---|---|
+| this disk | 5.02 s | 2.11 s | 0.70 s | 0.64 s |
+| +5 ms per sync | 6.65 s | 2.21 s | 0.77 s | 0.65 s |
+
+`flush="close"` is worth a lot for a per-channel loop (the 256 waits are most
+of its time) and little (about 10 %) once the calls are batched with
+`write_int32_many`, which already pays one wait per call. Prefer the batched
+call; keep `flush="each"` for anything that cannot be rebuilt.

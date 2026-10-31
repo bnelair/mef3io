@@ -30,7 +30,7 @@ class WriterFlushWarning(MefWarning):
     """
 
 
-def _flush_on_collect(impl, path) -> None:
+def _flush_on_collect(impl, path, close_mode: bool = False) -> None:
     """Flush an UNCLOSED writer from its ``__del__``: with the GIL released (the
     binding's flush does that) so a slow disk does not stall every other
     thread inside the garbage collector, and a failure becomes a
@@ -45,8 +45,13 @@ def _flush_on_collect(impl, path) -> None:
                 WriterFlushWarning,
                 f"an unclosed Writer could not flush its data to disk ({e}); "
                 "data written since the last successful flush may be lost: "
-                "run recover on the session. Close the Writer (or use `with`) "
-                "to get this as an exception.",
+                + (
+                    'the session (flush="close") must be rewritten; it cannot be '
+                    "reliably recovered. "
+                    if close_mode
+                    else "run recover on the session. "
+                )
+                + "Close the Writer (or use `with`) to get this as an exception.",
                 path=path,
                 details=[str(e)],
                 stacklevel=1,
@@ -295,6 +300,15 @@ class Writer:
         At most ``mef3io._mef3io.MAX_BLOCK_SAMPLES`` (858 993 396: a block's
         byte size is a 32-bit field); more raises ``ValueError`` before
         anything is created, as does a rate whose derived block exceeds it.
+    flush : {"each", "close"}, optional
+        ``"each"`` (default): the waits described in the data-on-disk guide.
+        ``"close"``: no waits during writes, one combined wait at
+        :meth:`close`/:meth:`flush`. **Only for a session this Writer creates**
+        (``overwrite=True`` or a new path; an existing session raises
+        ``ValueError``) and only for output you rebuild after any failure: a
+        power cut while writing can leave the whole session unreadable and
+        ``recover_session`` cannot be relied on. Not combinable with
+        ``wait_for_disk``.
     n_threads : int, optional
         How many threads this Writer may use (RED encoding): ``0`` (default)
         = automatic, ``1`` = no extra threads. Output is byte-identical
@@ -342,8 +356,17 @@ class Writer:
         n_threads: int = 0,
         metadata=None,
         wait_for_disk: bool = False,
+        flush: str = "each",
     ):
         from . import _mef3io
+
+        if flush not in ("each", "close"):
+            raise ValueError(f'flush must be "each" or "close", not {flush!r}')
+        if flush == "close" and wait_for_disk:
+            raise ValueError(
+                'flush="close" defers every flush to close(); it cannot be combined '
+                "with wait_for_disk=True (which waits for the disk on every write)"
+            )
 
         # Validated FIRST: the SessionWriter constructor removes an existing
         # session when overwrite=True, so checking afterwards could delete a
@@ -367,6 +390,8 @@ class Writer:
         self._n_threads = _check_threads(n_threads)
         self._impl.set_threads(self._n_threads)
         self._impl.set_wait_for_disk(bool(wait_for_disk))
+        self._impl.set_flush_mode(flush)
+        self._close_mode = flush == "close"
         if metadata is not None:
             self.set_metadata(metadata)
 
@@ -387,7 +412,7 @@ class Writer:
         impl = getattr(self, "_impl", None)
         if impl is not None:
             self._impl = None
-            _flush_on_collect(impl, getattr(self, "_path", None))
+            _flush_on_collect(impl, getattr(self, "_path", None), getattr(self, "_close_mode", False))
 
     @property
     def n_threads(self) -> int:
@@ -581,6 +606,157 @@ class Writer:
             return self._impl.write_int32(
                 channel, data, float(ufact), start_uutc, float(fs), valid, bool(new_segment)
             )
+
+    @staticmethod
+    def _many_args(channels, data, dtype_checker=None):
+        """Common validation of a multi-channel call (nothing is written)."""
+        if isinstance(channels, (str, bytes)):
+            raise TypeError("channels must be a sequence of channel names, not one string")
+        channels = list(channels)
+        for c in channels:
+            if not isinstance(c, str):
+                raise TypeError(f"channel names must be str, not {type(c).__name__}")
+        if len(set(channels)) != len(channels):
+            dup = sorted({c for c in channels if channels.count(c) > 1})
+            raise ValueError(f"channels listed more than once: {dup}; nothing was written")
+        data = dtype_checker(data) if dtype_checker else data
+        if data.ndim == 1 and len(channels) == 1:
+            data = data[None, :]
+        if data.ndim != 2 or data.shape[0] != len(channels):
+            raise ValueError(
+                f"data must have shape (n_channels, n_samples) = ({len(channels)}, n), "
+                f"got {tuple(data.shape)}"
+            )
+        return channels, np.ascontiguousarray(data)
+
+    def write_int32_many(
+        self,
+        channels,
+        data: np.ndarray,
+        ufact,
+        start_uutc: int,
+        fs: float,
+        new_segment: bool = False,
+    ) -> list:
+        """Write the same run of integer counts for many channels in one call.
+
+        Byte-identical to calling :meth:`write_int32` for each channel in the
+        given order (fresh segments differ only in their random UUIDs), but
+        the channels are encoded and written in parallel on this Writer's
+        ``n_threads`` (one budget for channels and blocks together), and the
+        ``.tmet`` barriers of all channels are ONE combined wait instead of
+        one per channel. See `When is my data on disk?
+        <https://bnelair.github.io/mef3io/long_recordings/#when-is-my-data-on-disk>`_.
+
+        Every refusal, including an append that conflicts with what is on
+        disk (rate, factor, start before the segment's end), is decided before
+        any byte is written. A failure while writing or flushing rolls
+        **every** channel of the call back and raises the underlying error
+        (nothing was written); if a rollback itself does not complete,
+        :class:`RollbackIncompleteError` names the channels
+        (``incomplete_channels``) whose files may be torn. A failure while
+        publishing raises :class:`PartialWriteError`, whose
+        ``written_channels`` lists the channels that are on disk (the rest
+        were rolled back; ``incomplete_channels`` as above).
+
+        Memory: besides the data, each channel being written holds a copy of
+        its samples and its encoded blocks (freed when it is written), and
+        only about ``n_threads`` channels run at once; ``write_many``
+        also holds the converted counts and mask of every channel (about 5/8
+        of the input), so write long
+        recordings in chunks (minutes per call).
+
+        Parameters
+        ----------
+        channels : sequence of str
+            Distinct channel names.
+        data : array_like of int, shape (n_channels, n_samples)
+            Counts, stored bit-exact (no gap mask: split the run, or use
+            :meth:`write_many` with NaN).
+        ufact : float or sequence of float
+            One conversion factor, or one per channel.
+        start_uutc : int or float
+            Timestamp of the first sample, uUTC.
+        fs : float
+            Sampling frequency in Hz.
+        new_segment : bool, optional
+            Force a fresh segment for every channel instead of appending.
+
+        Returns
+        -------
+        list of dict
+            One summary per channel, in order (as :meth:`write_int32`).
+
+        Raises
+        ------
+        ValueError
+            Duplicate channels, a shape other than ``(len(channels), n)``,
+            ``ufact`` neither a scalar nor one per channel, or the checks of
+            :meth:`write_int32`.
+        TypeError
+            If ``data`` is floating-point.
+        PartialWriteError
+            Some channels were published before a failure; see above.
+        """
+        channels, data = self._many_args(channels, data, _as_int32_counts)
+        ufacts = np.atleast_1d(np.asarray(ufact, dtype=np.float64))
+        if ufacts.ndim != 1 or ufacts.size not in (1, len(channels)):
+            raise ValueError(
+                f"ufact must be one number or one per channel ({len(channels)}), "
+                f"got shape {tuple(ufacts.shape)}"
+            )
+        with self._reporting_unreadable_metadata():
+            return self._impl.write_int32_many(
+                channels, data, [float(u) for u in ufacts], start_uutc, float(fs),
+                bool(new_segment),
+            )
+
+    def write_many(
+        self,
+        channels,
+        data: np.ndarray,
+        start_uutc: int,
+        fs: float,
+        precision: "int | str" = -1,
+        new_segment: bool = False,
+    ) -> list:
+        """Write the same run of float data for many channels in one call.
+
+        The float counterpart of :meth:`write_int32_many`, with the semantics
+        of :meth:`write` per channel: NaN runs become discontinuity gaps, and
+        the precision (``-1`` = inferred) is decided **per channel**. Parallel
+        across channels, one combined barrier, all-or-nothing rollback; see
+        :meth:`write_int32_many`.
+
+        Parameters
+        ----------
+        channels : sequence of str
+            Distinct channel names.
+        data : array_like, shape (n_channels, n_samples)
+            Coerced to float64.
+        start_uutc, fs, precision, new_segment
+            As :meth:`write`.
+
+        Returns
+        -------
+        list of dict
+            One summary per channel, in order (as :meth:`write`). The
+            warnings of :meth:`write` (step fallback, clamped samples) are
+            emitted per channel.
+        """
+        step = _is_step(precision)
+        channels, data = self._many_args(
+            channels, np.asarray(data), lambda d: np.atleast_1d(np.asarray(d, dtype=np.float64))
+        )
+        with self._reporting_unreadable_metadata():
+            summaries = self._impl.write_float_many(
+                channels, data, start_uutc, float(fs), -1 if step else int(precision),
+                bool(new_segment), step,
+            )
+        for ch, summary in zip(channels, summaries):
+            warn_step_fallback(ch, summary, path=self._path)
+            warn_clamped(ch, summary, path=self._path)
+        return summaries
 
     def write_annotations(self, annotations, channel: Optional[str] = None) -> None:
         """Write records (annotations).

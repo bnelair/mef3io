@@ -512,6 +512,18 @@ int mef3io_writer_write_int32(mef3io_writer* w, const char* channel, const int32
                               const uint8_t* valid, int64_t n, double ufact, int64_t start_uutc,
                               double fs, int new_segment, mef3io_write_summary* out);
 
+/* The same run for MANY channels in one call (write_int32_many): `data` is
+   n_channels consecutive runs of n_samples int32 (channel-major; a MATLAB
+   n_samples x n_channels matrix as is). `ufacts` holds n_ufacts (1 or
+   n_channels) factors. `out` receives n_channels summaries (may be NULL).
+   Channels are written in parallel on the writer's threads with one combined
+   flush; a failure before publication rolls every channel back. A failure
+   while publishing returns the error with the written channels in its message. */
+int mef3io_writer_write_int32_many(mef3io_writer* w, const char* const* channels,
+                                   int32_t n_channels, const int32_t* data, int64_t n_samples,
+                                   const double* ufacts, int32_t n_ufacts, int64_t start_uutc,
+                                   double fs, int new_segment, mef3io_write_summary* out);
+
 /* Records are collected into a list, then written (APPENDED to the level's records; never replacing). */
 mef3io_records* mef3io_records_create(void);
 void mef3io_records_free(mef3io_records* list);

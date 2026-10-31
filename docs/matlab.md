@@ -65,6 +65,7 @@ shutdown, `mef3io.recoverSession(path)` reports what is wrong (a dry run) and
   `data` must be integer-typed: floating-point input errors (use `write`
   for float data) and values beyond the int32 range error instead of
   saturating. `Valid` is any numeric/logical mask, nonzero = valid.
+- **`writeInt32Many(channels, data, ufact, startUutc, fs, NewSegment=false)`** — the same run of int32 counts for many channels in one call (`data` is n_samples x n_channels; `channels` a cell array; `ufact` one value or one per channel). Like Python's `write_int32_many`: channels in parallel on the Writer's threads, one combined disk barrier, all channels rolled back on a failure before publishing. Returns one summary struct per channel.
 - **`writeAnnotations(records, channel)`** — struct array (or table) with
   fields `time` (required), `type` (default `'Note'`), `text`, `duration`.
   Omit `channel` for session-level records. Appends to the records already stored at that level (created if absent); never replaces or deletes one.
