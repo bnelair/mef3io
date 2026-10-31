@@ -99,8 +99,9 @@ block_length=None, n_threads=0, metadata=None, wait_for_disk=False, flush="each"
   during writes; `close()` / `flush()` does one combined wait. **A power cut
   while writing can leave the whole session unreadable, and `recover_session`
   cannot be relied on to fix it**, so use it only for output you rebuild after
-  any failure. Only for a session this `Writer` creates; refused with
-  `wait_for_disk=True`. See
+  any failure. When `close()` returns, everything is on disk. Only for a
+  session this `Writer` creates (`ValueError` for one that already existed);
+  `ValueError` with `wait_for_disk=True` too. See
   [`flush="close"`](long_recordings.md#flushclose-no-waits-until-the-end).
 - `recover_session` and `repair_session` always keep a backup of what they
   change. `backup=False` (and the CLI's `--no-backup`) is still accepted but
@@ -257,8 +258,8 @@ of silently wrapping. A `valid` mask of the wrong length raises
 The same run of samples for many channels in one call: `data` is
 `(n_channels, n_samples)` (`int32` counts with one `ufact` or one per
 channel, or float with NaN gaps and the precision decided per channel). The
-files are the same as a loop of `write_int32` / `write` calls would produce,
-but channels are written in parallel on the `Writer`'s `n_threads` and the
+files are the same as a loop of `write_int32` / `write` calls would produce
+(a fresh segment differs only in its random UUIDs), but channels are written in parallel on the `Writer`'s `n_threads` and the
 disk is waited for once per call instead of once per channel. Returns one
 summary dict per channel. Refusals are decided before any file is touched; a
 failure before publishing rolls every channel back, one while publishing
