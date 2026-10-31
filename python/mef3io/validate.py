@@ -88,7 +88,11 @@ class Check:
 
 @dataclass(frozen=True)
 class Finding:
-    """One problem, found by one check, in one segment."""
+    """One problem, found by one check, in one segment.
+
+    Findings about a record (annotation) file at channel or session level carry
+    ``segment == -1`` (and ``channel == ""`` for the session).
+    """
 
     check_id: str
     severity: str

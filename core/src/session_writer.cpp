@@ -450,6 +450,8 @@ void SessionWriter::write_records(std::optional<std::string> channel,
   const std::string what =
       channel ? "channel-level records of " + *channel : std::string("session-level records");
   validate_records_for_write(records);
+  // The session decides the encryption, not the passwords passed (#167).
+  require_record_write_access(mefd_path_, channel, password_1_, password_2_, record_access_);
   const si8 rto = resolve_offset(channel, what);
   for (const auto& r : records) require_storable_time(r.time, rto, "record time");
   std::string dir, base;

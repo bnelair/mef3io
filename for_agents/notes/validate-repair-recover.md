@@ -4,7 +4,7 @@
 > Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
 Validator/repair (`core/{include,src}/…/validate.{hpp,cpp}`, `python/mef3io/
-validate.py`, `python/mef3io/__main__.py`): a REGISTRY of 18 checks comparing a
+validate.py`, `python/mef3io/__main__.py`): a REGISTRY of 19 checks comparing a
 session's declarations against its data, run in a fixed order (integrity →
 structure → sizing → times → headers). Adding a check = ONE entry with
 `detect` + optional `repair` lambdas; ordering/filtering/reporting/bindings/CLI

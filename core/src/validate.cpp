@@ -12,6 +12,7 @@
 #include <fstream>
 #include <functional>
 #include <optional>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <system_error>
@@ -856,6 +857,24 @@ const std::vector<CheckImpl>& check_impls() {
                    return true;
                  }});
 
+    v.push_back({{"records.encryption", "Record files are protected like the session",
+                  "Annotation (.rdat) files at segment, channel and session level must be "
+                  "protected exactly as the session is: a password-protected session's record "
+                  "files carry the password validation fields and level-2 encrypted bodies "
+                  "(meflib's convention: annotations may hold identifying text). A record file "
+                  "that is unprotected in a protected session keeps its text in PLAINTEXT "
+                  "(older mef3io, issue #167, created one when the writer was opened without "
+                  "the level-1 password); a protected one in an unprotected session cannot be "
+                  "opened by readers given no password. NOT repairable: fixing it means "
+                  "re-encrypting (or decrypting) record bodies, which this registry, that only "
+                  "rewrites declarations, never does. Copy the annotations out and write them "
+                  "again with both passwords. Judged from each file's universal header.",
+                  Severity::Error, false},
+                 // Record files are not part of a segment; the pass judges them after
+                 // the segments (check_records_encryption), so detect has nothing to do.
+                 [](const SegmentState&, const SegmentTruth&, Finding&, bool&) {},
+                 {}});
+
     return v;
   }();
   return impls;
@@ -1293,6 +1312,123 @@ std::vector<std::string> Report::repairable_check_ids() const {
 
 namespace {
 
+bool uh_protected(const SessionSource& src, const std::string& rel, bool& readable) {
+  readable = false;
+  try {
+    if (!src.exists(rel) || src.file_size(rel) < fmt::UNIVERSAL_HEADER_BYTES) return false;
+    const auto uh = fmt::UniversalHeader::parse(src.read_range(rel, 0, fmt::UNIVERSAL_HEADER_BYTES));
+    readable = true;
+    return uh.is_password_protected();
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
+// records.encryption: every .rdat is judged against its OWN level: a segment's
+// against that segment's .tmet, a channel's against its first segment's, the
+// session's against the session (any protected channel). Reads 1 KB headers and
+// the small .ridx; filed per file, session-level ones with no channel/segment.
+void check_records_encryption(const SessionSource& src, const std::vector<SegmentFiles>& segments,
+                              Report& report) {
+  struct Ch {
+    bool protected_ = false;
+    bool known = false;
+  };
+  std::map<std::string, Ch> chans;
+  std::map<std::string, bool> seg_protected;  // tmet_rel -> protected
+  bool any_known = false, session_protected = false;
+  for (const auto& f : segments) {
+    if (!f.missing.empty() && std::find(f.missing.begin(), f.missing.end(), ".tmet") != f.missing.end())
+      continue;
+    bool ok = false;
+    const bool p = uh_protected(src, f.tmet_rel, ok);
+    if (!ok) continue;
+    seg_protected[f.tmet_rel] = p;
+    auto& c = chans[f.channel];
+    if (!c.known) {
+      c.known = true;
+      c.protected_ = p;
+      session_protected = session_protected || p;
+    }
+    any_known = true;
+  }
+  if (!any_known) return;
+
+  auto file = [&](const std::string& rel, bool expect_protected, const std::string& level,
+                  const std::string& channel, int segment) {
+    bool ok = false;
+    const bool is_p = uh_protected(src, rel, ok);
+    if (!ok) return;
+    Finding f;
+    f.check_id = "records.encryption";
+    f.channel = channel;
+    f.segment_number = segment;
+    f.path = rel;
+    f.field = "record file universal header password fields";
+    if (is_p != expect_protected) {
+      f.severity = Severity::Error;
+      f.stored = is_p ? "protected" : "not protected";
+      f.expected = expect_protected ? "protected" : "not protected";
+      f.message = level + " record file " + rel + (is_p ? " is protected" : " is not protected") +
+                  (expect_protected
+                       ? " in a password-protected session: its annotation text is stored in "
+                         "plaintext"
+                       : " but the session is not: readers without the password cannot open it");
+      report.findings.push_back(std::move(f));
+      return;
+    }
+    if (!is_p) return;
+    // Protected header: do the record bodies agree? Legacy tools (mef_tools) wrote
+    // protected headers over unencrypted bodies, so this is a warning.
+    const std::string ridx = rel.substr(0, rel.size() - 5) + ".ridx";
+    try {
+      if (!src.exists(ridx)) return;
+      const std::uint64_t sz = src.file_size(ridx);
+      if (sz <= fmt::UNIVERSAL_HEADER_BYTES) return;
+      const std::uint64_t cap = std::min<std::uint64_t>(sz - fmt::UNIVERSAL_HEADER_BYTES, 4u << 20);
+      const auto body = src.read_range(ridx, fmt::UNIVERSAL_HEADER_BYTES, cap);
+      for (std::size_t o = 0; o + std::size_t{24} <= body.size(); o += std::size_t{24}) {
+        if (static_cast<si1>(body[o + 7]) > 0) continue;
+        f.severity = Severity::Warning;
+        f.stored = "unencrypted record bodies";
+        f.expected = "level-2 encrypted";
+        f.message = level + " record file " + rel +
+                    " is in a password-protected session but its note text is stored without "
+                    "encryption (typical of the legacy mef_tools writer)";
+        report.findings.push_back(std::move(f));
+        return;
+      }
+    } catch (const std::exception&) {
+    }
+  };
+
+  // session level: any root *.rdat
+  for (const auto& e : src.list_dir(""))
+    if (!e.is_dir && e.name.size() > 5 && e.name.ends_with(".rdat"))
+      file(e.name, session_protected, "session-level", "", -1);
+  // channel level, including channels with records and no segments
+  std::set<std::string> channel_names;
+  for (const auto& [name, c] : chans) channel_names.insert(name);
+  for (const auto& e : src.list_dir(""))
+    if (e.is_dir && e.name.ends_with(".timd")) channel_names.insert(e.name.substr(0, e.name.size() - 5));
+  for (const auto& name : channel_names) {
+    const auto it = chans.find(name);
+    const bool expect = it != chans.end() && it->second.known ? it->second.protected_ : session_protected;
+    const std::string dir = name + ".timd";
+    for (const auto& e : src.list_dir(dir))
+      if (!e.is_dir && e.name.ends_with(".rdat")) file(dir + "/" + e.name, expect, "channel-level", name, -1);
+  }
+  // segment level
+  for (const auto& f : segments) {
+    const auto it = seg_protected.find(f.tmet_rel);
+    if (it == seg_protected.end()) continue;
+    const auto slash = f.tmet_rel.rfind('/');
+    const std::string rdat = f.tmet_rel.substr(0, f.tmet_rel.size() - 5) + ".rdat";
+    (void)slash;
+    if (src.exists(rdat)) file(rdat, it->second, "segment-level", f.channel, f.segment_number);
+  }
+}
+
 // The shared body of validate/repair. `repair` empty => read-only.
 Report run(const std::string& path, const ValidateOptions& opts, const RepairSelection* repair,
            const Control& ctl) {
@@ -1499,7 +1635,6 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       continue;
     }
     ++report.segments_checked;
-
     RepairBuffer buffer;
     buffer.s2 = state.md.section2;
     buffer.tmet_uh = state.md.universal_header;
@@ -1788,6 +1923,8 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       skip(reason);
     }
   }
+
+  if (selected(opts.check_ids, "records.encryption")) check_records_encryption(*src, segments, report);
 
   // segment-repaired: a non-last segment of these channels changed, so their
   // LAST segment's .tmet says so (see last_segment.hpp). Header-only, backed up
