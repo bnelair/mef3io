@@ -83,7 +83,8 @@ with mef3io.Writer("session.mefd", overwrite=True, units="uV") as w:
     w.write("eeg1", signal, start, fs=fs)
     w.write("eeg2", signal[::-1].copy(), start, fs=fs)
     w.write_annotations([{"time": start, "text": "recording start"}], channel="eeg1")
-# leaving the block waits until everything is on disk (w.flush() does it mid-way):
+# leaving the block waits until everything is on disk (w.flush() does it mid-way);
+# w.write_many([...], 2-D array, start, fs) writes many channels in one call:
 # https://bnelair.github.io/mef3io/long_recordings/#when-is-my-data-on-disk
 
 with mef3io.Reader("session.mefd") as r:
@@ -120,7 +121,8 @@ pages such as
 - **Recordings that keep growing.** A session can be appended to for days or
   months; with one `Writer` kept open, each append costs time in proportion
   to the new data, not to the recording so far. If a write is interrupted,
-  the session can be checked and recovered — see [Long recordings](https://bnelair.github.io/mef3io/long_recordings/) and
+  the session can be checked and recovered. Many channels can be written in
+  one call (`write_many`), in parallel, with one wait for the disk — see [Long recordings](https://bnelair.github.io/mef3io/long_recordings/) and
   [Validating and repairing](https://bnelair.github.io/mef3io/validation/).
 - **Existing data and code.** It reads MEF 3.0 sessions from other writers,
   and `from mef3io import MefReader, MefWriter` runs code written for the
