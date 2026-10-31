@@ -171,6 +171,18 @@ std::vector<Record> parse_records(std::span<const ui1> rdat_bytes, si8 rto,
 /// it first; callers that create directories run it before doing so.
 void validate_records_for_write(const std::vector<Record>& records);
 
+/// Refuse, BEFORE any file or folder is created or touched, a record write
+/// that would not match how the session is protected (#167). The session's
+/// own channel metadata decides (the first `.tmet` found: its universal
+/// header's password validation fields), never which passwords the caller
+/// happened to pass: on a password-protected session BOTH passwords must be
+/// given and correct (PasswordError otherwise), because the record file is
+/// created with validation fields built from them and its bodies are
+/// level-2 encrypted. A session with no channel yet, or an unprotected one,
+/// is left to write_records (unchanged behaviour).
+void require_record_write_access(const std::string& session_dir, const std::string& password_1,
+                                 const std::string& password_2);
+
 /// APPEND records to `<dir>/<base>.rdat` + `<base>.ridx`, creating the pair
 /// when it does not exist. NEVER replaces, truncates or rewrites stored
 /// records: the new bytes are added in place (record data, then its index

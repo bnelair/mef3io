@@ -31,7 +31,7 @@ What is encrypted in an encrypted session, and what is not:
 | Subject name, subject ID, recording location | metadata section 3 (`.tmet`) | **yes**, level-2 password |
 | Recording-time offset, GMT offset, daylight-saving start/end | metadata section 3 | **yes**, level-2 password |
 | Sampling rate, conversion factor to physical units (e.g. µV), units, filter settings, channel/session/reference descriptions, sample and block totals (this copy only: the index and data blocks below keep their own, in plain text) | metadata section 2 (`.tmet`) | **yes**, level-1 password |
-| Annotation contents: note text, seizure and event details | record bodies (`.rdat`) | **yes**, level-2 password, when the writer encrypts them: mef3io always does, the legacy Python stack (`mef_tools`/`pymef`) does not |
+| Annotation contents: note text, seizure and event details | record bodies (`.rdat`) | **yes**, level-2 password, when the writer encrypts them: mef3io always does (and refuses to add annotations to a password-protected session unless both passwords are given, so a record file can never be plaintext in an encrypted session), the legacy Python stack (`mef_tools`/`pymef`) does not |
 | Annotation type, time and size (the size of its contents, to within 16 bytes) | record headers (`.rdat`) and record index (`.ridx`) | no |
 | Recording start and end time, session and channel names, anonymized name (if the writer filled it), number of blocks or records, file IDs, mef3io's [provenance stamp](mef3_format.md#provenance-region-mef3io-12-frozen-format) | the 1024-byte header at the start of **every** file | no |
 | Every data block's start time, sample count, position in the file, smallest and largest sample, and gap flag | block index (`.tidx`) | no |

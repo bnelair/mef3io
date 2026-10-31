@@ -604,6 +604,45 @@ constexpr const char* RECOVER_ADVICE =
 
 }  // namespace
 
+void require_record_write_access(const std::string& session_dir, const std::string& password_1,
+                                 const std::string& password_2) {
+  std::vector<std::string> timds;
+  std::error_code ec;
+  for (const auto& e : fs::directory_iterator(session_dir, ec))
+    if (e.is_directory() && e.path().extension() == ".timd") timds.push_back(e.path().string());
+  std::sort(timds.begin(), timds.end());
+  for (const auto& timd : timds) {
+    std::vector<std::string> segds;
+    for (const auto& e : fs::directory_iterator(timd, ec))
+      if (e.is_directory() && e.path().extension() == ".segd") segds.push_back(e.path().string());
+    std::sort(segds.begin(), segds.end());
+    for (const auto& segd : segds) {
+      const fs::path tmet = fs::path(segd) / (fs::path(segd).stem().string() + ".tmet");
+      std::error_code fe;
+      if (fs::file_size(tmet, fe) < fmt::UNIVERSAL_HEADER_BYTES || fe) continue;
+      std::vector<ui1> head;
+      try {
+        head = read_at(tmet.string(), 0, fmt::UNIVERSAL_HEADER_BYTES);
+      } catch (const MefError&) {
+        continue;
+      }
+      const auto uh = fmt::UniversalHeader::parse(head);
+      if (!uh.is_password_protected()) return;  // unprotected session: unchanged behaviour
+      const char* needs =
+          "both passwords (level-1 and level-2) are needed to add annotations to a "
+          "password-protected session; nothing was written";
+      if (password_1.empty() || password_2.empty()) throw PasswordError(needs);
+      const auto k1 = crypto::validate_password(password_1, uh.level_1_password_validation_field,
+                                                uh.level_2_password_validation_field);
+      const auto k2 = crypto::validate_password(password_2, uh.level_1_password_validation_field,
+                                                uh.level_2_password_validation_field);
+      if (!k1.level1_key || k1.level2_key || !k2.level2_key)
+        throw PasswordError(std::string("a password does not match this session: ") + needs);
+      return;
+    }
+  }
+}
+
 void write_records(const std::string& dir, const std::string& base,
                    const std::string& session_name, const std::string& channel_name,
                    int segment_number, const std::vector<Record>& records, si8 rto,

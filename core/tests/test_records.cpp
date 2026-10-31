@@ -627,3 +627,67 @@ TEST_CASE("write_records appends in place: same bytes as one call, any level, L2
   }
   fsys::remove_all(dir);
 }
+
+#include "mef3io/validate.hpp"
+
+TEST_CASE("Encrypted session: records need both passwords before anything is created (#167)") {
+  const auto dir = fsys::temp_directory_path() / "mef3io_records_guard.mefd";
+  fsys::remove_all(dir);
+  std::vector<si4> x(2560, 7);
+  {
+    SessionWriter w(dir.string(), true, "p1", "p2");
+    w.write_int32("ch1", x, 1.0, T0, 256.0);
+  }
+  Record r;
+  r.type = "Note";
+  r.time = T0 + SEC;
+  r.text = "SECRETTEXT";
+  auto count_files = [&] {
+    std::size_t n = 0;
+    for (const auto& e : fsys::recursive_directory_iterator(dir)) { (void)e; ++n; }
+    return n;
+  };
+  const auto before = count_files();
+  for (const auto& pw : {std::pair<std::string, std::string>{"", "p2"}, {"p1", ""}, {"", ""},
+                         {"p1", "bad"}, {"p2", "p2"}}) {
+    for (const bool ch : {false, true}) {
+      SessionWriter w(dir.string(), false, pw.first, pw.second);
+      REQUIRE_THROWS_AS(w.write_records(ch ? std::optional<std::string>("ch1") : std::nullopt, {r}),
+                        PasswordError);
+    }
+  }
+  REQUIRE(count_files() == before);
+  {
+    SessionWriter w(dir.string(), false, "p1", "p2");
+    w.write_records(std::nullopt, {r});
+  }
+  std::ifstream f(dir / "mef3io_records_guard.rdat", std::ios::binary);
+  const std::string raw((std::istreambuf_iterator<char>(f)), {});
+  REQUIRE(raw.find("SECRETTEXT") == std::string::npos);
+  auto count = [](const Report& rep) {
+    int n = 0;
+    for (const auto& fd : rep.findings) n += fd.check_id == "records.encryption";
+    return n;
+  };
+  ValidateOptions vo;
+  vo.password = "p2";
+  REQUIRE(count(validate_session(dir.string(), vo)) == 0);
+
+  // Craft the #167 state: replace the record pair with an unprotected one.
+  const auto plain = fsys::temp_directory_path() / "mef3io_records_guard_plain.mefd";
+  fsys::remove_all(plain);
+  {
+    SessionWriter w(plain.string(), true);
+    w.write_int32("ch1", x, 1.0, T0, 256.0);
+    w.write_records(std::nullopt, {r});
+  }
+  fsys::copy_file(plain / "mef3io_records_guard_plain.rdat", dir / "mef3io_records_guard.rdat",
+                  fsys::copy_options::overwrite_existing);
+  fsys::copy_file(plain / "mef3io_records_guard_plain.ridx", dir / "mef3io_records_guard.ridx",
+                  fsys::copy_options::overwrite_existing);
+  const auto rep = validate_session(dir.string(), vo);
+  REQUIRE(count(rep) == 1);
+  REQUIRE_FALSE(rep.ok());
+  fsys::remove_all(dir);
+  fsys::remove_all(plain);
+}
