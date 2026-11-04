@@ -525,12 +525,13 @@ bool path_has_suffix(const std::string& path, const std::string& suffix) {
 std::shared_ptr<const SessionSource> open_session_source(const std::string& path) {
   // Session naming is a safety contract: only clearly-marked paths are ever
   // opened, so a stray directory or file cannot be misread as a session.
-  if (fs::is_directory(path)) {
+  const fs::path native = detail::utf8_path(path);  // UTF-8 in, wide on Windows
+  if (fs::is_directory(native)) {
     if (!path_has_suffix(path, ".mefd"))
       throw IoError("session directory must end with .mefd: " + path);
     return std::make_shared<DirectorySource>(path);
   }
-  if (fs::is_regular_file(path)) {
+  if (fs::is_regular_file(native)) {
     if (!path_has_suffix(path, ".mefd.tar"))
       throw IoError("session archive must end with .mefd.tar: " + path);
     return std::make_shared<TarSource>(path);
