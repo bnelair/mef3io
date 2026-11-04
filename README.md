@@ -158,13 +158,16 @@ pages such as
 - **Copies with only what you need.** `mef3io.transform_session` writes a
   copy with chosen channels, new passwords (or none), a new name and edited
   subject details or descriptions, and can keep only a time window
-  (`time_range=`). Every time and sample is copied as stored, and the copy
-  is checked against its source before it is saved. Python and C++; see
+  (`time_range=`) or leave every annotation out (`records="drop"`). Every
+  time and sample is copied as stored, and the copy is checked against its
+  source before it is saved. Python and C++; see
   [Modified copies](https://bnelair.github.io/mef3io/transform/).
 - **Recordings merged into one.** `mef3io.merge_sessions` joins two or
   more recordings: parts of one stay, recordings that take turns, or
-  different amplifiers. Overlapping data is refused before anything is
-  written, and the result is checked against every source. See
+  different amplifiers. One call can also trim each recording to its own
+  time range, make the result anonymous and use several threads
+  (`n_threads=`). Overlapping data is refused before anything is written, and
+  the result is checked against every source. See
   [Merging recordings](https://bnelair.github.io/mef3io/merge/).
   To read several recordings as one without writing anything,
   `mef3io.MultiReader([...])` is a drop-in for `Reader` (Python).
