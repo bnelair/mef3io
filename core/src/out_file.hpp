@@ -9,21 +9,27 @@
 // every open is a round trip, so each of these is a request saved.
 //
 // Durability is the copy's own rule, unchanged: every file is fdatasync'd
-// (macOS F_FULLFSYNC) before the copy is verified and renamed. Windows keeps
-// the stream and the flush-by-path of before (`synced_by_handle` is false there:
-// FlushFileBuffers needs a handle opened with GENERIC_WRITE, see durability.hpp).
+// (macOS F_FULLFSYNC; Windows FlushFileBuffers, which needs the GENERIC_WRITE
+// handle this class holds, see durability.hpp) before the copy is verified and
+// renamed. Windows: CreateFileW(CREATE_NEW) is the exclusive create, WriteFile
+// the writes, an OVERLAPPED offset the header patch.
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <span>
 #include <string>
 #include <system_error>
 #include <vector>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <cerrno>
 #include <fcntl.h>
 #include <unistd.h>
@@ -35,11 +41,8 @@
 
 namespace mef3io::detail {
 
-#ifndef _WIN32
+/// Every output file is flushed through its own handle on every platform.
 inline constexpr bool synced_by_handle = true;
-#else
-inline constexpr bool synced_by_handle = false;
-#endif
 
 class OutputFile {
  public:
@@ -54,9 +57,17 @@ class OutputFile {
                     std::error_code(errno, std::generic_category()).message() + ")");
     }
 #else
-    if (std::filesystem::exists(path_)) throw IoError("output file already exists: " + path_);
-    f_.open(path_, std::ios::binary | std::ios::trunc);
-    if (!f_) throw IoError("cannot create file: " + path_);
+    const std::wstring wide = std::filesystem::path(path_).wstring();
+    h_ = CreateFileW(wide.c_str(), GENERIC_WRITE,
+                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_NEW,
+                     FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h_ == INVALID_HANDLE_VALUE) {
+      const DWORD e = GetLastError();
+      if (e == ERROR_FILE_EXISTS || e == ERROR_ALREADY_EXISTS)
+        throw IoError("output file already exists: " + path_);
+      throw IoError("cannot create file: " + path_ + " (" +
+                    std::error_code(static_cast<int>(e), std::system_category()).message() + ")");
+    }
 #endif
     buf_.reserve(cap_);
   }
@@ -65,6 +76,8 @@ class OutputFile {
   ~OutputFile() {
 #ifndef _WIN32
     if (fd_ >= 0) ::close(fd_);
+#else
+    if (h_ != INVALID_HANDLE_VALUE) CloseHandle(h_);
 #endif
   }
 
@@ -93,10 +106,15 @@ class OutputFile {
       done += static_cast<std::size_t>(n);
     }
 #else
-    f_.seekp(0);
-    f_.write(reinterpret_cast<const char*>(b.data()), static_cast<std::streamsize>(b.size()));
-    f_.seekp(0, std::ios::end);
-    if (!f_) throw IoError("write failed: " + path_);
+    // An explicit offset still moves a synchronous handle's file pointer, so
+    // it is put back at the end (the next append continues there).
+    OVERLAPPED ov{};
+    DWORD put = 0;
+    if (!WriteFile(h_, b.data(), static_cast<DWORD>(b.size()), &put, &ov) || put != b.size())
+      throw IoError("write failed: " + path_);
+    LARGE_INTEGER end{};
+    end.QuadPart = static_cast<LONGLONG>(size_);
+    if (!SetFilePointerEx(h_, end, nullptr, FILE_BEGIN)) throw IoError("write failed: " + path_);
 #endif
   }
 
@@ -121,11 +139,18 @@ class OutputFile {
     fd_ = -1;
     if (::close(fd) != 0) throw IoError("close failed, data may not have reached disk: " + path_);
 #else
-    (void)sync;
-    f_.flush();
-    if (!f_) throw IoError("write failed (disk full?): " + path_);
-    f_.close();
-    if (!f_) throw IoError("close failed: " + path_);
+    if (sync) {
+      if (fsync_observer) fsync_observer(path_);
+      if (!FlushFileBuffers(h_)) {
+        const DWORD e = GetLastError();
+        throw IoError("could not flush to disk, the write is not durable: " + path_ +
+                      " (FlushFileBuffers: " +
+                      std::error_code(static_cast<int>(e), std::system_category()).message() + ")");
+      }
+    }
+    const HANDLE h = h_;
+    h_ = INVALID_HANDLE_VALUE;
+    if (!CloseHandle(h)) throw IoError("close failed, data may not have reached disk: " + path_);
 #endif
   }
 
@@ -145,8 +170,14 @@ class OutputFile {
       done += static_cast<std::size_t>(w);
     }
 #else
-    f_.write(reinterpret_cast<const char*>(p), static_cast<std::streamsize>(n));
-    if (!f_) throw IoError("write failed (disk full?): " + path_);
+    std::size_t done = 0;
+    while (done < n) {
+      const DWORD want = static_cast<DWORD>(std::min<std::size_t>(n - done, 1u << 30));
+      DWORD put = 0;
+      if (!WriteFile(h_, p + done, want, &put, nullptr) || put == 0)
+        throw IoError("write failed (disk full?): " + path_);
+      done += put;
+    }
 #endif
   }
 
@@ -157,7 +188,7 @@ class OutputFile {
 #ifndef _WIN32
   int fd_ = -1;
 #else
-  std::ofstream f_;
+  HANDLE h_ = INVALID_HANDLE_VALUE;
 #endif
 };
 

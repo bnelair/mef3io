@@ -178,8 +178,10 @@ MERGE IN ONE PASS (`merge.hpp`; MergeOptions gained `time_ranges`, `anonymize`,
   files opened after they were written, from disk. Memos and fds are dropped
   when the root is removed. Contract: files under a registered root do not
   change (a source being appended to during a merge is out of contract).
-  Unopenable file = plain path = the same IoError. Windows: no-op (an open
-  handle blocks replace/delete). A cache hit still reads bytes: only the open
+  Unopenable file = plain path = the same IoError. Windows: same scheme
+  (CreateFileW with all three share modes, ReadFile+OVERLAPPED offset, cap
+  1024; the scope is dropped before the .partial is removed on failure) -
+  UNTESTED until Windows CI runs. A cache hit still reads bytes: only the open
   is saved (read calls are unchanged; the .tmet is still re-read by each
   pass). Pinned by "each source file is opened once" in
   core/tests/test_transform.cpp (`source_open_observer`). A session with more
@@ -190,8 +192,9 @@ MERGE IN ONE PASS (`merge.hpp`; MergeOptions gained `time_ranges`, `anonymize`,
   probe), 1 MiB write buffer, header patched with pwrite on the same fd,
   fdatasync (F_FULLFSYNC on macOS) on the same fd before close
   (`SegmentCopySpec::sync_outputs`, `Copier::write_out`); so `Copier::written`
-  is only filled where `synced_by_handle` is false (Windows keeps stream +
-  fsync by path). Durability unchanged: every output file is flushed before
+  is only filled where `synced_by_handle` is false (never now; Windows: CreateFileW CREATE_NEW, WriteFile, OVERLAPPED header
+  patch, FlushFileBuffers on the same handle - UNTESTED until Windows CI;
+  `synced_by_handle` is now true everywhere). Durability unchanged: every output file is flushed before
   verify and rename; a batched syncfs (flush_files) was NOT used for copies
   because syncfs on a network mount may not force the server (the per-file
   flush does). (c) archive: `lexically_relative` instead of fs::relative

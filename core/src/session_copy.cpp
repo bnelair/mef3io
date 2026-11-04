@@ -4467,6 +4467,7 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
     fs::rename(root, dst);
     detail::fsync_directory(dst.parent_path().empty() ? fs::path(".") : dst.parent_path());
   } catch (...) {
+    handles.remove_root(root.string());  // (Windows: no open file in the way of the removal)
     std::error_code ec;
     fs::remove_all(partial, ec);
     throw;
@@ -5858,6 +5859,7 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
     fs::rename(root, m.dst);
     detail::fsync_directory(m.dst.parent_path().empty() ? fs::path(".") : m.dst.parent_path());
   } catch (...) {
+    handles.remove_root(root.string());
     std::error_code ec;
     fs::remove_all(m.partial, ec);
     throw;

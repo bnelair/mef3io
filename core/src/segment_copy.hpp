@@ -95,8 +95,7 @@ struct SegmentCopySpec {
   std::optional<std::pair<std::size_t, std::size_t>> entries;
   const Control* control = nullptr;
   /// Flush both output files to stable storage through their own handle
-  /// before they are closed (no reopen to fsync them). POSIX only; where
-  /// detail::synced_by_handle is false the caller flushes by path.
+  /// before they are closed (no reopen to fsync them).
   bool sync_outputs = false;
   /// Called with the number of source bytes consumed since the last call.
   std::function<void(std::uint64_t)> on_progress;

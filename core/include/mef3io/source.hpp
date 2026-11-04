@@ -91,8 +91,9 @@ namespace detail {
 /// Rules: the files under a root must not change while it is registered (a
 /// copy's SOURCES; a copy's destination only once it is written, for its
 /// verification, so the verifier still reads what is on disk, through a handle
-/// opened after the write). Unregistering a root closes its handles. Not used
-/// on Windows (an open handle blocks replacing the file there): a no-op.
+/// opened after the write). Unregistering a root closes its handles. Windows
+/// uses the same scheme (CreateFileW with every share mode, so others can still
+/// replace or delete the file; reads use ReadFile with an explicit offset).
 class ReadHandleScope {
  public:
   ReadHandleScope();

@@ -150,7 +150,7 @@ and never backwards; cancelling stops all channels and leaves nothing behind.
 trip on a share, so a merge opens each source file once for the whole
 operation (the check before copying, the copy and the verification share the
 open files) and creates, fills, flushes and closes each result file through
-one handle. The verification still reads the sources again and still reads
+one handle (on Windows shares too). The verification still reads the sources again and still reads
 the result back from disk; only the number of opens changes, not what is
 checked. For 4 sources of 144 files each this took the opens of the source
 files from 5,824 to 576 and of the result files from 3,649 to 1,152; see
