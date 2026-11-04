@@ -266,6 +266,7 @@ bool pread_full(const Handle& h, std::size_t offset, std::size_t length, ui1* ou
     ov.Offset = static_cast<DWORD>(at & 0xFFFFFFFFu);
     ov.OffsetHigh = static_cast<DWORD>(at >> 32);
     ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);  // per call: no shared state
+    if (!ov.hEvent) throw IoError("could not prepare a read of " + h.path);
     const DWORD want = static_cast<DWORD>(std::min<std::size_t>(length - done, 1u << 30));
     DWORD got = 0;
     DWORD e = 0;

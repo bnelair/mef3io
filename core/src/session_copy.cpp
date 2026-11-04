@@ -4435,16 +4435,16 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
       vo.clear_location = an->clear_location;
       vo.clear_descriptions = an->clear_descriptions;
     }
-    rep.verification = verify_impl(src_path, src, plan, root.string(),
+    rep.verification = verify_impl(src_path, src, plan, detail::path_utf8(root),
                                    an ? an->shift_us : std::optional<si8>(0), vo,
                                    an ? nullptr : rules.edits, ctl, on_bytes,
                                    &pf.without_samples, &handles);
-    handles.release_under(root.string());
+    handles.release_under(detail::path_utf8(root));
     // verify alone cannot tell a dropped channel from an excluded one; here
     // the selection is known.
     if (rep.verification.channels != rep.channels_kept) {
       rep.verification.problems.push_back(
-          {root.string(), "channels", "the copy does not hold exactly the kept channels"});
+          {detail::path_utf8(root), "channels", "the copy does not hold exactly the kept channels"});
       rep.verification.ok = false;
     }
     if (!rep.verification.ok) {
@@ -4465,7 +4465,7 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
     fs::rename(root, dst);
     detail::fsync_directory(dst.parent_path().empty() ? fs::path(".") : dst.parent_path());
   } catch (...) {
-    handles.release_under(root.string());  // (Windows: no open file in the way of the removal)
+    handles.release_under(detail::path_utf8(root));  // Windows: no open file blocks removal
     std::error_code ec;
     fs::remove_all(partial, ec);
     throw;
@@ -5832,8 +5832,8 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
       }
     }
 
-    rep.verification = verify_merge_impl(m, root.string(), ctl, on_bytes, &handles);
-    handles.release_under(root.string());
+    rep.verification = verify_merge_impl(m, detail::path_utf8(root), ctl, on_bytes, &handles);
+    handles.release_under(detail::path_utf8(root));
     if (!rep.verification.ok) {
       std::string msg = "the merged session failed verification, so it was not published (" +
                         std::to_string(rep.verification.problems.size()) + " problem(s)):";
@@ -5852,7 +5852,7 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
     fs::rename(root, m.dst);
     detail::fsync_directory(m.dst.parent_path().empty() ? fs::path(".") : m.dst.parent_path());
   } catch (...) {
-    handles.release_under(root.string());
+    handles.release_under(detail::path_utf8(root));
     std::error_code ec;
     fs::remove_all(m.partial, ec);
     throw;
