@@ -37,28 +37,28 @@
 
 #include "durability.hpp"
 #include "mef3io/errors.hpp"
+#include "mef3io/source.hpp"
 #include "mef3io/types.hpp"
 
 namespace mef3io::detail {
 
-/// Every output file is flushed through its own handle on every platform.
-inline constexpr bool synced_by_handle = true;
-
 class OutputFile {
  public:
   /// Creates `path`; it must not exist (IoError "output file already exists").
-  explicit OutputFile(std::string path, std::size_t buffer_bytes = 1u << 20)
-      : path_(std::move(path)), cap_(buffer_bytes) {
+  /// `buffer_bytes` 0 = unbuffered (every write goes straight out: for a file
+  /// written in one piece). The path is a path object: on Windows the wide
+  /// name is used as it is, no ANSI code-page conversion.
+  explicit OutputFile(const std::filesystem::path& path, std::size_t buffer_bytes = 1u << 20)
+      : path_(path_utf8(path)), cap_(buffer_bytes) {
 #ifndef _WIN32
-    fd_ = ::open(path_.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+    fd_ = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
     if (fd_ < 0) {
       if (errno == EEXIST) throw IoError("output file already exists: " + path_);
       throw IoError("cannot create file: " + path_ + " (" +
                     std::error_code(errno, std::generic_category()).message() + ")");
     }
 #else
-    const std::wstring wide = std::filesystem::path(path_).wstring();
-    h_ = CreateFileW(wide.c_str(), GENERIC_WRITE,
+    h_ = CreateFileW(path.c_str(), GENERIC_WRITE,
                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_NEW,
                      FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h_ == INVALID_HANDLE_VALUE) {
@@ -119,7 +119,7 @@ class OutputFile {
   }
 
   /// Flush the buffer and close. `sync`: make the file durable first, through
-  /// this handle (POSIX only; Windows callers flush by path afterwards).
+  /// this handle (fdatasync / F_FULLFSYNC / FlushFileBuffers: no reopen).
   void finish(bool sync) {
     drain();
 #ifndef _WIN32

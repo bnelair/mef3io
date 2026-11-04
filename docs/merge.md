@@ -155,7 +155,10 @@ the result back from disk; only the number of opens changes, not what is
 checked. For 4 sources of 144 files each this took the opens of the source
 files from 5,824 to 576 and of the result files from 3,649 to 1,152; see
 [Benchmarks](benchmarks.md#copying-over-a-slow-file-system). The
-sources must not be changed while the merge runs.
+sources must not be changed while the merge runs. On Windows the source
+files therefore stay open for the whole operation: renaming or deleting a
+source folder while a copy runs fails (or is deferred until it ends). Other
+programs reading the same files, and other mef3io readers, are not affected.
 
 To keep only part of an existing result, cut it with
 `transform_session(..., time_range=...)`.

@@ -1431,8 +1431,8 @@ void check_records_encryption(const SessionSource& src, const std::vector<Segmen
 
 // The shared body of validate/repair. `repair` empty => read-only.
 Report run(const std::string& path, const ValidateOptions& opts, const RepairSelection* repair,
-           const Control& ctl) {
-  auto src = open_session_source(path);
+           const Control& ctl, std::shared_ptr<const SessionSource> given = nullptr) {
+  auto src = given ? std::move(given) : open_session_source(path);
   Report report;
 
   for (const auto& id : opts.check_ids)
@@ -1980,6 +1980,14 @@ Report validate_session(const std::string& path, const ValidateOptions& opts,
                         const Control& ctl) {
   return run(path, opts, nullptr, ctl);
 }
+
+namespace detail {
+Report validate_session_through(std::shared_ptr<const SessionSource> source,
+                                const std::string& path, const ValidateOptions& opts,
+                                const Control& ctl) {
+  return run(path, opts, nullptr, ctl, std::move(source));
+}
+}  // namespace detail
 
 Report repair_session(const std::string& path, const RepairSelection& selection,
                       const ValidateOptions& opts, const Control& ctl) {

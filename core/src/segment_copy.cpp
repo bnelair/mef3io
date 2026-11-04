@@ -29,7 +29,7 @@ constexpr std::size_t BATCH_BYTES = 8u * 1024u * 1024u;   // 8 MB of blocks
 /// flushed through the same handle) plus its body CRC.
 class OutFile {
  public:
-  explicit OutFile(const std::string& path) : f_(path) {
+  explicit OutFile(const std::string& path) : f_(detail::utf8_path(path)) {
     const std::vector<ui1> placeholder(UH, 0);
     put(placeholder, false);
   }

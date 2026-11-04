@@ -10,6 +10,7 @@
 #include <map>
 #include <mutex>
 #include <random>
+#include <thread>
 #include <vector>
 
 #include "mef3io/byteio.hpp"
@@ -22,6 +23,7 @@
 #include "mef3io/source.hpp"
 #include "mef3io/transform.hpp"
 #include "../src/durability.hpp"
+#include "../src/out_file.hpp"
 
 using namespace mef3io;
 namespace fsys = std::filesystem;
@@ -600,5 +602,170 @@ TEST_CASE("anonymize_session and transform_session: each source file is opened o
     REQUIRE(transform_session(a, (dir / "tr.mefd").string(), TransformOptions{}).verification.ok);
     check_opens(a, 1, 6);
     check_opens((dir / "tr.mefd.partial").string(), 1, 6);
+  }
+}
+
+// ---- the handle cache belongs to one copy (review round 1) ------------------
+namespace {
+
+std::string write_bytes(const fsys::path& dir, const std::string& rel, std::size_t n) {
+  fsys::create_directories((dir / rel).parent_path());
+  std::vector<ui1> bytes(n);
+  for (std::size_t i = 0; i < n; ++i) bytes[i] = static_cast<ui1>(i * 7 + 3);
+  std::ofstream(dir / rel, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()), n);
+  return (dir / rel).string();
+}
+
+std::mutex g_fault_mu;
+std::string g_fault_path;
+int g_fault_errno = 0;
+int g_fault_left = 0;  // -1 = forever
+int fault(const std::string& p) {
+  std::lock_guard<std::mutex> lk(g_fault_mu);
+  if (p != g_fault_path || g_fault_left == 0) return 0;
+  if (g_fault_left > 0) --g_fault_left;
+  return g_fault_errno;
+}
+struct FaultGuard {
+  FaultGuard(const std::string& p, int e, int times) {
+    std::lock_guard<std::mutex> lk(g_fault_mu);
+    g_fault_path = p;
+    g_fault_errno = e;
+    g_fault_left = times;
+    detail::read_fault_hook = &fault;
+  }
+  ~FaultGuard() { detail::read_fault_hook = nullptr; }
+};
+
+}  // namespace
+
+TEST_CASE("merge_sessions: other readers see fresh state while a copy caches its sources") {
+  const auto dir = fresh("mef3io_merge_isolation");
+  const std::string a = write_patient(dir, "a.mefd", "Jane", 0, 20'000);
+  const std::string b = write_patient(dir, "b.mefd", "Smithers", 10'000'000, 20'000);
+  MergeOptions o = anon_ranges_options();
+  bool checked = false;
+  Control ctl;
+  ctl.progress = [&](std::uint64_t, std::uint64_t) {
+    if (checked) return;
+    checked = true;  // (the copy has listed and sized its sources by now)
+    std::thread other([&] {
+      const fsys::path note = fsys::path(a) / "note.txt";
+      std::ofstream(note) << "hello";
+      DirectorySource plain(a);  // an unrelated source on the same files
+      bool listed = false;
+      for (const auto& e : plain.list_dir("")) listed |= e.name == "note.txt";
+      CHECK(listed);
+      CHECK(plain.exists("note.txt"));
+      CHECK(plain.file_size("note.txt") == 5);
+      CHECK(open_session_source(a)->exists("note.txt"));
+      CHECK_NOTHROW(Session(a));
+      fsys::remove(note);
+      CHECK_FALSE(plain.exists("note.txt"));
+    });
+    other.join();
+  };
+  const std::string dst = (dir / "m.mefd").string();
+  OpenWatch watch;
+  REQUIRE(merge_sessions({a, b}, dst, o, ctl).verification.ok);
+  CHECK(checked);
+  check_opens(a, 2, 6);  // each file once for the copy, once more for the other reader's Session
+  check_opens(b, 1, 6);  // and the copy itself still opens each file once
+}
+
+TEST_CASE("a stale cached handle is evicted and the read retried once") {
+#ifndef _WIN32
+  const auto dir = fresh("mef3io_stale_handle") / "s.mefd";
+  const std::string file = write_bytes(dir, "f.bin", 4096);
+  const detail::ReadHandleScope scope;
+  const auto src = scope.open(dir.string());
+  const auto want = DirectorySource(dir.string()).read_range("f.bin", 100, 200);
+  OpenWatch watch;
+  REQUIRE(src->read_range("f.bin", 100, 200) == want);  // warm: opened once
+  CHECK(g_opens[file] == 1);
+  for (int code : {ESTALE, EIO, EBADF}) {
+    g_opens.clear();
+    FaultGuard guard(file, code, 1);
+    REQUIRE(src->read_range("f.bin", 100, 200) == want);
+    CHECK(g_opens[file] == 1);  // exactly the retry's fresh open
+    g_opens.clear();
+    REQUIRE(src->read_range("f.bin", 100, 200) == want);
+    CHECK(g_opens.empty());  // and that handle is cached again
+  }
+  {
+    FaultGuard guard(file, ESTALE, -1);  // fails again after the reopen
+    try {
+      src->read_range("f.bin", 0, 10);
+      FAIL("expected IoError");
+    } catch (const IoError& e) {
+      CHECK(std::string(e.what()).find(file) != std::string::npos);
+    }
+  }
+  {
+    FaultGuard guard(file, ENOSPC, -1);  // not a stale-handle error: no retry
+    g_opens.clear();
+    try {
+      src->read_range("f.bin", 0, 10);
+      FAIL("expected IoError");
+    } catch (const IoError& e) {
+      CHECK(std::string(e.what()).find(file) != std::string::npos);
+    }
+    CHECK(g_opens[file] <= 1);
+  }
+#endif
+}
+
+TEST_CASE("threads asking for the same file open it exactly once") {
+  const auto dir = fresh("mef3io_same_file_threads") / "s.mefd";
+  const std::string file = write_bytes(dir, "f.bin", 1 << 16);
+  for (int round = 0; round < 20; ++round) {
+    const detail::ReadHandleScope scope;
+    const auto src = scope.open(dir.string());
+    OpenWatch watch;
+    std::atomic<int> ready{0};
+    std::vector<std::thread> ts;
+    for (int t = 0; t < 8; ++t)
+      ts.emplace_back([&] {
+        ++ready;
+        while (ready < 8) std::this_thread::yield();
+        CHECK(src->read_range("f.bin", 10, 100).size() == 100);
+      });
+    for (auto& t : ts) t.join();
+    CHECK(g_opens[file] == 1);
+  }
+}
+
+TEST_CASE("read_head returns what a shrunk file still has") {
+  const auto dir = fresh("mef3io_shrunk_head") / "s.mefd";
+  const std::string file = write_bytes(dir, "f.bin", 100);
+  const detail::ReadHandleScope scope;
+  const auto src = scope.open(dir.string());
+  REQUIRE(src->exists("f.bin"));  // remembers size 100
+  fsys::resize_file(file, 40);
+  CHECK(src->read_head("f.bin", 100).size() == 40);
+  CHECK(DirectorySource(dir.string()).read_head("f.bin", 100).size() == 40);
+}
+
+TEST_CASE("non-ASCII names work through the output file and the cached source") {
+  const auto root = fresh("mef3io_unicode_names");
+  const auto dir = root / detail::utf8_path("テスト.mefd");
+  fsys::create_directories(dir);
+  const auto file = dir / detail::utf8_path("ファイル.bin");
+  const std::vector<ui1> bytes{1, 2, 3, 4, 5};
+  {
+    detail::OutputFile f(file, 0);
+    f.write(bytes);
+    f.finish(true);
+  }
+  const std::string text = detail::path_utf8(dir);
+  const detail::ReadHandleScope scope;
+  for (const auto& src : {scope.open(text), open_session_source(text)}) {
+    CHECK(src->exists("ファイル.bin"));
+    CHECK(src->file_size("ファイル.bin") == 5);
+    CHECK(src->read_all("ファイル.bin") == bytes);
+    CHECK(src->read_range("ファイル.bin", 1, 3) == std::vector<ui1>{2, 3, 4});
+    bool listed = false;
+    for (const auto& e : src->list_dir("")) listed |= e.name == "ファイル.bin";
+    CHECK(listed);
   }
 }

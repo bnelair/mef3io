@@ -7,6 +7,9 @@
 // The .tdat appears only as a file size.
 #pragma once
 
+#include <memory>
+#include "mef3io/source.hpp"
+
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -257,5 +260,13 @@ struct SessionSummary {
 ///                 progress callback is attached.
 SessionSummary inspect_session(const std::string& path, const InspectOptions& options = {},
                                const Control& control = {});
+
+namespace detail {
+/// inspect_session over a source the caller opened (the copy engine's, which
+/// shares its open read handles); `path` only names it.
+SessionSummary inspect_session_through(std::shared_ptr<const SessionSource> source,
+                                       const std::string& path, const InspectOptions& options,
+                                       const Control& ctl);
+}  // namespace detail
 
 }  // namespace mef3io

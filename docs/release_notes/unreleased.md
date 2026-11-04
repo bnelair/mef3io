@@ -16,7 +16,7 @@ Changes since 2.1.1. This page becomes the next version's notes at release.
   3,264 to 576. Nothing is checked less: the verification still reads the
   sources again and still reads the finished copy back from disk. The output
   files are identical, byte for byte (apart from the random file IDs). The
-  sources must not be changed while the operation runs. `archive_session`
+  sources must not be changed while the operation runs (on Windows they stay open meanwhile, so a source folder cannot be renamed or deleted until it ends). This only concerns the copy itself: other readers and writers of the same files are unaffected and always see current data. A read error on a reused network handle is retried once on a fresh open. `archive_session`
   makes one check per file instead of two and writes in larger pieces.
   `benchmarks/fs_calls_benchmark.py` counts the calls (needs `strace`).
 

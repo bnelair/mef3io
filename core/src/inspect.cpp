@@ -123,8 +123,13 @@ std::vector<InspectGap> find_gaps(std::vector<std::pair<si8, si8>> spans, double
 
 SessionSummary inspect_session(const std::string& path, const InspectOptions& opt,
                                const Control& ctl) {
+  return detail::inspect_session_through(open_session_source(path), path, opt, ctl);
+}
+
+SessionSummary detail::inspect_session_through(std::shared_ptr<const SessionSource> src,
+                                               const std::string& path, const InspectOptions& opt,
+                                               const Control& ctl) {
   SessionSummary out;
-  const auto src = open_session_source(path);  // enforces the naming rules
   const auto layout = detail::discover_layout(*src);
 
   // Progress (#69): bytes of the files the segment pass reads. Sized only for

@@ -285,9 +285,12 @@ shared-safe. A new long call must release the GIL too (and get a
 `tests/test_p31_gil_release.py` case); any state it mutates must be locked;
 core globals must be `constexpr` or immutable (the AES inverse S-box used to
 be filled lazily, a data race). ONE exception: the copy's read-handle cache
-(`detail::ReadHandleScope`, source.cpp): a mutex-guarded process-wide cache
-that exists only while a copy/merge holds a scope, is shared by its threads,
-and is purged when the scope ends (copy-engine.md "FEWER OPENS").
+(`detail::ReadHandleScope`, source.cpp): a mutex-guarded cache owned by ONE
+copy/merge, bound only to the DirectorySources that copy opens through
+`scope.open()`; its threads share it, and nothing else does (no global,
+no path matching: a Reader/Session/SessionWriter in another thread, even on the
+same files, always reads fresh state; pinned in test_transform.cpp). It is
+freed with the last source holding it (copy-engine.md "FEWER OPENS").
 
 THREAD RULE (docs/threads.md, documented ONCE there): an object's
 `n_threads` is how many threads it may use for everything (open, file

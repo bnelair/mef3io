@@ -21,6 +21,9 @@
 // already reported (never that they have repaired).
 #pragma once
 
+#include <memory>
+#include "mef3io/source.hpp"
+
 #include <string>
 #include <vector>
 
@@ -165,5 +168,13 @@ Report validate_session(const std::string& path, const ValidateOptions& opts = {
 /// rewritten from the stale derivation.
 Report repair_session(const std::string& path, const RepairSelection& selection,
                       const ValidateOptions& opts = {}, const Control& ctl = {});
+
+namespace detail {
+/// validate_session over a source the caller opened (the copy engine's, which
+/// shares its open read handles); `path` only names it in the report.
+Report validate_session_through(std::shared_ptr<const SessionSource> source,
+                                const std::string& path, const ValidateOptions& opts,
+                                const Control& ctl);
+}  // namespace detail
 
 }  // namespace mef3io

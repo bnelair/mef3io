@@ -208,8 +208,7 @@
   recovery and the copies keep their OWN flush rules.
   COPIES (anonymize/transform/merge) flush each output file through the SAME
   handle that wrote it (`OutputFile::finish(sync)`, fdatasync) before it is
-  closed, so no reopen-to-fsync (copy-engine.md "FEWER OPENS"); Windows still
-  flushes by path.
+  closed, so no reopen-to-fsync on any platform (copy-engine.md "FEWER OPENS").
   THE FLUSH IS THREE DIFFERENT CALLS with three different rules, and the
   platform differences are load-bearing: Linux `fdatasync`, macOS
   `F_FULLFSYNC` (with an ENOTSUP fallback), Windows `FlushFileBuffers`.
