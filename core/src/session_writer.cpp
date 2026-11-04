@@ -806,9 +806,9 @@ std::unique_ptr<SessionWriter::WritePlan> SessionWriter::plan_write(
   const int seg = append ? st.last_segment : st.last_segment + 1;
   plan->append = append;
   plan->seg = seg;
-  plan->seg_dir =
-      (detail::utf8_path(mefd_path_) / detail::utf8_path(channel + ".timd") / detail::utf8_path(segment_stem(channel, st, seg) + ".segd"))
-          .string();
+  plan->seg_dir = detail::path_utf8(detail::utf8_path(mefd_path_) /
+                                    detail::utf8_path(channel + ".timd") /
+                                    detail::utf8_path(segment_stem(channel, st, seg) + ".segd"));
 
   SegmentSpec& spec = plan->spec;
   spec.session_name = session_name_;

@@ -149,3 +149,23 @@ def test_rename_to_a_non_ascii_name(tmp_path, parts):
     assert moved.is_dir() and not sess.exists(), rep
     got, _ = _read(moved)
     assert np.array_equal(want, got, equal_nan=True)
+
+
+@pytest.mark.parametrize("parts", NAMES)
+def test_non_ascii_channel_names_write_new_segments(tmp_path, parts):
+    """A channel name outside the code page: its folders are made by the
+    writer (new segments and appends), read back and validated."""
+    sess = _session_path(tmp_path, parts)
+    sess.parent.mkdir(parents=True)
+    channels = ("チャンネル", "Kanál-é")
+    _write(sess, 0, channels=channels)
+    with mef3io.Writer(str(sess)) as w:
+        for ch in channels:
+            w.write(ch, np.arange(int(FS * 10)) * 1.0, START + 20 * SECOND, FS,
+                    precision=0, new_segment=True)
+            w.write(ch, np.arange(int(FS * 10)) * 1.0, START + 30 * SECOND, FS, precision=0)
+    for ch in channels:
+        assert (sess / f"{ch}.timd").is_dir()
+        x, _ = _read(sess, ch)
+        assert np.isfinite(x).sum() == 3000
+    assert mef3io.validate_session(str(sess)).ok
