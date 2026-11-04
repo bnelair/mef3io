@@ -379,6 +379,8 @@ TEST_CASE("merge_sessions: a derived record file names the source file it came f
     CHECK(want != std::vector<ui1>(16, 0));
     CHECK(uuid(out, "m", ext, PROV_UUID) == want);
   }
+}
+
 TEST_CASE("merge_sessions: per-source ranges, anonymize and threads give the same bytes") {
   const auto dir = fresh("mef3io_merge_onepass");
   auto write = [&](const std::string& name, si8 t, std::size_t n) {
