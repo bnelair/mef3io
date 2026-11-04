@@ -324,3 +324,26 @@ the copy"); a records-only channel is accepted only if records-only in the
 source; anonymize_session also requires verify's channels == kept.
 
 DROP RECORDS (`CopyOptions::drop_records`, Python `records="keep"|"drop"`, CLI `--drop-records`; shared by anonymize, transform and merge because it lives in CopyOptions): the copy writes NO .rdat/.ridx at any level (a session that never had records is the model; no new on-disk field, provenance unchanged). Source record files are not read by the pass or the pre-flight record loop (`Copier::drop_records_of` counts them from the .ridx size, else the .rdat header, into `records_dropped`; `inspect` reads only their sizes). `records_dropped` counts only the records of the channels and segments the copy keeps (plus the session's); a left-out channel's are not counted. A record-only channel would be an empty folder, so the pre-flight leaves it out (excluded + note): it then counts as excluded like any other, so its name joins the scrubbed left-out names and can trigger text-unremovable. `records-ambiguous` is still refused under drop (safer; documented in the refusal table). The three reports carry `records_dropped` LAST with default 0 so 2.1.1 pickles/dicts still load and positional construction does not shift. Verify (`VerifyOptions::drop_records`, set from the options by every caller, merge from its sources' options) expects NO record file at any level and fails if one exists; with "keep" the strict count/order/type checks are untouched. A bad Python value is `records-invalid` (shared COPY_REFUSAL_CODES). Test-pinned: tests/test_p50_copy_drop_records.py.
+
+## all_zero and GCC 14.2 (2.1.1 wheel defect)
+
+RULE: keep `all_zero` (session_copy.cpp) a plain loop; do NOT write it with
+`std::all_of` over a span. With `std::all_of`, GCC 14.2 (the
+`quay.io/pypa/manylinux_2_28_x86_64` wheel toolchain, -O1 and up) found the
+function "const" (IPA-modref: reads no memory; `-fdump-ipa-modref`, grep
+"found to be const"), so dead-store elimination deleted the store into the
+`uuid_at(...)` temporary passed to it: `all_zero` then read uninitialised
+stack. Seen as: merged `.rdat`/`.ridx` got a zero provenance_UUID and the
+merge's own check refused them (nothing was published). `-fno-tree-dse`
+hides it; `-fno-strict-aliasing` does not; UBSan finds no undefined behaviour;
+the conda GCC 14 dev build and GCC 13 do not show it. A scan of every
+`core/src` TU's modref dump found no other memory-reading function marked
+const. `patch_uh` also computes the provenance value first and stores it once
+(same meaning). Pinned by the Catch2 case "merge_sessions: a derived record
+file names the source file it came from", which fails only when ctest is run
+in that manylinux image (cibuildwheel never runs ctest), and by
+`tests/test_p52_merge_trimmed_part_notes.py`, which the wheel test command
+(pyproject `[tool.cibuildwheel] test-command`) runs on every built wheel
+together with the drop-records and one-pass merge tests, so the released
+toolchain is checked before upload. To reproduce a wheel-only defect: build in
+`quay.io/pypa/manylinux_2_28_x86_64`.

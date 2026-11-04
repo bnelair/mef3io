@@ -340,6 +340,47 @@ TEST_CASE("check_merge: options a merge does not take are refused with their cod
   CHECK(std::count(codes.begin(), codes.end(), "merge-rename") == 1);
 }
 
+TEST_CASE("merge_sessions: a derived record file names the source file it came from") {
+  // A copy of a file whose provenance_UUID is unset names the source FILE as
+  // its origin (a store the 2.1.1 manylinux build dropped from the record
+  // files of a merge, so the merge failed its own check; ctest in a Release
+  // build is what catches it). The writer leaves both UUIDs zero, so the
+  // transformed part is the first file that carries a file UUID.
+  const auto dir = fresh("mef3io_merge_prov");
+  auto write = [&](const std::string& name, si8 start) {
+    const std::string path = (dir / name).string();
+    SessionWriter w(path, true);
+    std::vector<si4> x(10'000);
+    for (std::size_t i = 0; i < x.size(); ++i) x[i] = static_cast<si4>(i % 1000);
+    w.write_int32("a", x, 1.0, start, 1000.0, {}, false);
+    Record r;
+    r.type = "Note";
+    r.time = start + 1'000'000;
+    r.text = "note";
+    w.write_records(std::nullopt, {r});
+    return path;
+  };
+  const std::string a = write("a.mefd", START), b = write("b.mefd", START + 100'000'000);
+  const std::string part = (dir / "part.mefd").string();
+  TransformOptions to;
+  to.time_range = std::make_pair(START, START + 5'000'000);
+  REQUIRE(transform_session(a, part, to).verification.ok);
+  const std::string out = (dir / "m.mefd").string();
+  REQUIRE(merge_sessions({part, b}, out, MergeOptions{}).verification.ok);
+  auto uuid = [&](const std::string& session, const char* stem, const char* ext, std::size_t off) {
+    const auto f = slurp(fsys::path(session) / (std::string(stem) + ext));
+    REQUIRE(f.size() >= UH);
+    return std::vector<ui1>(f.begin() + static_cast<std::ptrdiff_t>(off),
+                            f.begin() + static_cast<std::ptrdiff_t>(off) + 16);
+  };
+  constexpr std::size_t FILE_UUID = 836, PROV_UUID = 852;
+  for (const char* ext : {".rdat", ".ridx"}) {
+    const auto want = uuid(part, "part", ext, FILE_UUID);
+    CHECK(want != std::vector<ui1>(16, 0));
+    CHECK(uuid(out, "m", ext, PROV_UUID) == want);
+  }
+}
+
 TEST_CASE("merge_sessions: per-source ranges, anonymize and threads give the same bytes") {
   const auto dir = fresh("mef3io_merge_onepass");
   auto write = [&](const std::string& name, si8 t, std::size_t n) {

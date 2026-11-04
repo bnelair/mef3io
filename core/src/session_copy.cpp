@@ -175,8 +175,14 @@ Uuid random_uuid() {
   return u;
 }
 
+// A plain loop on purpose: with std::all_of over the span, GCC 14.2 (the
+// manylinux_2_28 wheel toolchain, -O2 and up) wrongly found this function
+// "const" (reads no memory) and deleted the stores into the temporaries
+// passed to it (for_agents/notes/copy-engine.md, "all_zero and GCC 14.2").
 bool all_zero(std::span<const ui1> b) {
-  return std::all_of(b.begin(), b.end(), [](ui1 x) { return x == 0; });
+  for (const ui1 x : b)
+    if (x != 0) return false;
+  return true;
 }
 
 Uuid uuid_at(std::span<const ui1> b, std::size_t off) {
@@ -1235,13 +1241,12 @@ class Copier {
     const Uuid file = random_uuid();
     std::copy(level.begin(), level.end(), uh.begin() + UH_LEVEL_UUID);
     std::copy(file.begin(), file.end(), uh.begin() + UH_FILE_UUID);
-    if (anon) {
-      std::copy(file.begin(), file.end(), uh.begin() + UH_PROV_UUID);  // its own origin
-    } else if (all_zero(uuid_at(uh, UH_PROV_UUID))) {
-      // The copy's origin is the source file (meflib: provenance_UUID names
-      // the file a file was derived from); a set one is kept.
-      std::copy(old_file.begin(), old_file.end(), uh.begin() + UH_PROV_UUID);
-    }
+    // provenance_UUID: an anonymized file is its own origin; otherwise the
+    // copy's origin is the source file (meflib: provenance_UUID names the
+    // file a file was derived from) unless the source already names one.
+    const Uuid old_prov = uuid_at(uh, UH_PROV_UUID);
+    const Uuid prov = anon ? file : (all_zero(old_prov) ? old_file : old_prov);
+    std::copy(prov.begin(), prov.end(), uh.begin() + UH_PROV_UUID);
     std::copy(out_.vf.level1.begin(), out_.vf.level1.end(), uh.begin() + UH_L1_FIELD);
     std::copy(out_.vf.level2.begin(), out_.vf.level2.end(), uh.begin() + UH_L2_FIELD);
     if (anon) std::fill_n(uh.begin() + UH_PROTECTED, UH_PROTECTED_BYTES, ui1{0});
