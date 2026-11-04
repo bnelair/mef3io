@@ -146,6 +146,20 @@ identical. A text callback is called one record at a time, so the copy then
 uses one thread. Progress is reported at a bounded rate, never concurrently
 and never backwards; cancelling stops all channels and leaves nothing behind.
 
+**Sources and result on network drives.** Every open of a file is a round
+trip on a share, so a merge opens each source file once for the whole
+operation (the check before copying, the copy and the verification share the
+open files) and creates, fills, flushes and closes each result file through
+one handle (on Windows shares too). The verification still reads the sources again and still reads
+the result back from disk; only the number of opens changes, not what is
+checked. For 4 sources of 144 files each this took the opens of the source
+files from 5,824 to 576 and of the result files from 3,649 to 1,152; see
+[Benchmarks](benchmarks.md#copying-over-a-slow-file-system). The
+sources must not be changed while the merge runs. On Windows the source
+files therefore stay open for the whole operation: renaming or deleting a
+source folder while a copy runs fails (or is deferred until it ends). Other
+programs reading the same files, and other mef3io readers, are not affected.
+
 To keep only part of an existing result, cut it with
 `transform_session(..., time_range=...)`.
 

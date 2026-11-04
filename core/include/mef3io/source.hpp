@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -57,10 +58,17 @@ class SessionSource {
   virtual std::string session_name() const = 0;
 };
 
+namespace detail {
+class HandleCache;
+}
+
 /// Plain directory tree on the local filesystem (the classic .mefd layout).
 class DirectorySource : public SessionSource {
  public:
   explicit DirectorySource(std::string root);
+  /// A source that reads through `cache` (see ReadHandleScope; only the copy
+  /// engine builds one).
+  DirectorySource(std::string root, std::shared_ptr<detail::HandleCache> cache);
 
   std::vector<SourceDirEntry> list_dir(const std::string& rel) const override;
   bool exists(const std::string& rel) const override;
@@ -75,7 +83,59 @@ class DirectorySource : public SessionSource {
  private:
   std::string join(const std::string& rel) const;
   std::string root_;
+  std::shared_ptr<detail::HandleCache> cache_;  // null = plain reads
 };
+
+namespace detail {
+
+/// A path text from the API (UTF-8) as a path object: on Windows a wide path,
+/// with no ANSI code-page conversion in between.
+std::filesystem::path utf8_path(const std::string& s);
+/// The reverse: a path as UTF-8 text.
+std::string path_utf8(const std::filesystem::path& p);
+
+/// Reuse of open read handles for ONE operation (network drives: every open is
+/// a round trip). A copy builds a scope and opens ITS sources through it
+/// (`open`): those DirectorySources read through the scope's own bounded cache
+/// of open file descriptors (LRU, `pread`, one open per file instead of one per
+/// call) and remember what they were told about existence, sizes and listings.
+/// Nothing is shared with any other Reader, Session or writer, in this thread or
+/// another: a source opened elsewhere (`open_session_source`) never sees the
+/// scope's cache, so it always reads fresh state. The bytes are still fetched
+/// on each call; only the open/close pair is saved. A file that cannot be
+/// opened falls through to the plain path, so errors are unchanged. A read
+/// error on a cached handle (a stale network handle) evicts it and retries once
+/// through a fresh open.
+///
+/// Rule: the files a scope's sources show must not change while the scope
+/// lives (a copy's SOURCES; its destination only once written, for the
+/// verification: open it through the scope after the write). `release_under`
+/// closes the handles (Windows: so a folder can be removed or renamed).
+class ReadHandleScope {
+ public:
+  ReadHandleScope();
+  ~ReadHandleScope();
+  ReadHandleScope(const ReadHandleScope&) = delete;
+  ReadHandleScope& operator=(const ReadHandleScope&) = delete;
+  /// open_session_source, with a directory source bound to this scope.
+  std::shared_ptr<const SessionSource> open(const std::string& path) const;
+  /// Close the handles and forget the answers under `prefix`.
+  void release_under(const std::string& prefix) const;
+
+ private:
+  std::shared_ptr<HandleCache> cache_;
+};
+
+/// TEST HOOK: called with the path of every file a DirectorySource really
+/// opens (cached or not). Must be thread-safe. Pins "each source file is
+/// opened at most N times in a merge".
+inline void (*source_open_observer)(const std::string& path) = nullptr;
+
+/// TEST HOOK: called before each positional read through a cached handle;
+/// a non-zero return is raised as that errno (POSIX) in place of the read.
+inline int (*read_fault_hook)(const std::string& path) = nullptr;
+
+}  // namespace detail
 
 /// Case-insensitive suffix test on a path, ignoring trailing separators
 /// ("S.MEFD/" has suffix ".mefd"). Backs the session naming rules.

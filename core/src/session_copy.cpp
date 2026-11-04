@@ -48,6 +48,7 @@
 #include <tuple>
 
 #include "durability.hpp"
+#include "out_file.hpp"
 #include "segment_copy.hpp"
 #include "session_layout.hpp"
 
@@ -1197,8 +1198,6 @@ class Copier {
     if (rules_.copy->time_range) window_ = rules_.copy->time_range;
   }
 
-  std::vector<std::string> written;  // every output file, for the flush
-
   /// A stored time as the copy writes it: shifted (anonymize with a shift)
   /// or verbatim (a transform, or anonymize keeping the times).
   si8 time(si8 s, const std::string& what, bool body = false) const {
@@ -1276,15 +1275,19 @@ class Copier {
   }
 
   void write_out(const fs::path& p, const std::vector<ui1>& bytes) {
-    if (fs::exists(p))
-      refuse(RefusalKind::Io, "write-failed", "output file already exists: " + p.string());
-    std::ofstream f(p, std::ios::binary | std::ios::trunc);
-    if (!f) refuse(RefusalKind::Io, "write-failed", "cannot create file: " + p.string());
-    f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    f.flush();
-    if (!f) refuse(RefusalKind::Io, "write-failed", "write failed (disk full?): " + p.string());
-    f.close();
-    written.push_back(p.string());
+    try {
+      detail::OutputFile f(p, 0);  // one write, straight out
+      f.write(bytes);
+      f.finish(true);  // flushed through its own handle
+    } catch (const IoError& e) {
+      const std::string what = e.what();
+      if (what.starts_with("output file already exists"))
+        refuse(RefusalKind::Io, "write-failed", what);
+      if (what.starts_with("cannot create"))
+        refuse(RefusalKind::Io, "write-failed", "cannot create file: " + p.string());
+      if (what.starts_with("could not flush")) throw;
+      refuse(RefusalKind::Io, "write-failed", "write failed (disk full?): " + p.string());
+    }
     rep_.bytes_written += bytes.size();
   }
 
@@ -1428,7 +1431,6 @@ class Copier {
         copy_segment_data(seg, sdir, channel, stem, reshape ? std::optional<si8>(start)
                                                              : std::nullopt);
     if (reshape && st.blocks == 0) {  // only gaps of it lay in the window
-      written.resize(written.size() - 2);
       rep_.blocks -= st.blocks;
       rep_.bytes_written -= st.output_bytes;
       std::error_code ec;
@@ -1466,6 +1468,7 @@ class Copier {
                                       const std::string& channel, const std::string& stem,
                                       std::optional<si8> start_sample) {
     detail::SegmentCopySpec spec;
+    spec.sync_outputs = true;  // each file is flushed through its own handle
     spec.start_sample = start_sample;
     if (window_) {  // only the blocks around the window are read
       auto w =
@@ -1568,8 +1571,6 @@ class Copier {
     } catch (const IoError& e) {
       refuse(RefusalKind::Io, "write-failed", e.what(), channel);
     }
-    written.push_back(spec.tidx_out);
-    written.push_back(spec.tdat_out);
     rep_.blocks += st.blocks;
     rep_.bytes_written += st.output_bytes;
     return st;
@@ -2000,14 +2001,15 @@ std::string scrub_times(const SourcePlan& p, const std::string& text) {
   return out;
 }
 
-SourcePlan plan_source(const SessionSource& src, const std::string& path,
+SourcePlan plan_source(std::shared_ptr<const SessionSource> srcp, const std::string& path,
                        const std::string& password, const Control& ctl, int threads = 1) {
   SourcePlan p;
+  const SessionSource& src = *srcp;
   InspectOptions io;
   io.password = password;
   io.strict = true;
   io.include_values = true;
-  p.summary = inspect_session(path, io, ctl);
+  p.summary = detail::inspect_session_through(srcp, path, io, ctl);
   p.layout = detail::discover_layout(src, threads);
   for (const auto& c : p.layout.channels) p.all_channels.push_back(c.name);
   for (const auto& c : p.layout.record_only_channels) p.all_channels.push_back(c);
@@ -3129,9 +3131,12 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
                          std::optional<si8> shift,
                          const VerifyOptions& o, const MetadataEdits* edits, const Control& ctl,
                          std::function<void(std::uint64_t)> progress,
-                         const std::vector<std::string>* left_out_without_samples = nullptr) {
+                         const std::vector<std::string>* left_out_without_samples = nullptr,
+                         const detail::ReadHandleScope* handles = nullptr) {
   VerifyReport rep;
-  const auto dsrc = open_session_source(dst_path);
+  // (The destination is opened through the copy's scope only AFTER it was
+  // written, so these handles are fresh.)
+  const auto dsrc = handles ? handles->open(dst_path) : open_session_source(dst_path);
   const SessionSource& dst = *dsrc;
   const auto dlayout = detail::discover_layout(dst);
 
@@ -3227,9 +3232,11 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
     vo.exact_difference_bytes = false;
     Control inner;
     inner.cancel = ctl.cancel;
-    const Report sr = validate_session(src_path, vo, inner);
+    const Report sr = handles ? detail::validate_session_through(handles->open(src_path), src_path, vo, inner)
+                              : validate_session(src_path, vo, inner);
     vo.password = o.output_password;
-    const Report dr = validate_session(dst_path, vo, inner);
+    const Report dr = handles ? detail::validate_session_through(handles->open(dst_path), dst_path, vo, inner)
+                              : validate_session(dst_path, vo, inner);
     // Compared as a multiset: each source finding excuses one copy finding.
     // A finding is excused only when the source had exactly the same one
     // (check, channel, segment, field, message). A cut recomputes the very
@@ -3518,10 +3525,14 @@ Redactor copy_redactor(const SourcePlan& plan, const AnonymizeOptions& an, const
 /// checked; the shifting rules still apply when a shift is given.
 Preflight preflight(const std::string& src_path, const std::string& dst_path, const Rules& rules,
                     const Control& ctl, bool collect, bool check_shift,
-                    Prebuilt* prebuilt = nullptr) {
+                    Prebuilt* prebuilt = nullptr, const detail::ReadHandleScope* shared = nullptr) {
   const CopyOptions& o = *rules.copy;
   const AnonymizeOptions* an = rules.anon;
   const bool shifting = rules.shifting();
+  // The source's files open once, whoever reads them: through the copy's scope
+  // (`shared`), or the scope of this call alone.
+  const detail::ReadHandleScope own;
+  const detail::ReadHandleScope& handles = shared ? *shared : own;
   Preflight pf;
   auto add = [&](RefusalKind kind, std::string code, std::string message,
                  std::string channel = {}, std::string field = {}) {
@@ -3601,7 +3612,7 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
     prebuilt->plan.reset();
   } else {
     try {
-      pf.source = open_session_source(src_path);
+      pf.source = handles.open(src_path);
     } catch (...) {
       add_exception(std::current_exception(), "source-damaged", "source-crc", "source-unreadable");
       return pf;
@@ -3625,7 +3636,7 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
     Control inner;
     inner.cancel = ctl.cancel;
     try {
-      pf.plan = plan_source(*pf.source, src_path, o.password, inner);
+      pf.plan = plan_source(pf.source, src_path, o.password, inner);
     } catch (...) {
       add_exception(std::current_exception(), "source-damaged", "source-crc", "source-unreadable");
       return pf;
@@ -4162,17 +4173,19 @@ VerifyReport verify_standalone(const std::string& src, const std::string& dst,
                                std::optional<si8> shift_us,
                                const VerifyOptions& options, const MetadataEdits* edits,
                                const Control& ctl) {
-  const auto source = open_session_source(src);
+  const detail::ReadHandleScope handles;
+  const auto source = handles.open(src);
   Control inner;
   inner.cancel = ctl.cancel;
-  const SourcePlan plan = plan_source(*source, src, options.password, inner);
+  const SourcePlan plan = plan_source(source, src, options.password, inner);
   std::uint64_t total = std::max<std::uint64_t>(1, 2 * plan.summary.total_bytes);
   detail::ProgressReporter progress(ctl, total);
   progress.start();
   auto rep = verify_impl(src, *source, plan, dst, shift_us, options, edits, ctl,
                          progress.active() ? std::function<void(std::uint64_t)>(
                                                  [&](std::uint64_t n) { progress.add(n); })
-                                           : std::function<void(std::uint64_t)>());
+                                           : std::function<void(std::uint64_t)>(),
+                         nullptr, &handles);
   ctl.check();
   progress.finish();
   return rep;
@@ -4285,8 +4298,14 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
               TransformReport* trep) {
   const CopyOptions& o = *rules.copy;
   const AnonymizeOptions* an = rules.anon;
+  // The source's files are opened once for the planning, the copy and the
+  // verification together (a network share charges every open); the written
+  // copy joins the scope only when it is verified, so what the verifier
+  // reads was opened after the write.
+  const detail::ReadHandleScope handles;
   // Every refusal that can be decided before writing, thrown at the first.
-  Preflight pf = preflight(src_path, dst_path, rules, ctl, /*collect=*/false, /*check_shift=*/true);
+  Preflight pf = preflight(src_path, dst_path, rules, ctl, /*collect=*/false, /*check_shift=*/true,
+                           nullptr, &handles);
   const fs::path& dst = pf.dst;
   const fs::path& partial = pf.partial;
   const SessionSource& src = *pf.source;
@@ -4407,8 +4426,8 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
     };
     walk("");
 
-    // Durable before it is published: the rename below makes it a session.
-    for (const auto& f : cp.written) detail::fsync_file_or_throw(f);
+    // (Every output file was flushed through its own handle when it was closed:
+    // durable before the rename below makes it a session.)
 
     VerifyOptions vo;
     vo.password = o.password;
@@ -4421,15 +4440,16 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
       vo.clear_location = an->clear_location;
       vo.clear_descriptions = an->clear_descriptions;
     }
-    rep.verification = verify_impl(src_path, src, plan, root.string(),
+    rep.verification = verify_impl(src_path, src, plan, detail::path_utf8(root),
                                    an ? an->shift_us : std::optional<si8>(0), vo,
                                    an ? nullptr : rules.edits, ctl, on_bytes,
-                                   &pf.without_samples);
+                                   &pf.without_samples, &handles);
+    handles.release_under(detail::path_utf8(root));
     // verify alone cannot tell a dropped channel from an excluded one; here
     // the selection is known.
     if (rep.verification.channels != rep.channels_kept) {
       rep.verification.problems.push_back(
-          {root.string(), "channels", "the copy does not hold exactly the kept channels"});
+          {detail::path_utf8(root), "channels", "the copy does not hold exactly the kept channels"});
       rep.verification.ok = false;
     }
     if (!rep.verification.ok) {
@@ -4450,6 +4470,7 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
     fs::rename(root, dst);
     detail::fsync_directory(dst.parent_path().empty() ? fs::path(".") : dst.parent_path());
   } catch (...) {
+    handles.release_under(detail::path_utf8(root));  // Windows: no open file blocks removal
     std::error_code ec;
     fs::remove_all(partial, ec);
     throw;
@@ -4644,8 +4665,11 @@ void pool_identity(const std::vector<SourcePlan*>& plans) {
 }
 
 MergePlan preflight_merge(const std::vector<std::string>& sources, const std::string& dst_path,
-                          const MergeOptions& o, const Control& ctl, bool collect) {
+                          const MergeOptions& o, const Control& ctl, bool collect,
+                          const detail::ReadHandleScope* shared = nullptr) {
   MergePlan m;
+  const detail::ReadHandleScope own;
+  const detail::ReadHandleScope& handles = shared ? *shared : own;
   // Anonymizing: no message names a source time (the re-identification key,
   // #111), whatever the refusal or note: scrubbed against the pooled plan.
   auto scrub = [&m](std::string text) {
@@ -4718,13 +4742,13 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
       [&](std::size_t k) {
         try {
           if (auto hook = detail::merge_preopen_hook.load()) hook(k, 0);
-          auto src = open_session_source(sources[k]);
+          auto src = handles.open(sources[k]);
           std::string ambiguity;
           std::string records = detail::session_record_file(*src, ambiguity);
           if (!ambiguity.empty()) return;
           Control inner;
           inner.cancel = ctl.cancel;
-          pres[k].plan = plan_source(*src, sources[k], pw[k], inner, inner_threads);
+          pres[k].plan = plan_source(src, sources[k], pw[k], inner, inner_threads);
           pres[k].source = std::move(src);
           pres[k].session_records = std::move(records);
         } catch (const Cancelled&) {
@@ -4743,13 +4767,13 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
     if (pres[k].plan) continue;
     try {
       if (auto hook = detail::merge_preopen_hook.load()) hook(k, 1);
-      auto src = open_session_source(sources[k]);
+      auto src = handles.open(sources[k]);
       std::string ambiguity;
       std::string records = detail::session_record_file(*src, ambiguity);
       if (!ambiguity.empty()) continue;
       Control inner;
       inner.cancel = ctl.cancel;
-      pres[k].plan = plan_source(*src, sources[k], pw[k], inner, inner_threads);
+      pres[k].plan = plan_source(src, sources[k], pw[k], inner, inner_threads);
       pres[k].source = std::move(src);
       pres[k].session_records = std::move(records);
     } catch (const Cancelled&) {
@@ -4769,7 +4793,7 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
       holds[k].insert(pres[k].plan->all_channels.begin(), pres[k].plan->all_channels.end());
     } else {
       try {
-        const auto src = open_session_source(sources[k]);
+        const auto src = handles.open(sources[k]);
         const auto layout = detail::discover_layout(*src);
         for (const auto& c : layout.channels) holds[k].insert(c.name);
         for (const auto& c : layout.record_only_channels) holds[k].insert(c);
@@ -4836,7 +4860,7 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
         MergeSourcePlan& sp = *m.sources[k];
         if (!sp.used) return;
         sp.pf = preflight(sources[k], dst_path, m.rules_of(sp), ctl, /*collect=*/true,
-                          /*check_shift=*/false, &pres[k]);
+                          /*check_shift=*/false, &pres[k], &handles);
       },
       Work::Io);
   // Anonymizing: the pool is built (again) from the plan every used source
@@ -5174,9 +5198,10 @@ void rethrow_first(const std::vector<std::exception_ptr>& errors) {
 /// identity of EVERY source scanned for in every text field and path of the
 /// result, every time exactly the shift away.
 VerifyReport verify_merge_impl(MergePlan& m, const std::string& dst_path, const Control& ctl,
-                               std::function<void(std::uint64_t)> progress) {
+                               std::function<void(std::uint64_t)> progress,
+                               const detail::ReadHandleScope* handles = nullptr) {
   VerifyReport rep;
-  const auto dsrc = open_session_source(dst_path);
+  const auto dsrc = handles ? handles->open(dst_path) : open_session_source(dst_path);
   const SessionSource& dst = *dsrc;
   const auto dlayout = detail::discover_layout(dst, m.threads);
   const bool anon = m.anonymize;
@@ -5559,7 +5584,8 @@ VerifyReport verify_merge_impl(MergePlan& m, const std::string& dst_path, const 
     vo.password = vos.empty() ? "" : vos[0].output_password;
     Control inner;
     inner.cancel = ctl.cancel;
-    const Report dr = validate_session(dst_path, vo, inner);
+    const Report dr = handles ? detail::validate_session_through(handles->open(dst_path), dst_path, vo, inner)
+                              : validate_session(dst_path, vo, inner);
     for (const auto& f : dr.findings)
       if (f.severity != Severity::Info)
         problem(f.path, f.check_id, "the validator reports on the result: " + f.message);
@@ -5575,7 +5601,8 @@ VerifyReport verify_merge_impl(MergePlan& m, const std::string& dst_path, const 
 
 void run_merge(const std::vector<std::string>& sources, const std::string& dst_path,
                const MergeOptions& o, const Control& ctl, MergeReport& rep) {
-  MergePlan m = preflight_merge(sources, dst_path, o, ctl, /*collect=*/false);
+  const detail::ReadHandleScope handles;  // see run_copy
+  MergePlan m = preflight_merge(sources, dst_path, o, ctl, /*collect=*/false, &handles);
   if (!m.refusals.empty()) raise(m.refusals.front());
   const bool anon = m.anonymize;
   const OutputKeys out = output_keys(o);
@@ -5760,10 +5787,7 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
           ++co.segments;
         }
       }
-      // Durable before it is published: the rename below makes it a session.
-      for (const auto& cpp : cps)
-        if (cpp)
-          for (const auto& f : cpp->written) detail::fsync_file_or_throw(f);
+      // (Each output file was flushed through its own handle when closed.)
     };
     const bool serial_text = anon && m.an.text == RecordTextPolicy::Callback;  // called in order
     const auto errors = parallel_try_each(
@@ -5804,9 +5828,6 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
         };
         merge_records(cp, from, root / (m.new_name + ".rdat"), RecordLevel::Session, "",
                       random_uuid(), ctl);
-        for (const auto& cpp : cps)
-          if (cpp)
-            for (const auto& f : cpp->written) detail::fsync_file_or_throw(f);
       }
       fold_counts(rep, anon ? static_cast<const CopyReport&>(session_out.an)
                             : static_cast<const CopyReport&>(session_out.tr));
@@ -5816,7 +5837,8 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
       }
     }
 
-    rep.verification = verify_merge_impl(m, root.string(), ctl, on_bytes);
+    rep.verification = verify_merge_impl(m, detail::path_utf8(root), ctl, on_bytes, &handles);
+    handles.release_under(detail::path_utf8(root));
     if (!rep.verification.ok) {
       std::string msg = "the merged session failed verification, so it was not published (" +
                         std::to_string(rep.verification.problems.size()) + " problem(s)):";
@@ -5835,6 +5857,7 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
     fs::rename(root, m.dst);
     detail::fsync_directory(m.dst.parent_path().empty() ? fs::path(".") : m.dst.parent_path());
   } catch (...) {
+    handles.release_under(detail::path_utf8(root));
     std::error_code ec;
     fs::remove_all(m.partial, ec);
     throw;
@@ -5872,11 +5895,12 @@ VerifyReport verify_merge(const std::vector<std::string>& sources, const std::st
                           const MergeOptions& o, const Control& ctl) {
   // The plan is the merge's own (pieces from the sources' indexes), made as
   // if the result did not exist yet.
-  MergePlan m = preflight_merge(sources, dst + ".verify-plan.mefd", o, ctl, /*collect=*/true);
+  const detail::ReadHandleScope handles;
+  MergePlan m = preflight_merge(sources, dst + ".verify-plan.mefd", o, ctl, /*collect=*/true, &handles);
   for (const auto& r : m.refusals)
     if (r.code != "dst-exists" && r.code != "partial-exists") raise(r);
   m.new_name = session_name_from_path(dst);
-  return verify_merge_impl(m, dst, ctl, {});
+  return verify_merge_impl(m, dst, ctl, {}, &handles);
 }
 
 }  // namespace mef3io

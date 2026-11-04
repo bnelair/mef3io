@@ -213,3 +213,12 @@ Read phase: 40 windows × 16 channels, median **89 ms**, p95 144 ms,
 
 mef3io was **1.6× faster per block even with the 1.x full durability barriers
 the legacy stack does not have at all**, in a file **1.8× smaller**, with flat growth.
+
+`fs_calls_benchmark.py` counts the file-system calls (opens, existence checks,
+reads, writes, flushes, renames) of `merge_sessions`, `anonymize_session`,
+`transform_session` and `archive_session` under `strace -f`, per kind of file
+(`.tdat`, `.tidx`, `.tmet`, `.rdat`, `.ridx`, source or result) and per phase
+(plan, copy, verify, publish). It is what matters on a network drive, where
+every open is a round trip (results in
+[docs/benchmarks.md](../docs/benchmarks.md#copying-over-a-slow-file-system)).
+Needs `strace` (Linux); synthetic data only.

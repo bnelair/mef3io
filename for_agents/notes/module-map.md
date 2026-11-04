@@ -36,7 +36,7 @@ not implemented — can reuse it), `inspect` (describe a session from
 one `Control`; `Cancelled` is deliberately NOT a std::exception), `recover`,
 `errors` (MefError hierarchy; copy refusals add the `CopyError`
 code mixin), `time` (stored <-> user time), `c_api.h` (flat C ABI under the
-MEX); internal `durability.hpp`, `last_segment.hpp`.
+MEX); internal `durability.hpp`, `last_segment.hpp`, `out_file.hpp` (the file a copy writes: one open, O_EXCL, buffered, header patched and fdatasync'd through the same handle).
 
 `python/mef3io/`: `Reader`, `MultiReader` (`_multi`), `Writer` (incl. `write_annotations`), `compat`
 (mef_tools.io drop-in; `MefReader`/`MefWriter` are also re-exported at the top

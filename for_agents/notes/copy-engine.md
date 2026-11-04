@@ -164,7 +164,52 @@ MERGE IN ONE PASS (`merge.hpp`; MergeOptions gained `time_ranges`, `anonymize`,
   Progress: ProgressReporter is already serialised/monotonic; called from
   whichever worker crosses a step (NOT one fixed thread).
 * Verification still re-reads every source (copy pass: once; verify: again).
-  A digest taken during the copy would avoid the second read; not done.
+  A digest taken during the copy would avoid the second read; not done (it
+  would stop the check comparing the copy with the sources as they are: only
+  as an explicit opt-in option, PROPOSED, not built).
+* FEWER OPENS (network drives; perf/merge-fewer-opens). (a) `detail::
+  ReadHandleScope` (source.hpp; run_copy, run_merge, preflight, preflight_merge,
+  verify_standalone, verify_merge) is PER COPY: it owns one `HandleCache` and
+  `scope.open(path)` returns a DirectorySource bound to it (shared with
+  `detail::validate_session_through` / `inspect_session_through`, which take the
+  copy's source instead of opening their own). Bound sources read through ONE
+  LRU of open fds (`pread`; cap = half of RLIMIT_NOFILE, max 4096), and
+  exists/file_size/list_dir are memoised per path. Sources opened any other way
+  (`open_session_source`, Reader, SessionWriter, other threads) never see it:
+  no global, no path-prefix matching (a round-1 review found the process-wide
+  version leaked stale listings/sizes into unrelated objects; pinned by "other
+  readers see fresh state"). The written copy is opened through the scope ONLY
+  after it is written (verification), so the verifier reads files opened after
+  the write; `release_under(root)` drops its handles (Windows: before the
+  .partial is removed/renamed). Contract: files a bound source shows do not
+  change while the copy runs (a source appended to during a merge is out of
+  contract; on Windows the source files stay open the whole time, docs/merge.md).
+  Unopenable file = plain path = the same IoError. Opens are deduplicated (one
+  thread opens a path, the others wait and share: the count is exact). A read
+  error on a cached handle (ESTALE/EIO/EBADF; Windows NETNAME_DELETED,
+  UNEXP_NET_ERR, BAD_NETPATH, SEM_TIMEOUT) evicts it and retries ONCE through a
+  fresh open; the IoError names the file (test hook `read_fault_hook`). A
+  shrunk file: read_head returns the bytes it read, like the plain path.
+  Windows: CreateFileW with all three share modes + FILE_FLAG_OVERLAPPED, one
+  event per read (threads on one file are not serialized), cap 1024; paths are
+  wide (`detail::utf8_path`, no ANSI conversion; Linux test with Japanese
+  names) - Windows parts UNTESTED until Windows CI runs. A cache hit still
+  reads bytes: only the open is saved. Pinned by "each source file is opened
+  once" in core/tests/test_transform.cpp (`source_open_observer`). A session
+  with more files than the cap reopens per pass; sharing parsed .tmet/.tidx
+  between passes is PROPOSED, not done (verifier independence). (b) Output
+  files: `OutputFile` (core/src/out_file.hpp) = O_EXCL create (no exists()
+  probe), 1 MiB write buffer (0 for the record files written in one piece),
+  header patched with pwrite on the same fd, fdatasync (F_FULLFSYNC on macOS;
+  Windows FlushFileBuffers on the GENERIC_WRITE handle) on the same handle before close
+  (`SegmentCopySpec::sync_outputs`, `Copier::write_out`); there is no flush by
+  path afterwards. Durability unchanged: every output file is flushed before
+  verify and rename; a batched syncfs (flush_files) was NOT used for copies
+  because syncfs on a network mount may not force the server (the per-file
+  flush does). (c) archive: `lexically_relative` instead of fs::relative
+  (an lstat per path component per file), 4 MiB stream buffer. Measure with
+  `benchmarks/fs_calls_benchmark.py`; byte identity vs the pre-change build
+  was compared with the 1024-byte UHs masked.
 Transform rules, test-pinned (`tests/test_p33_transform.py`,
 `core/tests/test_transform.cpp`): every stored time VERBATIM (Copier::time
 returns it unchanged; no Shifter, so no rto refusals: rto, DST, GMT kept);
