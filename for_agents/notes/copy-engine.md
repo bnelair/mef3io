@@ -336,3 +336,6 @@ once, unconditionally. Pinned by the Catch2 case "merge_sessions: a derived
 record file names the source file it came from" (only fails in a Release build
 with that toolchain) and `tests/test_merge_trimmed_part_notes.py`. To
 reproduce a wheel-only defect: build in `quay.io/pypa/manylinux_2_28_x86_64`.
+The wheel test command (pyproject `[tool.cibuildwheel] test-command`) runs
+this test and the drop-records / one-pass merge tests on every built wheel,
+so the released toolchain is checked before upload.
