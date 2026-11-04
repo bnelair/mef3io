@@ -271,3 +271,15 @@ warning; test_p32 greps the copy's bytes for them. (13) verify: a kept
 source DATA channel must be a data channel in the copy ("has no segments in
 the copy"); a records-only channel is accepted only if records-only in the
 source; anonymize_session also requires verify's channels == kept.
+
+## provenance_UUID store in `Copier::patch_uh` (2.1.1 wheel defect)
+
+The conditional store `else if (all_zero(prov)) copy(old_file -> prov)` was
+removed by dead-store elimination in the manylinux GCC 14.2 build (with
+`-fno-tree-dse` it survives; -O1 and up fail, -O0 and the conda GCC 14 dev
+build pass), so merged `.rdat`/`.ridx` had a zero provenance_UUID and the
+merge's own check refused them. The value is now computed first and stored
+once, unconditionally. Pinned by the Catch2 case "merge_sessions: a derived
+record file names the source file it came from" (only fails in a Release build
+with that toolchain) and `tests/test_merge_trimmed_part_notes.py`. To
+reproduce a wheel-only defect: build in `quay.io/pypa/manylinux_2_28_x86_64`.

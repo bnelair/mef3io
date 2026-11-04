@@ -1232,13 +1232,12 @@ class Copier {
     const Uuid file = random_uuid();
     std::copy(level.begin(), level.end(), uh.begin() + UH_LEVEL_UUID);
     std::copy(file.begin(), file.end(), uh.begin() + UH_FILE_UUID);
-    if (anon) {
-      std::copy(file.begin(), file.end(), uh.begin() + UH_PROV_UUID);  // its own origin
-    } else if (all_zero(uuid_at(uh, UH_PROV_UUID))) {
-      // The copy's origin is the source file (meflib: provenance_UUID names
-      // the file a file was derived from); a set one is kept.
-      std::copy(old_file.begin(), old_file.end(), uh.begin() + UH_PROV_UUID);
-    }
+    // provenance_UUID: an anonymized file is its own origin; otherwise the
+    // copy's origin is the source file (meflib: provenance_UUID names the
+    // file a file was derived from) unless the source already names one.
+    const Uuid old_prov = uuid_at(uh, UH_PROV_UUID);
+    const Uuid prov = anon ? file : (all_zero(old_prov) ? old_file : old_prov);
+    std::copy(prov.begin(), prov.end(), uh.begin() + UH_PROV_UUID);
     std::copy(out_.vf.level1.begin(), out_.vf.level1.end(), uh.begin() + UH_L1_FIELD);
     std::copy(out_.vf.level2.begin(), out_.vf.level2.end(), uh.begin() + UH_L2_FIELD);
     if (anon) std::fill_n(uh.begin() + UH_PROTECTED, UH_PROTECTED_BYTES, ui1{0});
