@@ -217,3 +217,32 @@ def test_progress_is_monotonic_with_threads(tmp_path):
            progress=lambda d, t: calls.append((d, t)))
     done = [d for d, _ in calls]
     assert done == sorted(done) and calls[-1][0] == calls[-1][1]
+
+
+@pytest.mark.parametrize("both_parts", [False, True])
+@pytest.mark.parametrize("part_first", [True, False])
+def test_parts_cut_from_sources_with_records_merge_and_verify(tmp_path, both_parts, part_first):
+    """Reported against 2.1.1: a transform(time_range) part with notes, merged
+    with a recording (with or without notes) must pass the merge verification
+    (provenance_UUID of every file). Could not be reproduced; pinned here, and
+    for the one-pass merge with per-source ranges and records kept."""
+    a = _session(tmp_path / "a.mefd", [(0, 60)], channels=("A", "B"),
+                 notes=[(5, "x"), (50, "y")])
+    b = _session(tmp_path / "b.mefd", [(100, 60)], channels=("A", "B"))
+    pa = tmp_path / "pa.mefd"
+    _quiet(mef3io.transform_session, a, pa, time_range=(START, START + 30 * SECOND))
+    srcs = [pa, b]
+    if both_parts:
+        pb = tmp_path / "pb.mefd"
+        _quiet(mef3io.transform_session, b, pb,
+               time_range=(START + 100 * SECOND, START + 130 * SECOND))
+        srcs = [pa, pb]
+    if not part_first:
+        srcs.reverse()
+    rep = _quiet(mef3io.merge_sessions, srcs, tmp_path / "m.mefd")
+    assert rep.verification.ok, rep.summary()
+    assert mef3io.merge.verify(srcs, tmp_path / "m.mefd").ok
+    # the same in one pass from the uncut sources, records kept
+    rep = _quiet(mef3io.merge_sessions, [a, b], tmp_path / "o.mefd",
+                 time_ranges=[(START, START + 30 * SECOND), None])
+    assert rep.verification.ok and rep.records >= 1, rep.summary()
