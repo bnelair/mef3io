@@ -4,6 +4,7 @@
 // provenance stamp; the refusals; and a tampered copy failing verification.
 // tests/test_p30_transform.py covers the Python API, records and the CLI.
 #include <catch2/catch_test_macros.hpp>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -15,6 +16,7 @@
 #include "mef3io/naming.hpp"
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
+#include "mef3io/merge.hpp"
 #include "mef3io/transform.hpp"
 
 using namespace mef3io;
@@ -336,4 +338,174 @@ TEST_CASE("check_merge: options a merge does not take are refused with their cod
   for (const auto& r : c.refusals) codes.push_back(r.code);
   CHECK(std::count(codes.begin(), codes.end(), "merge-time-range") == 1);
   CHECK(std::count(codes.begin(), codes.end(), "merge-rename") == 1);
+}
+
+TEST_CASE("merge_sessions: per-source ranges, anonymize and threads give the same bytes") {
+  const auto dir = fresh("mef3io_merge_onepass");
+  auto write = [&](const std::string& name, si8 t, std::size_t n) {
+    const std::string path = (dir / name).string();
+    SessionWriter w(path, true);
+    for (const char* ch : {"a", "b"}) {
+      std::vector<si4> x(n);
+      for (std::size_t i = 0; i < n; ++i) x[i] = static_cast<si4>((i * 7) % 1000);
+      w.write_int32(ch, x, 1.0, START + t, 1000.0, {}, false);
+    }
+    return path;
+  };
+  const std::string a = write("a.mefd", 0, 20'000);           // 0-20 s
+  const std::string b = write("b.mefd", 10'000'000, 20'000);  // 10-30 s: overlaps a
+  MergeOptions o;
+  CHECK_FALSE(check_merge({a, b}, (dir / "m.mefd").string(), o).ok);
+  o.time_ranges = {std::make_pair(START, START + 10'000'000),
+                   std::make_pair(START + 10'000'000, START + 30'000'000)};
+  o.anonymize = AnonymizeOptions{};
+  o.anonymize->shift_us = 3'000'000'000'000'000;  // ~95 years
+  std::vector<std::vector<ui1>> tdat;
+  for (int threads : {1, 4}) {
+    o.n_threads = threads;
+    const std::string dst = (dir / ("m" + std::to_string(threads) + ".mefd")).string();
+    const MergeReport rep = merge_sessions({a, b}, dst, o);
+    REQUIRE(rep.verification.ok);
+    CHECK(rep.shift_us == o.anonymize->shift_us);
+    CHECK(verify_merge({a, b}, dst, o).ok);
+    Session m(dst);
+    CHECK(m.segment_map("a").size() == 2);
+    // The data file of segment 1 of channel a, past its universal header.
+    std::ifstream f(dst + "/a.timd/a-000001.segd/a-000001.tdat", std::ios::binary);
+    std::vector<ui1> bytes((std::istreambuf_iterator<char>(f)), {});
+    REQUIRE(bytes.size() > 1024);
+    tdat.emplace_back(bytes.begin() + 1024, bytes.end());
+  }
+  CHECK(tdat[0] == tdat[1]);
+  o.n_threads = -1;
+  CHECK_FALSE(check_merge({a, b}, (dir / "z.mefd").string(), o).ok);
+}
+
+// ---- review round 1 of the one-pass merge ------------------------------------
+namespace {
+
+std::string write_patient(const fsys::path& dir, const std::string& name, const std::string& patient,
+                          si8 t, std::size_t n) {
+  const std::string path = (dir / name).string();
+  SessionWriter w(path, true);
+  SessionMetadata md;
+  md.subject_name_1 = patient;
+  w.set_metadata(md);
+  for (const char* ch : {"a", "b"}) {
+    std::vector<si4> x(n);
+    for (std::size_t i = 0; i < n; ++i) x[i] = static_cast<si4>((i * 7) % 1000);
+    w.write_int32(ch, x, 1.0, START + t, 1000.0, {}, false);
+  }
+  return path;
+}
+
+std::string all_bytes(const fsys::path& root) {
+  std::string out;
+  for (const auto& e : fsys::recursive_directory_iterator(root))
+    if (e.is_regular_file()) {
+      const auto b = slurp(e.path());
+      out.append(b.begin(), b.end());
+      out += e.path().string();  // the names count too
+    }
+  return out;
+}
+
+std::atomic<int> g_fail_source{-1};
+std::atomic<int> g_fail_attempts{0};  // attempts (0 = first, 1 = retry) < this fail
+void fail_preopen(std::size_t k, int attempt) {
+  if (static_cast<int>(k) == g_fail_source.load() && attempt < g_fail_attempts.load())
+    throw std::runtime_error("injected: transient open failure");
+}
+struct PreopenGuard {
+  PreopenGuard(int source, int attempts) {
+    g_fail_source = source;
+    g_fail_attempts = attempts;
+    detail::merge_preopen_hook.store(&fail_preopen);
+  }
+  ~PreopenGuard() { detail::merge_preopen_hook.store(nullptr); }
+};
+std::atomic<int> g_threads_started{0};
+void count_thread(unsigned) { ++g_threads_started; }
+
+MergeOptions anon_ranges_options() {
+  MergeOptions o;
+  o.time_ranges = {std::make_pair(START, START + 10'000'000),
+                   std::make_pair(START + 10'000'000, START + 30'000'000)};
+  o.anonymize = AnonymizeOptions{};
+  o.anonymize->shift_us = 3'000'000'000'000'000;
+  o.n_threads = 1;
+  return o;
+}
+
+}  // namespace
+
+TEST_CASE("merge_sessions: anonymize with time ranges removes every source's patient and name") {
+  const auto dir = fresh("mef3io_merge_anon_ranges");
+  const std::string a = write_patient(dir, "Alpha_Jane.mefd", "Jane", 0, 20'000);
+  const std::string b = write_patient(dir, "Beta_Smithers.mefd", "Smithers", 10'000'000, 20'000);
+  const MergeOptions o = anon_ranges_options();
+  const std::string dst = (dir / "S.mefd").string();
+  const MergeReport rep = merge_sessions({a, b}, dst, o);
+  REQUIRE(rep.verification.ok);
+  CHECK(rep.shift_us == o.anonymize->shift_us);
+  CHECK(rep.segments == 4);  // 2 channels x one segment per source
+  const std::string blob = all_bytes(dst);
+  for (const char* needle : {"Jane", "Smithers", "Alpha", "Beta"})
+    CHECK(blob.find(needle) == std::string::npos);
+  CHECK(verify_merge({a, b}, dst, o).ok);
+}
+
+TEST_CASE("merge_sessions: a source whose first open failed is still pooled and scanned") {
+  const auto dir = fresh("mef3io_merge_preopen_fault");
+  const std::string a = write_patient(dir, "Alpha_Jane.mefd", "Jane", 0, 20'000);
+  const std::string b = write_patient(dir, "Beta_Smithers.mefd", "Smithers", 10'000'000, 20'000);
+  const MergeOptions o = anon_ranges_options();
+  const std::string clean = (dir / "clean.mefd").string();
+  REQUIRE(merge_sessions({a, b}, clean, o).verification.ok);
+  for (int k : {0, 1}) {
+    const std::string dst = (dir / ("f" + std::to_string(k) + ".mefd")).string();
+    PreopenGuard fault(k, 1);  // the parallel open of source k throws once
+    const MergeReport rep = merge_sessions({a, b}, dst, o);
+    REQUIRE(rep.verification.ok);
+    const std::string blob = all_bytes(dst);
+    for (const char* needle : {"Jane", "Smithers", "Alpha", "Beta"})
+      CHECK(blob.find(needle) == std::string::npos);
+    CHECK(slurp(dst + "/a.timd/a-000000.segd/a-000000.tdat").size() ==
+          slurp(clean + "/a.timd/a-000000.segd/a-000000.tdat").size());
+    CHECK(verify_merge({a, b}, dst, o).ok);
+  }
+  // identity-differs still compares the source whose first open failed
+  MergeOptions keep = o;
+  keep.anonymize->clear_subject = false;
+  for (int k : {0, 1}) {
+    PreopenGuard fault(k, 1);
+    const CopyCheck chk = check_merge({a, b}, (dir / "d.mefd").string(), keep);
+    CHECK(std::any_of(chk.refusals.begin(), chk.refusals.end(),
+                      [](const CopyRefusal& r) { return r.code == "merge-identity-differs"; }));
+  }
+  // both pre-opens of a source fail (its own pre-flight then plans it): the
+  // pool is built again from the plans the sources ended with
+  PreopenGuard both(0, 2);
+  const std::string dst = (dir / "g.mefd").string();
+  REQUIRE(merge_sessions({a, b}, dst, o).verification.ok);
+  const std::string blob = all_bytes(dst);
+  for (const char* needle : {"Jane", "Smithers", "Alpha", "Beta"})
+    CHECK(blob.find(needle) == std::string::npos);
+}
+
+TEST_CASE("merge_sessions: n_threads = 1 starts no thread") {
+  const auto dir = fresh("mef3io_merge_one_thread");
+  const std::string a = write_patient(dir, "a.mefd", "Jane", 0, 20'000);
+  const std::string b = write_patient(dir, "b.mefd", "Smithers", 10'000'000, 20'000);
+  MergeOptions o = anon_ranges_options();
+  g_threads_started = 0;
+  detail::thread_start_hook.store(&count_thread);
+  struct Reset {
+    ~Reset() { detail::thread_start_hook.store(nullptr); }
+  } reset;
+  REQUIRE(merge_sessions({a, b}, (dir / "m1.mefd").string(), o).verification.ok);
+  CHECK(g_threads_started == 0);
+  o.n_threads = 4;
+  REQUIRE(merge_sessions({a, b}, (dir / "m4.mefd").string(), o).verification.ok);
+  CHECK(g_threads_started > 0);
 }

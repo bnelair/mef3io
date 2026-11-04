@@ -112,8 +112,59 @@ annotations against the sources' sorted by time, PLUS their headers
 entry (by offset: type/version/encryption, the source index's time);
 segments never overlapping (with the tolerance); the validator with NO
 excusal (renumbered: repair sources first). The Seiz entry filter is one
-function (`seiz_without`) for the copy and this check. time_range is refused with a
-merge for now (`merge-time-range`); anonymize after merging.
+function (`seiz_without`) for the copy and this check.
+
+MERGE IN ONE PASS (`merge.hpp`; MergeOptions gained `time_ranges`, `anonymize`,
+`n_threads`; the single `time_range` stays refused, `merge-time-range`):
+* PER-SOURCE CUT: each source's `TransformOptions::time_range` = its entry; its
+  Copier has `window_` AND `piece_` (copy_segment_data intersects
+  `window_entries` with the piece). Planning (`index_blocks(win, exact)`) keeps
+  only blocks `window_slice` says hold a sample, clipped like the copy
+  (`exact`: [sample i0, sample i1); else whole), reading only
+  `window_entries` of a windowed segment; a segment is skipped by the COPY's own
+  UH rule; piece entry ranges still tile [0,n) (`bl[b].idx`). Channels with no
+  piece are left out (`without_samples`, also excluded). The verifier's
+  `check_segment_data_cut(piece)` now honours `o_.time_range` too, and
+  merged annotations/`check_records` filter per source with `record_in_window`.
+* ANONYMIZE: per source `Rules{anon}` (the same Copier/Verifier/preflight, no
+  parallel implementation). All sources are opened+planned FIRST (`Prebuilt`
+  handed to `preflight`), then `pool_identity` unions session names, subject/
+  location/anonymized values, IDs, `summary.identity` and the time range
+  (first/last) into EVERY plan, so each source's preflight, Redactor and
+  verify Scanner know every source's identity (`merge-identity-differs`
+  reads a snapshot taken BEFORE pooling and skips fields anonymize clears).
+  Redactor/Scanner are built once from the pooled plan with the merge's
+  global kept/excluded sets (verify: excluded = source channels absent from the
+  result's own layout). ONE shift: `shift-zero` + `shift_range_refusals`
+  (shared with preflight) against the span of ALL whole sources, trimmed or not
+  (floor kept as in anonymize on purpose). `metadata` + anonymize =
+  `merge-anonymize-metadata`. verify_merge_impl adds the path walk, the scanner,
+  the shift floor and an anonymize variant of the merged-record comparison
+  (`time_field` + `check_body` per record, by source).
+* REVIEW ROUND 1: (a) a source whose parallel pre-open failed is planned again
+  serially BEFORE pooling, and the pool is rebuilt from every used source's
+  final `pf.plan` after the preflights (a source never drops out; anonymize
+  with an unplannable source refuses, `merge-source-unplanned`); test hook
+  `detail::merge_preopen_hook` (merge.hpp). (b) every refusal and note is
+  `scrub_times`-ed with the pooled plan when anonymizing. (c) overlap compares
+  the KEPT blocks (index_blocks), segment spans are not clipped to the range
+  (kept blocks reach past its end). (d) anonymized MergeReport: `sources` and
+  the paths in `notes` are memory-only (to_dict/pickle/summary), `source_count`.
+  (e) merge.hpp is forwarded from transform.hpp/anonymize.hpp (macro
+  MEF3IO_ANONYMIZE_HPP_PENDING breaks the include cycle).
+* THREADS (docs/threads.md "Merging and copying"): `MergeOptions::n_threads`.
+  Phases: open+plan sources (parallel_for over sources), per-source preflights,
+  the copy (parallel_try_each over CHANNELS; one Copier per source per task,
+  own report, folded in channel order; fsync in the task), the verify (per
+  channel, own Verifiers/reports), validator and merged records serial. Errors:
+  a failing channel i cancels tokens of channels > i only, the caller's cancel
+  wins, then the LOWEST-index error is rethrown, so the error never depends on
+  the count (INVARIANTS §12). Output equals across counts except the UH
+  (random UUIDs). A text callback => copy on one thread (called in order).
+  Progress: ProgressReporter is already serialised/monotonic; called from
+  whichever worker crosses a step (NOT one fixed thread).
+* Verification still re-reads every source (copy pass: once; verify: again).
+  A digest taken during the copy would avoid the second read; not done.
 Transform rules, test-pinned (`tests/test_p33_transform.py`,
 `core/tests/test_transform.cpp`): every stored time VERBATIM (Copier::time
 returns it unchanged; no Shifter, so no rto refusals: rto, DST, GMT kept);

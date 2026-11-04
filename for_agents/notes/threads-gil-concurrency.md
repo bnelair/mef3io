@@ -72,3 +72,12 @@
   10.9 s on 16 threads (docs/benchmarks.md). The `shared_ptr<const
   SessionSource>` constructors of Session/Reader are INTERNAL (tests): they
   skip the naming rule, so applications use the path constructors.
+
+- **`merge_sessions` takes `n_threads` as an ARGUMENT OF THE OPERATION** (a
+  one-call operation has no object; no per-call count on Reader/Writer is
+  unaffected; the exception to INVARIANTS "no per-call count" was approved by the
+  maintainer 2026-11-04): `MergeOptions::n_threads`, 0 = automatic with `Work::Io`
+  (>= 8, sources may be on a network share), negative = `merge-threads-invalid`.
+  It covers opening/planning sources, copying channels, verifying; the GIL is
+  released for the whole call (`PyHooks::run`), progress/text callbacks take it.
+  Details and the error-order rule: copy-engine.md "MERGE IN ONE PASS".

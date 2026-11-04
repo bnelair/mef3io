@@ -19,7 +19,7 @@ MATLAB. Reads/toc/segments/records on one Reader/Session may overlap across
 threads (#79; GIL released on open and every long call; the Python races of
 #110 fixed, rules in for_agents/INVARIANTS.md §12). ONE thread rule
 (docs/threads.md): `n_threads` per object covers open, file access, decode,
-encode; settable at runtime; no per-call count (2.0). Parallel open (#141),
+encode; settable at runtime; no per-call count (2.0) except the one-call, object-less `merge_sessions(n_threads=)` (approved 2026-11-04). Parallel open (#141),
 decode, encode, all byte-/result-deterministic across thread counts.
 Python (pytest) + standalone C++ Catch2 suites.
 Wheel builds via `python -m build`.
@@ -42,7 +42,7 @@ directory. `reference_files/` (meflib/pymef/mef3_dump) stayed in the old repo.
 
 ## Module map (short; full text in `for_agents/notes/module-map.md`)
 
-- `core/` (C++17/20): byte/CRC/crypto/header layers (`byteio`, `crc`, `crypto`, `headers`, `metadata`), codec `red`, read side (`session`, `source` = Directory/Tar, `tar`, `reader`, `records`, `inspect`), write side (`writer`, `session_writer`), `validate`/`recover`, copy engine (`session_copy.cpp` behind `anonymize.hpp`/`transform.hpp`, `segment_copy.hpp`), `parallel.hpp` (the thread rule), `control.hpp` (cancel/progress), `errors`, `time`, `c_api.h` (flat C ABI under the MEX).
+- `core/` (C++17/20): byte/CRC/crypto/header layers (`byteio`, `crc`, `crypto`, `headers`, `metadata`), codec `red`, read side (`session`, `source` = Directory/Tar, `tar`, `reader`, `records`, `inspect`), write side (`writer`, `session_writer`), `validate`/`recover`, copy engine (`session_copy.cpp` behind `anonymize.hpp`/`transform.hpp`/`merge.hpp`, `segment_copy.hpp`), `parallel.hpp` (the thread rule), `control.hpp` (cancel/progress), `errors`, `time`, `c_api.h` (flat C ABI under the MEX).
 - `python/mef3io/`: `Reader`, `MultiReader`, `Writer`, `compat` (mef_tools drop-in), `cache`, `anonymize`, `transform`, `_copy`, `_inspect`, `validate`, `metadata`, `_archive`, `_warnings`, `__main__` (CLI). Bindings: `bindings/python/mef3io_ext.cpp` (nanobind); `matlab/` (MEX + `+mef3io`); `examples/` 01-13; docs site from `docs/` (MkDocs Material, `PYTHONPATH=python mkdocs build --strict` must stay green; deployed by `.github/workflows/docs.yml`). `for_agents/` (repo root) is agent handoff docs, NOT on the site. `docs/design.md` = full design; `docs/encryption_model.md` = crypto model; `docs/mef3_format.md` = format reference.
 
 ## Topic notes (read the file BEFORE touching its area)

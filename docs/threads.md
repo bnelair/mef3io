@@ -54,6 +54,7 @@ thread alone. Results stay the same; nothing aborts.
 |---|---|
 | `Reader` | the open: listing the channel folders, checking each segment's files, reading and parsing every `.tmet`. Reads: decoding (and decrypting) the blocks of the window. A multi-channel read (`read([...])`, `block_envelope([...])`): every channel's index at once (file access: automatic = at least 8), then the data a group of that many channels at a time, each group decoded by ONE pool over all its blocks, never one pool per channel |
 | `MultiReader` | the same, as a **total** shared by its recordings (below) |
+| `merge_sessions` | `n_threads=` of the call: opening the sources, copying channels, verifying (see below) |
 | `Writer` | encoding the RED blocks of each write. A multi-channel write (`write_int32_many`, `write_many`) shares the ONE count between channels and blocks: up to `n_threads` channels run at once, each encoding its blocks on `n_threads // channels_at_once` threads, so the total never exceeds the count (a quantisation of float data runs across channels on the same count). The bytes do not depend on it |
 
 Opening a session makes several requests per segment. On a local disk that is
@@ -61,6 +62,21 @@ cheap. On a network share it is most of the open time, and spreading the
 requests over threads is what speeds it up. Measured with an artificial delay
 per request, the open gets faster almost linearly with the thread count
 ([benchmarks](benchmarks.md#opening-over-a-slow-file-system)).
+
+## Merging and copying
+
+`merge_sessions` is one call, not an object, so its count is an argument of
+the operation, `n_threads=`, that lives exactly as long as the operation (the
+same meaning as an object's: `0` = automatic, `1` = no extra threads,
+negative = error `merge-threads-invalid`). It covers opening and planning the
+sources (several at once), copying (channels at a time, each channel read in
+large sequential batches) and the verification. Automatic counts as for file
+access (at least 8), because the sources may be on a network drive. Results
+never depend on it: every byte except the 1024-byte file headers (fresh
+random IDs) is the same for 1 and for 32 threads. When several channels fail,
+the error is the one a single-threaded run would meet first. A Python text
+callback is called one record at a time, so the copy then runs on one thread.
+`anonymize_session` and `transform_session` have no thread argument yet.
 
 ## Changing it later
 
@@ -71,7 +87,10 @@ the **next call**. Calls already running keep the count they started with,
 and setting it while other threads read is safe. The open always uses the
 value given to the constructor.
 
-There is **no per-call thread argument**. `Reader.read(..., n_threads=)` and
+There is **no per-call thread argument** on an object's methods. (The one
+exception, approved by the maintainer on 2026-11-04: an operation that is a
+single call with no object, `merge_sessions`, takes `n_threads=` on the call,
+with the same meaning as the per-object count, 0 = automatic.) `Reader.read(..., n_threads=)` and
 `read_raw(..., n_threads=)` were removed in 2.0. Set the object's count
 instead.
 

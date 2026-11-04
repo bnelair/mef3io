@@ -235,12 +235,13 @@ def test_the_cli_merges(tmp_path, capsys):
 
 
 def test_every_code_only_a_merge_raises_is_documented():
+    from mef3io.anonymize import REFUSAL_CODES as ANONYMIZE
     from mef3io.transform import REFUSAL_CODES as TRANSFORM
 
     rows = {code: (error, where) for code, error, where in re.findall(
         r"^\| `([a-z0-9-]+)` \| `(\w+)` \| (\w+) \|", DOCS.read_text(encoding="utf-8"),
         re.MULTILINE)}
-    assert rows == {k: v for k, v in REFUSAL_CODES.items() if k not in TRANSFORM}
+    assert rows == {k: v for k, v in REFUSAL_CODES.items() if k not in TRANSFORM and k not in ANONYMIZE}
 
 
 # --------------------------------------------------------------------------- review round 1
