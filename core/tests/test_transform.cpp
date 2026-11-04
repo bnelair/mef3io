@@ -15,6 +15,7 @@
 #include "mef3io/naming.hpp"
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
+#include "mef3io/merge.hpp"
 #include "mef3io/transform.hpp"
 
 using namespace mef3io;
