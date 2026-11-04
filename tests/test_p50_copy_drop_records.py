@@ -7,6 +7,8 @@ accepts the drop and still fails a copy that holds records; "keep" is unchanged.
 from __future__ import annotations
 
 import json
+import pickle
+import shutil
 import warnings
 from pathlib import Path
 
@@ -16,7 +18,7 @@ import pytest
 import mef3io
 from mef3io import anonymize, merge, transform
 
-from test_p29_anonymize import START, SECOND, _all_records, _read_all, _rich_session
+from test_p29_anonymize import _reseal, START, SECOND, _all_records, _read_all, _rich_session
 from test_p34_merge import _session
 
 
@@ -158,3 +160,102 @@ def test_the_cli(tmp_path, capsys):
     assert main(["merge", str(tmp_path / "m.mefd"), str(a), str(b), "--drop-records", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["records_dropped"] == 2
     assert _no_record_files(tmp_path / "m.mefd")
+
+
+def _rich_pair(tmp_path):
+    a = _rich_session(tmp_path / "ra.mefd")
+    b = _rich_session(tmp_path / "rb.mefd", channels=("d1", "d2"))
+    return a, b
+
+
+def test_merge_drop_rich_sources(tmp_path):
+    a, b = _rich_pair(tmp_path)
+    levels = {r["level"] for r in _all_records(a)} | {r["level"] for r in _all_records(b)}
+    assert {"session", "channel", "segment"} <= levels
+    out = tmp_path / "m.mefd"
+    rep = _quiet(merge.merge_sessions, [a, b], out, records="drop")
+    assert rep.verification.ok, rep.summary()
+    assert rep.records == 0 and rep.records_dropped > 0
+    assert _no_record_files(out) and _all_records(out) == []
+    assert merge.verify([a, b], out, records="drop").ok
+    assert mef3io.validate_session(str(out)).ok
+
+
+def _plant(kept, dropped, rel_dir, stem):
+    """Copy one record file pair from the kept copy into the dropped copy.
+
+    A segment's files must share their level UUID, so the planted pair takes
+    its siblings' (else the check that fails would be the UUID one, not the
+    no-records one)."""
+    sib = next((Path(dropped) / rel_dir).glob("*.tmet"), None)
+    for ext in ("rdat", "ridx"):
+        dst = Path(dropped) / rel_dir / f"{stem}.{ext}"
+        shutil.copy(Path(kept) / rel_dir / f"{stem}.{ext}", dst)
+        if sib is not None:
+            raw = bytearray(dst.read_bytes())
+            raw[820:836] = sib.read_bytes()[820:836]
+            _reseal(raw)
+            dst.write_bytes(bytes(raw))
+
+
+def _levels_of(kept):
+    """(relative dir, stem) of one session / channel / segment record file."""
+    kept = Path(kept)
+    out = {}
+    for f in sorted(kept.rglob("*.rdat")):
+        level = ("segment" if f.parent.suffix == ".segd" else
+                 "channel" if f.parent.suffix == ".timd" else "session")
+        out.setdefault(level, (f.parent.relative_to(kept), f.stem))
+    assert set(out) == {"segment", "channel", "session"}
+    return out
+
+
+@pytest.mark.parametrize("level", ["segment", "channel", "session"])
+@pytest.mark.parametrize("op", ["transform", "anonymize", "merge"])
+def test_one_planted_record_file_fails_drop_verify(rich, tmp_path, op, level):
+    if op == "merge":
+        srcs = _rich_pair(tmp_path)
+        run = lambda dst, **kw: _quiet(merge.merge_sessions, list(srcs), dst, **kw)
+        verify = lambda dst: merge.verify(list(srcs), dst, records="drop")
+    elif op == "transform":
+        run = lambda dst, **kw: _quiet(mef3io.transform_session, rich, dst, **kw)
+        verify = lambda dst: transform.verify(rich, dst, records="drop")
+    else:
+        run = lambda dst, **kw: _quiet(mef3io.anonymize_session, rich, dst, None, **kw)
+        verify = lambda dst: anonymize.verify(rich, dst, None, records="drop")
+    kept, dropped = tmp_path / "kept.mefd", tmp_path / "dropped.mefd"
+    run(kept)
+    run(dropped, records="drop")
+    assert verify(dropped).ok
+    rel, stem = _levels_of(kept)[level]
+    _plant(kept, dropped, rel, stem)
+    assert not verify(dropped).ok
+
+
+def test_summary_and_old_reports(rich, tmp_path):
+    for rep in (
+        _quiet(mef3io.transform_session, rich, tmp_path / "t.mefd", records="drop"),
+        _quiet(mef3io.anonymize_session, rich, tmp_path / "a.mefd", None, records="drop"),
+        _quiet(merge.merge_sessions, list(_rich_pair(tmp_path)), tmp_path / "m.mefd",
+               records="drop"),
+    ):
+        assert f"{rep.records_dropped} annotation(s) left out" in rep.summary()
+        # a report from 2.1.1 has no records_dropped: it still loads, as 0
+        d = rep.to_dict()
+        del d["records_dropped"]
+        old = type(rep)._from(d) if type(rep) is not mef3io.anonymize.AnonymizeReport else None
+        if old is not None:
+            assert old.records_dropped == 0
+            assert "annotation(s) left out" not in old.summary()
+    kept = _quiet(mef3io.transform_session, rich, tmp_path / "k.mefd")
+    assert "left out" not in kept.summary().replace("channels left out", "")
+
+
+def test_anonymize_pickle_without_records_dropped(rich, tmp_path):
+    from mef3io.anonymize import _unpickle_report
+
+    rep = _quiet(mef3io.anonymize_session, rich, tmp_path / "a.mefd", None, records="drop")
+    values = {f: getattr(rep, f) for f in rep.__dataclass_fields__}
+    del values["records_dropped"]
+    assert _unpickle_report(values, False).records_dropped == 0
+    assert pickle.loads(pickle.dumps(rep)).records_dropped == rep.records_dropped

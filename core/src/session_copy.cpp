@@ -5175,10 +5175,10 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
           if (o.drop_records) {
             cp.drop_records_of(pc.segment->rdat());
           } else {
-          const si8 lo = pc.lo, hi = pc.hi;
-          cp.copy_records(pc.segment->rdat(), cdir / (stem + ".segd") / (stem + ".rdat"),
-                          RecordLevel::Segment, ch, number,
-                          [lo, hi](si8 t) { return t >= lo && t < hi; });
+            const si8 lo = pc.lo, hi = pc.hi;
+            cp.copy_records(pc.segment->rdat(), cdir / (stem + ".segd") / (stem + ".rdat"),
+                            RecordLevel::Segment, ch, number,
+                            [lo, hi](si8 t) { return t >= lo && t < hi; });
           }
         }
         cp.end_segment();

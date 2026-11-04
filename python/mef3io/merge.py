@@ -71,7 +71,9 @@ class MergeReport:
         data lies in one of their gaps.
     blocks, records, blocks_reencrypted, blocks_decrypted : int
     records_dropped : int
-        ``records="drop"``: source annotations left out (``records`` is then 0).
+        ``records="drop"``: annotations of the channels and segments the copy
+        keeps (and the session's own) that were left out; ``records`` is then 0.
+        Those of a channel the copy leaves out are not counted.
     seizure_channel_entries_dropped, metadata_fields_changed : int
     bytes_written : int
     output_encrypted : bool
@@ -91,7 +93,6 @@ class MergeReport:
     blocks_reencrypted: int
     blocks_decrypted: int
     records: int
-    records_dropped: int
     seizure_channel_entries_dropped: int
     metadata_fields_changed: int
     bytes_written: int
@@ -99,6 +100,8 @@ class MergeReport:
     not_copied: Tuple[str, ...]
     notes: Tuple[str, ...]
     verification: VerifyReport = field(repr=False)
+    # Last, with a default: a report from 2.1.1 (no such key) still loads.
+    records_dropped: int = 0
 
     @classmethod
     def _from(cls, d: dict) -> "MergeReport":
@@ -125,6 +128,8 @@ class MergeReport:
             lines.append(f"  {self.segments_split} segment(s) split around another recording's data")
         if self.channels_excluded:
             lines.append(f"  channels left out: {', '.join(self.channels_excluded)}")
+        if self.records_dropped:
+            lines.append(f"  {self.records_dropped} annotation(s) left out")
         for n in self.notes:
             lines.append(f"  note: {n}")
         lines.append(self.verification.summary())
