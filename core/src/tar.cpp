@@ -439,7 +439,9 @@ std::string archive_session(const std::string& session_dir, const std::string& t
   std::vector<std::pair<std::string, bool>> entries;  // rel path, is_dir
   for (const auto& e : fs::recursive_directory_iterator(src)) {
     if (!e.is_directory() && !e.is_regular_file()) continue;
-    entries.emplace_back(fs::relative(e.path(), src).generic_string(), e.is_directory());
+    // (lexically: fs::relative resolves symlinks with an lstat per path
+    // component, per file, and the iterator's paths are already src/<child>)
+    entries.emplace_back(e.path().lexically_relative(src).generic_string(), e.is_directory());
   }
   std::sort(entries.begin(), entries.end());
   ctl.check();
@@ -454,7 +456,12 @@ std::string archive_session(const std::string& session_dir, const std::string& t
   const std::string tmp_path = out_path + ".tmp";
   try {
     progress.start();
-    std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
+    // A large stream buffer: the 512-byte headers and padding of many small
+    // members leave in a few big writes, not two small ones per member.
+    std::vector<char> out_buffer(4u << 20);
+    std::ofstream out;
+    out.rdbuf()->pubsetbuf(out_buffer.data(), static_cast<std::streamsize>(out_buffer.size()));
+    out.open(tmp_path, std::ios::binary | std::ios::trunc);
     if (!out) throw IoError("cannot create archive: " + tmp_path);
 
     auto root_header = make_header(root_name, 0, true);

@@ -206,6 +206,10 @@
   100 ms < 400 ms; rollback .tidx flushed), tests/test_p46_crash_states.py,
   test_p18 (API), test_p31 (flush releases the GIL). Repair, rename,
   recovery and the copies keep their OWN flush rules.
+  COPIES (anonymize/transform/merge) flush each output file through the SAME
+  handle that wrote it (`OutputFile::finish(sync)`, fdatasync) before it is
+  closed, so no reopen-to-fsync (copy-engine.md "FEWER OPENS"); Windows still
+  flushes by path.
   THE FLUSH IS THREE DIFFERENT CALLS with three different rules, and the
   platform differences are load-bearing: Linux `fdatasync`, macOS
   `F_FULLFSYNC` (with an ENOTSUP fallback), Windows `FlushFileBuffers`.

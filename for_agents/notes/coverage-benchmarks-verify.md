@@ -42,5 +42,8 @@ into the README; derived figures are read off the generated files, never
 hard-coded. Every session is verified through mef3io AND pymef before the
 script exits.
 
-Benchmarks: `benchmarks/mef_benchmark.py` (write/open/seq/parallel vs mef_tools
+Benchmarks: `benchmarks/fs_calls_benchmark.py` (strace counts of opens/stats/
+reads/writes/syncs per file kind and phase for merge/anonymize/transform/
+archive; the numbers in docs/benchmarks.md "Copying over a slow file system"),
+`benchmarks/mef_benchmark.py` (write/open/seq/parallel vs mef_tools
 & NWB-Zarr) and `benchmarks/compression_test.py` (file size / compression).

@@ -284,7 +284,10 @@ loaded at open is IMMUTABLE afterwards and read without a lock
 shared-safe. A new long call must release the GIL too (and get a
 `tests/test_p31_gil_release.py` case); any state it mutates must be locked;
 core globals must be `constexpr` or immutable (the AES inverse S-box used to
-be filled lazily, a data race).
+be filled lazily, a data race). ONE exception: the copy's read-handle cache
+(`detail::ReadHandleScope`, source.cpp): a mutex-guarded process-wide cache
+that exists only while a copy/merge holds a scope, is shared by its threads,
+and is purged when the scope ends (copy-engine.md "FEWER OPENS").
 
 THREAD RULE (docs/threads.md, documented ONCE there): an object's
 `n_threads` is how many threads it may use for everything (open, file

@@ -7,6 +7,8 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <mutex>
 #include <random>
 #include <vector>
 
@@ -17,7 +19,9 @@
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
 #include "mef3io/merge.hpp"
+#include "mef3io/source.hpp"
 #include "mef3io/transform.hpp"
+#include "../src/durability.hpp"
 
 using namespace mef3io;
 namespace fsys = std::filesystem;
@@ -508,4 +512,93 @@ TEST_CASE("merge_sessions: n_threads = 1 starts no thread") {
   o.n_threads = 4;
   REQUIRE(merge_sessions({a, b}, (dir / "m4.mefd").string(), o).verification.ok);
   CHECK(g_threads_started > 0);
+}
+
+// ---- file opens (network drives: every open is a round trip) ----------------
+namespace {
+
+std::mutex g_open_mu;
+std::map<std::string, int> g_opens;   // DirectorySource opens per path
+std::map<std::string, int> g_syncs;   // fsyncs per path
+void note_open(const std::string& p) {
+  std::lock_guard<std::mutex> lk(g_open_mu);
+  ++g_opens[p];
+}
+void note_sync(const std::string& p) {
+  std::lock_guard<std::mutex> lk(g_open_mu);
+  ++g_syncs[p];
+}
+struct OpenWatch {
+  OpenWatch() {
+    g_opens.clear();
+    g_syncs.clear();
+    detail::source_open_observer = &note_open;
+    detail::fsync_observer = &note_sync;
+  }
+  ~OpenWatch() {
+    detail::source_open_observer = nullptr;
+    detail::fsync_observer = nullptr;
+  }
+};
+
+// Every .tmet/.tidx/.tdat of `under` (a source, or the destination while it
+// is verified) is opened at most `most` times in the whole operation.
+void check_opens(const std::string& under, int most, int min_files) {
+  int files = 0;
+  for (const auto& [path, n] : g_opens) {
+    if (path.find(under) != 0) continue;
+    const auto ext = fsys::path(path).extension().string();
+    if (ext != ".tmet" && ext != ".tidx" && ext != ".tdat") continue;
+    ++files;
+    INFO(path << " opened " << n << " times");
+    CHECK(n <= most);
+  }
+  CHECK(files >= min_files);
+}
+
+}  // namespace
+
+TEST_CASE("merge_sessions: each source file is opened once, whatever the number of passes") {
+  const auto dir = fresh("mef3io_merge_open_counts");
+  const std::string a = write_patient(dir, "a.mefd", "Jane", 0, 20'000);
+  const std::string b = write_patient(dir, "b.mefd", "Smithers", 10'000'000, 20'000);
+  for (int threads : {1, 4}) {
+    MergeOptions o = anon_ranges_options();
+    o.n_threads = threads;
+    const std::string dst = (dir / ("m" + std::to_string(threads) + ".mefd")).string();
+    OpenWatch watch;
+    REQUIRE(merge_sessions({a, b}, dst, o).verification.ok);
+    check_opens(a, 1, 6);
+    check_opens(b, 1, 6);
+    // The result is read through handles opened after it was written (the
+    // verifier reads what is on disk), once per file.
+    check_opens((dir / ("m" + std::to_string(threads) + ".mefd.partial")).string(), 1, 12);
+    // Every output file is flushed exactly once, through its own handle.
+    int flushed = 0;
+    for (const auto& [path, n] : g_syncs)
+      if (path.find(".partial") != std::string::npos) {
+        ++flushed;
+        CHECK(n == 1);
+      }
+    CHECK(flushed >= 12);
+  }
+}
+
+TEST_CASE("anonymize_session and transform_session: each source file is opened once") {
+  const auto dir = fresh("mef3io_copy_open_counts");
+  const std::string a = write_patient(dir, "a.mefd", "Jane", 0, 20'000);
+  {
+    OpenWatch watch;
+    AnonymizeOptions ao;
+    ao.shift_us = 3'000'000'000'000'000;
+    REQUIRE(anonymize_session(a, (dir / "an.mefd").string(), ao).verification.ok);
+    check_opens(a, 1, 6);
+    check_opens((dir / "an.mefd.partial").string(), 1, 6);
+  }
+  {
+    OpenWatch watch;
+    REQUIRE(transform_session(a, (dir / "tr.mefd").string(), TransformOptions{}).verification.ok);
+    check_opens(a, 1, 6);
+    check_opens((dir / "tr.mefd.partial").string(), 1, 6);
+  }
 }

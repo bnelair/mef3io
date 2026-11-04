@@ -164,7 +164,40 @@ MERGE IN ONE PASS (`merge.hpp`; MergeOptions gained `time_ranges`, `anonymize`,
   Progress: ProgressReporter is already serialised/monotonic; called from
   whichever worker crosses a step (NOT one fixed thread).
 * Verification still re-reads every source (copy pass: once; verify: again).
-  A digest taken during the copy would avoid the second read; not done.
+  A digest taken during the copy would avoid the second read; not done (it
+  would stop the check comparing the copy with the sources as they are: only
+  as an explicit opt-in option, PROPOSED, not built).
+* FEWER OPENS (network drives; perf/merge-fewer-opens). (a) `detail::
+  ReadHandleScope` (source.hpp; run_copy, run_merge, preflight, preflight_merge,
+  verify_standalone, verify_merge): while a scope holds a ROOT, every
+  DirectorySource read of a file under it goes through ONE process-wide LRU
+  of open fds (`pread`; cap = half of RLIMIT_NOFILE, max 4096) and
+  exists/file_size/list_dir are memoised per path. Roots: the sources for the
+  whole operation; the written copy (`root` in .partial) is added ONLY right
+  before its verification (validator + Verifier), so the verifier reads
+  files opened after they were written, from disk. Memos and fds are dropped
+  when the root is removed. Contract: files under a registered root do not
+  change (a source being appended to during a merge is out of contract).
+  Unopenable file = plain path = the same IoError. Windows: no-op (an open
+  handle blocks replace/delete). A cache hit still reads bytes: only the open
+  is saved (read calls are unchanged; the .tmet is still re-read by each
+  pass). Pinned by "each source file is opened once" in
+  core/tests/test_transform.cpp (`source_open_observer`). A session with more
+  files than the cap reopens per pass: the passes (inspect, layout,
+  validator, Verifier) each walk ALL files; sharing parsed .tmet/.tidx
+  between them is PROPOSED, not done (verifier independence). (b) Output
+  files: `OutputFile` (core/src/out_file.hpp) = O_EXCL create (no exists()
+  probe), 1 MiB write buffer, header patched with pwrite on the same fd,
+  fdatasync (F_FULLFSYNC on macOS) on the same fd before close
+  (`SegmentCopySpec::sync_outputs`, `Copier::write_out`); so `Copier::written`
+  is only filled where `synced_by_handle` is false (Windows keeps stream +
+  fsync by path). Durability unchanged: every output file is flushed before
+  verify and rename; a batched syncfs (flush_files) was NOT used for copies
+  because syncfs on a network mount may not force the server (the per-file
+  flush does). (c) archive: `lexically_relative` instead of fs::relative
+  (an lstat per path component per file), 4 MiB stream buffer. Measure with
+  `benchmarks/fs_calls_benchmark.py`; byte identity vs the pre-change build
+  was compared with the 1024-byte UHs masked.
 Transform rules, test-pinned (`tests/test_p33_transform.py`,
 `core/tests/test_transform.cpp`): every stored time VERBATIM (Copier::time
 returns it unchanged; no Shifter, so no rto refusals: rto, DST, GMT kept);

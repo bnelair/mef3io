@@ -77,6 +77,44 @@ class DirectorySource : public SessionSource {
   std::string root_;
 };
 
+namespace detail {
+
+/// Reuse of open read handles (network drives: every open is a round trip).
+///
+/// While at least one scope is alive, a DirectorySource reads the files under
+/// the scope's ROOTS through a bounded cache of open file descriptors (LRU,
+/// `pread`, one open per file instead of one per call), shared by every
+/// DirectorySource and every thread of the process. The bytes are still
+/// fetched on each call; only the open/close pair is saved. A file that cannot
+/// be opened falls through to the plain path, so errors are unchanged.
+///
+/// Rules: the files under a root must not change while it is registered (a
+/// copy's SOURCES; a copy's destination only once it is written, for its
+/// verification, so the verifier still reads what is on disk, through a handle
+/// opened after the write). Unregistering a root closes its handles. Not used
+/// on Windows (an open handle blocks replacing the file there): a no-op.
+class ReadHandleScope {
+ public:
+  ReadHandleScope();
+  ~ReadHandleScope();
+  ReadHandleScope(const ReadHandleScope&) = delete;
+  ReadHandleScope& operator=(const ReadHandleScope&) = delete;
+  /// `root` is the path text a DirectorySource was built with.
+  void add_root(const std::string& root);
+  /// Close the handles under `root` and stop caching it.
+  void remove_root(const std::string& root);
+
+ private:
+  std::vector<std::string> roots_;
+};
+
+/// TEST HOOK: called with the path of every file a DirectorySource really
+/// opens (cached or not). Must be thread-safe. Pins "each source file is
+/// opened at most N times in a merge".
+inline void (*source_open_observer)(const std::string& path) = nullptr;
+
+}  // namespace detail
+
 /// Case-insensitive suffix test on a path, ignoring trailing separators
 /// ("S.MEFD/" has suffix ".mefd"). Backs the session naming rules.
 bool path_has_suffix(const std::string& path, const std::string& suffix);

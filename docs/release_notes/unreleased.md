@@ -2,6 +2,24 @@
 
 Changes since 2.1.1. This page becomes the next version's notes at release.
 
+## Faster on network drives
+
+- **Copies open each file far fewer times.** `merge_sessions`,
+  `anonymize_session` and `transform_session` used to open every source file
+  about ten times (the check before copying, the copy, the
+  validator and the verification each opened it again) and every file they
+  wrote about six times. Now each source file is opened once for the whole operation, and
+  each written file once to write, flush and close it, plus once to verify
+  it. In a test merge of 4 sources with 576 data files each side the opens
+  fell from 5,824 to 576 (sources) and from 3,649 to 1,152 (result), and the
+  number of "does it exist / how big is it" checks from 3,712 to 576 and
+  3,264 to 576. Nothing is checked less: the verification still reads the
+  sources again and still reads the finished copy back from disk. The output
+  files are identical, byte for byte (apart from the random file IDs). The
+  sources must not be changed while the operation runs. `archive_session`
+  makes one check per file instead of two and writes in larger pieces.
+  `benchmarks/fs_calls_benchmark.py` counts the calls (needs `strace`).
+
 ## Added
 
 - **One-call merge pipeline.** `merge_sessions` can now trim each recording to

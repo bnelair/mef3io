@@ -276,6 +276,58 @@ of the loop (2026-10-25): **4.7-4.9 ms per read before, 0.20-0.28 ms after**.
 The first read of a freshly opened Reader takes about 45 ms here, because it
 walks all 2,400 indexes.
 
+## Copying over a slow file system
+
+`merge_sessions`, `anonymize_session`, `transform_session` and
+`archive_session` read and write every file of a session. On a network share
+the number of **opens** matters more than the bytes, because each open is a
+round trip. Until 2.1.1 a copy opened each source file once for every read that
+needed it (the check before copying, the copy, the validator, the
+verification: about ten opens per file in the run below), and re-opened each
+file it had written to flush it.
+
+Now the files of the sources are opened once for the whole operation (a
+bounded set of open files is shared by every pass and every thread, and
+closed when the operation ends), a written file is created, filled, flushed
+and closed through one handle, and a file that exists is asked about once. The
+bytes are still read again by the verification and nothing is skipped: the
+copy is still verified against the sources, and the written copy is still read
+back from disk by files opened after they were written. The output is
+byte-for-byte what it was (apart from the random IDs in the file headers).
+
+Counted with `strace -f` by `benchmarks/fs_calls_benchmark.py` (2026-11-04,
+4 sources x 16 channels x 3 segments of 30 s at 250 Hz, annotations kept, so
+576 `.tdat`/`.tidx`/`.tmet` files on each side; one thread; counts are for
+those three file kinds):
+
+| merge (ranges + anonymize) | opens before | opens after | existence/size checks before | after |
+|---|---|---|---|---|
+| source files, planning | 2,375 | 385 | 2,371 | 576 |
+| source files, copy | 1,721 | 191 | 573 | 0 |
+| source files, verification | 1,728 | 0 | 768 | 0 |
+| **source files, total (10.1 opens per file before)** | **5,824** | **576 (1 per file)** | **3,712** | **576** |
+| result files, copy (create + flush) | 1,152 | 576 | 575 | 0 |
+| result files, verification | 2,497 | 576 | 2,688 | 576 |
+| **result files, total (6.3 per file before)** | **3,649** | **1,152 (2 per file)** | **3,264** | **576** |
+
+`anonymize_session` and `transform_session` of one source (144 files each
+side): source opens 768 to 144, result opens 721 to 288. `archive_session` was
+already one open and one read per file; it now makes one existence/size check
+per file instead of two (288 to 144). Read calls are unchanged (each pass still
+reads what it checks), the number of write calls is the same on this small
+data and falls with larger blocks (a file is written in 1 MiB pieces), and each
+result file is flushed once, as before. The run time on a local disk is the
+same (4.8-5.1 s against 5.0-5.3 s for a 4-source, 32-channel merge on one
+thread).
+
+What was **not** changed: the verification reads the sources again from their
+files. Replacing that second read by a checksum taken during the copy would
+save the bytes, but then the check would no longer compare the copy with the
+sources as they are; it could be offered as an explicit option. Also a session
+of many thousands of files is read in several passes and the set of open files
+is bounded (half the process limit, at most 4,096), so such a session still
+opens a file again for each pass that finds it closed.
+
 ## Reading many channels at once
 
 `Reader.read([...])` reads a window of many channels in one call (#90): every

@@ -48,6 +48,7 @@
 #include <tuple>
 
 #include "durability.hpp"
+#include "out_file.hpp"
 #include "segment_copy.hpp"
 #include "session_layout.hpp"
 
@@ -1191,7 +1192,7 @@ class Copier {
     if (rules_.copy->time_range) window_ = rules_.copy->time_range;
   }
 
-  std::vector<std::string> written;  // every output file, for the flush
+  std::vector<std::string> written;  // output files still to flush by path (Windows; elsewhere flushed when closed)
 
   /// A stored time as the copy writes it: shifted (anonymize with a shift)
   /// or verbatim (a transform, or anonymize keeping the times).
@@ -1271,15 +1272,20 @@ class Copier {
   }
 
   void write_out(const fs::path& p, const std::vector<ui1>& bytes) {
-    if (fs::exists(p))
-      refuse(RefusalKind::Io, "write-failed", "output file already exists: " + p.string());
-    std::ofstream f(p, std::ios::binary | std::ios::trunc);
-    if (!f) refuse(RefusalKind::Io, "write-failed", "cannot create file: " + p.string());
-    f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    f.flush();
-    if (!f) refuse(RefusalKind::Io, "write-failed", "write failed (disk full?): " + p.string());
-    f.close();
-    written.push_back(p.string());
+    try {
+      detail::OutputFile f(p.string(), bytes.size() + 1);  // one write
+      f.write(bytes);
+      f.finish(detail::synced_by_handle);
+    } catch (const IoError& e) {
+      const std::string what = e.what();
+      if (what.starts_with("output file already exists"))
+        refuse(RefusalKind::Io, "write-failed", what);
+      if (what.starts_with("cannot create"))
+        refuse(RefusalKind::Io, "write-failed", "cannot create file: " + p.string());
+      if (what.starts_with("could not flush")) throw;
+      refuse(RefusalKind::Io, "write-failed", "write failed (disk full?): " + p.string());
+    }
+    if (!detail::synced_by_handle) written.push_back(p.string());
     rep_.bytes_written += bytes.size();
   }
 
@@ -1423,7 +1429,7 @@ class Copier {
         copy_segment_data(seg, sdir, channel, stem, reshape ? std::optional<si8>(start)
                                                              : std::nullopt);
     if (reshape && st.blocks == 0) {  // only gaps of it lay in the window
-      written.resize(written.size() - 2);
+      if (!detail::synced_by_handle) written.resize(written.size() - 2);
       rep_.blocks -= st.blocks;
       rep_.bytes_written -= st.output_bytes;
       std::error_code ec;
@@ -1461,6 +1467,7 @@ class Copier {
                                       const std::string& channel, const std::string& stem,
                                       std::optional<si8> start_sample) {
     detail::SegmentCopySpec spec;
+    spec.sync_outputs = detail::synced_by_handle;
     spec.start_sample = start_sample;
     if (window_) {  // only the blocks around the window are read
       auto w =
@@ -1563,8 +1570,10 @@ class Copier {
     } catch (const IoError& e) {
       refuse(RefusalKind::Io, "write-failed", e.what(), channel);
     }
-    written.push_back(spec.tidx_out);
-    written.push_back(spec.tdat_out);
+    if (!detail::synced_by_handle) {
+      written.push_back(spec.tidx_out);
+      written.push_back(spec.tdat_out);
+    }
     rep_.blocks += st.blocks;
     rep_.bytes_written += st.output_bytes;
     return st;
@@ -3517,6 +3526,8 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
   const CopyOptions& o = *rules.copy;
   const AnonymizeOptions* an = rules.anon;
   const bool shifting = rules.shifting();
+  detail::ReadHandleScope handles;  // the source's files open once, whoever reads them
+  handles.add_root(src_path);
   Preflight pf;
   auto add = [&](RefusalKind kind, std::string code, std::string message,
                  std::string channel = {}, std::string field = {}) {
@@ -4157,6 +4168,9 @@ VerifyReport verify_standalone(const std::string& src, const std::string& dst,
                                std::optional<si8> shift_us,
                                const VerifyOptions& options, const MetadataEdits* edits,
                                const Control& ctl) {
+  detail::ReadHandleScope handles;
+  handles.add_root(src);
+  handles.add_root(dst);
   const auto source = open_session_source(src);
   Control inner;
   inner.cancel = ctl.cancel;
@@ -4280,6 +4294,12 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
               TransformReport* trep) {
   const CopyOptions& o = *rules.copy;
   const AnonymizeOptions* an = rules.anon;
+  // The source's files are opened once for the planning, the copy and the
+  // verification together (a network share charges every open); the written
+  // copy joins the scope only when it is verified, so what the verifier
+  // reads was opened after the write.
+  detail::ReadHandleScope handles;
+  handles.add_root(src_path);
   // Every refusal that can be decided before writing, thrown at the first.
   Preflight pf = preflight(src_path, dst_path, rules, ctl, /*collect=*/false, /*check_shift=*/true);
   const fs::path& dst = pf.dst;
@@ -4416,10 +4436,12 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
       vo.clear_location = an->clear_location;
       vo.clear_descriptions = an->clear_descriptions;
     }
+    handles.add_root(root.string());
     rep.verification = verify_impl(src_path, src, plan, root.string(),
                                    an ? an->shift_us : std::optional<si8>(0), vo,
                                    an ? nullptr : rules.edits, ctl, on_bytes,
                                    &pf.without_samples);
+    handles.remove_root(root.string());
     // verify alone cannot tell a dropped channel from an excluded one; here
     // the selection is known.
     if (rep.verification.channels != rep.channels_kept) {
@@ -4641,6 +4663,8 @@ void pool_identity(const std::vector<SourcePlan*>& plans) {
 MergePlan preflight_merge(const std::vector<std::string>& sources, const std::string& dst_path,
                           const MergeOptions& o, const Control& ctl, bool collect) {
   MergePlan m;
+  detail::ReadHandleScope handles;
+  for (const auto& sp : sources) handles.add_root(sp);
   // Anonymizing: no message names a source time (the re-identification key,
   // #111), whatever the refusal or note: scrubbed against the pooled plan.
   auto scrub = [&m](std::string text) {
@@ -5570,6 +5594,8 @@ VerifyReport verify_merge_impl(MergePlan& m, const std::string& dst_path, const 
 
 void run_merge(const std::vector<std::string>& sources, const std::string& dst_path,
                const MergeOptions& o, const Control& ctl, MergeReport& rep) {
+  detail::ReadHandleScope handles;  // see run_copy
+  for (const auto& sp : sources) handles.add_root(sp);
   MergePlan m = preflight_merge(sources, dst_path, o, ctl, /*collect=*/false);
   if (!m.refusals.empty()) raise(m.refusals.front());
   const bool anon = m.anonymize;
@@ -5811,7 +5837,9 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
       }
     }
 
+    handles.add_root(root.string());
     rep.verification = verify_merge_impl(m, root.string(), ctl, on_bytes);
+    handles.remove_root(root.string());
     if (!rep.verification.ok) {
       std::string msg = "the merged session failed verification, so it was not published (" +
                         std::to_string(rep.verification.problems.size()) + " problem(s)):";
@@ -5867,6 +5895,9 @@ VerifyReport verify_merge(const std::vector<std::string>& sources, const std::st
                           const MergeOptions& o, const Control& ctl) {
   // The plan is the merge's own (pieces from the sources' indexes), made as
   // if the result did not exist yet.
+  detail::ReadHandleScope handles;
+  for (const auto& sp : sources) handles.add_root(sp);
+  handles.add_root(dst);
   MergePlan m = preflight_merge(sources, dst + ".verify-plan.mefd", o, ctl, /*collect=*/true);
   for (const auto& r : m.refusals)
     if (r.code != "dst-exists" && r.code != "partial-exists") raise(r);

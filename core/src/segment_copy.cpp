@@ -10,6 +10,7 @@
 #include "mef3io/byteio.hpp"
 #include "mef3io/crc.hpp"
 #include "mef3io/errors.hpp"
+#include "out_file.hpp"
 
 namespace fs = std::filesystem;
 
@@ -24,38 +25,29 @@ constexpr std::size_t RED = fmt::RED_BLOCK_HEADER_BYTES;
 constexpr std::size_t ENTRIES_PER_CHUNK = 8192;           // ~450 KB of index
 constexpr std::size_t BATCH_BYTES = 8u * 1024u * 1024u;   // 8 MB of blocks
 
+/// One output file (see out_file.hpp: one open, buffered, header patched and
+/// flushed through the same handle) plus its body CRC.
 class OutFile {
  public:
-  explicit OutFile(const std::string& path) : path_(path) {
-    if (fs::exists(path)) throw IoError("output file already exists: " + path);
-    f_.open(path, std::ios::binary | std::ios::trunc);
-    if (!f_) throw IoError("cannot create file: " + path);
+  explicit OutFile(const std::string& path) : f_(path) {
     const std::vector<ui1> placeholder(UH, 0);
     put(placeholder, false);
   }
   /// Append bytes; `body` = they count toward the body CRC.
   void put(std::span<const ui1> b, bool body = true) {
-    f_.write(reinterpret_cast<const char*>(b.data()), static_cast<std::streamsize>(b.size()));
-    if (!f_) throw IoError("write failed (disk full?): " + path_);
+    f_.write(b);
     if (body) crc_ = crc::calculate(b, crc_);
-    bytes_ += b.size();
   }
   ui4 body_crc() const { return crc_; }
-  std::uint64_t bytes() const { return bytes_; }
-  void finish(std::span<const ui1> header) {
-    f_.seekp(0);
-    f_.write(reinterpret_cast<const char*>(header.data()), static_cast<std::streamsize>(UH));
-    f_.flush();
-    if (!f_) throw IoError("write failed: " + path_);
-    f_.close();
-    if (!f_) throw IoError("close failed: " + path_);
+  std::uint64_t bytes() const { return f_.size(); }
+  void finish(std::span<const ui1> header, bool sync) {
+    f_.patch_front(header.subspan(0, UH));
+    f_.finish(sync);
   }
 
  private:
-  std::string path_;
-  std::ofstream f_;
+  OutputFile f_;
   ui4 crc_ = fmt::CRC_START_VALUE;
-  std::uint64_t bytes_ = 0;
 };
 
 void seal_header(std::vector<ui1>& uh, ui4 body_crc, si8 entries, si8 max_entry) {
@@ -238,8 +230,8 @@ CopyStats copy_segment(const SegmentCopySpec& spec) {
   }
   seal_header(tdat_uh, tdat.body_crc(), st.blocks, st.max_block_bytes);
   seal_header(tidx_uh, tidx.body_crc(), st.blocks, static_cast<si8>(ENTRY));
-  tdat.finish(tdat_uh);
-  tidx.finish(tidx_uh);
+  tdat.finish(tdat_uh, spec.sync_outputs);
+  tidx.finish(tidx_uh, spec.sync_outputs);
   st.output_bytes = tdat.bytes() + tidx.bytes();
   return st;
 }
