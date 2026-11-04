@@ -30,6 +30,7 @@
 #include "mef3io/parallel.hpp"
 #include "mef3io/red.hpp"
 #include "mef3io/time.hpp"
+#include "mef3io/source.hpp"
 
 namespace fs = std::filesystem;
 
@@ -43,7 +44,7 @@ std::string segment_base_name(const SegmentSpec& spec) {
 }
 
 std::vector<ui1> read_whole_file(const std::string& path) {
-  std::ifstream f(path, std::ios::binary | std::ios::ate);
+  std::ifstream f(detail::utf8_path(path), std::ios::binary | std::ios::ate);
   if (!f) throw IoError("cannot open file: " + path);
   auto size = f.tellg();
   f.seekg(0);
@@ -64,8 +65,8 @@ using detail::fsync_file_or_throw;
 void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
                        bool flush_new = false, std::vector<fs::path> flush_with = {},
                        PendingPublish* defer = nullptr, bool no_flush = false) {
-  const fs::path target(path);
-  const fs::path tmp = target.parent_path() / (target.filename().string() + ".mef3io-tmp");
+  const fs::path target = detail::utf8_path(path);
+  const fs::path tmp = target.parent_path() / detail::utf8_path(detail::path_utf8(target.filename()) + ".mef3io-tmp");
   std::error_code ignored;
   // THE ONE BARRIER A WRITE STILL PAYS (2.0 removed the `durability` option
   // and every other flush). Only a REPLACEMENT is flushed — on an append that
@@ -92,11 +93,11 @@ void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
   const bool replacing = fs::exists(target, ignored);
   fs::remove(tmp, ignored);
   try {
-    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-    if (!f) throw IoError("cannot open for write: " + tmp.string());
+    std::ofstream f(detail::utf8_path(tmp), std::ios::binary | std::ios::trunc);
+    if (!f) throw IoError("cannot open for write: " + detail::path_utf8(tmp));
     f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    if (!f) throw IoError("write failed: " + tmp.string());
-    finish_stream(f, tmp.string());
+    if (!f) throw IoError("write failed: " + detail::path_utf8(tmp));
+    finish_stream(f, detail::path_utf8(tmp));
     copy_file_identity(target, tmp);
     // Flush the CONTENT before the rename, but not the directory entry after
     // it. Losing the rename is harmless: the old file is still there, complete
@@ -117,7 +118,7 @@ void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
       flush_with.push_back(tmp);
       detail::flush_files(flush_with);
     } else if ((replacing || flush_new) && !no_flush) {
-      fsync_file_or_throw(tmp.string());
+      fsync_file_or_throw(detail::path_utf8(tmp));
     }
     replace_file(tmp, target);
     // wait_for_disk: the PUBLISHED name must be durable before the write
@@ -135,7 +136,7 @@ void write_file_atomic(const std::string& path, std::span<const ui1> bytes,
 // No flush: a header patched in place is part of the append, whose torn
 // states recover_session repairs (see write_file_atomic).
 void overwrite_file_prefix(const std::string& path, std::span<const ui1> bytes) {
-  std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
+  std::fstream f(detail::utf8_path(path), std::ios::binary | std::ios::in | std::ios::out);
   if (!f) throw IoError("cannot open for header update: " + path);
   f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
   f.flush();
@@ -313,7 +314,7 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
                               ui4* out_max_difference_bytes, PendingPublish* defer) {
   check_threads(n_threads);  // before any file is touched
   check_segment_input(spec, blocks);
-  if (!fs::is_directory(segment_dir)) throw IoError("segment dir does not exist: " + segment_dir);
+  if (!fs::is_directory(detail::utf8_path(segment_dir))) throw IoError("segment dir does not exist: " + segment_dir);
   const sf8 fs_hz = spec.sampling_frequency;
   const si8 rto = spec.recording_time_offset;
   const bool encrypt = !spec.password_1.empty();
@@ -404,7 +405,7 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
                       max_block_bytes, level_uuid, vf);
     uh.serialize(file);
     finalize_crcs(file);
-    write_file((fs::path(segment_dir) / (base + ".tdat")).string(), file);
+    write_file(detail::path_utf8((detail::utf8_path(segment_dir) / detail::utf8_path(base + ".tdat"))), file);
   }
 
   // --- .tidx ---
@@ -419,7 +420,7 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
       file.insert(file.end(), entry.begin(), entry.end());
     }
     finalize_crcs(file);
-    write_file((fs::path(segment_dir) / (base + ".tidx")).string(), file);
+    write_file(detail::path_utf8((detail::utf8_path(segment_dir) / detail::utf8_path(base + ".tidx"))), file);
   }
 
   // --- .tmet ---
@@ -510,7 +511,7 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     // Equivalent here (this image is exactly METADATA_FILE_BYTES), but stated
     // explicitly so the fixed-length rule holds for every .tmet we write.
     finalize_metadata_crcs(file);
-    const std::string tmet_path = (fs::path(segment_dir) / (base + ".tmet")).string();
+    const std::string tmet_path = detail::path_utf8((detail::utf8_path(segment_dir) / detail::utf8_path(base + ".tmet")));
     // A segment is visible only through its .tmet (one missing is skipped,
     // one SHORT fails the strict open of the whole session), so the .tmet is
     // written last and renamed into place: flushed first for a channel's
@@ -518,7 +519,7 @@ si8 write_time_series_segment(const std::string& segment_dir, const SegmentSpec&
     // .tidx in wait_for_disk mode.
     std::vector<fs::path> with;
     if (spec.wait_for_disk)
-      with = {fs::path(segment_dir) / (base + ".tdat"), fs::path(segment_dir) / (base + ".tidx")};
+      with = {detail::utf8_path(segment_dir) / detail::utf8_path(base + ".tdat"), detail::utf8_path(segment_dir) / detail::utf8_path(base + ".tidx")};
     write_file(tmet_path, file, spec.flush_new_metadata, std::move(with), defer,
                spec.skip_tmet_flush);
   }
@@ -579,20 +580,20 @@ struct AppendRollback {
       try {
         std::error_code ec;
         if (!original_tidx.empty()) {
-          if (!(fs::file_size(tidx_path, ec) == original_tidx.size() && !ec &&
+          if (!(fs::file_size(detail::utf8_path(tidx_path), ec) == original_tidx.size() && !ec &&
                 read_whole_file(tidx_path) == original_tidx))
             write_file(tidx_path, original_tidx);
         } else {
           bool untouched = false;
-          if (fs::file_size(tidx_path, ec) == original_tidx_size && !ec) {
-            std::ifstream in(tidx_path, std::ios::binary);
+          if (fs::file_size(detail::utf8_path(tidx_path), ec) == original_tidx_size && !ec) {
+            std::ifstream in(detail::utf8_path(tidx_path), std::ios::binary);
             std::vector<ui1> head(fmt::UNIVERSAL_HEADER_BYTES);
             untouched = in && in.read(reinterpret_cast<char*>(head.data()),
                                       fmt::UNIVERSAL_HEADER_BYTES) &&
                         head == original_tidx_uh;
           }
           if (!untouched) {
-            fs::resize_file(tidx_path, static_cast<std::uintmax_t>(original_tidx_size), ec);
+            fs::resize_file(detail::utf8_path(tidx_path), static_cast<std::uintmax_t>(original_tidx_size), ec);
             if (ec) note_rollback("tidx truncate rollback failed: " + ec.message());
             else overwrite_file_prefix(tidx_path, original_tidx_uh);
           }
@@ -604,7 +605,7 @@ struct AppendRollback {
     if (patched_tdat_header) {
       // Only the 1024-byte header was patched in place; compare just that.
       try {
-        std::ifstream in(tdat_path, std::ios::binary);
+        std::ifstream in(detail::utf8_path(tdat_path), std::ios::binary);
         std::vector<ui1> head(fmt::UNIVERSAL_HEADER_BYTES);
         if (in && in.read(reinterpret_cast<char*>(head.data()), fmt::UNIVERSAL_HEADER_BYTES) &&
             head == tdat_uh) {
@@ -618,10 +619,10 @@ struct AppendRollback {
     }
     if (appended_tdat) {
       std::error_code ec;
-      const auto now = fs::file_size(tdat_path, ec);
+      const auto now = fs::file_size(detail::utf8_path(tdat_path), ec);
       if (ec || now != static_cast<std::uintmax_t>(old_tdat_size)) {
         ec.clear();
-        fs::resize_file(tdat_path, static_cast<std::uintmax_t>(old_tdat_size), ec);
+        fs::resize_file(detail::utf8_path(tdat_path), static_cast<std::uintmax_t>(old_tdat_size), ec);
       }
       if (ec) note_rollback("tdat truncate rollback failed: " + ec.message());
     }
@@ -641,13 +642,13 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   // segment number: a foreign writer's un-padded `ch1-5.segd` holds
   // `ch1-5.tdat`, and the padded name would not exist (#83).
   const std::string base =
-      fs::path(segment_dir).has_stem() && fs::path(segment_dir).extension() == ".segd"
-          ? fs::path(segment_dir).stem().string()
+      detail::utf8_path(segment_dir).has_stem() && detail::utf8_path(segment_dir).extension() == ".segd"
+          ? detail::path_utf8(detail::utf8_path(segment_dir).stem())
           : segment_base_name(spec);
-  const std::string tmet_path = (fs::path(segment_dir) / (base + ".tmet")).string();
-  const std::string tidx_path = (fs::path(segment_dir) / (base + ".tidx")).string();
-  const std::string tdat_path = (fs::path(segment_dir) / (base + ".tdat")).string();
-  if (!fs::exists(tmet_path) || !fs::exists(tidx_path) || !fs::exists(tdat_path))
+  const std::string tmet_path = detail::path_utf8((detail::utf8_path(segment_dir) / detail::utf8_path(base + ".tmet")));
+  const std::string tidx_path = detail::path_utf8((detail::utf8_path(segment_dir) / detail::utf8_path(base + ".tidx")));
+  const std::string tdat_path = detail::path_utf8((detail::utf8_path(segment_dir) / detail::utf8_path(base + ".tdat")));
+  if (!fs::exists(detail::utf8_path(tmet_path)) || !fs::exists(detail::utf8_path(tidx_path)) || !fs::exists(detail::utf8_path(tdat_path)))
     throw IoError("segment to append to is incomplete or missing: " + segment_dir);
 
   // --- existing metadata is authoritative: load, decrypt, validate ---
@@ -704,7 +705,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   });
 
   // --- new index entries; file offsets continue from the current .tdat size ---
-  const si8 old_tdat_size = static_cast<si8>(fs::file_size(tdat_path));
+  const si8 old_tdat_size = static_cast<si8>(fs::file_size(detail::utf8_path(tdat_path)));
   std::vector<fmt::TimeSeriesIndex> index;
   si8 appended_samples = 0, running_offset = old_tdat_size;
   si8 last_end = old_end;
@@ -752,7 +753,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   ui4 tdat_body_crc = 0;
   bool tdat_body_crc_known = true;
   {
-    std::ifstream in(tdat_path, std::ios::binary);
+    std::ifstream in(detail::utf8_path(tdat_path), std::ios::binary);
     if (!in) throw IoError("cannot open for read: " + tdat_path);
     if (!in.read(reinterpret_cast<char*>(tdat_uh.data()), fmt::UNIVERSAL_HEADER_BYTES))
       throw IoError("short read: " + tdat_path);
@@ -806,7 +807,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     index[i].serialize(std::span<ui1>(new_entries).subspan(i * fmt::TIME_SERIES_INDEX_BYTES,
                                                            fmt::TIME_SERIES_INDEX_BYTES));
 
-  const std::uintmax_t tidx_size_on_disk = fs::file_size(tidx_path);
+  const std::uintmax_t tidx_size_on_disk = fs::file_size(detail::utf8_path(tidx_path));
   const bool use_cache = cache && cache->valid &&
                          cache->file_size == static_cast<std::size_t>(tidx_size_on_disk);
 
@@ -841,7 +842,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
 
     original_tidx_uh.assign(fmt::UNIVERSAL_HEADER_BYTES, 0);
     {
-      std::ifstream in(tidx_path, std::ios::binary);
+      std::ifstream in(detail::utf8_path(tidx_path), std::ios::binary);
       if (!in || !in.read(reinterpret_cast<char*>(original_tidx_uh.data()),
                           fmt::UNIVERSAL_HEADER_BYTES))
         throw IoError("short read: " + tidx_path);
@@ -1108,7 +1109,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
   bool& wrote_tmet = rb->wrote_tmet;
   try {
     {
-      std::ofstream app(tdat_path, std::ios::binary | std::ios::app);
+      std::ofstream app(detail::utf8_path(tdat_path), std::ios::binary | std::ios::app);
       if (!app) throw IoError("cannot open for append: " + tdat_path);
       appended_tdat = true;  // any later failure may have left partial bytes on disk
       for (std::size_t i = 0; i < nb; ++i) {
@@ -1138,12 +1139,12 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
       // Trailing bytes that do not form a whole entry (foreign padding, which
       // the validator tolerates) go before the new entries are appended.
       std::error_code ec;
-      if (fs::file_size(tidx_path, ec) != strip_tidx_to)
-        fs::resize_file(tidx_path, static_cast<std::uintmax_t>(strip_tidx_to), ec);
+      if (fs::file_size(detail::utf8_path(tidx_path), ec) != strip_tidx_to)
+        fs::resize_file(detail::utf8_path(tidx_path), static_cast<std::uintmax_t>(strip_tidx_to), ec);
       if (ec) throw IoError("cannot trim index padding: " + tidx_path + ": " + ec.message());
     }
     {
-      std::ofstream app(tidx_path, std::ios::binary | std::ios::app);
+      std::ofstream app(detail::utf8_path(tidx_path), std::ios::binary | std::ios::app);
       if (!app) throw IoError("cannot open for append: " + tidx_path);
       app.write(reinterpret_cast<const char*>(new_entries.data()),
                 static_cast<std::streamsize>(new_entries.size()));
@@ -1159,7 +1160,7 @@ si8 append_time_series_segment(const std::string& segment_dir, const SegmentSpec
     // Flushed before the rename — the one barrier; with wait_for_disk, in ONE
     // combined wait with the data and index just extended.
     std::vector<fs::path> with;
-    if (spec.wait_for_disk) with = {fs::path(tdat_path), fs::path(tidx_path)};
+    if (spec.wait_for_disk) with = {detail::utf8_path(tdat_path), detail::utf8_path(tidx_path)};
     write_file(tmet_path, new_tmet, false, std::move(with), defer, spec.skip_tmet_flush);
   } catch (...) {
     if (cache) cache->valid = false;  // the file may no longer match the summary

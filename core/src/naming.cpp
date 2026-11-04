@@ -102,30 +102,30 @@ ArchiveRename rename_archive(const std::string& path, const std::string& new_nam
   if (new_name.size() > 246)
     throw std::invalid_argument("the new name is " + std::to_string(new_name.size()) +
                                 " bytes; at most 246 fit (the file name ends in .mefd.tar)");
-  fs::path from(path);
+  fs::path from = detail::utf8_path(path);
   if (from.filename().empty()) from = from.parent_path();
-  if (!fs::is_regular_file(from)) throw IoError("not an archive file: " + from.string());
+  if (!fs::is_regular_file(from)) throw IoError("not an archive file: " + detail::path_utf8(from));
   // Being written: archive_session writes `<archive>.tmp` and renames it;
   // a copy writes `<dst>.partial`. (A name too long for either cannot have one.)
   for (const char* ext : {".tmp", ".partial"}) {
     std::error_code ec;
-    if (fs::exists(fs::path(from.string() + ext), ec))
+    if (fs::exists(detail::utf8_path(detail::path_utf8(from) + ext), ec))
       throw IoError("the archive is being written (a " + std::string(ext) +
-                    " file is beside it): " + from.string());
+                    " file is beside it): " + detail::path_utf8(from));
   }
-  const fs::path to = from.parent_path() / (new_name + ".mefd.tar");
+  const fs::path to = from.parent_path() / detail::utf8_path(new_name + ".mefd.tar");
   std::string why;
   switch (detail::rename_no_replace(from, to, why)) {
     case detail::NoReplaceResult::Renamed: break;
     case detail::NoReplaceResult::TargetExists:
-      throw IoError("the target already exists: " + to.string());
+      throw IoError("the target already exists: " + detail::path_utf8(to));
     case detail::NoReplaceResult::Unsupported:
       throw IoError("this file system cannot rename without the risk of replacing a file (" +
                     why + "); nothing was renamed");
     case detail::NoReplaceResult::Failed:
       throw IoError("the rename failed (" + why + "); nothing was renamed");
   }
-  return {from.string(), to.string(), true};
+  return {detail::path_utf8(from), detail::path_utf8(to), true};
 }
 
 }  // namespace mef3io

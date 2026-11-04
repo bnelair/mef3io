@@ -38,6 +38,7 @@
 #include "mef3io/headers.hpp"
 #include "mef3io/naming.hpp"
 #include "mef3io/version.hpp"
+#include "mef3io/source.hpp"
 
 namespace fs = std::filesystem;
 
@@ -55,13 +56,8 @@ constexpr const char* JOURNAL_MAGIC = "mef3io-rename-journal 1";
 /// Paths from and to UTF-8 strings. fs::path(std::string) and
 /// path::string() use the ANSI code page on Windows, which garbles (or
 /// throws on) a non-ASCII name; every name here is UTF-8, as stored.
-fs::path u8(const std::string& s) {
-  return fs::path(std::u8string(reinterpret_cast<const char8_t*>(s.data()), s.size()));
-}
-std::string str(const fs::path& p) {
-  const std::u8string u = p.u8string();
-  return std::string(reinterpret_cast<const char*>(u.data()), u.size());
-}
+fs::path u8(const std::string& s) { return detail::utf8_path(s); }
+std::string str(const fs::path& p) { return detail::path_utf8(p); }
 
 bool ends_with(const std::string& s, const std::string& suffix) {
   return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
@@ -103,7 +99,7 @@ bool has_entry(const fs::path& dir, const std::string& name) {
 }
 
 std::vector<ui1> read_prefix(const fs::path& file, std::size_t n) {
-  std::ifstream in(file, std::ios::binary);
+  std::ifstream in(detail::utf8_path(file), std::ios::binary);
   if (!in) throw IoError("cannot open: " + str(file));
   std::vector<ui1> b(n);
   if (!in.read(reinterpret_cast<char*>(b.data()), static_cast<std::streamsize>(n)))
@@ -117,7 +113,7 @@ std::vector<ui1> read_whole(const fs::path& file) {
 
 void write_new_file(const fs::path& file, std::span<const ui1> bytes) {
   {
-    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    std::ofstream out(detail::utf8_path(file), std::ios::binary | std::ios::trunc);
     if (!out) throw IoError("cannot write: " + str(file));
     out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     detail::finish_stream(out, str(file));
@@ -132,7 +128,7 @@ void write_new_file(const fs::path& file, std::span<const ui1> bytes) {
 /// the backups cover a crash.
 void overwrite_prefix(const fs::path& file, std::span<const ui1> bytes) {
   {
-    std::fstream f(file, std::ios::binary | std::ios::in | std::ios::out);
+    std::fstream f(detail::utf8_path(file), std::ios::binary | std::ios::in | std::ios::out);
     if (!f) throw IoError("cannot open for header update: " + str(file));
     f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     f.flush();
@@ -183,10 +179,10 @@ struct Journal {
   std::vector<std::string> files;        ///< session-relative; backed up as <id>/<i>
   fs::path backup_dir;                   ///< where the journal file lives
 
-  fs::path file() const { return backup_dir / (id + ".journal"); }
+  fs::path file() const { return backup_dir / detail::utf8_path(id + ".journal"); }
   /// Every file's backed-up bytes, concatenated in `files` order (one file,
   /// one flush, however many files the session has).
-  fs::path backups() const { return backup_dir / (id + ".backup"); }
+  fs::path backups() const { return backup_dir / detail::utf8_path(id + ".backup"); }
   std::vector<std::size_t> sizes;        ///< bytes of each file's backup
 };
 
@@ -200,7 +196,7 @@ void write_journal(const Journal& j) {
   for (std::size_t i = 0; i < j.files.size(); ++i)
     text += "file " + hex(j.files[i]) + " " + std::to_string(j.sizes[i]) + "\n";
   text += "end\n";  // a journal without it was cut short: never acted on
-  const fs::path tmp = j.backup_dir / (j.id + ".journal.part");
+  const fs::path tmp = j.backup_dir / detail::utf8_path(j.id + ".journal.part");
   write_new_file(tmp, std::span<const ui1>(reinterpret_cast<const ui1*>(text.data()), text.size()));
   std::error_code ec;
   fs::rename(tmp, j.file(), ec);
@@ -209,7 +205,7 @@ void write_journal(const Journal& j) {
 }
 
 std::optional<Journal> read_journal(const fs::path& file) {
-  std::ifstream in(file, std::ios::binary);
+  std::ifstream in(detail::utf8_path(file), std::ios::binary);
   std::string line;
   if (!in || !std::getline(in, line) || line != JOURNAL_MAGIC) return std::nullopt;
   Journal j;

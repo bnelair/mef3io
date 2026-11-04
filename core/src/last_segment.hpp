@@ -27,6 +27,7 @@
 #include "mef3io/crc.hpp"
 #include "mef3io/errors.hpp"
 #include "mef3io/headers.hpp"
+#include "mef3io/source.hpp"
 
 namespace mef3io::detail {
 
@@ -55,8 +56,8 @@ inline std::optional<fsys::path> last_segment_dir(const fsys::path& channel_dir)
   std::error_code ec;
   for (const auto& e : fsys::directory_iterator(channel_dir, ec)) {
     if (!e.is_directory() || e.path().extension() != ".segd") continue;
-    std::pair<long long, std::string> key{segment_number_of(e.path().stem().string()),
-                                          e.path().filename().string()};
+    std::pair<long long, std::string> key{segment_number_of(detail::path_utf8(e.path().stem())),
+                                          detail::path_utf8(e.path().filename())};
     if (!best || key > best_key) {
       best = e.path();
       best_key = std::move(key);
@@ -77,7 +78,7 @@ inline std::optional<fsys::path> writer_temp_file(const fsys::path& channel_dir)
   if (!last) return std::nullopt;
   std::error_code ec;
   for (const auto& e : fsys::directory_iterator(*last, ec))
-    if (e.path().filename().string().ends_with(".mef3io-tmp")) return e.path();
+    if (detail::path_utf8(e.path().filename()).ends_with(".mef3io-tmp")) return e.path();
   return std::nullopt;
 }
 
@@ -104,8 +105,8 @@ inline LastSegmentStamp prepare_last_segment_stamp(const fsys::path& channel_dir
     s.note = "no segment found to stamp";
     return s;
   }
-  s.segment_stem = last->stem().string();
-  s.tmet = *last / (s.segment_stem + ".tmet");
+  s.segment_stem = detail::path_utf8(last->stem());
+  s.tmet = *last / detail::utf8_path(s.segment_stem + ".tmet");
   if (const auto tmp = writer_temp_file(channel_dir)) {
     s.note = tmp->string() +
              " is a writer's temp file, so a write may be in progress, and the last segment "
@@ -115,10 +116,10 @@ inline LastSegmentStamp prepare_last_segment_stamp(const fsys::path& channel_dir
   }
   std::vector<ui1> file(fmt::METADATA_FILE_BYTES);
   {
-    std::ifstream in(s.tmet, std::ios::binary);
+    std::ifstream in(detail::utf8_path(s.tmet), std::ios::binary);
     if (!in || !in.read(reinterpret_cast<char*>(file.data()),
                         static_cast<std::streamsize>(file.size()))) {
-      s.note = s.tmet.string() + " could not be read in full; its provenance was not stamped";
+      s.note = detail::path_utf8(s.tmet) + " could not be read in full; its provenance was not stamped";
       return s;
     }
   }
@@ -132,13 +133,13 @@ inline LastSegmentStamp prepare_last_segment_stamp(const fsys::path& channel_dir
       fmt::UNIVERSAL_HEADER_BYTES, fmt::METADATA_FILE_BYTES - fmt::UNIVERSAL_HEADER_BYTES));
   if ((stored_header != real_header && stored_header != fmt::CRC_NO_ENTRY) ||
       (stored_body != real_body && stored_body != fmt::CRC_NO_ENTRY)) {
-    s.note = s.tmet.string() + " fails its CRC; its provenance was not stamped";
+    s.note = detail::path_utf8(s.tmet) + " fails its CRC; its provenance was not stamped";
     return s;
   }
   std::vector<ui1> head(file.begin(), file.begin() + fmt::UNIVERSAL_HEADER_BYTES);
   auto uh = fmt::UniversalHeader::parse(head);
   if (!fmt::provenance::stamp_modified(uh, fmt::provenance::Operation::SegmentRepaired)) {
-    s.note = s.tmet.string() +
+    s.note = detail::path_utf8(s.tmet) +
              " carries another application's data in its provenance region; not stamped";
     return s;
   }
@@ -159,15 +160,15 @@ inline LastSegmentStamp prepare_last_segment_stamp(const fsys::path& channel_dir
 /// Patch the prepared header in place and flush it. Same rules as the
 /// repair's own in-place header patch (validate.cpp overwrite_universal_header).
 inline void write_last_segment_stamp(const LastSegmentStamp& s) {
-  std::fstream out(s.tmet, std::ios::binary | std::ios::in | std::ios::out);
-  if (!out) throw IoError("cannot open for header update: " + s.tmet.string());
+  std::fstream out(detail::utf8_path(s.tmet), std::ios::binary | std::ios::in | std::ios::out);
+  if (!out) throw IoError("cannot open for header update: " + detail::path_utf8(s.tmet));
   out.write(reinterpret_cast<const char*>(s.new_header.data()),
             static_cast<std::streamsize>(s.new_header.size()));
   out.flush();
-  if (!out) throw IoError("header update failed: " + s.tmet.string());
+  if (!out) throw IoError("header update failed: " + detail::path_utf8(s.tmet));
   out.close();
-  if (!out) throw IoError("close failed, header may not have reached disk: " + s.tmet.string());
-  (void)fsync_file(s.tmet.string());  // best effort, as for the repair's header patches
+  if (!out) throw IoError("close failed, header may not have reached disk: " + detail::path_utf8(s.tmet));
+  (void)fsync_file(detail::path_utf8(s.tmet));  // best effort, as for the repair's header patches
 }
 
 }  // namespace mef3io::detail

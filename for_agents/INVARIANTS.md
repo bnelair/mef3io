@@ -201,6 +201,23 @@ Linux. And **do not push a syscall change and walk away** — the matrix
 (ubuntu/macos/windows) is the only thing that can tell you, and it takes
 minutes.
 
+### Paths: every one through `utf8_path` / `path_utf8`
+
+Paths cross the API as UTF-8 `std::string`. On Windows `fs::path(std::string)`,
+`path / std::string`, `std::ifstream(std::string)`, `path.string()` and
+`generic_string()` all go through the ANSI code page, so a name outside it
+fails or is garbled. The rule: **every path text becomes a path through
+`detail::utf8_path`, and every path becomes text through
+`detail::path_utf8` (`path_generic_utf8` for `/`-separated member names),
+never `.string()`/`.generic_string()`/implicit conversion** (also not for
+error messages and listings). Only ASCII literals may be joined directly.
+To audit: compile once with a copy of `<bits/fs_path.h>` whose
+`path(const std::string&)`/`path(std::string&&)` constructors are
+`[[deprecated]]` (put it first with `-isystem`): every implicit string to
+path conversion in the code shows up as a warning. Pinned by
+`core/tests/test_unicode_paths.cpp` and `tests/test_p47_unicode_paths.py`
+(Japanese and accented folder AND session names; GitHub's Windows CI runs them).
+
 ## 9. Reproduce before believing
 
 Every finding in the two review rounds was reproduced before being acted on, and

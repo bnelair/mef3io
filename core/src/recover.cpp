@@ -44,32 +44,32 @@ std::vector<ui1> read_range(std::ifstream& f, std::uint64_t offset, std::size_t 
 }
 
 std::vector<ui1> read_all(const fsys::path& p) {
-  std::ifstream f(p, std::ios::binary | std::ios::ate);
-  if (!f) throw IoError("cannot open file: " + p.string());
+  std::ifstream f(detail::utf8_path(p), std::ios::binary | std::ios::ate);
+  if (!f) throw IoError("cannot open file: " + detail::path_utf8(p));
   const auto size = f.tellg();
   f.seekg(0);
   std::vector<ui1> buf(static_cast<std::size_t>(size));
   if (size && !f.read(reinterpret_cast<char*>(buf.data()), size))
-    throw IoError("short read: " + p.string());
+    throw IoError("short read: " + detail::path_utf8(p));
   return buf;
 }
 
 void write_all(const fsys::path& target, std::span<const ui1> bytes) {
-  const fsys::path tmp = target.parent_path() / (target.filename().string() + ".mef3io-rec-tmp");
+  const fsys::path tmp = target.parent_path() / detail::utf8_path(detail::path_utf8(target.filename()) + ".mef3io-rec-tmp");
   std::error_code ignored;
   fsys::remove(tmp, ignored);
   try {
-    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-    if (!f) throw IoError("cannot open for write: " + tmp.string());
+    std::ofstream f(detail::utf8_path(tmp), std::ios::binary | std::ios::trunc);
+    if (!f) throw IoError("cannot open for write: " + detail::path_utf8(tmp));
     f.write(reinterpret_cast<const char*>(bytes.data()),
             static_cast<std::streamsize>(bytes.size()));
     f.flush();
-    if (!f) throw IoError("write failed: " + tmp.string());
+    if (!f) throw IoError("write failed: " + detail::path_utf8(tmp));
     f.close();
     detail::copy_file_identity(target, tmp);
     // Recovery runs once, on a session that is already damaged. Pay for the
     // barrier: a crash DURING recovery must not compound the problem.
-    detail::fsync_file_or_throw(tmp.string());
+    detail::fsync_file_or_throw(detail::path_utf8(tmp));
     detail::replace_file(tmp, target);
   } catch (...) {
     fsys::remove(tmp, ignored);
@@ -79,13 +79,13 @@ void write_all(const fsys::path& target, std::span<const ui1> bytes) {
 }
 
 void back_up_file(const fsys::path& file, const fsys::path& root, const std::string& rel) {
-  const fsys::path dest = root / rel;
+  const fsys::path dest = root / detail::utf8_path(rel);
   std::error_code ec;
   fsys::create_directories(dest.parent_path(), ec);
   if (fsys::exists(dest)) return;  // never overwrite a pristine backup
   fsys::copy_file(file, dest, fsys::copy_options::overwrite_existing, ec);
-  if (ec) throw IoError("cannot back up " + file.string() + ": " + ec.message());
-  (void)detail::fsync_file(dest.string());
+  if (ec) throw IoError("cannot back up " + detail::path_utf8(file) + ": " + ec.message());
+  (void)detail::fsync_file(detail::path_utf8(dest));
 }
 
 /// A destination that does not exist yet: `dest`, else `dest.1`, `dest.2`, ...
@@ -101,18 +101,18 @@ fsys::path free_backup_name(const fsys::path& dest) {
 }
 
 void back_up_bytes(const fsys::path& root, const std::string& rel, std::span<const ui1> bytes) {
-  const fsys::path dest = root / rel;
+  const fsys::path dest = root / detail::utf8_path(rel);
   std::error_code ec;
   fsys::create_directories(dest.parent_path(), ec);
   if (fsys::exists(dest)) return;  // never overwrite a pristine backup
-  std::ofstream f(dest, std::ios::binary | std::ios::trunc);
-  if (!f) throw IoError("cannot back up to " + dest.string());
+  std::ofstream f(detail::utf8_path(dest), std::ios::binary | std::ios::trunc);
+  if (!f) throw IoError("cannot back up to " + detail::path_utf8(dest));
   f.write(reinterpret_cast<const char*>(bytes.data()),
           static_cast<std::streamsize>(bytes.size()));
   f.flush();
-  if (!f) throw IoError("backup write failed: " + dest.string());
+  if (!f) throw IoError("backup write failed: " + detail::path_utf8(dest));
   f.close();
-  (void)detail::fsync_file(dest.string());
+  (void)detail::fsync_file(detail::path_utf8(dest));
 }
 
 /// Is there a plausible, CRC-valid RED block at `offset`?
@@ -260,7 +260,7 @@ struct TmetRebuild {
 /// provenance stamped Recovery) or empty. Never throws.
 std::vector<ui1> adoptable_tmet_temp(const fsys::path& tmet, const std::string& password) {
   try {
-    const fsys::path tmp = tmet.parent_path() / (tmet.filename().string() + ".mef3io-tmp");
+    const fsys::path tmp = tmet.parent_path() / detail::utf8_path(detail::path_utf8(tmet.filename()) + ".mef3io-tmp");
     std::error_code ec;
     if (!fsys::exists(tmp, ec)) return {};
     std::vector<ui1> file = read_all(tmp);
@@ -328,7 +328,7 @@ std::vector<ui1> rebuild_tmet(const fsys::path& prev_tmet, const fsys::path& tda
   const TimeSeriesMetadata md = load_time_series_metadata(file, password);  // CRC + access
   std::vector<ui1> tdat_uh, first_block;
   {
-    std::ifstream in(tdat, std::ios::binary);
+    std::ifstream in(detail::utf8_path(tdat), std::ios::binary);
     tdat_uh = read_range(in, 0, fmt::UNIVERSAL_HEADER_BYTES);
     first_block = read_range(in, fmt::UNIVERSAL_HEADER_BYTES, fmt::RED_BLOCK_HEADER_BYTES);
   }
@@ -548,7 +548,7 @@ std::optional<RecordFilePlan> plan_record_file(const fsys::path& rdat) {
   p.rdat = rdat;
   p.ridx = rdat;
   p.ridx.replace_extension(".ridx");
-  p.where = rdat.string();
+  p.where = detail::path_utf8(rdat);
   std::error_code ec;
   p.rdat_size = fsys::file_size(rdat, ec);
   if (ec || p.rdat_size < UH) return std::nullopt;  // not a record file we can reason about
@@ -739,15 +739,15 @@ std::optional<RecordFilePlan> plan_record_file(const fsys::path& rdat) {
 void apply_record_file(const RecordFilePlan& p, bool backup, const fsys::path& backup_root,
                        const fsys::path& session_root) {
   constexpr std::uint64_t UH = fmt::UNIVERSAL_HEADER_BYTES;
-  const std::string rel = fsys::relative(p.rdat, session_root).generic_string();
+  const std::string rel = detail::path_generic_utf8(fsys::relative(p.rdat, session_root));
   if (backup) {
     back_up_bytes(backup_root, rel + ".header", p.rdat_head);
     if (p.rdat_size > p.keep_bytes) {
-      std::ifstream f(p.rdat, std::ios::binary);
+      std::ifstream f(detail::utf8_path(p.rdat), std::ios::binary);
       auto tail = read_range(f, p.keep_bytes, static_cast<std::size_t>(p.rdat_size - p.keep_bytes));
       back_up_bytes(backup_root, rel + ".dropped", tail);
     }
-    if (fsys::exists(p.ridx)) back_up_file(p.ridx, backup_root, fsys::relative(p.ridx, session_root).generic_string());
+    if (fsys::exists(p.ridx)) back_up_file(p.ridx, backup_root, detail::path_generic_utf8(fsys::relative(p.ridx, session_root)));
   }
   // Times of the UH span, from the kept records' stored times, in whichever
   // convention they use (negated = offset applied: later time = smaller value).
@@ -774,17 +774,17 @@ void apply_record_file(const RecordFilePlan& p, bool backup, const fsys::path& b
   if (p.rdat_size > p.keep_bytes) {
     std::error_code ec;
     fsys::resize_file(p.rdat, p.keep_bytes, ec);
-    if (ec) throw IoError("cannot truncate " + p.rdat.string() + ": " + ec.message());
+    if (ec) throw IoError("cannot truncate " + detail::path_utf8(p.rdat) + ": " + ec.message());
   }
   {
     const auto head = fix(uh, p.rdat_head, p.body_crc, p.max_entry);
-    std::fstream f(p.rdat, std::ios::binary | std::ios::in | std::ios::out);
-    if (!f) throw IoError("cannot open for header update: " + p.rdat.string());
+    std::fstream f(detail::utf8_path(p.rdat), std::ios::binary | std::ios::in | std::ios::out);
+    if (!f) throw IoError("cannot open for header update: " + detail::path_utf8(p.rdat));
     f.write(reinterpret_cast<const char*>(head.data()), static_cast<std::streamsize>(head.size()));
     f.flush();
-    if (!f) throw IoError("header update failed: " + p.rdat.string());
+    if (!f) throw IoError("header update failed: " + detail::path_utf8(p.rdat));
     f.close();
-    (void)detail::fsync_file(p.rdat.string());
+    (void)detail::fsync_file(detail::path_utf8(p.rdat));
   }
   // The index: a new file (header from the rdat's, file type ridx), replaced atomically.
   fmt::UniversalHeader ih = p.ridx_head.empty() ? uh : fmt::UniversalHeader::parse(p.ridx_head);
@@ -832,7 +832,7 @@ void recover_record_files(const fsys::path& root, bool apply, bool backup,
         auto sibling = e.path();
         sibling.replace_extension(".rdat");
         if (!fsys::exists(sibling))
-          report.notes.push_back(e.path().string() + ": record index without its record file (.rdat "
+          report.notes.push_back(detail::path_utf8(e.path()) + ": record index without its record file (.rdat "
                                  "missing); kept as is, nothing can be rebuilt from an index alone, "
                                  "and writing annotations here is refused until the .rdat is restored");
       }
@@ -843,16 +843,16 @@ void recover_record_files(const fsys::path& root, bool apply, bool backup,
     try {
       plan = plan_record_file(f);
     } catch (const std::exception& e) {
-      report.skipped.push_back(f.string() + ": annotation file not examined: " + e.what());
+      report.skipped.push_back(detail::path_utf8(f) + ": annotation file not examined: " + e.what());
       continue;
     }
     if (!plan) continue;
     if (plan->no_change) {
-      report.notes.push_back(f.string() + ": " + plan->action);
+      report.notes.push_back(detail::path_utf8(f) + ": " + plan->action);
       continue;
     }
     RecoveredRecordFile r;
-    r.path = f.string();
+    r.path = detail::path_utf8(f);
     r.records_before = plan->n_before;
     r.records_after = plan->n_after;
     r.bytes_dropped = plan->dropped;
@@ -862,11 +862,11 @@ void recover_record_files(const fsys::path& root, bool apply, bool backup,
     report.record_files.push_back(r);
     if (!apply) continue;
     try {
-      report.backup_root = backup ? backup_root.string() : report.backup_root;
+      report.backup_root = backup ? detail::path_utf8(backup_root) : report.backup_root;
       apply_record_file(*plan, backup, backup_root, root);
       report.record_files.back().action = plan->action;
     } catch (const std::exception& e) {
-      report.skipped.push_back(f.string() + ": annotation repair failed: " + e.what());
+      report.skipped.push_back(detail::path_utf8(f) + ": annotation repair failed: " + e.what());
       report.record_files.pop_back();
     }
   }
@@ -886,14 +886,14 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
                   " (extract it first with extract_session)");
   if (!path_has_suffix(path, ".mefd"))
     throw IoError("session directory must end with .mefd: " + path);
-  if (!fsys::is_directory(path)) throw IoError("no such session directory: " + path);
+  if (!fsys::is_directory(detail::utf8_path(path))) throw IoError("no such session directory: " + path);
   if (apply) detail::refuse_if_mid_operation(path);
 
-  const fsys::path root(path);
+  const fsys::path root = detail::utf8_path(path);
   RecoveryReport report;
   std::set<fsys::path> channels_to_stamp;
   const fsys::path backup_root =
-      root.parent_path() / (root.filename().string() + ".recover-backup");
+      root.parent_path() / detail::utf8_path(detail::path_utf8(root.filename()) + ".recover-backup");
 
   std::vector<SegmentDir> all_segments;
   for (const auto& ch_entry : fsys::directory_iterator(root)) {
@@ -904,12 +904,12 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
     // Ordered by the SAME rule as detail::last_segment_dir (number, then
     // folder name), so the last one is last and each has its predecessor.
     const auto key = [](const fsys::path& p) {
-      return std::make_pair(detail::segment_number_of(p.stem().string()), p.filename().string());
+      return std::make_pair(detail::segment_number_of(detail::path_utf8(p.stem())), detail::path_utf8(p.filename()));
     };
     std::sort(segs.begin(), segs.end(),
               [&](const fsys::path& a, const fsys::path& b) { return key(a) < key(b); });
     for (std::size_t i = 0; i < segs.size(); ++i)
-      all_segments.push_back({ch_entry.path(), segs[i], ch_entry.path().stem().string(),
+      all_segments.push_back({ch_entry.path(), segs[i], detail::path_utf8(ch_entry.path().stem()),
                               i + 1 == segs.size(), i ? segs[i - 1] : fsys::path()});
   }
 
@@ -921,12 +921,12 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
   if (ctl.progress) {
     seg_bytes.reserve(all_segments.size());
     for (const auto& sd : all_segments) {
-      const std::string base = sd.dir.stem().string();
+      const std::string base = detail::path_utf8(sd.dir.stem());
       std::uint64_t b = 0;
       std::error_code ec;
-      const auto a = fsys::file_size(sd.dir / (base + ".tidx"), ec);
+      const auto a = fsys::file_size(sd.dir / detail::utf8_path(base + ".tidx"), ec);
       if (!ec) b += static_cast<std::uint64_t>(a);
-      const auto d = fsys::file_size(sd.dir / (base + ".tdat"), ec);
+      const auto d = fsys::file_size(sd.dir / detail::utf8_path(base + ".tdat"), ec);
       if (!ec) b += static_cast<std::uint64_t>(d);
       seg_bytes.push_back(b);
       total += b;
@@ -959,9 +959,9 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
     const SegmentDir& sd = all_segments[si];
     const fsys::path& seg = sd.dir;
     const std::string& channel = sd.channel;
-    const std::string base = seg.stem().string();
-    const fsys::path tidx = seg / (base + ".tidx");
-    const fsys::path tdat = seg / (base + ".tdat");
+    const std::string base = detail::path_utf8(seg.stem());
+    const fsys::path tidx = seg / detail::utf8_path(base + ".tidx");
+    const fsys::path tdat = seg / detail::utf8_path(base + ".tdat");
     int segment_number = 0;
     try {
       segment_number = std::stoi(base.substr(base.rfind('-') + 1));
@@ -988,7 +988,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
     //    (the placement authority), under a header taken from this segment's
     //    .tmet (or .tdat), as for any index that fails its CRC below.
     {
-      const fsys::path tmet_path = seg / (base + ".tmet");
+      const fsys::path tmet_path = seg / detail::utf8_path(base + ".tmet");
       std::error_code e1, e2, e3;
       const auto sz_tidx = fsys::exists(tidx) ? fsys::file_size(tidx, e1) : 0;
       const auto sz_tdat = fsys::exists(tdat) ? fsys::file_size(tdat, e2) : 0;
@@ -999,7 +999,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
       if (incomplete) {
         bool has_block = false;
         if (sz_tdat >= fmt::UNIVERSAL_HEADER_BYTES + fmt::RED_BLOCK_HEADER_BYTES) {
-          std::ifstream in(tdat, std::ios::binary);
+          std::ifstream in(detail::utf8_path(tdat), std::ios::binary);
           fmt::RedBlockHeader h;
           has_block = in && block_looks_real(in, static_cast<std::uint64_t>(sz_tdat),
                                              fmt::UNIVERSAL_HEADER_BYTES, h);
@@ -1015,7 +1015,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
                 tmet_rebuild = TmetRebuild{tmet_path, std::move(adopted),
                                            sz_tmet > 0 || fsys::exists(tmet_path),
                                            tmet_path.parent_path() /
-                                               (tmet_path.filename().string() + ".mef3io-tmp")};
+                                               detail::utf8_path(detail::path_utf8(tmet_path.filename()) + ".mef3io-tmp")};
                 done.push_back(std::string("the .tmet was ") +
                                (sz_tmet ? "shorter than a metadata record"
                                         : (fsys::exists(tmet_path) ? "empty" : "missing")) +
@@ -1026,7 +1026,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
                 if (sd.prev.empty())
                 throw FormatError("the .tmet of a channel's first segment is lost, and there is "
                                   "no previous segment's .tmet to rebuild it from");
-              auto rebuilt = rebuild_tmet(sd.prev / (sd.prev.stem().string() + ".tmet"), tdat,
+              auto rebuilt = rebuild_tmet(sd.prev / detail::utf8_path(detail::path_utf8(sd.prev.stem()) + ".tmet"), tdat,
                                           tidx, segment_number, password);
               tmet_rebuild = TmetRebuild{tmet_path, std::move(rebuilt),
                                          sz_tmet > 0 || fsys::exists(tmet_path), {}};
@@ -1043,7 +1043,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
               source.assign(tmet_rebuild->bytes.begin(),
                             tmet_rebuild->bytes.begin() + fmt::UNIVERSAL_HEADER_BYTES);
             } else {
-              std::ifstream in(tmet_path, std::ios::binary);
+              std::ifstream in(detail::utf8_path(tmet_path), std::ios::binary);
               source = read_range(in, 0, fmt::UNIVERSAL_HEADER_BYTES);
               if (!header_crc_ok(source)) source.clear();
             }
@@ -1056,7 +1056,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
                              " from the CRC-checked blocks in .tdat");
             }
             if (!source.empty()) {
-              std::ifstream in(tdat, std::ios::binary);
+              std::ifstream in(detail::utf8_path(tdat), std::ios::binary);
               if (!header_crc_ok(read_range(in, 0, fmt::UNIVERSAL_HEADER_BYTES)))
                 data_header_override = synthesize_header(source, "tdat");
             }
@@ -1103,12 +1103,12 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
       std::error_code ec;
       if (fsys::exists(tidx, ec)) index_bytes = read_all(tidx);  // a lost one is rebuilt
       data_size = static_cast<std::uint64_t>(fsys::file_size(tdat, ec));
-      if (ec) throw IoError("cannot stat " + tdat.string() + ": " + ec.message());
+      if (ec) throw IoError("cannot stat " + detail::path_utf8(tdat) + ": " + ec.message());
       // Unbuffered: every read is exactly the bytes asked for (a buffered
       // stream refills its buffer after each seek, reading past the block).
       data_in.rdbuf()->pubsetbuf(nullptr, 0);
-      data_in.open(tdat, std::ios::binary);
-      if (!data_in) throw IoError("cannot open file: " + tdat.string());
+      data_in.open(detail::utf8_path(tdat), std::ios::binary);
+      if (!data_in) throw IoError("cannot open file: " + detail::path_utf8(tdat));
     } catch (const std::exception& e) {
       report.skipped.push_back(description + ": " + e.what());
       continue;
@@ -1167,7 +1167,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
         // A lost or damaged HEADER is not written back: one is taken from
         // this segment's .tmet (or .tdat) instead.
         if (!header_ok && !index_lost && index_header_override.empty()) {
-          std::ifstream in(seg / (base + ".tmet"), std::ios::binary);
+          std::ifstream in(seg / detail::utf8_path(base + ".tmet"), std::ios::binary);
           auto source = read_range(in, 0, fmt::UNIVERSAL_HEADER_BYTES);
           if (header_crc_ok(source)) index_header_override = synthesize_header(source, "tidx");
         }
@@ -1291,7 +1291,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
         if (tmet_rebuild) {
           record = tmet_rebuild->bytes;
         } else {
-          std::ifstream in(seg / (base + ".tmet"), std::ios::binary);
+          std::ifstream in(seg / detail::utf8_path(base + ".tmet"), std::ios::binary);
           record = read_range(in, 0, fmt::METADATA_FILE_BYTES);
         }
         const si8 declared = load_time_series_metadata(record, password).section2.start_sample;
@@ -1350,7 +1350,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
         source.assign(tmet_rebuild->bytes.begin(),
                       tmet_rebuild->bytes.begin() + fmt::UNIVERSAL_HEADER_BYTES);
       } else {
-        std::ifstream in(seg / (base + ".tmet"), std::ios::binary);
+        std::ifstream in(seg / detail::utf8_path(base + ".tmet"), std::ios::binary);
         source = read_range(in, 0, fmt::UNIVERSAL_HEADER_BYTES);
         if (!header_crc_ok(source)) source.clear();
       }
@@ -1379,15 +1379,15 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
     EndPlan end_plan;
     std::vector<ui1> tmet_header;
     std::string end_note;
-    const fsys::path tmet = seg / (base + ".tmet");
+    const fsys::path tmet = seg / detail::utf8_path(base + ".tmet");
     const bool needs_work =
         dropped != 0 || recovered != 0 || tail != 0 || stale_headers != 0 || index_crc_bad;
     const bool is_last = sd.is_last;
     if (!tmet_rebuild && n_after > 0 && (needs_work || is_last) &&
         data_head.size() >= fmt::UNIVERSAL_HEADER_BYTES) {
       try {
-        std::ifstream tmet_in(tmet, std::ios::binary);
-        if (!tmet_in) throw IoError("cannot open " + tmet.string());
+        std::ifstream tmet_in(detail::utf8_path(tmet), std::ios::binary);
+        if (!tmet_in) throw IoError("cannot open " + detail::path_utf8(tmet));
         tmet_header = read_range(tmet_in, 0, fmt::UNIVERSAL_HEADER_BYTES);
         if (tmet_header.size() < fmt::UNIVERSAL_HEADER_BYTES)
           throw FormatError("shorter than a universal header");
@@ -1585,9 +1585,9 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
   // recovery and the declaration step below read them). -----------------
   for (const auto& tr : tmet_rebuilds) {
     if (backup && tr.existed) {
-      report.backup_root = backup_root.string();
-      const auto rel = tr.path.parent_path().parent_path().stem().string() + "/" +
-                       tr.path.filename().string();
+      report.backup_root = detail::path_utf8(backup_root);
+      const auto rel = detail::path_utf8(tr.path.parent_path().parent_path().stem()) + "/" +
+                       detail::path_utf8(tr.path.filename());
       back_up_file(tr.path, backup_root, rel);
     }
     write_all(tr.path, tr.bytes);
@@ -1636,8 +1636,8 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
       continue;
     }
     data_in.rdbuf()->pubsetbuf(nullptr, 0);
-    data_in.open(tdat, std::ios::binary);
-    if (!data_in) throw IoError("cannot open file: " + tdat.string());
+    data_in.open(detail::utf8_path(tdat), std::ios::binary);
+    if (!data_in) throw IoError("cannot open file: " + detail::path_utf8(tdat));
 
     std::vector<fmt::TimeSeriesIndex> keep;
     keep.reserve(p.kept_from_index + p.rebuilt.size());
@@ -1661,7 +1661,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
       // 1024-byte header and drops a trailing fragment shorter than one
       // block — so those are what get saved. Copying 30 GB to undo 200 bytes
       // would make the tool unusable on exactly the files it is for.
-      report.backup_root = backup_root.string();
+      report.backup_root = detail::path_utf8(backup_root);
       if (fsys::exists(tidx)) back_up_file(tidx, backup_root, channel + "/" + base + ".tidx");
       const auto head = read_range(data_in, 0, fmt::UNIVERSAL_HEADER_BYTES);
       back_up_bytes(backup_root, channel + "/" + base + ".tdat.header", head);
@@ -1709,7 +1709,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
       // blocks were indexed above rather than discarded.
       std::error_code ec;
       fsys::resize_file(tdat, static_cast<std::uintmax_t>(offset), ec);
-      if (ec) throw IoError("cannot truncate " + tdat.string() + ": " + ec.message());
+      if (ec) throw IoError("cannot truncate " + detail::path_utf8(tdat) + ": " + ec.message());
     }
     {
       // The .tdat header's entry count must match the index it is paired with.
@@ -1737,13 +1737,13 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
       byteio::write<ui4>(
           head, 0,
           crc::calculate(std::span<const ui1>(head).subspan(4, fmt::UNIVERSAL_HEADER_BYTES - 4)));
-      std::fstream f(tdat, std::ios::binary | std::ios::in | std::ios::out);
-      if (!f) throw IoError("cannot open for header update: " + tdat.string());
+      std::fstream f(detail::utf8_path(tdat), std::ios::binary | std::ios::in | std::ios::out);
+      if (!f) throw IoError("cannot open for header update: " + detail::path_utf8(tdat));
       f.write(reinterpret_cast<const char*>(head.data()), fmt::UNIVERSAL_HEADER_BYTES);
       f.flush();
-      if (!f) throw IoError("header update failed: " + tdat.string());
+      if (!f) throw IoError("header update failed: " + detail::path_utf8(tdat));
     }
-    (void)detail::fsync_file(tdat.string());
+    (void)detail::fsync_file(detail::path_utf8(tdat));
     if (p.end.new_end[0]) {
       // The .tmet universal header: header only (the body CRC is unchanged
       // because the body is), the whole file rewritten by rename like the
@@ -1768,7 +1768,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
       }
     }
     if (const auto last = detail::last_segment_dir(p.channel_dir);
-        last && detail::segment_number_of(last->stem().string()) != p.segment_number)
+        last && detail::segment_number_of(detail::path_utf8(last->stem())) != p.segment_number)
       channels_to_stamp.insert(p.channel_dir);
   }
   // Dataless segments cut off by a power cut (see the scan) are moved to the
@@ -1778,8 +1778,8 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
   for (const auto& rm : removals) {
     std::error_code ec;
     if (backup) {
-      report.backup_root = backup_root.string();
-      const fsys::path dest = free_backup_name(backup_root / rm.channel / rm.dir.filename());
+      report.backup_root = detail::path_utf8(backup_root);
+      const fsys::path dest = free_backup_name(backup_root / detail::utf8_path(rm.channel) / rm.dir.filename());
       fsys::create_directories(dest.parent_path());
       fsys::rename(rm.dir, dest, ec);
     }
@@ -1795,7 +1795,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
     if (!any && !ec) {
       if (backup) {
         // Keep whatever else the folder held (channel records) in the backup.
-        const fsys::path dest = free_backup_name(backup_root / rm.channel / "channel-folder");
+        const fsys::path dest = free_backup_name(backup_root / detail::utf8_path(rm.channel) / "channel-folder");
         fsys::rename(rm.channel_dir, dest, ec);
       }
       if (!ec)
@@ -1822,7 +1822,7 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
   // as recovery's own header writes; a stamp that cannot be applied is a note.
   for (const auto& channel_dir : channels_to_stamp) {
     const auto stamp = detail::prepare_last_segment_stamp(channel_dir);
-    const std::string channel = channel_dir.stem().string();
+    const std::string channel = detail::path_utf8(channel_dir.stem());
     if (!stamp.ready) {
       report.notes.push_back(channel + ": a segment was recovered, but the last segment could "
                                        "not record it: " + stamp.note +
@@ -1830,13 +1830,13 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
       continue;
     }
     if (backup) {
-      report.backup_root = backup_root.string();
+      report.backup_root = detail::path_utf8(backup_root);
       back_up_bytes(backup_root, channel + "/" + stamp.segment_stem + ".tmet.header",
                     stamp.old_header);
     }
     detail::write_last_segment_stamp(stamp);
     report.notes.push_back(channel + ": last segment stamped segment-repaired (header only): " +
-                           stamp.tmet.string());
+                           detail::path_utf8(stamp.tmet));
   }
   recover_record_files(root, apply, backup, backup_root, report, ctl);
   report.applied = apply;

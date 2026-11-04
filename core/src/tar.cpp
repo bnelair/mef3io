@@ -12,6 +12,7 @@
 #include <random>
 
 #include "mef3io/errors.hpp"
+#include "mef3io/source.hpp"
 
 namespace fs = std::filesystem;
 
@@ -135,7 +136,7 @@ std::string detect_session_root(const TarIndex& idx) {
 // and root-names ("C:...", UNC shares) are judged the way the extraction
 // itself would treat them.
 void check_member_safe(const std::string& rel, const std::string& archive) {
-  const fs::path p(rel);
+  const fs::path p(detail::utf8_path(rel));
   if (p.is_absolute() || p.has_root_name() || p.has_root_directory())
     throw FormatError("unsafe member path in archive " + archive + ": " + rel);
   for (const auto& part : p)
@@ -145,7 +146,7 @@ void check_member_safe(const std::string& rel, const std::string& archive) {
 }  // namespace
 
 TarIndex::TarIndex(std::string tar_path) : path_(std::move(tar_path)) {
-  std::ifstream f(path_, std::ios::binary | std::ios::ate);
+  std::ifstream f(detail::utf8_path(path_), std::ios::binary | std::ios::ate);
   if (!f) throw IoError("cannot open archive: " + path_);
   const auto archive_size = static_cast<std::uint64_t>(f.tellg());
   f.seekg(0);
@@ -305,7 +306,7 @@ std::vector<ui1> TarSource::read_range(const std::string& rel, std::size_t offse
                                        std::size_t length) const {
   const TarMember& m = member(rel);
   if (offset + length > m.size) throw IoError("read past end of archived file: " + describe(rel));
-  std::ifstream f(tar_path_, std::ios::binary);
+  std::ifstream f(detail::utf8_path(tar_path_), std::ios::binary);
   if (!f) throw IoError("cannot open archive: " + tar_path_);
   f.seekg(static_cast<std::streamoff>(m.offset + offset));
   std::vector<ui1> buf(length);
@@ -390,7 +391,7 @@ std::array<char, BLOCK> make_header(const std::string& member_path, std::uint64_
 
 void write_member_data(std::ofstream& out, const std::string& file_path, std::uint64_t size,
                        const Control& ctl, detail::ProgressReporter& progress) {
-  std::ifstream in(file_path, std::ios::binary);
+  std::ifstream in(detail::utf8_path(file_path), std::ios::binary);
   if (!in) throw IoError("cannot open file: " + file_path);
   std::vector<char> buf(1 << 20);
   std::uint64_t remaining = size;
@@ -412,36 +413,36 @@ void write_member_data(std::ofstream& out, const std::string& file_path, std::ui
 
 std::string archive_session(const std::string& session_dir, const std::string& tar_path,
                             bool overwrite, const Control& ctl) {
-  fs::path src(session_dir);
+  fs::path src(detail::utf8_path(session_dir));
   if (src.filename().empty()) src = src.parent_path();  // tolerate a trailing '/'
   if (!fs::is_directory(src)) throw IoError("session path is not a directory: " + session_dir);
-  if (!path_has_suffix(src.string(), ".mefd"))
+  if (!path_has_suffix(detail::path_utf8(src), ".mefd"))
     throw IoError("session directory must end with .mefd: " + session_dir);
   // A session mid-rename (#72) would be packed half-renamed, marker and all.
-  detail::refuse_if_mid_operation(src.string());
+  detail::refuse_if_mid_operation(detail::path_utf8(src));
   if (!tar_path.empty() && !path_has_suffix(tar_path, ".mefd.tar"))
     throw IoError("session archive must end with .mefd.tar: " + tar_path);
 
-  const std::string out_path = tar_path.empty() ? src.string() + ".tar" : tar_path;
-  if (fs::exists(out_path)) {
+  const std::string out_path = tar_path.empty() ? detail::path_utf8(src) + ".tar" : tar_path;
+  if (fs::exists(detail::utf8_path(out_path))) {
     if (!overwrite) throw IoError("archive target already exists (pass overwrite=true): " + out_path);
-    if (fs::is_directory(out_path)) throw IoError("archive target is a directory: " + out_path);
+    if (fs::is_directory(detail::utf8_path(out_path))) throw IoError("archive target is a directory: " + out_path);
   }
   {
     // A target inside the source would archive (a growing) itself.
-    const std::string s = fs::weakly_canonical(src).generic_string() + "/";
-    const std::string o = fs::weakly_canonical(out_path).generic_string();
+    const std::string s = detail::path_generic_utf8(fs::weakly_canonical(src)) + "/";
+    const std::string o = detail::path_generic_utf8(fs::weakly_canonical(detail::utf8_path(out_path)));
     if (o.compare(0, s.size(), s) == 0)
       throw IoError("archive target lies inside the session directory: " + out_path);
   }
 
-  const std::string root_name = src.filename().generic_string();
+  const std::string root_name = detail::path_generic_utf8(src.filename());
   std::vector<std::pair<std::string, bool>> entries;  // rel path, is_dir
   for (const auto& e : fs::recursive_directory_iterator(src)) {
     if (!e.is_directory() && !e.is_regular_file()) continue;
     // (lexically: fs::relative resolves symlinks with an lstat per path
     // component, per file, and the iterator's paths are already src/<child>)
-    entries.emplace_back(e.path().lexically_relative(src).generic_string(), e.is_directory());
+    entries.emplace_back(detail::path_generic_utf8(e.path().lexically_relative(src)), e.is_directory());
   }
   std::sort(entries.begin(), entries.end());
   ctl.check();
@@ -450,7 +451,7 @@ std::string archive_session(const std::string& session_dir, const std::string& t
   std::uint64_t total = 0;
   if (ctl.progress)
     for (const auto& [rel, is_dir] : entries)
-      if (!is_dir) total += static_cast<std::uint64_t>(fs::file_size(src / rel));
+      if (!is_dir) total += static_cast<std::uint64_t>(fs::file_size(src / detail::utf8_path(rel)));
   detail::ProgressReporter progress(ctl, total);
 
   const std::string tmp_path = out_path + ".tmp";
@@ -461,7 +462,7 @@ std::string archive_session(const std::string& session_dir, const std::string& t
     std::vector<char> out_buffer(4u << 20);
     std::ofstream out;
     out.rdbuf()->pubsetbuf(out_buffer.data(), static_cast<std::streamsize>(out_buffer.size()));
-    out.open(tmp_path, std::ios::binary | std::ios::trunc);
+    out.open(detail::utf8_path(tmp_path), std::ios::binary | std::ios::trunc);
     if (!out) throw IoError("cannot create archive: " + tmp_path);
 
     auto root_header = make_header(root_name, 0, true);
@@ -469,8 +470,8 @@ std::string archive_session(const std::string& session_dir, const std::string& t
     for (const auto& [rel, is_dir] : entries) {
       ctl.check();
       const std::string member = root_name + "/" + rel;
-      const std::string abs = (src / rel).string();
-      const std::uint64_t size = is_dir ? 0 : static_cast<std::uint64_t>(fs::file_size(abs));
+      const std::string abs = detail::path_utf8((src / detail::utf8_path(rel)));
+      const std::uint64_t size = is_dir ? 0 : static_cast<std::uint64_t>(fs::file_size(detail::utf8_path(abs)));
       auto header = make_header(member, size, is_dir);
       out.write(header.data(), BLOCK);
       if (!is_dir) write_member_data(out, abs, size, ctl, progress);
@@ -488,11 +489,11 @@ std::string archive_session(const std::string& session_dir, const std::string& t
     progress.finish();
   } catch (...) {
     std::error_code ec;
-    fs::remove(tmp_path, ec);  // includes Cancelled: no partial archive left behind
+    fs::remove(detail::utf8_path(tmp_path), ec);  // includes Cancelled: no partial archive left behind
     throw;
   }
-  if (overwrite && fs::exists(out_path)) fs::remove(out_path);  // Windows rename won't replace
-  fs::rename(tmp_path, out_path);
+  if (overwrite && fs::exists(detail::utf8_path(out_path))) fs::remove(detail::utf8_path(out_path));  // Windows rename won't replace
+  fs::rename(detail::utf8_path(tmp_path), detail::utf8_path(out_path));
   return out_path;
 }
 
@@ -509,10 +510,10 @@ std::string extract_session(const std::string& tar_path, const std::string& dest
   // Default target strips ".tar": "name.mefd.tar" -> "name.mefd".
   const std::string dest =
       dest_dir.empty() ? tar_path.substr(0, tar_path.size() - 4) : dest_dir;
-  if (fs::exists(dest)) {
+  if (fs::exists(detail::utf8_path(dest))) {
     if (!overwrite)
       throw IoError("extraction target already exists (pass overwrite=true): " + dest);
-    if (!fs::is_directory(dest))
+    if (!fs::is_directory(detail::utf8_path(dest)))
       throw IoError("extraction target exists and is not a directory: " + dest);
   }
 
@@ -540,7 +541,7 @@ std::string extract_session(const std::string& tar_path, const std::string& dest
   // deleted first, so a failure part-way lost both. The name is unique per
   // call so a leftover from a crashed run is never mistaken for ours, and
   // nothing that is not ours is ever removed.
-  fs::path final_path(dest);
+  fs::path final_path(detail::utf8_path(dest));
   if (final_path.filename().empty()) final_path = final_path.parent_path();  // trailing '/'
   std::string tag;
   {
@@ -552,13 +553,13 @@ std::string extract_session(const std::string& tar_path, const std::string& dest
     tag = hex;
   }
   const fs::path staging =
-      final_path.parent_path() / (final_path.filename().string() + ".mef3io-extract-" + tag);
+      final_path.parent_path() / detail::utf8_path(detail::path_utf8(final_path.filename()) + ".mef3io-extract-" + tag);
   const fs::path retired =
-      final_path.parent_path() / (final_path.filename().string() + ".mef3io-replaced-" + tag);
+      final_path.parent_path() / detail::utf8_path(detail::path_utf8(final_path.filename()) + ".mef3io-replaced-" + tag);
   if (fs::exists(staging) || fs::exists(retired))
-    throw IoError("staging directory already exists: " + staging.string());
+    throw IoError("staging directory already exists: " + detail::path_utf8(staging));
 
-  std::ifstream in(tar_path, std::ios::binary);
+  std::ifstream in(detail::utf8_path(tar_path), std::ios::binary);
   if (!in) throw IoError("cannot open archive: " + tar_path);
 
   try {
@@ -568,7 +569,7 @@ std::string extract_session(const std::string& tar_path, const std::string& dest
       const std::string rel = rel_of(d);
       if (rel.empty()) continue;
       check_member_safe(rel, tar_path);
-      fs::create_directories(staging / fs::path(rel));
+      fs::create_directories(staging / detail::utf8_path(rel));
     }
     std::vector<char> buf(1 << 20);
     for (const auto& [p, m] : idx.files()) {
@@ -576,10 +577,10 @@ std::string extract_session(const std::string& tar_path, const std::string& dest
       if (rel.empty()) continue;
       check_member_safe(rel, tar_path);
       ctl.check();
-      const fs::path out_path = staging / fs::path(rel);
+      const fs::path out_path = staging / detail::utf8_path(rel);
       fs::create_directories(out_path.parent_path());
-      std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
-      if (!out) throw IoError("cannot create file: " + out_path.string());
+      std::ofstream out(detail::utf8_path(out_path), std::ios::binary | std::ios::trunc);
+      if (!out) throw IoError("cannot create file: " + detail::path_utf8(out_path));
       in.seekg(static_cast<std::streamoff>(m.offset));
       std::uint64_t remaining = m.size;
       while (remaining) {
@@ -592,7 +593,7 @@ std::string extract_session(const std::string& tar_path, const std::string& dest
         progress.add(static_cast<std::uint64_t>(chunk));
       }
       out.flush();
-      if (!out) throw IoError("write failed: " + out_path.string());
+      if (!out) throw IoError("write failed: " + detail::path_utf8(out_path));
     }
     // The last point a cancel or a throwing callback can stop the call; past
     // here the target is replaced.

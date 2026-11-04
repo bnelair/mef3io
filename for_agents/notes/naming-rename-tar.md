@@ -73,7 +73,7 @@ restore would erase an append made meanwhile. A marker whose journal
 describes ANOTHER folder (a copy made mid-operation) is refused, never
 rolled back. Folder names are taken from the DISK entry (case-insensitive
 volumes) and converted as UTF-8 (`u8`/`str` helpers; path::string() is ANSI
-on Windows — repo-wide gap elsewhere). Known gap: a Writer appending DURING
+on Windows; the rule now holds repo-wide, INVARIANTS §8 "Paths"). Known gap: a Writer appending DURING
 a rename can race it (needs a cross-process write lock, filed as an issue). Not done: NFD length
 check on HFS+ (the file system refuses at the folder step, which rolls back),
 per-segment end time/entry counts in the report (`files` has size+mtime).
