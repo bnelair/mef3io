@@ -41,7 +41,9 @@
 
 #include "mef3io/control.hpp"
 #include "mef3io/records.hpp"
+#define MEF3IO_ANONYMIZE_HPP_PENDING
 #include "mef3io/transform.hpp"
+#undef MEF3IO_ANONYMIZE_HPP_PENDING
 #include "mef3io/types.hpp"
 
 namespace mef3io {
@@ -222,3 +224,6 @@ VerifyReport verify_anonymized(const std::string& src, const std::string& dst,
                                const VerifyOptions& options = {}, const Control& ctl = {});
 
 }  // namespace mef3io
+
+// MergeOptions needs AnonymizeOptions; transform.hpp forwards to merge.hpp.
+#include "mef3io/merge.hpp"

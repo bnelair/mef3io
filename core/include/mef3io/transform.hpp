@@ -253,3 +253,10 @@ VerifyReport verify_transform(const std::string& src, const std::string& dst,
 
 }  // namespace mef3io
 
+// merge_sessions / MergeOptions / MergeReport moved to merge.hpp (one-pass
+// merge); this keeps callers that include only transform.hpp compiling.
+// (anonymize.hpp includes this header first and then merge.hpp itself, once
+// AnonymizeOptions exists: the include below is skipped on that path.)
+#ifndef MEF3IO_ANONYMIZE_HPP_PENDING
+#include "mef3io/merge.hpp"
+#endif

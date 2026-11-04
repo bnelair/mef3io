@@ -11,6 +11,8 @@
 // anonymization options are anonymize.hpp's.
 #pragma once
 
+#include <atomic>
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <utility>
@@ -22,6 +24,13 @@
 #include "mef3io/types.hpp"
 
 namespace mef3io {
+
+namespace detail {
+/// Test hook: called with (source index, attempt 0 = the parallel open, 1 =
+/// the retry) before a merge opens a source to plan it; it may throw to
+/// simulate a failed open.
+inline std::atomic<void (*)(std::size_t, int)> merge_preopen_hook{nullptr};
+}  // namespace detail
 
 /// Merging several recordings into one (#103). The transform's rules apply
 /// to every source (times and samples verbatim; channels, passwords and

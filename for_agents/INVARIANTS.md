@@ -298,7 +298,10 @@ be STARTED never aborts: `parallel_for` catches the spawn failure and runs on
 the threads already started plus the caller (an unjoined std::thread
 destructor = std::terminate, which the parallel open reached on every open
 under a pids limit).
-NO per-call count in any public API (removed in 2.0). MultiReader's budget is
+NO per-call count in any public API (removed in 2.0), with ONE approved exception
+(maintainer, 2026-11-04): a one-call operation with no object (`merge_sessions`)
+takes `n_threads=` on the call, same meaning as the per-object count (0 =
+automatic); everything else unchanged. MultiReader's budget is
 a TOTAL split between recordings; the per-call share goes through the
 PRIVATE `Reader._read_raw(_split=)` -> binding `_n_threads` ->
 `Reader::read_raw_split`. Never expose it publicly (pinned by

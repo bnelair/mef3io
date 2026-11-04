@@ -4603,13 +4603,12 @@ std::vector<IndexBlock> index_blocks(const SessionSource& src, const detail::Lay
 /// source, and judges times against the range of all of them. A name that is
 /// one source's patient is a leak in the result of every other source's
 /// segments too.
-void pool_identity(std::vector<Prebuilt>& pres) {
+void pool_identity(const std::vector<SourcePlan*>& plans) {
   std::set<std::string> names, subject, location, anonymized, ids;
   std::map<std::string, std::set<std::string>> fields;
   std::optional<si8> first, last;
-  for (const auto& pr : pres) {
-    if (!pr.plan) continue;
-    const SourcePlan& p = *pr.plan;
+  for (const SourcePlan* pp : plans) {
+    const SourcePlan& p = *pp;
     names.insert(p.session_names.begin(), p.session_names.end());
     subject.insert(p.subject_values.begin(), p.subject_values.end());
     location.insert(p.location_values.begin(), p.location_values.end());
@@ -4622,9 +4621,8 @@ void pool_identity(std::vector<Prebuilt>& pres) {
       last = std::max(last.value_or(p.last), p.last);
     }
   }
-  for (auto& pr : pres) {
-    if (!pr.plan) continue;
-    SourcePlan& p = *pr.plan;
+  for (SourcePlan* pp : plans) {
+    SourcePlan& p = *pp;
     p.session_names = names;
     p.subject_values = subject;
     p.location_values = location;
@@ -4643,8 +4641,16 @@ void pool_identity(std::vector<Prebuilt>& pres) {
 MergePlan preflight_merge(const std::vector<std::string>& sources, const std::string& dst_path,
                           const MergeOptions& o, const Control& ctl, bool collect) {
   MergePlan m;
+  // Anonymizing: no message names a source time (the re-identification key,
+  // #111), whatever the refusal or note: scrubbed against the pooled plan.
+  auto scrub = [&m](std::string text) {
+    if (m.anonymize)
+      if (const SourcePlan* p = m.first_plan()) return scrub_times(*p, text);
+    return text;
+  };
   auto add = [&](RefusalKind kind, std::string code, std::string message, std::string channel = {},
                  std::string field = {}) {
+    message = scrub(std::move(message));
     CopyRefusal r{std::move(code), std::move(message), kind, std::move(channel), std::move(field),
                   {}};
     if (!collect) raise(std::move(r));
@@ -4706,6 +4712,7 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
       n, m.threads,
       [&](std::size_t k) {
         try {
+          if (auto hook = detail::merge_preopen_hook.load()) hook(k, 0);
           auto src = open_session_source(sources[k]);
           std::string ambiguity;
           std::string records = detail::session_record_file(*src, ambiguity);
@@ -4722,6 +4729,30 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
         }
       },
       Work::Io);
+  ctl.check();
+  // A source whose parallel open failed (a transient error on a network
+  // share) is planned once more here, so that its identity is pooled below
+  // like every other source's. If it still fails, its own pre-flight reports
+  // why, and an anonymized merge is refused (never run with a partial pool).
+  for (std::size_t k = 0; k < n; ++k) {
+    if (pres[k].plan) continue;
+    try {
+      if (auto hook = detail::merge_preopen_hook.load()) hook(k, 1);
+      auto src = open_session_source(sources[k]);
+      std::string ambiguity;
+      std::string records = detail::session_record_file(*src, ambiguity);
+      if (!ambiguity.empty()) continue;
+      Control inner;
+      inner.cancel = ctl.cancel;
+      pres[k].plan = plan_source(*src, sources[k], pw[k], inner, inner_threads);
+      pres[k].source = std::move(src);
+      pres[k].session_records = std::move(records);
+    } catch (const Cancelled&) {
+      throw;
+    } catch (...) {
+      pres[k].plan.reset();
+    }
+  }
   ctl.check();
 
   // Each source's channels, to give each its share of the selection: a
@@ -4757,7 +4788,12 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
       for (const auto& f : pres[k].plan->summary.identity)
         for (const auto& v : f.values)
           if (!v.empty()) identity[k][f.name].insert(v);
-  if (m.anonymize) pool_identity(pres);
+  if (m.anonymize) {
+    std::vector<SourcePlan*> plans;
+    for (auto& pr : pres)
+      if (pr.plan) plans.push_back(&*pr.plan);
+    pool_identity(plans);
+  }
 
   // Each source's options and pre-flight (run at once, assembled in order).
   m.sources.resize(n);
@@ -4798,6 +4834,22 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
                           /*check_shift=*/false, &pres[k]);
       },
       Work::Io);
+  // Anonymizing: the pool is built (again) from the plan every used source
+  // actually ended up with, so no source can be missing from it; a source that
+  // was planned only by its own pre-flight enters the identity check unpooled.
+  if (m.anonymize) {
+    std::vector<SourcePlan*> plans;
+    for (std::size_t k = 0; k < n; ++k) {
+      MergeSourcePlan& sp = *m.sources[k];
+      if (!sp.used || !sp.pf.plan) continue;
+      if (!pres[k].plan && identity[k].empty())
+        for (const auto& f : sp.pf.plan->summary.identity)
+          for (const auto& v : f.values)
+            if (!v.empty()) identity[k][f.name].insert(v);
+      plans.push_back(&*sp.pf.plan);
+    }
+    pool_identity(plans);
+  }
   for (std::size_t k = 0; k < n; ++k) {
     MergeSourcePlan& sp = *m.sources[k];
     if (!sp.used) continue;
@@ -4810,10 +4862,11 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
       if (dup) continue;
       if (r.channel.empty() && r.field != "dst")
         r.message = sources[k] + ": " + r.message;  // which source
+      r.message = scrub(std::move(r.message));
       if (!collect) raise(std::move(r));
       m.refusals.push_back(std::move(r));
     }
-    for (const auto& note : sp.pf.notes) m.notes.push_back(sources[k] + ": " + note);
+    for (const auto& note : sp.pf.notes) m.notes.push_back(scrub(sources[k] + ": " + note));
     if (sp.pf.plan) {
       m.kept.insert(sp.pf.kept.begin(), sp.pf.kept.end());
       m.excluded.insert(sp.pf.excluded.begin(), sp.pf.excluded.end());
@@ -4824,9 +4877,16 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
     if (m.anonymize) m.pseudonym = sp.pf.pseudonym;
   }
   for (const auto& c : m.kept) m.excluded.erase(c);  // kept by any source = kept
-  // Everything below needs every used source readable.
+  // Everything below needs every used source readable (an anonymized merge
+  // never runs on a pool that lacks a source's identity).
   for (const auto& sp : m.sources)
-    if (sp->used && !sp->pf.plan) return m;
+    if (sp->used && !sp->pf.plan) {
+      if (m.anonymize && m.refusals.empty())
+        add(RefusalKind::Io, "merge-source-unplanned",
+            "a source could not be read, so its identity cannot be removed from the result", {},
+            "sources");
+      return m;
+    }
 
   // ---- the sources must agree where their data meet ----------------------
   // Recording-time offset: times are copied verbatim (or shifted together).
@@ -4895,7 +4955,7 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
       si8 rto = 0;
       sf8 fs = 0;
       si8 reach = 0;
-      si8 start = 0, end = 0;  // UH span (clipped to the source's range)
+      si8 start = 0, end = 0;  // the segment's span (header widened to the index)
       std::vector<IndexBlock> blocks;
       bool read = false;
     };
@@ -4936,10 +4996,10 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
               b = std::max(b, sample_time(to_user_time(read<si8>(el, 8), t.rto),
                                           read<ui4>(el, 24), fs));
             }
-            if (win) {
-              a = std::max(a, win->first);
-              b = std::min(b, win->second);
-            }
+            // (Not clipped to the range: kept blocks extend past its end, by a
+            // sample when exact, by a block otherwise. The span only prunes
+            // which segments are compared; the comparison itself is on the
+            // blocks the copy keeps, index_blocks.)
             segs.push_back({k, &seg, t.rto, fs, longest_block_us(s2), a, b, {}, false});
           } catch (...) {
             // the source's own pre-flight already reported it
@@ -4995,14 +5055,14 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
       const std::size_t total = isize < UH ? 0 : static_cast<std::size_t>((isize - UH) / ENTRY);
       const auto& bl = blocks_of(sg);
       if (bl.empty()) {  // a segment without blocks (in range) has nothing to merge
-        m.notes.push_back(sp.path + ": " + sg.seg->dir() +
-                          (sp.options.time_range && total ? " holds no block in its time range"
-                                                          : " holds no blocks") +
-                          "; it is left out");
+        m.notes.push_back(scrub(sp.path + ": " + sg.seg->dir() +
+                                (sp.options.time_range && total ? " holds no block in its time range"
+                                                                : " holds no blocks") +
+                                "; it is left out"));
         continue;
       }
       if (foreign[i].empty()) {
-        pieces.push_back({sg.source, sg.seg, {0, total}, sg.start, 0, 0, {}});
+        pieces.push_back({sg.source, sg.seg, {0, total}, bl.front().start, 0, 0, {}});
         continue;
       }
       std::vector<si8> starts;

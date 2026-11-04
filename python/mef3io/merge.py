@@ -76,7 +76,11 @@ class MergeReport:
     ----------
     destination, session_name : str
     sources : tuple of str
-        As given.
+        As given. ANONYMIZED result: memory only, like the re-identification key
+        below (the paths name the patient): empty in :meth:`to_dict` (unless
+        ``include_original_times=True``) and in pickles, and ``notes`` there
+        name ``source N`` instead of the path. ``source_count`` always holds
+        the number of recordings.
     channels_kept, channels_excluded : tuple of str
         Over all sources.
     channels_without_samples : tuple of str
@@ -124,30 +128,35 @@ class MergeReport:
 
     destination: str
     session_name: str
-    sources: Tuple[str, ...]
+    sources: Tuple[str, ...] = field(repr=False)  # memory-only when anonymized
     channels_kept: Tuple[str, ...]
     channels_excluded: Tuple[str, ...]
-    channels_without_samples: Tuple[str, ...]
     segments: int
     segments_split: int
     blocks: int
     blocks_reencrypted: int
     blocks_decrypted: int
-    blocks_trimmed: int
     records: int
-    records_outside_window: int
     seizure_channel_entries_dropped: int
     metadata_fields_changed: int
     bytes_written: int
     output_encrypted: bool
     not_copied: Tuple[str, ...]
-    notes: Tuple[str, ...]
-    pseudonym: str
-    shift_us: Optional[int]
-    source_recording_time_offset: int
-    record_text_fields_changed: int
-    record_bodies_cleared: int
+    notes: Tuple[str, ...] = field(repr=False)  # (paths) memory-only when anonymized
     verification: VerifyReport = field(repr=False)
+    # Every field below has a default and sits after `verification`, so a report
+    # (dict or pickle) from 2.1.1, which has none of them, still loads.
+    channels_without_samples: Tuple[str, ...] = ()
+    blocks_trimmed: int = 0
+    records_outside_window: int = 0
+    pseudonym: str = ""
+    shift_us: Optional[int] = None
+    source_recording_time_offset: int = 0
+    record_text_fields_changed: int = 0
+    record_bodies_cleared: int = 0
+    # How many recordings were merged (``sources`` itself is memory-only when
+    # anonymizing: it holds the original paths, which name the patient).
+    source_count: int = 0
     # The re-identification key: out of repr() (see above).
     source_start_us: Optional[int] = field(default=None, repr=False)
     source_end_us: Optional[int] = field(default=None, repr=False)
@@ -164,9 +173,23 @@ class MergeReport:
         d["verification"] = VerifyReport._from(d["verification"])
         for k in ("sources", "channels_kept", "channels_excluded", "channels_without_samples",
                   "not_copied", "notes"):
-            d[k] = tuple(d[k])
+            if k in d:
+                d[k] = tuple(d[k])
+        d.setdefault("source_count", len(d.get("sources", ())))
         d["source_channel_times"] = {k: tuple(v) for k, v in d.get("source_channel_times", {}).items()}
         return cls(**d)
+
+    def _public_notes(self) -> Tuple[str, ...]:
+        """``notes`` with each source path replaced by ``source N`` when the
+        result is anonymized (the paths name the patient)."""
+        if not self.pseudonym:
+            return self.notes
+        out = []
+        for n in self.notes:
+            for i, p in enumerate(self.sources):
+                n = n.replace(p, f"source {i + 1}")
+            out.append(n)
+        return tuple(out)
 
     def with_original_times_in_pickle(self) -> "MergeReport":
         """A copy of this report whose pickle KEEPS the original times (see
@@ -180,6 +203,9 @@ class MergeReport:
         keep = getattr(self, "_pickle_original_times", False)
         if not keep:
             values.update(source_start_us=None, source_end_us=None, source_channel_times={})
+            if self.pseudonym:  # the original paths are as identifying as the times
+                values.update(notes=self._public_notes(), sources=(),
+                              source_count=self.source_count or len(self.sources))
         return (_unpickle_report, (values, keep))
 
     def __copy__(self):
@@ -199,12 +225,16 @@ class MergeReport:
         if not include_original_times:
             for k in ("source_start_us", "source_end_us", "source_channel_times"):
                 del d[k]
+            if self.pseudonym:
+                d["notes"] = list(self._public_notes())
+                d["sources"] = []
+                d["source_count"] = self.source_count or len(self.sources)
         return d
 
     def summary(self) -> str:
         """A few lines for a terminal."""
         lines = [
-            f"wrote {self.destination} from {len(self.sources)} recording(s): "
+            f"wrote {self.destination} from {self.source_count or len(self.sources)} recording(s): "
             f"{len(self.channels_kept)} channel(s), {self.segments} segment(s), "
             f"{self.blocks} block(s), {self.records} record(s)",
         ]
@@ -227,7 +257,7 @@ class MergeReport:
         if self.record_bodies_cleared:
             lines.append(f"  {self.record_bodies_cleared} record bod(ies) of an unknown type or "
                          "version not carried over")
-        for n in self.notes:
+        for n in self._public_notes():
             lines.append(f"  note: {n}")
         lines.append(self.verification.summary())
         return "\n".join(lines)

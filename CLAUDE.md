@@ -19,7 +19,7 @@ MATLAB. Reads/toc/segments/records on one Reader/Session may overlap across
 threads (#79; GIL released on open and every long call; the Python races of
 #110 fixed, rules in for_agents/INVARIANTS.md §12). ONE thread rule
 (docs/threads.md): `n_threads` per object covers open, file access, decode,
-encode; settable at runtime; no per-call count (2.0). Parallel open (#141),
+encode; settable at runtime; no per-call count (2.0) except the one-call, object-less `merge_sessions(n_threads=)` (approved 2026-11-04). Parallel open (#141),
 decode, encode, all byte-/result-deterministic across thread counts.
 Python (pytest) + standalone C++ Catch2 suites.
 Wheel builds via `python -m build`.

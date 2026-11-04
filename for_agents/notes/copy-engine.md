@@ -141,6 +141,17 @@ MERGE IN ONE PASS (`merge.hpp`; MergeOptions gained `time_ranges`, `anonymize`,
   `merge-anonymize-metadata`. verify_merge_impl adds the path walk, the scanner,
   the shift floor and an anonymize variant of the merged-record comparison
   (`time_field` + `check_body` per record, by source).
+* REVIEW ROUND 1: (a) a source whose parallel pre-open failed is planned again
+  serially BEFORE pooling, and the pool is rebuilt from every used source's
+  final `pf.plan` after the preflights (a source never drops out; anonymize
+  with an unplannable source refuses, `merge-source-unplanned`); test hook
+  `detail::merge_preopen_hook` (merge.hpp). (b) every refusal and note is
+  `scrub_times`-ed with the pooled plan when anonymizing. (c) overlap compares
+  the KEPT blocks (index_blocks), segment spans are not clipped to the range
+  (kept blocks reach past its end). (d) anonymized MergeReport: `sources` and
+  the paths in `notes` are memory-only (to_dict/pickle/summary), `source_count`.
+  (e) merge.hpp is forwarded from transform.hpp/anonymize.hpp (macro
+  MEF3IO_ANONYMIZE_HPP_PENDING breaks the include cycle).
 * THREADS (docs/threads.md "Merging and copying"): `MergeOptions::n_threads`.
   Phases: open+plan sources (parallel_for over sources), per-source preflights,
   the copy (parallel_try_each over CHANNELS; one Copier per source per task,

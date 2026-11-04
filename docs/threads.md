@@ -87,7 +87,10 @@ the **next call**. Calls already running keep the count they started with,
 and setting it while other threads read is safe. The open always uses the
 value given to the constructor.
 
-There is **no per-call thread argument**. `Reader.read(..., n_threads=)` and
+There is **no per-call thread argument** on an object's methods. (The one
+exception, approved by the maintainer on 2026-11-04: an operation that is a
+single call with no object, `merge_sessions`, takes `n_threads=` on the call,
+with the same meaning as the per-object count, 0 = automatic.) `Reader.read(..., n_threads=)` and
 `read_raw(..., n_threads=)` were removed in 2.0. Set the object's count
 instead.
 
