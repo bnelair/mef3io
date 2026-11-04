@@ -175,8 +175,14 @@ Uuid random_uuid() {
   return u;
 }
 
+// A plain loop on purpose: with std::all_of over the span, GCC 14.2 (the
+// manylinux_2_28 wheel toolchain, -O2 and up) wrongly found this function
+// "const" (reads no memory) and deleted the stores into the temporaries
+// passed to it (for_agents/notes/copy-engine.md, "all_zero and GCC 14.2").
 bool all_zero(std::span<const ui1> b) {
-  return std::all_of(b.begin(), b.end(), [](ui1 x) { return x == 0; });
+  for (const ui1 x : b)
+    if (x != 0) return false;
+  return true;
 }
 
 Uuid uuid_at(std::span<const ui1> b, std::size_t off) {
