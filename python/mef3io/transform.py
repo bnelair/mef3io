@@ -107,7 +107,9 @@ class TransformReport:
         A cut (``time_range``): edge blocks re-encoded to the window, and
         annotations left out.
     records_dropped : int
-        ``records="drop"``: source annotations left out (``records`` is then 0).
+        ``records="drop"``: annotations of the channels and segments the copy
+        keeps (and the session's own) that were left out; ``records`` is then 0.
+        Those of a channel the copy leaves out are not counted.
     metadata_fields_changed : int
         Metadata fields whose stored value changed (one per field per
         segment).
@@ -134,13 +136,14 @@ class TransformReport:
     seizure_channel_entries_dropped: int
     blocks_trimmed: int
     records_outside_window: int
-    records_dropped: int
     metadata_fields_changed: int
     bytes_written: int
     output_encrypted: bool
     not_copied: Tuple[str, ...]
     notes: Tuple[str, ...]
     verification: VerifyReport = field(repr=False)
+    # Last, with a default: a report from 2.1.1 (no such key) still loads.
+    records_dropped: int = 0
 
     @classmethod
     def _from(cls, d: dict) -> "TransformReport":
@@ -171,6 +174,8 @@ class TransformReport:
                 f"  encrypted data blocks: {self.blocks_reencrypted} re-encrypted, "
                 f"{self.blocks_decrypted} decrypted"
             )
+        if self.records_dropped:
+            lines.append(f"  {self.records_dropped} annotation(s) left out")
         if self.not_copied:
             lines.append(f"  {len(self.not_copied)} file(s) outside the MEF layout not copied")
         for n in self.notes:

@@ -142,7 +142,9 @@ class AnonymizeReport:
         A cut (``time_range``): edge blocks re-encoded to the window, and
         annotations left out.
     records_dropped : int
-        ``records="drop"``: source annotations left out (``records`` is then 0).
+        ``records="drop"``: annotations of the channels and segments the copy
+        keeps (and the session's own) that were left out; ``records`` is then 0.
+        Those of a channel the copy leaves out are not counted.
     bytes_written : int
     output_encrypted : bool
     not_copied : tuple of str
@@ -192,7 +194,6 @@ class AnonymizeReport:
     seizure_channel_entries_dropped: int
     blocks_trimmed: int
     records_outside_window: int
-    records_dropped: int
     bytes_written: int
     output_encrypted: bool
     not_copied: Tuple[str, ...]
@@ -204,6 +205,8 @@ class AnonymizeReport:
     source_channel_times: Dict[str, Tuple[Optional[int], Optional[int]]] = field(
         default_factory=dict, repr=False, compare=False
     )
+    # Last, with a default: a report pickled by 2.1.1 (no such key) still loads.
+    records_dropped: int = 0
 
     @classmethod
     def _from(cls, d: dict) -> "AnonymizeReport":
@@ -279,6 +282,8 @@ class AnonymizeReport:
                 f"  {self.record_bodies_cleared} record bod(ies) of an unknown type or version "
                 "not carried over"
             )
+        if self.records_dropped:
+            lines.append(f"  {self.records_dropped} annotation(s) left out")
         if self.not_copied:
             lines.append(f"  {len(self.not_copied)} file(s) outside the MEF layout not copied")
         for n in self.notes:

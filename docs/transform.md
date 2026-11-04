@@ -83,10 +83,15 @@ python -m mef3io transform patient.mefd patient_eeg.mefd \
 annotations at any level (session, channel, segment): no annotation files
 exist in it, exactly as in a recording that never had any. Everything else is
 as without it, and the same argument works for `anonymize_session` and
-`merge_sessions`. The report's `records_dropped` counts the annotations left
-out (`records` is then 0). `verify` takes the same argument and expects none.
+`merge_sessions`. The report's `records_dropped` counts the annotations of the channels and
+segments the copy keeps (and the session's own) that were left out; those of
+a channel the copy leaves out are not counted (`records` is then 0), and
+`summary()` says "N annotation(s) left out". `verify` takes the same argument and expects none.
 A channel that holds only annotations is left out. The default is
-`records="keep"`; any other value is refused (`records-invalid`).
+`records="keep"`; any other value is refused (`records-invalid`). Several
+session-level annotation files with none named after the session are still
+refused (`records-ambiguous`) with `"drop"`: the copy would not know which
+one the session means.
 
 ## Keep only a time window (cut)
 

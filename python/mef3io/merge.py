@@ -92,7 +92,9 @@ class MergeReport:
         ``time_ranges``: edge blocks re-encoded to a range, and annotations
         left out for lying outside their source's range.
     records_dropped : int
-        ``records="drop"``: source annotations left out (``records`` is then 0).
+        ``records="drop"``: annotations of the channels and segments the copy
+        keeps (and the session's own) that were left out; ``records`` is then 0.
+        Those of a channel the copy leaves out are not counted.
     seizure_channel_entries_dropped, metadata_fields_changed : int
     bytes_written : int
     output_encrypted : bool
@@ -133,7 +135,6 @@ class MergeReport:
     blocks_decrypted: int
     blocks_trimmed: int
     records: int
-    records_dropped: int
     records_outside_window: int
     seizure_channel_entries_dropped: int
     metadata_fields_changed: int
@@ -153,6 +154,8 @@ class MergeReport:
     source_channel_times: Dict[str, Tuple[Optional[int], Optional[int]]] = field(
         default_factory=dict, repr=False, compare=False
     )
+    # Last, with a default: a report from 2.1.1 (no such key) still loads.
+    records_dropped: int = 0
 
     @classmethod
     def _from(cls, d: dict) -> "MergeReport":
@@ -162,7 +165,7 @@ class MergeReport:
         for k in ("sources", "channels_kept", "channels_excluded", "channels_without_samples",
                   "not_copied", "notes"):
             d[k] = tuple(d[k])
-        d["source_channel_times"] = {k: tuple(v) for k, v in d["source_channel_times"].items()}
+        d["source_channel_times"] = {k: tuple(v) for k, v in d.get("source_channel_times", {}).items()}
         return cls(**d)
 
     def with_original_times_in_pickle(self) -> "MergeReport":
@@ -219,6 +222,8 @@ class MergeReport:
             lines.append(f"  {self.segments_split} segment(s) split around another recording's data")
         if self.channels_excluded:
             lines.append(f"  channels left out: {', '.join(self.channels_excluded)}")
+        if self.records_dropped:
+            lines.append(f"  {self.records_dropped} annotation(s) left out")
         if self.record_bodies_cleared:
             lines.append(f"  {self.record_bodies_cleared} record bod(ies) of an unknown type or "
                          "version not carried over")
