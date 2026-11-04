@@ -67,8 +67,9 @@ version number.
   [Ordering and naming many sessions](python.md#ordering-and-naming-many-sessions).
 - **Merging recordings** — `mef3io.merge_sessions` merges two or more
   recordings into one session: parts of one stay, or recordings that take
-  turns, checked for overlapping data before anything is written. Python and
-  C++ — see [Merging recordings](merge.md).
+  turns, checked for overlapping data before anything is written; one call
+  can also trim each recording to its own time range and anonymize the
+  result. Python and C++ — see [Merging recordings](merge.md).
 - **Deterministic** — output is byte-identical regardless of thread count.
 - **Responsive, with thread-safe reads** — opening, reading and writing
   release Python's GIL, so a GUI stays responsive while a session opens or

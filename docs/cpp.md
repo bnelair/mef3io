@@ -217,9 +217,17 @@ mef3io::TransformReport rep = mef3io::transform_session("patient.mefd", "eeg.mef
 `check_transform` and `verify_transform` mirror their anonymize
 counterparts. `merge_sessions(sources, dst, MergeOptions)` (with
 `check_merge` / `verify_merge`) merges several sessions on the same engine;
-see [Merging recordings](merge.md) (`merge.hpp`: per-source `time_ranges`, `anonymize`, `n_threads`). The options, refusals and reports are shared:
+see [Merging recordings](merge.md). The options, refusals and reports are shared:
 - `AnonymizeOptions` and `TransformOptions` both extend `CopyOptions`;
 - `AnonymizeError` is an alias of `CopyError`.
+- `CopyOptions::drop_records` (with `VerifyOptions::drop_records` for the
+  verification) leaves every annotation out of the copy; the report's
+  `records_dropped` counts them.
+- `MergeOptions` (in `merge.hpp`, which `transform.hpp` and `anonymize.hpp`
+  include) adds `time_ranges` (one optional cut per source), `anonymize` (an
+  `AnonymizeOptions`) and `n_threads` (0 = automatic, negative is an error).
+- Paths are UTF-8 `std::string`s on every platform; on Windows they are
+  converted to wide paths, never through the ANSI code page.
 
 ## Errors
 
