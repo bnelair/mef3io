@@ -69,6 +69,14 @@ struct CopyOptions {
   /// holds exactly the window; false = whole edge blocks are kept and
   /// nothing is decoded (a block's worth of extra samples at each edge).
   bool exact = true;
+  /// true: the copy holds NO annotation records at any level (session,
+  /// channel, segment): no .rdat/.ridx is written, exactly like a session
+  /// that never had records. The source's records are not copied or checked
+  /// by the copy (the pre-flight's inspection still reads them); their count
+  /// is reported as `records_dropped`. A channel that holds only records
+  /// (no signal) would be an empty folder, so it is left out of the copy.
+  /// false (the default): records are copied as before.
+  bool drop_records = false;
 };
 
 /// Edits to the descriptive metadata of a transformed copy. Unset = copied
@@ -195,6 +203,7 @@ struct CopyReport {
   si8 seizure_channel_entries_dropped = 0;
   si8 blocks_trimmed = 0;          ///< cut: edge blocks re-encoded to the window
   si8 records_outside_window = 0;  ///< cut: annotations left out
+  si8 records_dropped = 0;         ///< drop_records: source annotations left out
   std::uint64_t bytes_written = 0;
   bool output_encrypted = false;
   /// Files in the source that are not part of the MEF layout and were not

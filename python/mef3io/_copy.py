@@ -26,6 +26,7 @@ COPY_REFUSAL_CODES: Dict[str, Tuple[str, str]] = {
     "argument-type": ("TypeError", "check"),
     # options
     "channel-selection-conflict": ("ValueError", "check"),
+    "records-invalid": ("ValueError", "check"),
     "output-password-unpaired": ("ValueError", "check"),
     "output-passwords-equal": ("ValueError", "check"),
     # paths
@@ -344,8 +345,16 @@ def _time_range(time_range):
     return (int(t0), int(t1))
 
 
+def _records_drop(records) -> bool:
+    """``records=`` as the extension's drop_records flag (verify paths)."""
+    if not (isinstance(records, str) and records in ("keep", "drop")):
+        raise _error("ValueError", "records-invalid", "records must be 'keep' or 'drop'",
+                     field="records")
+    return records == "drop"
+
+
 def _copy_arguments(refusals: _Refusals, *, channels, exclude_channels, output_password,
-                    time_range=None, exact=True) -> dict:
+                    time_range=None, exact=True, records="keep") -> dict:
     """The checks every copy makes in Python, in the order the copy makes
     them, and the extension's keyword arguments for them."""
     if channels is not None and exclude_channels is not None:
@@ -356,8 +365,12 @@ def _copy_arguments(refusals: _Refusals, *, channels, exclude_channels, output_p
     if channels is not None and not names:
         refusals.add("ValueError", "no-channels-left",
                      "the selection leaves no channel to copy (channels=[])", field="channels")
+    if not (isinstance(records, str) and records in ("keep", "drop")):
+        refusals.add("ValueError", "records-invalid", "records must be 'keep' or 'drop'",
+                     field="records")
+        records = "keep"
     out1, out2 = _output_passwords(output_password, refusals)
-    return dict(output_password_1=out1, output_password_2=out2, channels=names,
+    return dict(drop_records=records == "drop", output_password_1=out1, output_password_2=out2, channels=names,
                 exclude_channels=excluded, time_range=_time_range(time_range), exact=bool(exact))
 
 
@@ -426,6 +439,8 @@ def _add_copy_cli_arguments(p) -> None:
                    help="cut: keep only samples before this time")
     p.add_argument("--whole-blocks", action="store_true",
                    help="cut: keep whole blocks at the edges instead of trimming them exactly")
+    p.add_argument("--drop-records", action="store_true",
+                   help="leave every annotation (session, channel and segment level) out of the copy")
     p.add_argument("--json", action="store_true", help="print the report as JSON")
 
 
@@ -446,6 +461,7 @@ def _cli_copy_kwargs(args, password: str) -> dict:
     return dict(
         time_range=None if args.start is None else (args.start, args.end),
         exact=not args.whole_blocks,
+        records="drop" if args.drop_records else "keep",
         rename=not args.no_rename,
         password=password,
         output_password=tuple(args.output_password) if args.output_password else None,
