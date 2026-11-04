@@ -338,3 +338,44 @@ TEST_CASE("check_merge: options a merge does not take are refused with their cod
   CHECK(std::count(codes.begin(), codes.end(), "merge-time-range") == 1);
   CHECK(std::count(codes.begin(), codes.end(), "merge-rename") == 1);
 }
+
+TEST_CASE("merge_sessions: per-source ranges, anonymize and threads give the same bytes") {
+  const auto dir = fresh("mef3io_merge_onepass");
+  auto write = [&](const std::string& name, si8 t, std::size_t n) {
+    const std::string path = (dir / name).string();
+    SessionWriter w(path, true);
+    for (const char* ch : {"a", "b"}) {
+      std::vector<si4> x(n);
+      for (std::size_t i = 0; i < n; ++i) x[i] = static_cast<si4>((i * 7) % 1000);
+      w.write_int32(ch, x, 1.0, START + t, 1000.0, {}, false);
+    }
+    return path;
+  };
+  const std::string a = write("a.mefd", 0, 20'000);           // 0-20 s
+  const std::string b = write("b.mefd", 10'000'000, 20'000);  // 10-30 s: overlaps a
+  MergeOptions o;
+  CHECK_FALSE(check_merge({a, b}, (dir / "m.mefd").string(), o).ok);
+  o.time_ranges = {std::make_pair(START, START + 10'000'000),
+                   std::make_pair(START + 10'000'000, START + 30'000'000)};
+  o.anonymize = AnonymizeOptions{};
+  o.anonymize->shift_us = 3'000'000'000'000'000;  // ~95 years
+  std::vector<std::vector<ui1>> tdat;
+  for (int threads : {1, 4}) {
+    o.n_threads = threads;
+    const std::string dst = (dir / ("m" + std::to_string(threads) + ".mefd")).string();
+    const MergeReport rep = merge_sessions({a, b}, dst, o);
+    REQUIRE(rep.verification.ok);
+    CHECK(rep.shift_us == o.anonymize->shift_us);
+    CHECK(verify_merge({a, b}, dst, o).ok);
+    Session m(dst);
+    CHECK(m.segment_map("a").size() == 2);
+    // The data file of segment 1 of channel a, past its universal header.
+    std::ifstream f(dst + "/a.timd/a-000001.segd/a-000001.tdat", std::ios::binary);
+    std::vector<ui1> bytes((std::istreambuf_iterator<char>(f)), {});
+    REQUIRE(bytes.size() > 1024);
+    tdat.emplace_back(bytes.begin() + 1024, bytes.end());
+  }
+  CHECK(tdat[0] == tdat[1]);
+  o.n_threads = -1;
+  CHECK_FALSE(check_merge({a, b}, (dir / "z.mefd").string(), o).ok);
+}
