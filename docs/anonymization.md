@@ -156,7 +156,7 @@ times.
 | Subject | `subject_name_1`, `subject_name_2`, `subject_id` and `recording_location` cleared (`clear=`). |
 | Session name | Replaced by the copy's name in every file header, in the names of the session-level annotation files, and in `session_description`. `anonymized_name` is set to `pseudonym` (default: the copy's name). |
 | Descriptions | `session_description`, `channel_description` and `reference_description` cleared. With `clear=("subject", "location")` they are kept, with the old session name replaced and the removed names taken out. |
-| Annotation text | `text="drop"` (default) clears every free-text field; the annotations, their types and their (moved) times stay. `text="keep"` keeps the text and takes out only the names mef3io knows: the old session name, the subject's names, ID and location, and excluded channels (short names and numbers only as whole words or numbers; kept channel names are never changed). **It does not find dates, ages, other people's names or anything else written in free text**; read the text yourself, or use `"drop"`. A function `text(value, info)` decides itself; the known names are still taken out afterwards. Text that is not valid UTF-8 reaches it with each bad byte as a surrogate (`errors="surrogateescape"`) and is written back byte for byte. An annotation of a type or version mef3io does not know keeps its type and time, but its contents are not copied, since they may hold text or dates nothing can find. |
+| Annotation text | `text="drop"` (default) clears every free-text field; the annotations, their types and their (moved) times stay. `text="keep"` keeps the text and takes out only the names mef3io knows: the old session name, the subject's names, ID and location, and excluded channels (short names and numbers only as whole words or numbers; kept channel names are never changed). **It does not find dates, ages, other people's names or anything else written in free text**; read the text yourself, or use `"drop"`. `records="drop"` leaves every annotation out instead (`records_dropped` counts those of the channels and segments the copy keeps and the session's own; `summary()` says "N annotation(s) left out"). A function `text(value, info)` decides itself; the known names are still taken out afterwards. Text that is not valid UTF-8 reaches it with each bad byte as a surrogate (`errors="surrogateescape"`) and is written back byte for byte. An annotation of a type or version mef3io does not know keeps its type and time, but its contents are not copied, since they may hold text or dates nothing can find. |
 | Seizure channel lists | An entry naming a kept channel exactly stays. An entry naming an excluded channel (compared without case or surrounding spaces) is removed. Any other entry name is free text: cleared with `text="drop"`, names taken out otherwise. |
 | Identifiers | Every file identifier (level, file and provenance UUID) is new, so nothing links the copy back to the original. |
 | Other programs' data | The private areas other programs may fill in are cleared: the protected and discretionary regions of every file header, of metadata sections 1–3, of every block-index entry and of every data block's header. Every text field is rewritten whole, so nothing hidden after a field's end survives. |
@@ -305,6 +305,7 @@ with a shift; a copy that keeps the times never meets them.
 |---|---|---|---|
 | `argument-type` | `TypeError` | check | A channel list holds something other than names. Raised by `check` too. |
 | `clear-unknown` | `ValueError` | check | `clear=` names something other than subject, location, descriptions. |
+| `records-invalid` | `ValueError` | check | `records=` is not `"keep"` or `"drop"` (any copy, also `merge_sessions`). |
 | `text-invalid` | `ValueError` | check | `text=` is not `"drop"`, `"keep"` or a callable. |
 | `shift-zero` | `ValueError` | check | *(shift only)* The shift is 0. Leave the shift out to keep the times. |
 | `channel-selection-conflict` | `ValueError` | check | Both `channels` and `exclude_channels` given. |
@@ -320,7 +321,7 @@ with a shift; a copy that keeps the times never meets them.
 | `source-unreadable` | `IoError` | check | The source cannot be opened as a session (not `.mefd` / `.mefd.tar`, a compressed archive, an unreadable file). |
 | `source-damaged` | `FormatError` | check | Source metadata or annotation files are damaged (truncated, malformed). |
 | `source-crc` | `CrcError` | check | Source metadata or an annotation fails its checksum. |
-| `records-ambiguous` | `FormatError` | check | Several session-level annotation files and none named after the session. |
+| `records-ambiguous` | `FormatError` | check | Several session-level annotation files and none named after the session (refused also with `records="drop"`). |
 | `password-wrong` | `PasswordError` | check | The password opens nothing. |
 | `password-required` | `PasswordError` | check | The source is encrypted and no password was given. |
 | `password-level1-only` | `PasswordError` | check | The password is the level-1 one; anonymizing needs level 2. |
@@ -415,7 +416,8 @@ It confirms that:
   shift: every time differs from the source's by exactly the shift, in the
   same stored form, and the offset is 0. In both, the GMT offset and
   daylight-saving fields hold their set values;
-- the annotations match in number, order and type; a cut keeps exactly the
+- the annotations match in number, order and type (with `records="drop"`:
+  the copy holds none, and any annotation file in it fails the check); a cut keeps exactly the
   source's annotations in the window, each placed by its own file's offset;
 - a cut segment's file headers span exactly the samples it holds, and a
   channel left out for having no samples in the window has none;

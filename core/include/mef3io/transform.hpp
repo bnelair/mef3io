@@ -69,6 +69,14 @@ struct CopyOptions {
   /// holds exactly the window; false = whole edge blocks are kept and
   /// nothing is decoded (a block's worth of extra samples at each edge).
   bool exact = true;
+  /// true: the copy holds NO annotation records at any level (session,
+  /// channel, segment): no .rdat/.ridx is written, exactly like a session
+  /// that never had records. The source's records are not copied or checked
+  /// by the copy (the pre-flight's inspection still reads them); their count
+  /// is reported as `records_dropped`. A channel that holds only records
+  /// (no signal) would be an empty folder, so it is left out of the copy.
+  /// false (the default): records are copied as before.
+  bool drop_records = false;
 };
 
 /// Edits to the descriptive metadata of a transformed copy. Unset = copied
@@ -195,6 +203,7 @@ struct CopyReport {
   si8 seizure_channel_entries_dropped = 0;
   si8 blocks_trimmed = 0;          ///< cut: edge blocks re-encoded to the window
   si8 records_outside_window = 0;  ///< cut: annotations left out
+  si8 records_dropped = 0;         ///< drop_records: source annotations left out
   std::uint64_t bytes_written = 0;
   bool output_encrypted = false;
   /// Files in the source that are not part of the MEF layout and were not
@@ -209,51 +218,6 @@ struct TransformReport : CopyReport {
   /// segment).
   si8 metadata_fields_changed = 0;
 };
-
-/// Merging several recordings into one (#103). The transform's rules apply
-/// to every source (times and samples verbatim; channels, passwords and
-/// metadata edits as asked), `rename` is implied (the result is named after
-/// `dst`), and a cut is not combined with it yet (`time_range` must be unset).
-struct MergeOptions : TransformOptions {
-  /// The password that opens each source, in the order of `sources`. Empty =
-  /// CopyOptions::password for every source.
-  std::vector<std::string> passwords;
-};
-
-struct MergeReport : TransformReport {
-  std::vector<std::string> sources;  ///< as given
-  /// Source segments split in two or more pieces because another source's
-  /// data lies in one of their gaps (each piece is its own segment).
-  si8 segments_split = 0;
-};
-
-/// Merge `sources` (`.mefd` directories or `.mefd.tar` archives, at least
-/// two) into ONE new session `dst`. Refused before anything is written
-/// (check_merge lists everything):
-///   * `merge-overlap`: two sources hold samples of the same channel at the
-///     same moment (compared on the RECORDED data, from the indexes, so
-///     recordings that take turns merge; a source's own overlapping blocks
-///     never count);
-///   * `merge-rate-differs`: a channel has different sampling rates;
-///   * `merge-rto-differs`: the sources use different recording-time
-///     offsets (times are copied verbatim);
-///   * `merge-identity-differs`: the sources' subject fields differ and
-///     `metadata` does not set them for the result;
-/// plus every refusal a transform of each source would meet. Each source
-/// segment becomes one segment of the result, split at gaps where another
-/// source's data lies so that the result's segments never overlap; they are
-/// ordered by time and renumbered per channel. Annotations are merged by
-/// time. The result is verified against the sources before it is published.
-MergeReport merge_sessions(const std::vector<std::string>& sources, const std::string& dst,
-                           const MergeOptions& options, const Control& ctl = {});
-
-/// Every check merge_sessions makes before it writes, without writing.
-CopyCheck check_merge(const std::vector<std::string>& sources, const std::string& dst,
-                      const MergeOptions& options, const Control& ctl = {});
-
-/// Check a merged session against its sources. Reads all; writes nothing.
-VerifyReport verify_merge(const std::vector<std::string>& sources, const std::string& dst,
-                          const MergeOptions& options, const Control& ctl = {});
 
 /// Write a modified copy of `src` (a `.mefd` directory or `.mefd.tar`) to
 /// `dst` (a new `.mefd` directory). See the top of this file.
@@ -288,3 +252,11 @@ VerifyReport verify_transform(const std::string& src, const std::string& dst,
                               const TransformOptions& options, const Control& ctl = {});
 
 }  // namespace mef3io
+
+// merge_sessions / MergeOptions / MergeReport moved to merge.hpp (one-pass
+// merge); this keeps callers that include only transform.hpp compiling.
+// (anonymize.hpp includes this header first and then merge.hpp itself, once
+// AnonymizeOptions exists: the include below is skipped on that path.)
+#ifndef MEF3IO_ANONYMIZE_HPP_PENDING
+#include "mef3io/merge.hpp"
+#endif

@@ -112,8 +112,59 @@ annotations against the sources' sorted by time, PLUS their headers
 entry (by offset: type/version/encryption, the source index's time);
 segments never overlapping (with the tolerance); the validator with NO
 excusal (renumbered: repair sources first). The Seiz entry filter is one
-function (`seiz_without`) for the copy and this check. time_range is refused with a
-merge for now (`merge-time-range`); anonymize after merging.
+function (`seiz_without`) for the copy and this check.
+
+MERGE IN ONE PASS (`merge.hpp`; MergeOptions gained `time_ranges`, `anonymize`,
+`n_threads`; the single `time_range` stays refused, `merge-time-range`):
+* PER-SOURCE CUT: each source's `TransformOptions::time_range` = its entry; its
+  Copier has `window_` AND `piece_` (copy_segment_data intersects
+  `window_entries` with the piece). Planning (`index_blocks(win, exact)`) keeps
+  only blocks `window_slice` says hold a sample, clipped like the copy
+  (`exact`: [sample i0, sample i1); else whole), reading only
+  `window_entries` of a windowed segment; a segment is skipped by the COPY's own
+  UH rule; piece entry ranges still tile [0,n) (`bl[b].idx`). Channels with no
+  piece are left out (`without_samples`, also excluded). The verifier's
+  `check_segment_data_cut(piece)` now honours `o_.time_range` too, and
+  merged annotations/`check_records` filter per source with `record_in_window`.
+* ANONYMIZE: per source `Rules{anon}` (the same Copier/Verifier/preflight, no
+  parallel implementation). All sources are opened+planned FIRST (`Prebuilt`
+  handed to `preflight`), then `pool_identity` unions session names, subject/
+  location/anonymized values, IDs, `summary.identity` and the time range
+  (first/last) into EVERY plan, so each source's preflight, Redactor and
+  verify Scanner know every source's identity (`merge-identity-differs`
+  reads a snapshot taken BEFORE pooling and skips fields anonymize clears).
+  Redactor/Scanner are built once from the pooled plan with the merge's
+  global kept/excluded sets (verify: excluded = source channels absent from the
+  result's own layout). ONE shift: `shift-zero` + `shift_range_refusals`
+  (shared with preflight) against the span of ALL whole sources, trimmed or not
+  (floor kept as in anonymize on purpose). `metadata` + anonymize =
+  `merge-anonymize-metadata`. verify_merge_impl adds the path walk, the scanner,
+  the shift floor and an anonymize variant of the merged-record comparison
+  (`time_field` + `check_body` per record, by source).
+* REVIEW ROUND 1: (a) a source whose parallel pre-open failed is planned again
+  serially BEFORE pooling, and the pool is rebuilt from every used source's
+  final `pf.plan` after the preflights (a source never drops out; anonymize
+  with an unplannable source refuses, `merge-source-unplanned`); test hook
+  `detail::merge_preopen_hook` (merge.hpp). (b) every refusal and note is
+  `scrub_times`-ed with the pooled plan when anonymizing. (c) overlap compares
+  the KEPT blocks (index_blocks), segment spans are not clipped to the range
+  (kept blocks reach past its end). (d) anonymized MergeReport: `sources` and
+  the paths in `notes` are memory-only (to_dict/pickle/summary), `source_count`.
+  (e) merge.hpp is forwarded from transform.hpp/anonymize.hpp (macro
+  MEF3IO_ANONYMIZE_HPP_PENDING breaks the include cycle).
+* THREADS (docs/threads.md "Merging and copying"): `MergeOptions::n_threads`.
+  Phases: open+plan sources (parallel_for over sources), per-source preflights,
+  the copy (parallel_try_each over CHANNELS; one Copier per source per task,
+  own report, folded in channel order; fsync in the task), the verify (per
+  channel, own Verifiers/reports), validator and merged records serial. Errors:
+  a failing channel i cancels tokens of channels > i only, the caller's cancel
+  wins, then the LOWEST-index error is rethrown, so the error never depends on
+  the count (INVARIANTS §12). Output equals across counts except the UH
+  (random UUIDs). A text callback => copy on one thread (called in order).
+  Progress: ProgressReporter is already serialised/monotonic; called from
+  whichever worker crosses a step (NOT one fixed thread).
+* Verification still re-reads every source (copy pass: once; verify: again).
+  A digest taken during the copy would avoid the second read; not done.
 Transform rules, test-pinned (`tests/test_p33_transform.py`,
 `core/tests/test_transform.cpp`): every stored time VERBATIM (Copier::time
 returns it unchanged; no Shifter, so no rto refusals: rto, DST, GMT kept);
@@ -271,6 +322,8 @@ warning; test_p32 greps the copy's bytes for them. (13) verify: a kept
 source DATA channel must be a data channel in the copy ("has no segments in
 the copy"); a records-only channel is accepted only if records-only in the
 source; anonymize_session also requires verify's channels == kept.
+
+DROP RECORDS (`CopyOptions::drop_records`, Python `records="keep"|"drop"`, CLI `--drop-records`; shared by anonymize, transform and merge because it lives in CopyOptions): the copy writes NO .rdat/.ridx at any level (a session that never had records is the model; no new on-disk field, provenance unchanged). Source record files are not read by the pass or the pre-flight record loop (`Copier::drop_records_of` counts them from the .ridx size, else the .rdat header, into `records_dropped`; `inspect` reads only their sizes). `records_dropped` counts only the records of the channels and segments the copy keeps (plus the session's); a left-out channel's are not counted. A record-only channel would be an empty folder, so the pre-flight leaves it out (excluded + note): it then counts as excluded like any other, so its name joins the scrubbed left-out names and can trigger text-unremovable. `records-ambiguous` is still refused under drop (safer; documented in the refusal table). The three reports carry `records_dropped` LAST with default 0 so 2.1.1 pickles/dicts still load and positional construction does not shift. Verify (`VerifyOptions::drop_records`, set from the options by every caller, merge from its sources' options) expects NO record file at any level and fails if one exists; with "keep" the strict count/order/type checks are untouched. A bad Python value is `records-invalid` (shared COPY_REFUSAL_CODES). Test-pinned: tests/test_p50_copy_drop_records.py.
 
 ## provenance_UUID store in `Copier::patch_uh` (2.1.1 wheel defect)
 

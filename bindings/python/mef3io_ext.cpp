@@ -29,6 +29,7 @@
 #include "mef3io/session.hpp"
 #include "mef3io/session_writer.hpp"
 #include "mef3io/tar.hpp"
+#include "mef3io/merge.hpp"
 #include "mef3io/transform.hpp"
 #include "mef3io/validate.hpp"
 #include "mef3io/types.hpp"
@@ -480,9 +481,10 @@ void set_copy_options(mef3io::CopyOptions& o, bool rename, const std::string& pa
                       const std::string& output_password_1, const std::string& output_password_2,
                       std::vector<std::string> channels, std::vector<std::string> exclude_channels,
                       std::optional<std::pair<std::int64_t, std::int64_t>> time_range = std::nullopt,
-                      bool exact = true) {
+                      bool exact = true, bool drop_records = false) {
   o.time_range = time_range;
   o.exact = exact;
+  o.drop_records = drop_records;
   o.rename = rename;
   o.password = password;
   o.output_password_1 = output_password_1;
@@ -533,6 +535,7 @@ nb::dict copy_report_dict(const mef3io::CopyReport& r) {
   out["seizure_channel_entries_dropped"] = r.seizure_channel_entries_dropped;
   out["blocks_trimmed"] = r.blocks_trimmed;
   out["records_outside_window"] = r.records_outside_window;
+  out["records_dropped"] = r.records_dropped;
   out["bytes_written"] = r.bytes_written;
   out["output_encrypted"] = r.output_encrypted;
   out["not_copied"] = r.not_copied;
@@ -637,6 +640,52 @@ struct PyHooks {
     }
   }
 };
+/// The Python text callable as a RecordTextFn. Called on the copying thread
+/// with the GIL released; takes it for the call. A raised exception aborts the
+/// copy (nothing is left behind) and is re-raised unchanged, like a progress
+/// callback's.
+mef3io::RecordTextFn make_text_fn(PyHooks& hooks, nb::object& text_fn) {
+  if (!PyCallable_Check(text_fn.ptr())) throw nb::type_error("text must be callable");
+  return [&hooks, &text_fn](const std::string& value,
+                                 const mef3io::RecordTextField& f) -> std::string {
+    nb::gil_scoped_acquire gil;
+    if (hooks.error) throw mef3io::Cancelled("text callback raised");
+    try {
+      nb::dict info;
+      info["record_type"] = f.record_type;
+      info["field"] = f.field;
+      info["level"] = mef3io::record_level_name(f.level);
+      info["channel"] = f.channel;
+      info["segment"] = f.segment;
+      // NO_ENTRY: not known (an offset its segments disagree on).
+      if (f.time == std::numeric_limits<std::int64_t>::min()) info["time"] = nb::none();
+      else info["time"] = f.time;
+      // Record text is bytes from a file and need not be valid UTF-8:
+      // decode with surrogateescape so every byte survives, and
+      // encode the result back the same way.
+      PyObject* raw = PyUnicode_DecodeUTF8(value.data(),
+                                           static_cast<Py_ssize_t>(value.size()),
+                                           "surrogateescape");
+      if (!raw) throw nb::python_error();
+      nb::object arg = nb::steal(raw);
+      nb::object r = text_fn(arg, info);
+      if (r.is_none()) return std::string();
+      if (!nb::isinstance<nb::str>(r)) {
+        PyErr_SetString(PyExc_TypeError, "the text callable must return a str or None");
+        throw nb::python_error();
+      }
+      PyObject* enc = PyUnicode_AsEncodedString(r.ptr(), "utf-8", "surrogateescape");
+      if (!enc) throw nb::python_error();
+      nb::object b = nb::steal(enc);
+      return std::string(PyBytes_AS_STRING(enc),
+                         static_cast<std::size_t>(PyBytes_GET_SIZE(enc)));
+    } catch (nb::python_error& e) {
+      hooks.error.emplace(std::move(e));
+      throw mef3io::Cancelled("text callback raised");
+    }
+  };
+}
+
 }  // namespace
 
 NB_MODULE(_mef3io, m) {
@@ -841,7 +890,7 @@ NB_MODULE(_mef3io, m) {
          bool clear_descriptions, const std::string& text, bool has_text_fn, bool rename,
          const std::string& password, const std::string& output_password_1,
          const std::string& output_password_2, std::vector<std::string> channels,
-         std::vector<std::string> exclude_channels, std::optional<std::pair<std::int64_t, std::int64_t>> time_range, bool exact,
+         std::vector<std::string> exclude_channels, std::optional<std::pair<std::int64_t, std::int64_t>> time_range, bool exact, bool drop_records,
          const mef3io::CancelToken* cancel) {
         PyHooks hooks(cancel, nb::none());
         mef3io::AnonymizeOptions o;
@@ -858,7 +907,7 @@ NB_MODULE(_mef3io, m) {
         if (has_text_fn)
           o.text_fn = [](const std::string& v, const mef3io::RecordTextField&) { return v; };
         set_copy_options(o, rename, password, output_password_1, output_password_2,
-                         std::move(channels), std::move(exclude_channels), time_range, exact);
+                         std::move(channels), std::move(exclude_channels), time_range, exact, drop_records);
         mef3io::AnonymizeCheck c = hooks.run([&](const mef3io::Control& ctl) {
           return mef3io::check_anonymize(src, dst, o, ctl);
         });
@@ -873,7 +922,7 @@ NB_MODULE(_mef3io, m) {
       nb::arg("rename") = true, nb::arg("password") = "", nb::arg("output_password_1") = "",
       nb::arg("output_password_2") = "", nb::arg("channels") = std::vector<std::string>{},
       nb::arg("exclude_channels") = std::vector<std::string>{},
-      nb::arg("time_range").none() = nb::none(), nb::arg("exact") = true,
+      nb::arg("time_range").none() = nb::none(), nb::arg("exact") = true, nb::arg("drop_records") = false,
       nb::arg("cancel").none() = nb::none(),
       "Every check anonymize_session makes before writing; writes nothing "
       "(see mef3io.anonymize.check).");
@@ -884,7 +933,7 @@ NB_MODULE(_mef3io, m) {
          bool clear_descriptions, const std::string& text, nb::object text_fn, bool rename,
          const std::string& password, const std::string& output_password_1,
          const std::string& output_password_2, std::vector<std::string> channels,
-         std::vector<std::string> exclude_channels, std::optional<std::pair<std::int64_t, std::int64_t>> time_range, bool exact,
+         std::vector<std::string> exclude_channels, std::optional<std::pair<std::int64_t, std::int64_t>> time_range, bool exact, bool drop_records,
          const mef3io::CancelToken* cancel, nb::object progress) {
         PyHooks hooks(cancel, std::move(progress));
         mef3io::AnonymizeOptions o;
@@ -897,52 +946,10 @@ NB_MODULE(_mef3io, m) {
         else if (text == "keep") o.text = mef3io::RecordTextPolicy::Keep;
         else if (text == "callback") o.text = mef3io::RecordTextPolicy::Callback;
         else throw nb::value_error("text must be 'drop', 'keep' or a callable");
-        if (o.text == mef3io::RecordTextPolicy::Callback) {
-          if (!PyCallable_Check(text_fn.ptr())) throw nb::type_error("text must be callable");
-          // Called on the copying thread with the GIL released; take it for
-          // the call. A raised exception aborts the copy (nothing is left
-          // behind) and is re-raised unchanged, like a progress callback's.
-          o.text_fn = [&hooks, &text_fn](const std::string& value,
-                                         const mef3io::RecordTextField& f) -> std::string {
-            nb::gil_scoped_acquire gil;
-            if (hooks.error) throw mef3io::Cancelled("text callback raised");
-            try {
-              nb::dict info;
-              info["record_type"] = f.record_type;
-              info["field"] = f.field;
-              info["level"] = mef3io::record_level_name(f.level);
-              info["channel"] = f.channel;
-              info["segment"] = f.segment;
-              // NO_ENTRY: not known (an offset its segments disagree on).
-              if (f.time == std::numeric_limits<std::int64_t>::min()) info["time"] = nb::none();
-              else info["time"] = f.time;
-              // Record text is bytes from a file and need not be valid UTF-8:
-              // decode with surrogateescape so every byte survives, and
-              // encode the result back the same way.
-              PyObject* raw = PyUnicode_DecodeUTF8(value.data(),
-                                                   static_cast<Py_ssize_t>(value.size()),
-                                                   "surrogateescape");
-              if (!raw) throw nb::python_error();
-              nb::object arg = nb::steal(raw);
-              nb::object r = text_fn(arg, info);
-              if (r.is_none()) return std::string();
-              if (!nb::isinstance<nb::str>(r)) {
-                PyErr_SetString(PyExc_TypeError, "the text callable must return a str or None");
-                throw nb::python_error();
-              }
-              PyObject* enc = PyUnicode_AsEncodedString(r.ptr(), "utf-8", "surrogateescape");
-              if (!enc) throw nb::python_error();
-              nb::object b = nb::steal(enc);
-              return std::string(PyBytes_AS_STRING(enc),
-                                 static_cast<std::size_t>(PyBytes_GET_SIZE(enc)));
-            } catch (nb::python_error& e) {
-              hooks.error.emplace(std::move(e));
-              throw mef3io::Cancelled("text callback raised");
-            }
-          };
-        }
+        if (o.text == mef3io::RecordTextPolicy::Callback)
+          o.text_fn = make_text_fn(hooks, text_fn);
         set_copy_options(o, rename, password, output_password_1, output_password_2,
-                         std::move(channels), std::move(exclude_channels), time_range, exact);
+                         std::move(channels), std::move(exclude_channels), time_range, exact, drop_records);
         mef3io::AnonymizeReport r = hooks.run([&](const mef3io::Control& ctl) {
           return mef3io::anonymize_session(src, dst, o, ctl);
         });
@@ -970,7 +977,7 @@ NB_MODULE(_mef3io, m) {
       nb::arg("output_password_1") = "", nb::arg("output_password_2") = "",
       nb::arg("channels") = std::vector<std::string>{},
       nb::arg("exclude_channels") = std::vector<std::string>{},
-      nb::arg("time_range").none() = nb::none(), nb::arg("exact") = true,
+      nb::arg("time_range").none() = nb::none(), nb::arg("exact") = true, nb::arg("drop_records") = false,
       nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none(),
       "Write a de-identified copy of a session (see mef3io.anonymize_session).");
   m.def(
@@ -1013,12 +1020,13 @@ NB_MODULE(_mef3io, m) {
       "verify_anonymized",
       [](const std::string& src, const std::string& dst, std::optional<std::int64_t> shift_us,
          const std::string& password, const std::string& output_password, bool clear_subject,
-         bool clear_location, bool clear_descriptions, std::optional<std::pair<std::int64_t, std::int64_t>> time_range, bool exact,
+         bool clear_location, bool clear_descriptions, std::optional<std::pair<std::int64_t, std::int64_t>> time_range, bool exact, bool drop_records,
          const mef3io::CancelToken* cancel, nb::object progress) {
         PyHooks hooks(cancel, std::move(progress));
         mef3io::VerifyOptions o;
         o.time_range = time_range;
         o.exact = exact;
+        o.drop_records = drop_records;
         o.password = password;
         o.output_password = output_password;
         o.clear_subject = clear_subject;
@@ -1033,7 +1041,7 @@ NB_MODULE(_mef3io, m) {
       nb::arg("password") = "",
       nb::arg("output_password") = "", nb::arg("clear_subject") = true,
       nb::arg("clear_location") = true, nb::arg("clear_descriptions") = true,
-      nb::arg("time_range").none() = nb::none(), nb::arg("exact") = true,
+      nb::arg("time_range").none() = nb::none(), nb::arg("exact") = true, nb::arg("drop_records") = false,
       nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none(),
       "Check a de-identified copy against its source (see mef3io.anonymize.verify).");
 
@@ -1048,12 +1056,12 @@ NB_MODULE(_mef3io, m) {
       std::optional<std::string> session_description,                                            \
       std::map<std::string, std::string> channel_descriptions,                                   \
       std::map<std::string, std::string> reference_descriptions,                                 \
-      std::optional<std::pair<std::int64_t, std::int64_t>> time_range, bool exact,               \
+      std::optional<std::pair<std::int64_t, std::int64_t>> time_range, bool exact, bool drop_records,               \
       const mef3io::CancelToken *cancel
 #define MEF3IO_TRANSFORM_OPTIONS(o)                                                              \
   mef3io::TransformOptions o;                                                                    \
   set_copy_options(o, rename, password, output_password_1, output_password_2,                    \
-                   std::move(channels), std::move(exclude_channels), time_range, exact);         \
+                   std::move(channels), std::move(exclude_channels), time_range, exact, drop_records);         \
   o.metadata = metadata_edits(std::move(subject_name_1), std::move(subject_name_2),              \
                               std::move(subject_id), std::move(recording_location),              \
                               std::move(session_description), std::move(channel_descriptions),   \
@@ -1068,7 +1076,7 @@ NB_MODULE(_mef3io, m) {
       nb::arg("session_description").none() = nb::none(),                                        \
       nb::arg("channel_descriptions") = std::map<std::string, std::string>{},                    \
       nb::arg("reference_descriptions") = std::map<std::string, std::string>{},                  \
-      nb::arg("time_range").none() = nb::none(), nb::arg("exact") = true,                        \
+      nb::arg("time_range").none() = nb::none(), nb::arg("exact") = true, nb::arg("drop_records") = false,                        \
       nb::arg("cancel").none() = nb::none()
   m.def(
       "check_transform",
@@ -1118,16 +1126,37 @@ NB_MODULE(_mef3io, m) {
       std::optional<std::string> recording_location,                                             \
       std::optional<std::string> session_description,                                            \
       std::map<std::string, std::string> channel_descriptions,                                   \
-      std::map<std::string, std::string> reference_descriptions, const mef3io::CancelToken *cancel
+      std::map<std::string, std::string> reference_descriptions, bool drop_records,               \
+      std::vector<std::optional<std::pair<std::int64_t, std::int64_t>>> time_ranges, bool exact, \
+      int n_threads, bool anonymize, std::optional<std::int64_t> shift_us,                       \
+      const std::string &pseudonym, bool clear_subject, bool clear_location,                     \
+      bool clear_descriptions, const std::string &text, bool anonymize_rename,                   \
+      const mef3io::CancelToken *cancel
 #define MEF3IO_MERGE_OPTIONS(o)                                                                  \
   mef3io::MergeOptions o;                                                                        \
-  set_copy_options(o, true, "", output_password_1, output_password_2, std::move(channels),       \
-                   std::move(exclude_channels));                                                 \
+  set_copy_options(o, anonymize_rename, "", output_password_1, output_password_2,                \
+                   std::move(channels), std::move(exclude_channels), std::nullopt, exact,        \
+                   drop_records);                                                                \
   o.passwords = std::move(passwords);                                                            \
+  o.time_ranges = std::move(time_ranges);                                                        \
+  o.n_threads = n_threads;                                                                       \
   o.metadata = metadata_edits(std::move(subject_name_1), std::move(subject_name_2),              \
                               std::move(subject_id), std::move(recording_location),              \
                               std::move(session_description), std::move(channel_descriptions),   \
-                              std::move(reference_descriptions))
+                              std::move(reference_descriptions));                                \
+  if (anonymize) {                                                                               \
+    mef3io::AnonymizeOptions an;                                                                 \
+    an.shift_us = shift_us;                                                                      \
+    an.pseudonym = pseudonym;                                                                    \
+    an.clear_subject = clear_subject;                                                            \
+    an.clear_location = clear_location;                                                          \
+    an.clear_descriptions = clear_descriptions;                                                  \
+    if (text == "drop") an.text = mef3io::RecordTextPolicy::Drop;                                \
+    else if (text == "keep") an.text = mef3io::RecordTextPolicy::Keep;                           \
+    else if (text == "callback") an.text = mef3io::RecordTextPolicy::Callback;                   \
+    else throw nb::value_error("text must be 'drop', 'keep' or a callable");                     \
+    o.anonymize = std::move(an);                                                                 \
+  }
 #define MEF3IO_MERGE_NB_ARGS                                                                     \
   nb::arg("sources"), nb::arg("dst"), nb::arg("passwords") = std::vector<std::string>{},         \
       nb::arg("output_password_1") = "", nb::arg("output_password_2") = "",                      \
@@ -1138,22 +1167,38 @@ NB_MODULE(_mef3io, m) {
       nb::arg("session_description").none() = nb::none(),                                        \
       nb::arg("channel_descriptions") = std::map<std::string, std::string>{},                    \
       nb::arg("reference_descriptions") = std::map<std::string, std::string>{},                  \
-      nb::arg("cancel").none() = nb::none()
+      nb::arg("drop_records") = false,                                                           \
+      nb::arg("time_ranges") = std::vector<std::optional<std::pair<std::int64_t, std::int64_t>>>{}, \
+      nb::arg("exact") = true, nb::arg("n_threads") = 0, nb::arg("anonymize") = false,           \
+      nb::arg("shift_us").none() = nb::none(), nb::arg("pseudonym") = "",                        \
+      nb::arg("clear_subject") = true, nb::arg("clear_location") = true,                         \
+      nb::arg("clear_descriptions") = true, nb::arg("text") = "drop",                            \
+      nb::arg("anonymize_rename") = true, nb::arg("cancel").none() = nb::none()
   m.def(
       "check_merge",
-      [](MEF3IO_MERGE_ARGS) {
+      [](MEF3IO_MERGE_ARGS, bool has_text_fn) {
         PyHooks hooks(cancel, nb::none());
         MEF3IO_MERGE_OPTIONS(o);
+        // The check never calls it; it only needs to know there is one.
+        if (o.anonymize && has_text_fn)
+          o.anonymize->text_fn = [](const std::string& v, const mef3io::RecordTextField&) { return v; };
         const mef3io::CopyCheck c = hooks.run(
             [&](const mef3io::Control& ctl) { return mef3io::check_merge(sources, dst, o, ctl); });
-        return check_dict(c);
+        nb::dict out = check_dict(c);
+        out["pseudonym"] = !o.anonymize ? std::string()
+                           : o.anonymize->pseudonym.empty() ? c.session_name
+                                                            : o.anonymize->pseudonym;
+        return out;
       },
-      MEF3IO_MERGE_NB_ARGS, "Every check merge_sessions makes before writing (see mef3io.merge).");
+      MEF3IO_MERGE_NB_ARGS, nb::arg("has_text_fn") = false,
+      "Every check merge_sessions makes before writing (see mef3io.merge).");
   m.def(
       "merge_sessions",
-      [](MEF3IO_MERGE_ARGS, nb::object progress) {
+      [](MEF3IO_MERGE_ARGS, nb::object text_fn, nb::object progress) {
         PyHooks hooks(cancel, std::move(progress));
         MEF3IO_MERGE_OPTIONS(o);
+        if (o.anonymize && o.anonymize->text == mef3io::RecordTextPolicy::Callback)
+          o.anonymize->text_fn = make_text_fn(hooks, text_fn);
         const mef3io::MergeReport r = hooks.run([&](const mef3io::Control& ctl) {
           return mef3io::merge_sessions(sources, dst, o, ctl);
         });
@@ -1161,20 +1206,35 @@ NB_MODULE(_mef3io, m) {
         out["metadata_fields_changed"] = r.metadata_fields_changed;
         out["sources"] = r.sources;
         out["segments_split"] = r.segments_split;
+        out["pseudonym"] = r.pseudonym;
+        out["shift_us"] = opt_or_none(r.shift_us);
+        out["source_recording_time_offset"] = r.source_recording_time_offset;
+        // The re-identification key (see AnonymizeReport): to the caller only.
+        out["source_start_us"] = opt_or_none(r.source_start_us);
+        out["source_end_us"] = opt_or_none(r.source_end_us);
+        nb::dict ctimes;
+        for (const auto& t : r.source_channel_times)
+          ctimes[nb::str(t.channel.c_str())] =
+              nb::make_tuple(opt_or_none(t.start_us), opt_or_none(t.end_us));
+        out["source_channel_times"] = ctimes;
+        out["record_text_fields_changed"] = r.record_text_fields_changed;
+        out["record_bodies_cleared"] = r.record_bodies_cleared;
         return out;
       },
-      MEF3IO_MERGE_NB_ARGS, nb::arg("progress") = nb::none(),
+      MEF3IO_MERGE_NB_ARGS, nb::arg("text_fn") = nb::none(), nb::arg("progress") = nb::none(),
       "Merge several sessions into one (see mef3io.merge_sessions).");
   m.def(
       "verify_merge",
-      [](MEF3IO_MERGE_ARGS, nb::object progress) {
+      [](MEF3IO_MERGE_ARGS, bool has_text_fn, nb::object progress) {
         PyHooks hooks(cancel, std::move(progress));
         MEF3IO_MERGE_OPTIONS(o);
+        if (o.anonymize && has_text_fn)
+          o.anonymize->text_fn = [](const std::string& v, const mef3io::RecordTextField&) { return v; };
         const mef3io::VerifyReport r = hooks.run(
             [&](const mef3io::Control& ctl) { return mef3io::verify_merge(sources, dst, o, ctl); });
         return verify_report_dict(r);
       },
-      MEF3IO_MERGE_NB_ARGS, nb::arg("progress") = nb::none(),
+      MEF3IO_MERGE_NB_ARGS, nb::arg("has_text_fn") = false, nb::arg("progress") = nb::none(),
       "Check a merged session against its sources (see mef3io.merge.verify).");
 #undef MEF3IO_MERGE_ARGS
 #undef MEF3IO_MERGE_OPTIONS

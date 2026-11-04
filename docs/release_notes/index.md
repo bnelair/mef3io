@@ -5,7 +5,7 @@ Newest first.
 
 | Version | Released | Main changes |
 |---|---|---|
-| [Unreleased](unreleased.md) | — | joining a trimmed part of a recording, with notes, no longer fails its own check |
+| [Unreleased](unreleased.md) | — | `records="drop"` on anonymize, transform and merge |
 | [2.1.1](2.1.1.md) | — | annotations in password-protected sessions are never plaintext (#167), validator check `records.encryption` |
 | [2.1.0](2.1.0.md) | — | multi-channel writes (`write_int32_many`, `write_many`), opt-in `Writer(flush="close")` |
 | [2.0.1](2.0.1.md) | 2026-10-26 | `write_annotations` only ever appends (never replaces stored annotations), recovery of interrupted annotation appends, recover/repair always keep a backup |

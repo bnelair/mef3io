@@ -31,6 +31,11 @@ From the command line:
 python -m mef3io merge stay.mefd stay_part1.mefd stay_part2.mefd
 ```
 
+`records="drop"` leaves all annotations out of the result (see
+[transform](transform.md#leave-out-the-annotations)); `verify` then expects none. The report's `records_dropped` counts the annotations
+of the channels and segments the result keeps (and the sources' session-level ones);
+those of a channel left out are not counted.
+
 ## When a merge is refused
 
 These checks run **before anything is written**. `mef3io.merge.check(...)`
@@ -50,8 +55,9 @@ time) stops the merge later and leaves nothing behind:
 - **Different recording-time offsets** (meflib's date masking): times are
   copied as stored, so they must be read the same way.
 - **Different patients?** The recordings' patient names, ID or location
-  differ. Set them for the result with `metadata=` to merge anyway (or
-  check that these really are the same patient's recordings).
+  differ. Set them for the result with `metadata=` (or clear them by
+  anonymizing) to merge anyway; or check that these really are the same
+  patient's recordings.
 
 Every check a [modified copy](transform.md) makes also applies to each
 recording: passwords, damaged files, channel selection and so on.
@@ -91,9 +97,57 @@ few files.
 
 `mef3io.merge.verify(sources, dst, ...)` re-checks a merged session later.
 
-To merge and anonymize, merge first, then anonymize the result with
-[`anonymize_session`](anonymization.md). To keep only part of the result,
-cut it with `transform_session(..., time_range=...)`.
+## The whole pipeline in one call
+
+Several long recordings on a network drive can become one anonymous session
+on a local drive in a single call. Each source byte is read once and written
+once by the copy; the check at the end then reads the sources and the result
+again.
+
+```python
+rep = mef3io.merge_sessions(
+    ["//nas/pt7/day1.mefd", "//nas/pt7/day2.mefd", "//nas/pt7/day3.mefd"],
+    "D:/local/S007.mefd",
+    exclude_channels=["EKG", "Pulse"],                  # leave channels out
+    time_ranges=[(t0_a, t1_a), None, (t0_c, t1_c)],     # one range per source
+    anonymize={"shift_us": shift, "pseudonym": "S007"},  # same options as anonymize_session
+    records="drop",                                     # no notes or events
+    n_threads=16,
+)
+```
+
+**Time ranges.** `time_ranges` has one entry per source, in order:
+`(start_us, end_us)` keeps the samples in `[start, end)` (microseconds, as
+that source stores them), `None` keeps the whole source. The cut rules are
+those of [`transform_session`](transform.md) (edge blocks trimmed exactly, or
+kept whole with `exact=False`; annotations outside the range left out).
+Overlap is judged on the **trimmed** data, so two recordings that overlap
+only outside their ranges merge. A source with no sample in its range, or a
+list of the wrong length, is refused.
+
+**Anonymizing.** `anonymize=True` or a mapping with `shift_us`, `pseudonym`,
+`clear` and `text`, exactly as for [`anonymize_session`](anonymization.md).
+One shift applies to every source and is judged against the span of **all**
+the sources (whole recordings, trimmed or not). The identity of **every**
+source (patient names, ID, location, session names) is removed and searched
+for in the result, and the result is verified as `anonymize.verify` verifies a
+copy, plus the merge checks. Patient fields that are cleared may differ
+between the sources (no `merge-identity-differs`); a field you keep with
+`clear=` must still agree. `metadata=` cannot be combined with it. The
+report's `pseudonym` and `shift_us` say what was applied; the sources' real
+start and end times are in the report only in memory, like
+`AnonymizeReport.source_start_us`.
+
+**Threads.** `n_threads` (0 = automatic, at least 8; 1 = no extra thread)
+covers opening the sources, copying channels and the verification, per the
+[one thread rule](threads.md#merging-and-copying). The result does not depend
+on it: apart from the 1024-byte file headers (fresh random IDs) every byte is
+identical. A text callback is called one record at a time, so the copy then
+uses one thread. Progress is reported at a bounded rate, never concurrently
+and never backwards; cancelling stops all channels and leaves nothing behind.
+
+To keep only part of an existing result, cut it with
+`transform_session(..., time_range=...)`.
 
 ## Refusal codes
 
@@ -111,9 +165,12 @@ Refusals work as for the other copies:
 |---|---|---|---|
 | `merge-too-few` | `ValueError` | check | Fewer than two sources. |
 | `merge-passwords-count` | `ValueError` | check | `passwords` is not one password per source. |
-| `merge-time-range` | `ValueError` | check | `time_range` was given; cut the result afterwards. |
+| `merge-time-range` | `ValueError` | check | The single `time_range` was given; a merge takes `time_ranges`, one per source. |
+| `merge-time-ranges-count` | `ValueError` | check | `time_ranges` is not one entry per source. |
+| `merge-anonymize-metadata` | `ValueError` | check | `metadata` was combined with `anonymize`. |
+| `merge-threads-invalid` | `ValueError` | check | `n_threads` is negative. |
 | `merge-rename` | `ValueError` | check | `rename=False`: a merge is always named after its destination. |
 | `merge-rto-differs` | `WriteConflictError` | check | The sources use different recording-time offsets. |
 | `merge-rate-differs` | `WriteConflictError` | check | A channel has different sampling rates in different sources (`details["channel"]`). |
-| `merge-identity-differs` | `WriteConflictError` | check | The sources' patient field `details["field"]` differs; set it with `metadata`. |
+| `merge-identity-differs` | `WriteConflictError` | check | The sources' patient field `details["field"]` differs; set it with `metadata`, or clear it with `anonymize`. |
 | `merge-overlap` | `WriteConflictError` | check | Two sources hold samples of the same channel at the same moment (`details["channel"]`). |

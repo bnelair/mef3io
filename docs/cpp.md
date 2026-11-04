@@ -217,7 +217,7 @@ mef3io::TransformReport rep = mef3io::transform_session("patient.mefd", "eeg.mef
 `check_transform` and `verify_transform` mirror their anonymize
 counterparts. `merge_sessions(sources, dst, MergeOptions)` (with
 `check_merge` / `verify_merge`) merges several sessions on the same engine;
-see [Merging recordings](merge.md). The options, refusals and reports are shared:
+see [Merging recordings](merge.md) (`merge.hpp`: per-source `time_ranges`, `anonymize`, `n_threads`). The options, refusals and reports are shared:
 - `AnonymizeOptions` and `TransformOptions` both extend `CopyOptions`;
 - `AnonymizeError` is an alias of `CopyError`.
 
@@ -308,6 +308,7 @@ differ: `mef3io_channel_info.units_conversion_factor` is then NaN,
 | `validate.hpp` | validator (check registry) and `repair_session` |
 | `recover.hpp` | `recover_session`: rebuild index/data agreement after an interrupted write |
 | `anonymize.hpp` | `anonymize_session`, `check_anonymize`, `verify_anonymized` |
+| `merge.hpp` | `merge_sessions`, `check_merge`, `verify_merge` |
 | `errors.hpp` | the `MefError` hierarchy |
 | `time.hpp` | stored ↔ user time (the recording-time offset and sign conventions) |
 | `parallel.hpp` | deterministic `parallel_for` |
