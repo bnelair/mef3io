@@ -34,6 +34,7 @@
 
 #include "mef3io/errors.hpp"
 #include "mef3io/types.hpp"
+#include "mef3io/source.hpp"
 
 namespace mef3io::detail {
 
@@ -86,7 +87,7 @@ inline void (*publish_observer)(const fsys::path& target) = nullptr;
   };
   // The wide entry point, like replace_file: CreateFileA goes through the ANSI
   // code page, so a session path outside it cannot even be opened.
-  const std::wstring wide = fsys::path(path).wstring();
+  const std::wstring wide = detail::utf8_path(path).wstring();
   HANDLE h = CreateFileW(wide.c_str(), GENERIC_WRITE,
                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -169,7 +170,7 @@ inline void fsync_file_or_throw(const std::string& path) {
 ///    other errors) is a failed flush (documented in long_recordings.md).
 inline bool fsync_directory(const fsys::path& dir, std::string* why = nullptr) {
 #ifndef _WIN32
-  const int fd = ::open(dir.string().c_str(), O_RDONLY);
+  const int fd = ::open(detail::path_utf8(dir).c_str(), O_RDONLY);
   if (fd < 0) {
     if (why) *why = "cannot open folder: " + std::error_code(errno, std::generic_category()).message();
     return false;
@@ -218,11 +219,11 @@ inline void replace_file(const fsys::path& tmp, const fsys::path& target) {
                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
     return;
   const std::error_code ec(static_cast<int>(GetLastError()), std::system_category());
-  throw IoError("cannot replace " + target.string() + ": " + ec.message());
+  throw IoError("cannot replace " + detail::path_utf8(target) + ": " + ec.message());
 #else
   std::error_code ec;
   fsys::rename(tmp, target, ec);
-  if (ec) throw IoError("cannot replace " + target.string() + ": " + ec.message());
+  if (ec) throw IoError("cannot replace " + detail::path_utf8(target) + ": " + ec.message());
 #endif
 }
 
@@ -243,8 +244,8 @@ inline void copy_file_identity(const fsys::path& from, const fsys::path& to) {
   fsys::permissions(to, st.permissions(), fsys::perm_options::replace, ec);
 #ifndef _WIN32
   struct stat s {};
-  if (::stat(from.string().c_str(), &s) == 0) {
-    if (::chown(to.string().c_str(), s.st_uid, s.st_gid) != 0) { /* best effort */ }
+  if (::stat(detail::path_utf8(from).c_str(), &s) == 0) {
+    if (::chown(detail::path_utf8(to).c_str(), s.st_uid, s.st_gid) != 0) { /* best effort */ }
   }
 #endif
 }
@@ -263,9 +264,9 @@ inline void finish_stream(std::ofstream& f, const std::string& path) {
 // replaced is the only record of what the (much larger) .tdat contains.
 inline void write_all_atomic(const std::string& path, std::span<const ui1> bytes,
                              bool flush = true) {
-  const fsys::path target(path);
+  const fsys::path target = detail::utf8_path(path);
   const fsys::path tmp =
-      target.parent_path() / (target.filename().string() + ".mef3io-repair-tmp");
+      target.parent_path() / detail::utf8_path(detail::path_utf8(target.filename()) + ".mef3io-repair-tmp");
   // EVERY failure path removes the temp, not just a failed rename. The temp is
   // a sibling, so it lands INSIDE the .segd directory: a half-written file
   // named like a metadata file, left in a clinical session indefinitely, and
@@ -273,12 +274,12 @@ inline void write_all_atomic(const std::string& path, std::span<const ui1> bytes
   // writer's own write_file_atomic already guards its whole body this way.
   try {
     {
-      std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-      if (!f) throw IoError("cannot open for write: " + tmp.string());
+      std::ofstream f(detail::utf8_path(tmp), std::ios::binary | std::ios::trunc);
+      if (!f) throw IoError("cannot open for write: " + detail::path_utf8(tmp));
       f.write(reinterpret_cast<const char*>(bytes.data()),
               static_cast<std::streamsize>(bytes.size()));
-      if (!f) throw IoError("write failed: " + tmp.string());
-      finish_stream(f, tmp.string());
+      if (!f) throw IoError("write failed: " + detail::path_utf8(tmp));
+      finish_stream(f, detail::path_utf8(tmp));
     }
   // The target still exists here, so its mode/owner can be carried across
   // before it is replaced. Then flush the data before the rename, and the
@@ -288,7 +289,7 @@ inline void write_all_atomic(const std::string& path, std::span<const ui1> bytes
     // renaming an unflushed file over a good one hands back a durability
     // guarantee the caller did not get. replace_file is the portable swap
     // (MoveFileEx + WRITE_THROUGH on Windows).
-    if (flush) fsync_file_or_throw(tmp.string());
+    if (flush) fsync_file_or_throw(detail::path_utf8(tmp));
     replace_file(tmp, target);
   } catch (...) {
     std::error_code ignored;
@@ -311,10 +312,10 @@ inline void flush_each_concurrently(const std::vector<fsys::path>& files) {
   const auto worker = [&] {
     for (std::size_t i; (i = next.fetch_add(1)) < unique.size();) {
       std::string why;
-      if (!fsync_file(unique[i].string(), &why)) {
+      if (!fsync_file(detail::path_utf8(unique[i]), &why)) {
         std::lock_guard<std::mutex> lk(mu);
         if (first_error.empty())
-          first_error = unique[i].string() + (why.empty() ? "" : " (" + why + ")");
+          first_error = detail::path_utf8(unique[i]) + (why.empty() ? "" : " (" + why + ")");
       }
     }
   };
@@ -345,7 +346,7 @@ inline void flush_files(const std::vector<fsys::path>& files) {
     if (fd < 0 || ::syncfs(fd) != 0) {
       const int e = errno;
       if (fd >= 0) ::close(fd);
-      throw IoError("could not flush to disk, the write is not durable: " + f.string() + " (" +
+      throw IoError("could not flush to disk, the write is not durable: " + detail::path_utf8(f) + " (" +
                     std::error_code(e, std::generic_category()).message() + ")");
     }
     ::close(fd);
@@ -364,7 +365,7 @@ inline void flush_files(const std::vector<fsys::path>& files) {
     for (int level = 0; level < 4 && !d.empty(); ++level, d = d.parent_path()) {
       if (std::find(dirs.begin(), dirs.end(), d) == dirs.end()) dirs.push_back(d);
       // Never above the session folder: its parent is not ours to flush.
-      std::string leaf = d.filename().string();
+      std::string leaf = detail::path_utf8(d.filename());
       for (auto& ch : leaf) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
       if (leaf.size() >= 5 && leaf.compare(leaf.size() - 5, 5, ".mefd") == 0) break;
       if (d == d.parent_path()) break;
@@ -376,11 +377,11 @@ inline void flush_files(const std::vector<fsys::path>& files) {
     // NTFS may refuse a folder flush (ERROR_ACCESS_DENIED): only that one
     // refusal is ignored; anything else is a failed flush.
     if (!fsync_directory(d, &why) && why.find("[ntfs-refused]") == std::string::npos)
-      throw IoError("could not flush to disk, the write is not durable: " + d.string() +
+      throw IoError("could not flush to disk, the write is not durable: " + detail::path_utf8(d) +
                     (why.empty() ? "" : " (" + why + ")"));
 #else
     if (!fsync_directory(d, &why))
-      throw IoError("could not flush to disk, the write is not durable: " + d.string() +
+      throw IoError("could not flush to disk, the write is not durable: " + detail::path_utf8(d) +
                     (why.empty() ? "" : " (" + why + ")"));
 #endif
   }

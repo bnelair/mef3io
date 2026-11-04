@@ -13,6 +13,7 @@
 #include "mef3io/errors.hpp"
 #include "mef3io/headers.hpp"
 #include "mef3io/time.hpp"
+#include "mef3io/source.hpp"
 
 namespace fs = std::filesystem;
 
@@ -485,7 +486,7 @@ std::vector<ui1> base_uh_bytes(const std::string& ftype, const std::string& sess
 }
 
 void write_file(const std::string& path, const std::vector<ui1>& bytes) {
-  std::ofstream f(path, std::ios::binary | std::ios::trunc);
+  std::ofstream f(detail::utf8_path(path), std::ios::binary | std::ios::trunc);
   if (!f) throw IoError("cannot open for write: " + path);
   f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
 }
@@ -579,7 +580,7 @@ std::vector<EncodedRecord> encode_records(const std::vector<const Record*>& orde
 }
 
 std::vector<ui1> read_at(const std::string& path, std::uint64_t off, std::size_t n) {
-  std::ifstream f(path, std::ios::binary);
+  std::ifstream f(detail::utf8_path(path), std::ios::binary);
   if (!f) throw IoError("cannot open for read: " + path);
   f.seekg(static_cast<std::streamoff>(off));
   std::vector<ui1> buf(n);
@@ -589,7 +590,7 @@ std::vector<ui1> read_at(const std::string& path, std::uint64_t off, std::size_t
 }
 
 void write_at(const std::string& path, std::uint64_t off, std::span<const ui1> bytes) {
-  std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
+  std::fstream f(detail::utf8_path(path), std::ios::binary | std::ios::in | std::ios::out);
   if (!f) throw IoError("cannot open for append: " + path);
   f.seekp(static_cast<std::streamoff>(off));
   f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
@@ -615,11 +616,11 @@ std::optional<bool> channel_tmet_protected(const fs::path& timd) {
     if (e.is_directory() && e.path().extension() == ".segd") segds.push_back(e.path());
   std::sort(segds.begin(), segds.end());
   for (const auto& segd : segds) {
-    const fs::path tmet = segd / (segd.stem().string() + ".tmet");
+    const fs::path tmet = segd / detail::utf8_path(detail::path_utf8(segd.stem()) + ".tmet");
     std::error_code fe;
     if (fs::file_size(tmet, fe) < fmt::UNIVERSAL_HEADER_BYTES || fe) continue;
     try {
-      const auto head = read_at(tmet.string(), 0, fmt::UNIVERSAL_HEADER_BYTES);
+      const auto head = read_at(detail::path_utf8(tmet), 0, fmt::UNIVERSAL_HEADER_BYTES);
       return fmt::UniversalHeader::parse(head).is_password_protected();
     } catch (const MefError&) {
       continue;
@@ -639,7 +640,7 @@ void require_record_write_access(const std::string& session_dir,
   auto know = [&](const std::string& name) -> std::optional<bool> {
     auto it = cache.channel_protected.find(name);
     if (it != cache.channel_protected.end()) return it->second;
-    auto got = channel_tmet_protected(fs::path(session_dir) / (name + ".timd"));
+    auto got = channel_tmet_protected(detail::utf8_path(session_dir) / detail::utf8_path(name + ".timd"));
     if (got) cache.channel_protected[name] = *got;
     return got;
   };
@@ -655,9 +656,9 @@ void require_record_write_access(const std::string& session_dir,
       std::optional<bool> any;
       std::string prot;
       std::vector<std::string> names;
-      for (const auto& e : fs::directory_iterator(session_dir, ec))
+      for (const auto& e : fs::directory_iterator(detail::utf8_path(session_dir), ec))
         if (e.is_directory() && e.path().extension() == ".timd")
-          names.push_back(e.path().stem().string());
+          names.push_back(detail::path_utf8(e.path().stem()));
       std::sort(names.begin(), names.end());
       for (const auto& n : names) {
         const auto k = know(n);
@@ -704,16 +705,16 @@ void require_record_write_access(const std::string& session_dir,
   if (cache.access_ok.count(target)) return;
   std::vector<fs::path> segds;
   std::error_code ec;
-  for (const auto& e : fs::directory_iterator(fs::path(session_dir) / (target + ".timd"), ec))
+  for (const auto& e : fs::directory_iterator(detail::utf8_path(session_dir) / detail::utf8_path(target + ".timd"), ec))
     if (e.is_directory() && e.path().extension() == ".segd") segds.push_back(e.path());
   std::sort(segds.begin(), segds.end());
   for (const auto& segd : segds) {
-    const fs::path tmet = segd / (segd.stem().string() + ".tmet");
+    const fs::path tmet = segd / detail::utf8_path(detail::path_utf8(segd.stem()) + ".tmet");
     std::error_code fe;
     if (fs::file_size(tmet, fe) < fmt::UNIVERSAL_HEADER_BYTES || fe) continue;
     std::vector<ui1> head;
     try {
-      head = read_at(tmet.string(), 0, fmt::UNIVERSAL_HEADER_BYTES);
+      head = read_at(detail::path_utf8(tmet), 0, fmt::UNIVERSAL_HEADER_BYTES);
     } catch (const MefError&) {
       continue;
     }
@@ -735,12 +736,12 @@ void write_records(const std::string& dir, const std::string& base,
                    const std::string& password_1, const std::string& password_2) {
   if (records.empty()) return;
   validate_records_for_write(records);
-  const std::string rdat_path = (fs::path(dir) / (base + ".rdat")).string();
-  const std::string ridx_path = (fs::path(dir) / (base + ".ridx")).string();
-  const bool exists = fs::exists(rdat_path);
+  const std::string rdat_path = detail::path_utf8((detail::utf8_path(dir) / detail::utf8_path(base + ".rdat")));
+  const std::string ridx_path = detail::path_utf8((detail::utf8_path(dir) / detail::utf8_path(base + ".ridx")));
+  const bool exists = fs::exists(detail::utf8_path(rdat_path));
   // An index with no data file: never truncate it (write_file would), and do
   // not guess. recover_session lists it; the writer refuses.
-  if (!exists && fs::exists(ridx_path))
+  if (!exists && fs::exists(detail::utf8_path(ridx_path)))
     throw FormatError("record index without its record file: " + ridx_path +
                       " (the .rdat is missing; nothing was written; run recover_session, which "
                       "reports it, and restore the .rdat or move the .ridx away)");
@@ -759,12 +760,12 @@ void write_records(const std::string& dir, const std::string& base,
   // ---- APPEND to an existing pair: NEVER truncate, replace or rewrite -------
   if (exists) {
     std::error_code ec;
-    const std::uintmax_t rdat_size = fs::file_size(rdat_path, ec);
+    const std::uintmax_t rdat_size = fs::file_size(detail::utf8_path(rdat_path), ec);
     if (ec || rdat_size < static_cast<std::uintmax_t>(fmt::UNIVERSAL_HEADER_BYTES))
       throw FormatError("record file is shorter than its header: " + rdat_path + RECOVER_ADVICE);
-    if (!fs::exists(ridx_path))
+    if (!fs::exists(detail::utf8_path(ridx_path)))
       throw FormatError("record file has no index: " + ridx_path + RECOVER_ADVICE);
-    const std::uintmax_t ridx_size = fs::file_size(ridx_path, ec);
+    const std::uintmax_t ridx_size = fs::file_size(detail::utf8_path(ridx_path), ec);
     constexpr std::uintmax_t UH = fmt::UNIVERSAL_HEADER_BYTES;
     if (ec || ridx_size < UH || (ridx_size - UH) % fmt::RECORD_INDEX_BYTES != 0)
       throw FormatError("record index is short or torn: " + ridx_path + RECOVER_ADVICE);
@@ -898,8 +899,8 @@ void write_records(const std::string& dir, const std::string& base,
       try {
         write_at(rdat_path, 0, rdat_uh_bytes);  // a torn header patch too
       } catch (...) {}
-      if (touched_ridx) fs::resize_file(ridx_path, ridx_size, ignored);
-      if (touched_rdat) fs::resize_file(rdat_path, rdat_size, ignored);
+      if (touched_ridx) fs::resize_file(detail::utf8_path(ridx_path), ridx_size, ignored);
+      if (touched_rdat) fs::resize_file(detail::utf8_path(rdat_path), rdat_size, ignored);
       throw;
     }
     return;

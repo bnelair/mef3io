@@ -193,7 +193,7 @@ MERGE IN ONE PASS (`merge.hpp`; MergeOptions gained `time_ranges`, `anonymize`,
   Windows: CreateFileW with all three share modes + FILE_FLAG_OVERLAPPED, one
   event per read (threads on one file are not serialized), cap 1024; paths are
   wide (`detail::utf8_path`, no ANSI conversion; Linux test with Japanese
-  names) - Windows parts UNTESTED until Windows CI runs. A cache hit still
+  names; every path in core goes through utf8_path/path_utf8, INVARIANTS §8) - Windows parts UNTESTED until Windows CI runs. A cache hit still
   reads bytes: only the open is saved. Pinned by "each source file is opened
   once" in core/tests/test_transform.cpp (`source_open_observer`). A session
   with more files than the cap reopens per pass; sharing parsed .tmet/.tidx

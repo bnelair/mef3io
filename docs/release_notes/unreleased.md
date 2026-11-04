@@ -65,6 +65,15 @@ Changes since 2.1.1. This page becomes the next version's notes at release.
 
 ## Fixed
 
+- **Folder and session names with non-Latin letters work on Windows.** A
+  recording whose folder or file name holds characters outside the Windows
+  "ANSI" code page (for example Japanese, or accents on a system set to
+  another language) could fail to open or be written by the Writer, the Reader,
+  appending, annotations, archives, extraction, the validator and repair,
+  recovery, renaming, and the copies (anonymize, transform, merge). Every
+  file call now uses the full Unicode name. Linux and macOS behave exactly as
+  before, and the output files are identical.
+
 - **Joining a recording cut from another one, with notes, could fail its own
   check.** In the released Linux wheels, `merge_sessions` of a copy made by
   `transform_session` (for example a trimmed, password-protected part) with

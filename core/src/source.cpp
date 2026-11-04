@@ -41,6 +41,11 @@ std::string path_utf8(const std::filesystem::path& p) {
   return std::string(reinterpret_cast<const char*>(u.data()), u.size());
 }
 
+std::string path_generic_utf8(const std::filesystem::path& p) {
+  const std::u8string u = p.generic_u8string();
+  return std::string(reinterpret_cast<const char*>(u.data()), u.size());
+}
+
 namespace {
 
 /// A read that failed in a way a fresh open may cure (a stale network handle).

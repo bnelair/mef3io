@@ -46,7 +46,7 @@ inline std::optional<OperationMarker> read_operation_marker(const std::filesyste
   const auto file = dir / OPERATION_MARKER;
   if (!std::filesystem::exists(file, ec)) return std::nullopt;
   OperationMarker m{"unknown", "unknown", ""};
-  std::ifstream in(file, std::ios::binary);
+  std::ifstream in(detail::utf8_path(file), std::ios::binary);
   std::string line;
   if (in && std::getline(in, line) && line == OPERATION_MARKER_MAGIC) {
     while (std::getline(in, line)) {
@@ -68,22 +68,22 @@ inline void write_operation_marker(const std::filesystem::path& dir, const Opera
   // replacing one), so a failure part-way never leaves a marker without its
   // id: such a marker would refuse every write with no journal to match.
   const auto file = dir / OPERATION_MARKER;
-  const auto part = dir / (std::string(OPERATION_MARKER) + ".part");
+  const auto part = dir / detail::utf8_path(std::string(OPERATION_MARKER) + ".part");
   try {
     {
-      std::ofstream out(part, std::ios::binary | std::ios::trunc);
-      if (!out) throw IoError("cannot write the operation marker: " + part.string());
+      std::ofstream out(detail::utf8_path(part), std::ios::binary | std::ios::trunc);
+      if (!out) throw IoError("cannot write the operation marker: " + detail::path_utf8(part));
       out << OPERATION_MARKER_MAGIC << "\ntool " << m.tool << "\noperation " << m.operation
           << "\nid " << m.id << "\n";
-      finish_stream(out, part.string());
+      finish_stream(out, detail::path_utf8(part));
     }
-    fsync_file_or_throw(part.string());
+    fsync_file_or_throw(detail::path_utf8(part));
     std::string why;
     switch (rename_no_replace(part, file, why)) {
       case NoReplaceResult::Renamed: break;
       case NoReplaceResult::TargetExists:
         throw WriteConflictError("the session already carries an operation marker: " +
-                                 dir.string());
+                                 detail::path_utf8(dir));
       default: throw IoError("cannot place the operation marker (" + why + ")");
     }
   } catch (...) {
@@ -97,7 +97,7 @@ inline void write_operation_marker(const std::filesystem::path& dir, const Opera
 inline void remove_operation_marker(const std::filesystem::path& dir) {
   std::error_code ec;
   std::filesystem::remove(dir / OPERATION_MARKER, ec);
-  if (ec) throw IoError("cannot remove the operation marker in " + dir.string() + ": " + ec.message());
+  if (ec) throw IoError("cannot remove the operation marker in " + detail::path_utf8(dir) + ": " + ec.message());
   fsync_directory(dir);
 }
 
@@ -114,7 +114,7 @@ inline std::string mid_operation_message(const OperationMarker& m) {
 /// carries a marker (archive_session refuses a marked session).
 inline void refuse_if_mid_operation(const std::string& session_path) {
   if (path_has_suffix(session_path, ".tar")) return;
-  if (const auto m = read_operation_marker(std::filesystem::path(session_path)))
+  if (const auto m = read_operation_marker(detail::utf8_path(session_path)))
     throw WriteConflictError(mid_operation_message(*m));
 }
 

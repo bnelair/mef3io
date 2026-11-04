@@ -121,22 +121,22 @@ SessionWriter::SessionWriter(const std::string& mefd_path, bool overwrite, std::
   // directories are ever created or overwritten.
   if (!path_has_suffix(mefd_path_, ".mefd"))
     throw IoError("session directory must end with .mefd: " + mefd_path_);
-  if (fs::exists(mefd_path_) && !fs::is_directory(mefd_path_))
+  if (fs::exists(detail::utf8_path(mefd_path_)) && !fs::is_directory(detail::utf8_path(mefd_path_)))
     throw IoError("session path exists and is not a directory: " + mefd_path_);
   // Mid-rename (#72): no write, not even an overwrite, until it is finished
   // or rolled back — its journal would otherwise restore stale headers.
   detail::refuse_if_mid_operation(mefd_path_);
-  if (overwrite && fs::exists(mefd_path_)) fs::remove_all(mefd_path_);
+  if (overwrite && fs::exists(detail::utf8_path(mefd_path_))) fs::remove_all(detail::utf8_path(mefd_path_));
   // Held data before this writer: its new segments/channels are flushed.
-  session_preexisted_ = fs::exists(mefd_path_);
-  fs::create_directories(mefd_path_);
-  session_name_ = fs::path(mefd_path_).stem().string();
+  session_preexisted_ = fs::exists(detail::utf8_path(mefd_path_));
+  fs::create_directories(detail::utf8_path(mefd_path_));
+  session_name_ = detail::path_utf8(detail::utf8_path(mefd_path_).stem());
 
   // Adopt existing channels/segments so appends continue where the session
   // left off. Metadata is read back lazily (hydrate) on the first write.
-  for (const auto& entry : fs::directory_iterator(mefd_path_)) {
+  for (const auto& entry : fs::directory_iterator(detail::utf8_path(mefd_path_))) {
     if (!entry.is_directory() || entry.path().extension() != ".timd") continue;
-    std::string ch = entry.path().stem().string();
+    std::string ch = detail::path_utf8(entry.path().stem());
     int nseg = 0;
     long long last = -1;
     std::string last_stem, last_name;
@@ -146,22 +146,22 @@ SessionWriter::SessionWriter(const std::string& mefd_path, bool overwrite, std::
       // earlier refused or crashed write left behind, and adopting it would
       // wedge the channel (every later write: "cannot open segment metadata
       // for append"). Ignore it and say so.
-      if (!fs::exists(s.path() / (s.path().stem().string() + ".tmet"))) {
+      if (!fs::exists(s.path() / detail::utf8_path(detail::path_utf8(s.path().stem()) + ".tmet"))) {
         const std::string entry_text =
-            s.path().string() + ": segment directory without metadata (.tmet) ignored";
+            detail::path_utf8(s.path()) + ": segment directory without metadata (.tmet) ignored";
         note_unreadable(entry_text);
-        empty_segment_dirs_[s.path().string()] = entry_text;
+        empty_segment_dirs_[detail::path_utf8(s.path())] = entry_text;
         continue;
       }
       ++nseg;
       // The last segment by the SAME rule as last_segment_dir (number, then
       // folder name), keeping its real name for the append (#83 item 5).
-      const long long number = detail::segment_number_of(s.path().stem().string());
-      const std::string name = s.path().filename().string();
+      const long long number = detail::segment_number_of(detail::path_utf8(s.path().stem()));
+      const std::string name = detail::path_utf8(s.path().filename());
       if (last_stem.empty() || std::make_pair(number, name) > std::make_pair(last, last_name)) {
         last = number;
         last_name = name;
-        last_stem = s.path().stem().string();
+        last_stem = detail::path_utf8(s.path().stem());
       }
     }
     // Segments are addressed by the HIGHEST real segment NUMBER, never by
@@ -183,7 +183,7 @@ SessionWriter::SessionWriter(const std::string& mefd_path, bool overwrite, std::
 // journal would restore headers older than this write. Refuse both. One stat
 // per write call.
 void SessionWriter::check_still_writable() const {
-  if (!fs::is_directory(mefd_path_))
+  if (!fs::is_directory(detail::utf8_path(mefd_path_)))
     throw IoError("the session folder is no longer there (renamed or moved since this writer "
                   "opened it?): " + mefd_path_ + "; open a writer on its new path");
   detail::refuse_if_mid_operation(mefd_path_);
@@ -200,8 +200,8 @@ void SessionWriter::hydrate(const std::string& channel, ChannelState& st) {
   st.hydrated = true;
   const std::string base = segment_stem(channel, st, st.last_segment);
   const std::string tmet_path =
-      (fs::path(mefd_path_) / (channel + ".timd") / (base + ".segd") / (base + ".tmet")).string();
-  std::ifstream f(tmet_path, std::ios::binary);
+      detail::path_utf8((detail::utf8_path(mefd_path_) / detail::utf8_path(channel + ".timd") / detail::utf8_path(base + ".segd") / detail::utf8_path(base + ".tmet")));
+  std::ifstream f(detail::utf8_path(tmet_path), std::ios::binary);
   if (!f) throw IoError("cannot open segment metadata for append: " + tmet_path);
   std::vector<ui1> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
   auto md = load_time_series_metadata(bytes,
@@ -243,7 +243,7 @@ SessionWriter::LevelOffset SessionWriter::scan_channel_offset(const fs::path& ti
   std::error_code ec;
   for (const auto& segd : fs::directory_iterator(timd, ec)) {
     if (!segd.is_directory() || segd.path().extension() != ".segd") continue;
-    const fs::path tmet = segd.path() / (segd.path().stem().string() + ".tmet");
+    const fs::path tmet = segd.path() / detail::utf8_path(detail::path_utf8(segd.path().stem()) + ".tmet");
     if (!fs::exists(tmet)) continue;  // a directory without metadata: not a segment
     std::optional<si8> rto;
     try {
@@ -253,31 +253,31 @@ SessionWriter::LevelOffset SessionWriter::scan_channel_offset(const fs::path& ti
       // CRC must be verified before section 3's offset can be trusted.
       std::ifstream f;
       f.rdbuf()->pubsetbuf(nullptr, 0);
-      f.open(tmet, std::ios::binary);
+      f.open(detail::utf8_path(tmet), std::ios::binary);
       std::vector<ui1> record(fmt::METADATA_FILE_BYTES);
       f.read(reinterpret_cast<char*>(record.data()), static_cast<std::streamsize>(record.size()));
-      if (!f) throw IoError("cannot read " + tmet.string());
+      if (!f) throw IoError("cannot read " + detail::path_utf8(tmet));
       rto = probe_recording_time_offset(record, password_2_.empty() ? password_1_ : password_2_);
     } catch (const std::exception& e) {
       ++out.unreadable;
-      if (out.unreadable_example.empty()) out.unreadable_example = tmet.string();
-      note_unreadable(tmet.string() + ": " + e.what());
+      if (out.unreadable_example.empty()) out.unreadable_example = detail::path_utf8(tmet);
+      note_unreadable(detail::path_utf8(tmet) + ": " + e.what());
       continue;
     }
     ++out.readable;
     if (!rto) {
       out.state = LevelOffset::State::Unknown;
-      out.detail = tmet.string();
+      out.detail = detail::path_utf8(tmet);
       return out;  // nothing else can make it known
     }
     if (!have) {
       have = true;
       out.rto = *rto;
-      agreed_where = tmet.string();
+      agreed_where = detail::path_utf8(tmet);
     } else if (out.state == LevelOffset::State::Agreed && *rto != out.rto) {
       out.state = LevelOffset::State::Disputed;
       out.detail = std::to_string(out.rto) + " in " + agreed_where + ", " +
-                   std::to_string(*rto) + " in " + tmet.string();
+                   std::to_string(*rto) + " in " + detail::path_utf8(tmet);
     }
   }
   if (have) out.where = agreed_where;
@@ -295,7 +295,7 @@ SessionWriter::LevelOffset SessionWriter::level_offset(const std::optional<std::
     auto it = channel_offsets_.find(name);
     if (it == channel_offsets_.end())
       it = channel_offsets_
-               .emplace(name, scan_channel_offset(fs::path(mefd_path_) / (name + ".timd")))
+               .emplace(name, scan_channel_offset(detail::utf8_path(mefd_path_) / detail::utf8_path(name + ".timd")))
                .first;
     return it->second;
   };
@@ -304,11 +304,11 @@ SessionWriter::LevelOffset SessionWriter::level_offset(const std::optional<std::
   LevelOffset out;
   bool have = false;
   std::string agreed_where;
-  if (!fs::exists(mefd_path_)) return out;
+  if (!fs::exists(detail::utf8_path(mefd_path_))) return out;
   std::vector<std::string> names;
-  for (const auto& timd : fs::directory_iterator(mefd_path_))
+  for (const auto& timd : fs::directory_iterator(detail::utf8_path(mefd_path_)))
     if (timd.is_directory() && timd.path().extension() == ".timd")
-      names.push_back(timd.path().stem().string());
+      names.push_back(detail::path_utf8(timd.path().stem()));
   std::sort(names.begin(), names.end());
   for (const auto& name : names) {
     const LevelOffset& lv = channel_answer(name);
@@ -457,9 +457,9 @@ void SessionWriter::write_records(std::optional<std::string> channel,
   std::string dir, base;
   bool created_dir = false;
   if (channel) {
-    dir = (fs::path(mefd_path_) / (*channel + ".timd")).string();
-    created_dir = !fs::exists(dir);
-    fs::create_directories(dir);
+    dir = detail::path_utf8((detail::utf8_path(mefd_path_) / detail::utf8_path(*channel + ".timd")));
+    created_dir = !fs::exists(detail::utf8_path(dir));
+    fs::create_directories(detail::utf8_path(dir));
     base = *channel;
   } else {
     dir = mefd_path_;
@@ -481,11 +481,11 @@ void SessionWriter::write_records(std::optional<std::string> channel,
     // write_records validates before it writes; leave no empty channel
     // directory behind for a write that never happened.
     std::error_code ec;
-    if (created_dir) fs::remove_all(dir, ec);
+    if (created_dir) fs::remove_all(detail::utf8_path(dir), ec);
     throw;
   }
-  const std::vector<fs::path> files = {fs::path(dir) / (base + ".rdat"),
-                                       fs::path(dir) / (base + ".ridx")};
+  const std::vector<fs::path> files = {detail::utf8_path(dir) / detail::utf8_path(base + ".rdat"),
+                                       detail::utf8_path(dir) / detail::utf8_path(base + ".ridx")};
   // wait_for_disk waits now (files and their folders), so nothing is owed
   // later; otherwise flush()/close() owe them.
   if (wait_for_disk_)
@@ -806,9 +806,9 @@ std::unique_ptr<SessionWriter::WritePlan> SessionWriter::plan_write(
   const int seg = append ? st.last_segment : st.last_segment + 1;
   plan->append = append;
   plan->seg = seg;
-  plan->seg_dir =
-      (fs::path(mefd_path_) / (channel + ".timd") / (segment_stem(channel, st, seg) + ".segd"))
-          .string();
+  plan->seg_dir = detail::path_utf8(detail::utf8_path(mefd_path_) /
+                                    detail::utf8_path(channel + ".timd") /
+                                    detail::utf8_path(segment_stem(channel, st, seg) + ".segd"));
 
   SegmentSpec& spec = plan->spec;
   spec.session_name = session_name_;
@@ -871,10 +871,10 @@ std::unique_ptr<SessionWriter::WritePlan> SessionWriter::plan_write(
 
 void SessionWriter::create_plan_dirs(WritePlan& p) {
   if (p.noop || p.append) return;
-  p.timd = fs::path(mefd_path_) / (p.channel + ".timd");
+  p.timd = detail::utf8_path(mefd_path_) / detail::utf8_path(p.channel + ".timd");
   p.created_timd = !fs::exists(p.timd);
-  p.created_segd = !fs::exists(p.seg_dir);
-  fs::create_directories(p.seg_dir);
+  p.created_segd = !fs::exists(detail::utf8_path(p.seg_dir));
+  fs::create_directories(detail::utf8_path(p.seg_dir));
 }
 
 void SessionWriter::run_plan(WritePlan& p, PendingPublish* defer, int threads) {
@@ -926,7 +926,7 @@ std::string SessionWriter::roll_back_plan(WritePlan& p) {
     if (p.created_timd)
       fs::remove_all(p.timd, ec);
     else if (p.created_segd)
-      fs::remove_all(p.seg_dir, ec);
+      fs::remove_all(detail::utf8_path(p.seg_dir), ec);
   }
   return err;
 }
@@ -949,9 +949,9 @@ void SessionWriter::commit_plan(WritePlan& p) {
     // already flushed them (and their folders): not kept, so close() does not
     // re-flush the whole history (one F_FULLFSYNC per file on macOS).
     if (!wait_for_disk_) {
-      const std::string stem = fs::path(p.seg_dir).stem().string();
+      const std::string stem = detail::path_utf8(detail::utf8_path(p.seg_dir).stem());
       for (const char* ext : {".tdat", ".tidx", ".tmet"})
-        unflushed_.insert(fs::path(p.seg_dir) / (stem + ext));
+        unflushed_.insert(detail::utf8_path(p.seg_dir) / detail::utf8_path(stem + ext));
     }
   }
 
@@ -959,8 +959,8 @@ void SessionWriter::commit_plan(WritePlan& p) {
   st.units_conversion_factor = p.ufact;
   if (!append) {
     ++st.n_segments;
-    const std::string stem = fs::path(p.seg_dir).stem().string();
-    note_new_segment(p.channel, (fs::path(p.seg_dir) / (stem + ".tmet")).string(),
+    const std::string stem = detail::path_utf8(detail::utf8_path(p.seg_dir).stem());
+    note_new_segment(p.channel, detail::path_utf8((detail::utf8_path(p.seg_dir) / detail::utf8_path(stem + ".tmet"))),
                      p.spec.recording_time_offset);
     // The slot is a real segment now: drop the stale "ignored" report.
     const auto e = empty_segment_dirs_.find(p.seg_dir);
@@ -972,7 +972,7 @@ void SessionWriter::commit_plan(WritePlan& p) {
     }
   }
   st.last_segment = p.seg;
-  st.last_segment_stem = fs::path(p.seg_dir).stem().string();
+  st.last_segment_stem = detail::path_utf8(detail::utf8_path(p.seg_dir).stem());
   st.total_samples += p.stored;
   // Same expression as the writer's segment end (last block's start + its
   // length), so the pre-check in plan_write sees what is on disk.

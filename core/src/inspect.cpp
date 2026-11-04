@@ -151,7 +151,7 @@ SessionSummary detail::inspect_session_through(std::shared_ptr<const SessionSour
   out.name = src->session_name();
   out.path = path;
   out.layout = path_has_suffix(path, ".tar") ? "tar" : "directory";
-  if (out.layout == "tar") out.archive_bytes = std::filesystem::file_size(path);
+  if (out.layout == "tar") out.archive_bytes = std::filesystem::file_size(detail::utf8_path(path));
   out.index_read = opt.read_index;
   out.video_channels = layout.video_channels;
   std::sort(out.video_channels.begin(), out.video_channels.end());

@@ -10,6 +10,7 @@
 #include "mef3io/byteio.hpp"
 #include "mef3io/crc.hpp"
 #include "mef3io/errors.hpp"
+#include "mef3io/source.hpp"
 #include "out_file.hpp"
 
 namespace fs = std::filesystem;

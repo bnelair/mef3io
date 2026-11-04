@@ -1284,9 +1284,9 @@ class Copier {
       if (what.starts_with("output file already exists"))
         refuse(RefusalKind::Io, "write-failed", what);
       if (what.starts_with("cannot create"))
-        refuse(RefusalKind::Io, "write-failed", "cannot create file: " + p.string());
+        refuse(RefusalKind::Io, "write-failed", "cannot create file: " + detail::path_utf8(p));
       if (what.starts_with("could not flush")) throw;
-      refuse(RefusalKind::Io, "write-failed", "write failed (disk full?): " + p.string());
+      refuse(RefusalKind::Io, "write-failed", "write failed (disk full?): " + detail::path_utf8(p));
     }
     rep_.bytes_written += bytes.size();
   }
@@ -1424,7 +1424,7 @@ class Copier {
       seg_number_ = number;
     }
     const std::string stem = canonical_segment_stem(channel, number);
-    const fs::path sdir = cdir / (stem + ".segd");
+    const fs::path sdir = cdir / detail::utf8_path(stem + ".segd");
     fs::create_directory(sdir);
     const si8 start = next_start;
     const detail::CopyStats st =
@@ -1438,7 +1438,7 @@ class Copier {
       end_segment();
       return false;
     }
-    copy_tmet(std::move(t), seg.tmet, sdir / (stem + ".tmet"), channel, reshape ? &st : nullptr,
+    copy_tmet(std::move(t), seg.tmet, sdir / detail::utf8_path(stem + ".tmet"), channel, reshape ? &st : nullptr,
               start);
     next_start += st.samples;
     return true;
@@ -1486,8 +1486,8 @@ class Copier {
     spec.source = &src_;
     spec.tidx_rel = seg.tidx;
     spec.tdat_rel = seg.tdat;
-    spec.tidx_out = (dir / (stem + ".tidx")).string();
-    spec.tdat_out = (dir / (stem + ".tdat")).string();
+    spec.tidx_out = detail::path_utf8((dir / detail::utf8_path(stem + ".tidx")));
+    spec.tdat_out = detail::path_utf8((dir / detail::utf8_path(stem + ".tdat")));
     spec.control = &ctl_;
     spec.on_progress = progress_;
     const std::string where = src_.describe(seg.tdat);
@@ -1741,7 +1741,7 @@ class Copier {
     seal(rdat, max_entry, "record file " + what);
     seal(ridx, static_cast<si8>(RIDX), "record index of " + what);
     write_out(out_rdat, rdat);
-    write_out(fs::path(ridx_of(out_rdat.string())), ridx);
+    write_out(detail::utf8_path(ridx_of(detail::path_utf8(out_rdat))), ridx);
     if (progress_) progress_(rdat.size() + ridx.size());
   }
 
@@ -3581,28 +3581,28 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
   if (!dst_named)
     add(RefusalKind::Io, "dst-not-mefd", "the copy must be a directory ending in .mefd: " + dst_path,
         {}, "dst");
-  fs::path dst(dst_path);
+  fs::path dst(detail::utf8_path(dst_path));
   if (dst.filename().empty()) dst = dst.parent_path();
   pf.dst = dst;
-  pf.partial = dst.parent_path() / (dst.filename().string() + ".partial");
+  pf.partial = dst.parent_path() / detail::utf8_path(detail::path_utf8(dst.filename()) + ".partial");
   if (fs::exists(dst))
-    add(RefusalKind::Io, "dst-exists", "the destination already exists: " + dst.string(), {},
+    add(RefusalKind::Io, "dst-exists", "the destination already exists: " + detail::path_utf8(dst), {},
         "dst");
   if (fs::exists(pf.partial))
     add(RefusalKind::Io, "partial-exists",
         "a partial copy is in the way (an earlier run that did not finish, or one still "
-        "running): " + pf.partial.string() + ". Remove it if no copy is running.",
+        "running): " + detail::path_utf8(pf.partial) + ". Remove it if no copy is running.",
         {}, "dst");
-  if (!fs::exists(src_path)) {
+  if (!fs::exists(detail::utf8_path(src_path))) {
     add(RefusalKind::Io, "source-missing", "the source does not exist: " + src_path, {}, "src");
     return pf;  // nothing below can be decided
   }
   if (const auto m = operation_marker(src_path))
     add(RefusalKind::WriteConflict, "source-mid-operation", detail::mid_operation_message(*m), {},
         "src");
-  if (path_inside(dst, src_path) || path_inside(src_path, dst))
+  if (path_inside(dst, detail::utf8_path(src_path)) || path_inside(detail::utf8_path(src_path), dst))
     add(RefusalKind::Io, "dst-inside-src",
-        "the destination must not be inside the source: " + dst.string(), {}, "dst");
+        "the destination must not be inside the source: " + detail::path_utf8(dst), {}, "dst");
 
   // ---- the source --------------------------------------------------------
   if (prebuilt && prebuilt->plan) {
@@ -3827,7 +3827,7 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
 
   // ---- names -------------------------------------------------------------
   if (dst_named) {
-    pf.new_name = session_name_from_path(dst.string());
+    pf.new_name = session_name_from_path(detail::path_utf8(dst));
     if (!o.rename && pf.new_name != src.session_name())
       add(RefusalKind::InvalidArgument, "rename-name-mismatch",
           "rename=False keeps the source's session name, so the destination folder must be "
@@ -4323,7 +4323,7 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
   }
   const OutputKeys out = output_keys(o);
 
-  rep.destination = dst.string();
+  rep.destination = detail::path_utf8(dst);
   rep.session_name = new_name;
   rep.channels_kept.assign(kept.begin(), kept.end());
   rep.channels_excluded.assign(excluded.begin(), excluded.end());
@@ -4369,11 +4369,11 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
     std::map<std::string, const detail::LayoutChannel*> data;
     for (const auto& c : plan.layout.channels) data[c.name] = &c;
     for (const auto& ch : kept) {
-      const fs::path cdir = root / (ch + ".timd");
+      const fs::path cdir = root / detail::utf8_path(ch + ".timd");
       fs::create_directory(cdir);
       const std::string crec = ch + ".timd/" + ch + ".rdat";
       if (src.exists(crec)) {
-        cp.copy_records(crec, cdir / (ch + ".rdat"), RecordLevel::Channel, ch, -1);
+        cp.copy_records(crec, cdir / detail::utf8_path(ch + ".rdat"), RecordLevel::Channel, ch, -1);
         handled.insert(crec);
         handled.insert(ridx_of(crec));
       }
@@ -4394,7 +4394,7 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
         if (!cp.copy_segment(seg, cdir, ch, number, next_start)) continue;  // outside the cut
         const std::string stem = canonical_segment_stem(ch, number);
         if (src.exists(seg.rdat()))
-          cp.copy_records(seg.rdat(), cdir / (stem + ".segd") / (stem + ".rdat"),
+          cp.copy_records(seg.rdat(), cdir / detail::utf8_path(stem + ".segd") / detail::utf8_path(stem + ".rdat"),
                           RecordLevel::Segment, ch, number);
         cp.end_segment();
         ++next_number;
@@ -4404,7 +4404,7 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
     {
       const std::string& srec = pf.session_records;
       if (!srec.empty()) {
-        cp.copy_records(srec, root / (new_name + ".rdat"), RecordLevel::Session, "", -1);
+        cp.copy_records(srec, root / detail::utf8_path(new_name + ".rdat"), RecordLevel::Session, "", -1);
         handled.insert(srec);
         handled.insert(ridx_of(srec));
       }
@@ -4466,7 +4466,7 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
     progress.finish();
     if (fs::exists(dst))
       refuse(RefusalKind::Io, "dst-exists",
-             "the destination appeared while copying: " + dst.string(), {}, "dst");
+             "the destination appeared while copying: " + detail::path_utf8(dst), {}, "dst");
     fs::rename(root, dst);
     detail::fsync_directory(dst.parent_path().empty() ? fs::path(".") : dst.parent_path());
   } catch (...) {
@@ -4477,7 +4477,7 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
   }
   std::error_code ec;
   fs::remove_all(partial, ec);
-  rep.destination = dst.string();
+  rep.destination = detail::path_utf8(dst);
 }
 
 /// Whatever shared code threw without a code gets the generic one of its
@@ -5607,7 +5607,7 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
   const bool anon = m.anonymize;
   const OutputKeys out = output_keys(o);
   rep.sources = sources;
-  rep.destination = m.dst.string();
+  rep.destination = detail::path_utf8(m.dst);
   rep.session_name = m.new_name;
   rep.channels_kept.assign(m.kept.begin(), m.kept.end());
   rep.channels_excluded.assign(m.excluded.begin(), m.excluded.end());
@@ -5740,7 +5740,7 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
           hi = std::max(hi.value_or(r.sort_time), r.sort_time);
         }
       if (lo) cp(first).set_record_span(*lo, *hi, m.sources[first]->pf.plan->rto);
-      cp(first).write_records(all, *headers, "merged " + out_rdat.filename().string(), out_rdat, ch);
+      cp(first).write_records(all, *headers, "merged " + detail::path_utf8(out_rdat.filename()), out_rdat, ch);
       cp(first).end_segment();
     };
 
@@ -5755,14 +5755,14 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
         if (!cps[k]) cps[k] = make_copier(k, tc, co);
         return *cps[k];
       };
-      const fs::path cdir = root / (ch + ".timd");
+      const fs::path cdir = root / detail::utf8_path(ch + ".timd");
       fs::create_directory(cdir);
       std::vector<std::pair<std::size_t, std::string>> from;
       const std::string crec = ch + ".timd/" + ch + ".rdat";
       for (std::size_t k = 0; k < m.sources.size(); ++k)
         if (m.sources[k]->used && m.sources[k]->pf.source->exists(crec)) from.push_back({k, crec});
       if (!from.empty())
-        merge_records(cp, from, cdir / (ch + ".rdat"), RecordLevel::Channel, ch, random_uuid(), tc);
+        merge_records(cp, from, cdir / detail::utf8_path(ch + ".rdat"), RecordLevel::Channel, ch, random_uuid(), tc);
       const auto it = m.pieces.find(ch);
       if (it != m.pieces.end()) {  // (else a record-only channel)
         si8 next_start = 0;
@@ -5777,7 +5777,7 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
               c.drop_records_of(pc.segment->rdat());
             } else {
               const si8 lo = pc.lo, hi = pc.hi;
-              c.copy_records(pc.segment->rdat(), cdir / (stem + ".segd") / (stem + ".rdat"),
+              c.copy_records(pc.segment->rdat(), cdir / detail::utf8_path(stem + ".segd") / detail::utf8_path(stem + ".rdat"),
                              RecordLevel::Segment, ch, number,
                              [lo, hi](si8 t) { return t >= lo && t < hi; });
             }
@@ -5826,7 +5826,7 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
           if (!cps[k]) cps[k] = make_copier(k, ctl, session_out);
           return *cps[k];
         };
-        merge_records(cp, from, root / (m.new_name + ".rdat"), RecordLevel::Session, "",
+        merge_records(cp, from, root / detail::utf8_path(m.new_name + ".rdat"), RecordLevel::Session, "",
                       random_uuid(), ctl);
       }
       fold_counts(rep, anon ? static_cast<const CopyReport&>(session_out.an)
@@ -5853,7 +5853,7 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
     progress.finish();
     if (fs::exists(m.dst))
       refuse(RefusalKind::Io, "dst-exists",
-             "the destination appeared while merging: " + m.dst.string(), {}, "dst");
+             "the destination appeared while merging: " + detail::path_utf8(m.dst), {}, "dst");
     fs::rename(root, m.dst);
     detail::fsync_directory(m.dst.parent_path().empty() ? fs::path(".") : m.dst.parent_path());
   } catch (...) {

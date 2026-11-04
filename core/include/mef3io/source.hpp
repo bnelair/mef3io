@@ -91,8 +91,13 @@ namespace detail {
 /// A path text from the API (UTF-8) as a path object: on Windows a wide path,
 /// with no ANSI code-page conversion in between.
 std::filesystem::path utf8_path(const std::string& s);
+/// A path object passes through (lets generic call sites wrap either kind).
+inline std::filesystem::path utf8_path(const std::filesystem::path& p) { return p; }
+inline std::filesystem::path utf8_path(const char* s) { return utf8_path(std::string(s)); }
 /// The reverse: a path as UTF-8 text.
 std::string path_utf8(const std::filesystem::path& p);
+/// Same, with '/' separators (archive member names, relative names kept in notes).
+std::string path_generic_utf8(const std::filesystem::path& p);
 
 /// Reuse of open read handles for ONE operation (network drives: every open is
 /// a round trip). A copy builds a scope and opens ITS sources through it

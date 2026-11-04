@@ -1163,7 +1163,7 @@ using detail::write_all_atomic;
 void overwrite_universal_header(const std::string& path, const fmt::UniversalHeader& uh) {
   std::vector<ui1> head(fmt::UNIVERSAL_HEADER_BYTES);
   {
-    std::ifstream in(path, std::ios::binary);
+    std::ifstream in(detail::utf8_path(path), std::ios::binary);
     if (!in) throw IoError("cannot open for read: " + path);
     if (!in.read(reinterpret_cast<char*>(head.data()), fmt::UNIVERSAL_HEADER_BYTES))
       throw IoError("short read: " + path);
@@ -1173,7 +1173,7 @@ void overwrite_universal_header(const std::string& path, const fmt::UniversalHea
   patched.body_crc = byteio::read<ui4>(head, 4);
   patched.serialize(head);
   patched.update_header_crc(head);
-  std::fstream out(path, std::ios::binary | std::ios::in | std::ios::out);
+  std::fstream out(detail::utf8_path(path), std::ios::binary | std::ios::in | std::ios::out);
   if (!out) throw IoError("cannot open for header update: " + path);
   out.write(reinterpret_cast<const char*>(head.data()), fmt::UNIVERSAL_HEADER_BYTES);
   out.flush();
@@ -1189,7 +1189,7 @@ void overwrite_universal_header(const std::string& path, const fmt::UniversalHea
 fsys::path backup_root_for(const std::string& session_path) {
   std::string s = session_path;
   while (s.size() > 1 && (s.back() == '/' || s.back() == '\\')) s.pop_back();
-  return fsys::path(s + ".repair-backup");
+  return detail::utf8_path(s + ".repair-backup");
 }
 
 // Copy `file` into the backup tree before it is modified. `limit_bytes` copies
@@ -1202,18 +1202,18 @@ fsys::path backup_root_for(const std::string& session_path) {
 // overwritten.
 void back_up(const std::string& file, const fsys::path& backup_root, const std::string& rel,
              std::uintmax_t limit_bytes = 0) {
-  const fsys::path dest = backup_root / fsys::path(rel);
+  const fsys::path dest = backup_root / fsys::path(detail::utf8_path(rel));
   if (fsys::exists(dest)) return;
   fsys::create_directories(dest.parent_path());
-  const fsys::path part = dest.string() + ".part";
+  const fsys::path part = detail::utf8_path(detail::path_utf8(dest) + ".part");
 
-  std::ifstream in(file, std::ios::binary);
+  std::ifstream in(detail::utf8_path(file), std::ios::binary);
   if (!in) throw IoError("cannot open for backup: " + file);
-  const std::uintmax_t total = limit_bytes ? limit_bytes : fsys::file_size(file);
+  const std::uintmax_t total = limit_bytes ? limit_bytes : fsys::file_size(detail::utf8_path(file));
   std::vector<ui1> buf(static_cast<std::size_t>(std::min<std::uintmax_t>(total, 1u << 20)));
   {
-    std::ofstream out(part, std::ios::binary | std::ios::trunc);
-    if (!out) throw IoError("cannot open backup for write: " + part.string());
+    std::ofstream out(detail::utf8_path(part), std::ios::binary | std::ios::trunc);
+    if (!out) throw IoError("cannot open backup for write: " + detail::path_utf8(part));
     std::uintmax_t left = total;
     while (left > 0) {
       const std::streamsize chunk =
@@ -1221,20 +1221,20 @@ void back_up(const std::string& file, const fsys::path& backup_root, const std::
       if (!in.read(reinterpret_cast<char*>(buf.data()), chunk))
         throw IoError("short read while backing up: " + file);
       out.write(reinterpret_cast<const char*>(buf.data()), chunk);
-      if (!out) throw IoError("backup write failed (disk full?): " + part.string());
+      if (!out) throw IoError("backup write failed (disk full?): " + detail::path_utf8(part));
       left -= static_cast<std::uintmax_t>(chunk);
     }
-    finish_stream(out, part.string());
+    finish_stream(out, detail::path_utf8(part));
   }
   // The backup exists to survive exactly the crash that fsync guards against;
   // an unflushed one can come back empty from the same power cut.
-  fsync_file_or_throw(part.string());
+  fsync_file_or_throw(detail::path_utf8(part));
   std::error_code ec;
   fsys::rename(part, dest, ec);
   if (ec) {
     std::error_code ignored;
     fsys::remove(part, ignored);
-    throw IoError("cannot finalize backup " + dest.string() + ": " + ec.message());
+    throw IoError("cannot finalize backup " + detail::path_utf8(dest) + ": " + ec.message());
   }
   fsync_directory(dest.parent_path());
 }
@@ -1882,9 +1882,9 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       {
         // Remember channels whose NON-last segment changed: their last segment
         // gets a segment-repaired stamp once every segment has been processed.
-        const fsys::path channel_dir = fsys::path(path) / (files.channel + ".timd");
+        const fsys::path channel_dir = detail::utf8_path(path) / detail::utf8_path(files.channel + ".timd");
         const auto last = detail::last_segment_dir(channel_dir);
-        if (last && detail::segment_number_of(last->stem().string()) != files.segment_number)
+        if (last && detail::segment_number_of(detail::path_utf8(last->stem())) != files.segment_number)
           channels_to_stamp.insert(files.channel);
       }
     } catch (const std::exception& e) {
@@ -1913,7 +1913,7 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
         // Only name a backup that exists. Sending an operator to a directory
         // that was never created, mid-incident, is worse than saying nothing.
         if (repair->backup)
-          reason += "; restore from " + backup_root_for(path).string() +
+          reason += "; restore from " + detail::path_utf8(backup_root_for(path)) +
                     " (the PRISTINE original — a backup is taken once and never "
                     "overwritten, so restoring it also undoes any earlier successful "
                     "repair of this segment)";
@@ -1933,7 +1933,7 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
   // Every outcome is reported as an Info finding `provenance.last-segment` on
   // the last segment, so the report names each file this pass wrote.
   for (const auto& channel : channels_to_stamp) {
-    const fsys::path channel_dir = fsys::path(path) / (channel + ".timd");
+    const fsys::path channel_dir = detail::utf8_path(path) / detail::utf8_path(channel + ".timd");
     const auto stamp = detail::prepare_last_segment_stamp(channel_dir);
     const std::string rel = channel + ".timd/" + stamp.segment_stem + ".segd/" +
                             stamp.segment_stem + ".tmet";
@@ -1943,7 +1943,7 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     note.repairable = false;
     note.channel = channel;
     note.segment_number = static_cast<int>(detail::segment_number_of(stamp.segment_stem));
-    note.path = stamp.tmet.string();
+    note.path = detail::path_utf8(stamp.tmet);
     note.field = "provenance";
     if (!stamp.ready) {
       note.message = "a segment of this channel was repaired, but the last segment could not "
@@ -1952,7 +1952,7 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       continue;
     }
     try {
-      if (repair->backup) back_up(stamp.tmet.string(), backup_root_for(path), rel);
+      if (repair->backup) back_up(detail::path_utf8(stamp.tmet), backup_root_for(path), rel);
       detail::write_last_segment_stamp(stamp);
       note.stored = "written";
       note.message = "last segment stamped segment-repaired (header only): " + rel +
@@ -1961,13 +1961,13 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     } catch (const std::exception& e) {
       std::string reason = std::string("aborted stamping segment-repaired: ") + e.what() +
                            " — MAY ALREADY BE MODIFIED: " + rel;
-      reason += repair->backup ? "; restore from " + backup_root_for(path).string()
+      reason += repair->backup ? "; restore from " + detail::path_utf8(backup_root_for(path))
                                : "; no backup was taken (backup=false)";
       reason += ".";
       reason += detail::STAMP_SKIPPED_CONSEQUENCE;
       report.skipped.push_back({channel,
                                 static_cast<int>(detail::segment_number_of(stamp.segment_stem)),
-                                stamp.tmet.string(), reason});
+                                detail::path_utf8(stamp.tmet), reason});
     }
   }
 

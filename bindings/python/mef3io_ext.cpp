@@ -17,6 +17,7 @@
 #include "mef3io/anonymize.hpp"
 #include "mef3io/control.hpp"
 #include "mef3io/crc.hpp"
+#include "mef3io/source.hpp"
 #include "mef3io/errors.hpp"
 #include "mef3io/crypto.hpp"
 #include "mef3io/inspect.hpp"
@@ -1622,7 +1623,8 @@ NB_MODULE(_mef3io, m) {
          const std::string& password1, const std::string& password2) {
         namespace fs_ns = std::filesystem;
         std::string seg = channel + "-000000";
-        auto seg_dir = fs_ns::path(mefd_path) / (channel + ".timd") / (seg + ".segd");
+        auto seg_dir = mef3io::detail::utf8_path(mefd_path) / mef3io::detail::utf8_path(channel + ".timd") /
+                       mef3io::detail::utf8_path(seg + ".segd");
         fs_ns::create_directories(seg_dir);
 
         std::span<const mef3io::si4> all(samples.data(), samples.size());
@@ -1648,7 +1650,7 @@ NB_MODULE(_mef3io, m) {
         spec.gmt_offset = -21600;
         spec.password_1 = password1;
         spec.password_2 = password2;
-        return mef3io::write_time_series_segment(seg_dir.string(), spec, blocks);
+        return mef3io::write_time_series_segment(mef3io::detail::path_utf8(seg_dir), spec, blocks);
       },
       nb::arg("mefd_path"), nb::arg("channel"), nb::arg("session_name"), nb::arg("samples"),
       nb::arg("start_uutc"), nb::arg("fs"), nb::arg("ufact"), nb::arg("units") = "uV",
