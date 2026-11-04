@@ -327,6 +327,10 @@ def test_anonymized_report_keeps_source_paths_in_memory_only(tmp_path):
     assert "source 1: holds no blocks" in rep.summary()
     assert "2 recording(s)" in rep.summary()
     assert pickle.loads(pickle.dumps(rep)).source_count == 2
+    # a source path that starts another one is not replaced inside it
+    nested = type(rep)(**{**rep.__dict__, "sources": ("/d/x.mefd", "/d/x.mefd.tar"),
+                          "notes": ("/d/x.mefd.tar: holds no blocks",)})
+    assert nested._public_notes() == ("source 2: holds no blocks",)
     kept = rep.to_dict(include_original_times=True)
     assert tuple(kept["sources"]) == (str(a), str(b)) and str(a) in kept["notes"][0]
     assert str(a) in pickle.loads(pickle.dumps(rep.with_original_times_in_pickle())).sources[0]

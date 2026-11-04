@@ -184,9 +184,12 @@ class MergeReport:
         result is anonymized (the paths name the patient)."""
         if not self.pseudonym:
             return self.notes
+        # Longest path first, so a path that starts another is not replaced
+        # inside it.
+        order = sorted(enumerate(self.sources), key=lambda ip: -len(ip[1]))
         out = []
         for n in self.notes:
-            for i, p in enumerate(self.sources):
+            for i, p in order:
                 n = n.replace(p, f"source {i + 1}")
             out.append(n)
         return tuple(out)
