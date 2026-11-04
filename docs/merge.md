@@ -31,6 +31,9 @@ From the command line:
 python -m mef3io merge stay.mefd stay_part1.mefd stay_part2.mefd
 ```
 
+`records="drop"` leaves all annotations out of the result (see
+[transform](transform.md#leave-out-the-annotations)); `verify` then expects none.
+
 ## When a merge is refused
 
 These checks run **before anything is written**. `mef3io.merge.check(...)`

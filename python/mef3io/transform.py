@@ -106,6 +106,8 @@ class TransformReport:
     blocks_trimmed, records_outside_window : int
         A cut (``time_range``): edge blocks re-encoded to the window, and
         annotations left out.
+    records_dropped : int
+        ``records="drop"``: source annotations left out (``records`` is then 0).
     metadata_fields_changed : int
         Metadata fields whose stored value changed (one per field per
         segment).
@@ -132,6 +134,7 @@ class TransformReport:
     seizure_channel_entries_dropped: int
     blocks_trimmed: int
     records_outside_window: int
+    records_dropped: int
     metadata_fields_changed: int
     bytes_written: int
     output_encrypted: bool
@@ -210,10 +213,10 @@ def _metadata(metadata: Optional[Mapping], refusals: _Refusals) -> dict:
 
 
 def _arguments(refusals: _Refusals, *, channels, exclude_channels, output_password,
-               metadata, time_range=None, exact=True) -> dict:
+               metadata, time_range=None, exact=True, records="keep") -> dict:
     return dict(**_copy_arguments(refusals, channels=channels, exclude_channels=exclude_channels,
                                   output_password=output_password, time_range=time_range,
-                                  exact=exact),
+                                  exact=exact, records=records),
                 **_metadata(metadata, refusals))
 
 
@@ -227,6 +230,7 @@ def transform_session(
     metadata: Optional[Mapping] = None,
     time_range: Optional[Tuple[int, int]] = None,
     exact: bool = True,
+    records: str = "keep",
     rename: bool = True,
     password: str = "",
     progress: Optional[Callable[[int, int], object]] = None,
@@ -294,6 +298,14 @@ def transform_session(
         the edge block of each segment at each end, so the copy holds exactly
         the window (the cost does not depend on the window's length);
         ``False`` keeps whole edge blocks and decodes nothing.
+    records : str, optional
+        ``"keep"`` (default) copies the annotations. ``"drop"`` leaves ALL of
+        them out (session, channel and segment level): the copy has no
+        ``.rdat``/``.ridx`` file, like a session that never had annotations;
+        a channel that holds only annotations is left out too. The source's
+        annotations are not copied or checked; the report's
+        ``records_dropped`` counts them. Anything else is refused
+        (``records-invalid``).
     rename : bool, optional
         ``True`` (default) gives the copy the stem of ``dst`` as its session
         name. ``False`` keeps the source's session name, and the stem of
@@ -346,7 +358,7 @@ def transform_session(
     """
     a = _arguments(_Refusals(collect=False), channels=channels, exclude_channels=exclude_channels,
                    output_password=output_password, metadata=metadata, time_range=time_range,
-                   exact=exact)
+                   exact=exact, records=records)
     _warn_output_passwords(a)
     raw = _backend().transform_session(
         *_fspaths(src, dst), rename=bool(rename), password=password or "", **a,
@@ -364,6 +376,7 @@ def check(
     metadata: Optional[Mapping] = None,
     time_range: Optional[Tuple[int, int]] = None,
     exact: bool = True,
+    records: str = "keep",
     rename: bool = True,
     password: str = "",
     cancel: Optional[CancelToken] = None,
@@ -386,7 +399,7 @@ def check(
     refusals = _Refusals(collect=True)
     a = _arguments(refusals, channels=channels, exclude_channels=exclude_channels,
                    output_password=output_password, metadata=metadata, time_range=time_range,
-                   exact=exact)
+                   exact=exact, records=records)
     raw = _backend().check_transform(*_fspaths(src, dst), rename=bool(rename),
                                      password=password or "", **a, **_hooks(cancel, None))
     return _check_report(raw, refusals, a)
@@ -402,6 +415,7 @@ def verify(
     metadata: Optional[Mapping] = None,
     time_range: Optional[Tuple[int, int]] = None,
     exact: bool = True,
+    records: str = "keep",
     password: str = "",
     progress: Optional[Callable[[int, int], object]] = None,
     cancel: Optional[CancelToken] = None,
@@ -429,7 +443,7 @@ def verify(
     refusals = _Refusals(collect=False)
     a = _arguments(refusals, channels=None, exclude_channels=None,
                    output_password=output_password, metadata=metadata, time_range=time_range,
-                   exact=exact)
+                   exact=exact, records=records)
     raw = _backend().verify_transform(*_fspaths(src, dst), password=password or "", **a,
                                       **_hooks(cancel, progress))
     return VerifyReport._from(raw)

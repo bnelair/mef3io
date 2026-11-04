@@ -77,6 +77,17 @@ python -m mef3io transform patient.mefd patient_eeg.mefd \
   transform (operation 8, `transform`), unless the region belongs to another
   program, in which case it is left untouched.
 
+## Leave out the annotations
+
+`records="drop"` (command line: `--drop-records`) writes a copy with no
+annotations at any level (session, channel, segment): no annotation files
+exist in it, exactly as in a recording that never had any. Everything else is
+as without it, and the same argument works for `anonymize_session` and
+`merge_sessions`. The report's `records_dropped` counts the annotations left
+out (`records` is then 0). `verify` takes the same argument and expects none.
+A channel that holds only annotations is left out. The default is
+`records="keep"`; any other value is refused (`records-invalid`).
+
 ## Keep only a time window (cut)
 
 `time_range=(start_us, end_us)` keeps only the samples whose time lies in

@@ -305,6 +305,7 @@ with a shift; a copy that keeps the times never meets them.
 |---|---|---|---|
 | `argument-type` | `TypeError` | check | A channel list holds something other than names. Raised by `check` too. |
 | `clear-unknown` | `ValueError` | check | `clear=` names something other than subject, location, descriptions. |
+| `records-invalid` | `ValueError` | check | `records=` is not `"keep"` or `"drop"` (any copy, also `merge_sessions`). |
 | `text-invalid` | `ValueError` | check | `text=` is not `"drop"`, `"keep"` or a callable. |
 | `shift-zero` | `ValueError` | check | *(shift only)* The shift is 0. Leave the shift out to keep the times. |
 | `channel-selection-conflict` | `ValueError` | check | Both `channels` and `exclude_channels` given. |
@@ -415,7 +416,8 @@ It confirms that:
   shift: every time differs from the source's by exactly the shift, in the
   same stored form, and the offset is 0. In both, the GMT offset and
   daylight-saving fields hold their set values;
-- the annotations match in number, order and type; a cut keeps exactly the
+- the annotations match in number, order and type (with `records="drop"`:
+  the copy holds none, and any annotation file in it fails the check); a cut keeps exactly the
   source's annotations in the window, each placed by its own file's offset;
 - a cut segment's file headers span exactly the samples it holds, and a
   channel left out for having no samples in the window has none;

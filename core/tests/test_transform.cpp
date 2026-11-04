@@ -146,6 +146,30 @@ TEST_CASE("transform_session: a verbatim copy with new passwords") {
   CHECK(s2.channel_info("b").start_time == Session(src).channel_info("b").start_time);
 }
 
+TEST_CASE("transform_session drop_records: no record file anywhere; verify expects none") {
+  const auto dir = fresh("mef3io_transform_drop");
+  const std::string src = write_session(dir);
+  {
+    SessionWriter w(src, false);
+    w.write_records(std::nullopt, {{.type = "Note", .time = START, .text = "s"}});
+    w.write_records(std::string("a"), {{.type = "Note", .time = START + 1, .text = "c"}});
+  }
+  const std::string dst = (dir / "dropped.mefd").string();
+  TransformOptions o;
+  o.drop_records = true;
+  const TransformReport rep = transform_session(src, dst, o);
+  REQUIRE(rep.verification.ok);
+  CHECK(rep.records == 0);
+  CHECK(rep.records_dropped == 2);
+  for (const auto& e : fsys::recursive_directory_iterator(dst)) {
+    CHECK(e.path().extension() != ".rdat");
+    CHECK(e.path().extension() != ".ridx");
+  }
+  CHECK(verify_transform(src, dst, o).ok);
+  TransformOptions keep;  // the strict default expects the annotations
+  CHECK_FALSE(verify_transform(src, dst, keep).ok);
+}
+
 TEST_CASE("transform_session: a tampered copy fails verification") {
   const auto dir = fresh("mef3io_transform_tamper");
   const std::string src = write_session(dir);

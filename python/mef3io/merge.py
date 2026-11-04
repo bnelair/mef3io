@@ -70,6 +70,8 @@ class MergeReport:
         Source segments split in two or more pieces because another source's
         data lies in one of their gaps.
     blocks, records, blocks_reencrypted, blocks_decrypted : int
+    records_dropped : int
+        ``records="drop"``: source annotations left out (``records`` is then 0).
     seizure_channel_entries_dropped, metadata_fields_changed : int
     bytes_written : int
     output_encrypted : bool
@@ -89,6 +91,7 @@ class MergeReport:
     blocks_reencrypted: int
     blocks_decrypted: int
     records: int
+    records_dropped: int
     seizure_channel_entries_dropped: int
     metadata_fields_changed: int
     bytes_written: int
@@ -129,7 +132,7 @@ class MergeReport:
 
 
 def _arguments(refusals: _Refusals, *, sources, passwords, channels, exclude_channels,
-               output_password, metadata) -> dict:
+               output_password, metadata, records="keep") -> dict:
     if isinstance(sources, (str, bytes, os.PathLike)) or not all(
             isinstance(s, (str, os.PathLike)) for s in sources):
         raise _error("TypeError", "argument-type", "sources must be a list of session paths",
@@ -138,7 +141,7 @@ def _arguments(refusals: _Refusals, *, sources, passwords, channels, exclude_cha
     if not all(isinstance(p, str) for p in pw):
         raise _error("TypeError", "argument-type", "passwords must be strings", field="passwords")
     a = _copy_arguments(refusals, channels=channels, exclude_channels=exclude_channels,
-                        output_password=output_password)
+                        output_password=output_password, records=records)
     for k in ("time_range", "exact"):  # not combined with a merge yet
         a.pop(k)
     return dict(sources=[os.fspath(s) for s in sources], passwords=pw, **a,
@@ -154,6 +157,7 @@ def merge_sessions(
     exclude_channels: Optional[Sequence[str]] = None,
     output_password: Optional[Sequence[str]] = None,
     metadata: Optional[Mapping] = None,
+    records: str = "keep",
     progress: Optional[Callable[[int, int], object]] = None,
     cancel: Optional[CancelToken] = None,
 ) -> MergeReport:
@@ -199,6 +203,14 @@ def merge_sessions(
         Which channels the result holds, over all sources.
     output_password : (str, str), optional
         Encrypt the result with these two passwords; ``None`` = unencrypted.
+    records : str, optional
+        ``"keep"`` (default) copies the annotations. ``"drop"`` leaves ALL of
+        them out (session, channel and segment level): the copy has no
+        ``.rdat``/``.ridx`` file, like a session that never had annotations;
+        a channel that holds only annotations is left out too. The source's
+        annotations are not copied or checked; the report's
+        ``records_dropped`` counts them. Anything else is refused
+        (``records-invalid``).
     metadata : mapping, optional
         Descriptive fields for the result, as for
         :func:`mef3io.transform_session`.
@@ -211,7 +223,7 @@ def merge_sessions(
     """
     a = _arguments(_Refusals(collect=False), sources=sources, passwords=passwords,
                    channels=channels, exclude_channels=exclude_channels,
-                   output_password=output_password, metadata=metadata)
+                   output_password=output_password, metadata=metadata, records=records)
     _warn_output_passwords(a)
     raw = _backend().merge_sessions(dst=os.fspath(dst), **a, **_hooks(cancel, progress))
     return MergeReport._from(raw)
@@ -226,6 +238,7 @@ def check(
     exclude_channels: Optional[Sequence[str]] = None,
     output_password: Optional[Sequence[str]] = None,
     metadata: Optional[Mapping] = None,
+    records: str = "keep",
     cancel: Optional[CancelToken] = None,
 ) -> CheckReport:
     """Every check :func:`merge_sessions` makes before it writes, without writing.
@@ -236,7 +249,7 @@ def check(
     refusals = _Refusals(collect=True)
     a = _arguments(refusals, sources=sources, passwords=passwords, channels=channels,
                    exclude_channels=exclude_channels, output_password=output_password,
-                   metadata=metadata)
+                   metadata=metadata, records=records)
     raw = _backend().check_merge(dst=os.fspath(dst), **a, **_hooks(cancel, None))
     return _check_report(raw, refusals, a)
 
@@ -250,6 +263,7 @@ def verify(
     exclude_channels: Optional[Sequence[str]] = None,
     output_password: Optional[Sequence[str]] = None,
     metadata: Optional[Mapping] = None,
+    records: str = "keep",
     progress: Optional[Callable[[int, int], object]] = None,
     cancel: Optional[CancelToken] = None,
 ) -> VerifyReport:
@@ -263,7 +277,7 @@ def verify(
     """
     a = _arguments(_Refusals(collect=False), sources=sources, passwords=passwords,
                    channels=channels, exclude_channels=exclude_channels,
-                   output_password=output_password, metadata=metadata)
+                   output_password=output_password, metadata=metadata, records=records)
     raw = _backend().verify_merge(dst=os.fspath(dst), **a, **_hooks(cancel, progress))
     return VerifyReport._from(raw)
 
@@ -290,6 +304,8 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="keep only this channel (repeatable)")
     sel.add_argument("--exclude-channel", action="append", default=None,
                      help="leave this channel out (repeatable)")
+    p.add_argument("--drop-records", action="store_true",
+                   help="leave every annotation out of the result")
     p.add_argument("--json", action="store_true", help="print the report as JSON")
     return p
 
@@ -303,7 +319,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
             args.sources, args.dst, passwords=args.password, channels=args.channel,
             exclude_channels=args.exclude_channel,
             output_password=tuple(args.output_password) if args.output_password else None,
-            metadata=metadata)
+            metadata=metadata, records="drop" if args.drop_records else "keep")
     except (RuntimeError, ValueError, TypeError, OSError) as exc:
         return _cli_error(exc)
     print(json.dumps(report.to_dict(), indent=2) if args.json else report.summary())

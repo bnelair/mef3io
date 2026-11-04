@@ -108,6 +108,9 @@ struct VerifyOptions {
   /// The cut the copy was made with (CopyOptions::time_range / exact).
   std::optional<std::pair<si8, si8>> time_range;
   bool exact = true;
+  /// The copy was made with CopyOptions::drop_records: it must hold no
+  /// record file at all (and no record-only channel).
+  bool drop_records = false;
 };
 
 /// The names anonymize used before the copy types were shared (#73).

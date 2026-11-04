@@ -332,6 +332,7 @@ CASES = {
     "equal output passwords": ("output-passwords-equal",
                                lambda t, p: _plain(t, p, output_password=("aa", "aa"))),
     "bad text policy": ("text-invalid", lambda t, p: _plain(t, p, text="redact")),
+    "bad records value": ("records-invalid", lambda t, p: _plain(t, p, records="redact")),
     "two folders, one number": ("segment-number-duplicate", _mutated(_duplicate_segment)),
     "record index names no record": ("record-index-mismatch", _mutated(_move_an_index_entry)),
     "a non-UTF-8 folder name": ("segment-folder-unnumbered", _mutated(_non_utf8_segment_folder)),

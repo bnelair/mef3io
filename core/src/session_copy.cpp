@@ -1736,9 +1736,28 @@ class Copier {
                     const std::string& channel, int segment,
                     const std::function<bool(si8)>& keep = {}) {
     ctl_.check();
+    if (rules_.copy->drop_records) {
+      drop_records_of(rdat_rel);
+      return;
+    }
     const RawRecordFile f = read_record_file(src_, rdat_rel, rules_.copy->password);
     write_records(prepare_records(f, rdat_rel, level, channel, segment, keep), f,
                   src_.describe(rdat_rel), out_rdat, channel);
+  }
+
+  /// drop_records: count a source record file's records (from its index, else
+  /// the file header's entry count) without reading or checking them.
+  void drop_records_of(const std::string& rdat_rel) {
+    const std::string ridx_rel = ridx_of(rdat_rel);
+    si8 n = 0;
+    if (src_.exists(ridx_rel)) {
+      const auto sz = src_.file_size(ridx_rel);
+      if (sz > UH) n = static_cast<si8>((sz - UH) / RIDX);
+    } else if (src_.file_size(rdat_rel) >= UH) {
+      const si8 declared = read<si8>(src_.read_range(rdat_rel, 0, UH), 32);
+      if (declared > 0) n = declared;
+    }
+    rep_.records_dropped += n;
   }
 
   /// The source this copier reads.
@@ -3337,7 +3356,10 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
       v.check_segment_data(*ss, ds);
       ++rep.segments;
       const bool s_rec = src.exists(ss->rdat()), d_rec = dst.exists(ds.rdat());
-      if (s_rec && d_rec) {
+      if (o.drop_records) {
+        if (d_rec || dst.exists(ridx_of(ds.rdat())))
+          v.problem(ds.dir(), "segment records", "present in the copy, which was made without records");
+      } else if (s_rec && d_rec) {
         const std::optional<si8> r = cut ? std::optional<si8>(seg_rto(ss->tmet)) : std::nullopt;
         v.check_records(ss->rdat(), ds.rdat(), excluded_keys, {}, cut ? &r : nullptr);
       } else if (s_rec != d_rec && !(cut && s_rec))  // a cut may keep none of its records
@@ -3349,7 +3371,10 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
   for (const auto& c : dch) {
     const std::string rel = c + ".timd/" + c + ".rdat";
     const bool s_rec = src.exists(rel), d_rec = dst.exists(rel);
-    if (s_rec && d_rec) {
+    if (o.drop_records) {
+      if (d_rec || dst.exists(ridx_of(rel)))
+        v.problem(rel, "channel records", "present in the copy, which was made without records");
+    } else if (s_rec && d_rec) {
       const std::optional<si8> r = o.time_range ? level_rto(&c) : std::nullopt;
       v.check_records(rel, rel, excluded_keys, {}, o.time_range ? &r : nullptr);
     } else if (s_rec != d_rec) {
@@ -3360,7 +3385,10 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
     std::string amb_s, amb_d;
     const std::string s_rel = detail::session_record_file(src, amb_s);
     const std::string d_rel = detail::session_record_file(dst, amb_d);
-    if (!s_rel.empty() && !d_rel.empty()) {
+    if (o.drop_records) {
+      if (!d_rel.empty() || !amb_d.empty())
+        v.problem(dst_path, "session records", "present in the copy, which was made without records");
+    } else if (!s_rel.empty() && !d_rel.empty()) {
       if (d_rel != dname + ".rdat")
         v.problem(d_rel, "session records", "are not named after the copy's session");
       const std::optional<si8> r = o.time_range ? level_rto(nullptr) : std::nullopt;
@@ -3608,6 +3636,14 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
                  ? std::find(o.exclude_channels.begin(), o.exclude_channels.end(), c) ==
                        o.exclude_channels.end()
                  : std::find(o.channels.begin(), o.channels.end(), c) != o.channels.end();
+      // drop_records: a channel of records only would be an empty folder.
+      if (in && o.drop_records &&
+          std::find(plan.layout.record_only_channels.begin(),
+                    plan.layout.record_only_channels.end(), c) !=
+              plan.layout.record_only_channels.end()) {
+        in = false;
+        pf.notes.push_back("channel " + c + " holds only records; with drop_records it is left out");
+      }
       (in ? pf.kept : pf.excluded).insert(c);
     }
     if (pf.kept.empty())
@@ -3829,7 +3865,8 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
     std::set<int> numbers;
     for (const auto& seg : c.segments) {
       ctl.check();
-      if (src.exists(seg.rdat())) record_files.push_back({seg.rdat(), c.name, true});
+      if (!o.drop_records && src.exists(seg.rdat()))
+        record_files.push_back({seg.rdat(), c.name, true});
       const std::string folder = leaf(seg.dir());
       const std::string fstem = folder.substr(0, folder.size() - 5);
       const auto dash = fstem.rfind('-');
@@ -3890,7 +3927,7 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
     for (const auto& ch : pf.kept) {
       ctl.check();
       std::vector<std::string> names = {ch, ch + ".timd"};
-      if (src.exists(ch + ".timd/" + ch + ".rdat")) {
+      if (!o.drop_records && src.exists(ch + ".timd/" + ch + ".rdat")) {
         names.push_back(ch + ".rdat");
         names.push_back(ch + ".ridx");
       }
@@ -3898,7 +3935,8 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
         const std::string stem = canonical_segment_stem(ch, 0);
         for (const char* ext : {".segd", ".tmet", ".tidx", ".tdat"}) names.push_back(stem + ext);
         const auto& segs = it->second->segments;
-        if (std::any_of(segs.begin(), segs.end(),
+        if (!o.drop_records &&
+            std::any_of(segs.begin(), segs.end(),
                         [&](const auto& seg) { return src.exists(seg.rdat()); })) {
           names.push_back(stem + ".rdat");
           names.push_back(stem + ".ridx");
@@ -3923,9 +3961,9 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
   }
   for (const auto& ch : pf.kept) {
     const std::string crec = ch + ".timd/" + ch + ".rdat";
-    if (src.exists(crec)) record_files.push_back({crec, ch, false});
+    if (!o.drop_records && src.exists(crec)) record_files.push_back({crec, ch, false});
   }
-  if (!pf.session_records.empty()) record_files.push_back({pf.session_records, "", false});
+  if (!o.drop_records && !pf.session_records.empty()) record_files.push_back({pf.session_records, "", false});
   // Record files: read (and CRC-checked) as the copy pass reads them, each
   // index entry matched to its record by offset, and an Epoc/Curs id_number
   // holding a time inside the recording range refused: it is copied as is,
@@ -4331,6 +4369,7 @@ void run_copy(const std::string& src_path, const std::string& dst_path, const Ru
     vo.output_password = o.output_password_2;
     vo.time_range = o.time_range;
     vo.exact = o.exact;
+    vo.drop_records = o.drop_records;
     if (an) {
       vo.clear_subject = an->clear_subject;
       vo.clear_location = an->clear_location;
@@ -4416,6 +4455,7 @@ VerifyReport verify_transform(const std::string& src, const std::string& dst,
   vo.output_password = options.output_password_2;
   vo.time_range = options.time_range;
   vo.exact = options.exact;
+  vo.drop_records = options.drop_records;
   return verify_standalone(src, dst, 0, vo, &options.metadata, ctl);
 }
 
@@ -4819,7 +4859,10 @@ VerifyReport verify_merge_impl(MergePlan& m, const std::string& dst_path, const 
       vv.check_segment_data_cut(*pc.segment, ds, pc.entries);
       const auto& src = *m.sources[pc.source]->pf.source;
       const bool s_rec = src.exists(pc.segment->rdat()), d_rec = dst.exists(ds.rdat());
-      if (s_rec && d_rec)
+      if (m.sources[pc.source]->options.drop_records) {
+        if (d_rec || dst.exists(ridx_of(ds.rdat())))
+          problem(ds.dir(), "segment records", "present in the result, which was made without records");
+      } else if (s_rec && d_rec)
         vv.check_records(pc.segment->rdat(), ds.rdat(), excluded_keys,
                          [&](si8 t) { return t >= pc.lo && t < pc.hi; });
       else if (!s_rec && d_rec)
@@ -4887,6 +4930,10 @@ VerifyReport verify_merge_impl(MergePlan& m, const std::string& dst_path, const 
     }
     one_level({m.new_name + ".rdat", m.new_name + ".ridx"}, m.new_name + ".rdat");
   }
+
+  const bool drop_records =
+      std::any_of(m.sources.begin(), m.sources.end(),
+                  [](const auto& sp) { return sp->used && sp->options.drop_records; });
 
   // Channel- and session-level annotations: the sources', merged by time.
   auto merged_records = [&](const std::string& drel,
@@ -4976,7 +5023,18 @@ VerifyReport verify_merge_impl(MergePlan& m, const std::string& dst_path, const 
                to_user_time(read<si8>(d.uh, UH_END), rto) != *hi))
       problem(drel, "universal header times", "do not span the records the file holds");
   };
+  if (drop_records) {
+    for (const auto& ch : dch) {
+      const std::string rel = ch + ".timd/" + ch + ".rdat";
+      if (dst.exists(rel) || dst.exists(ridx_of(rel)))
+        problem(rel, "channel records", "present in the result, which was made without records");
+    }
+    std::string amb;
+    if (!detail::session_record_file(dst, amb).empty() || !amb.empty())
+      problem(dst_path, "session records", "present in the result, which was made without records");
+  }
   for (const auto& ch : dch) {
+    if (drop_records) break;
     std::vector<std::pair<std::size_t, std::string>> from;
     const std::string rel = ch + ".timd/" + ch + ".rdat";
     for (std::size_t k = 0; k < m.sources.size(); ++k)
@@ -4989,7 +5047,7 @@ VerifyReport verify_merge_impl(MergePlan& m, const std::string& dst_path, const 
     for (std::size_t k = 0; k < m.sources.size(); ++k)
       if (m.sources[k]->used && !m.sources[k]->pf.session_records.empty())
         from.push_back({k, m.sources[k]->pf.session_records});
-    if (!from.empty()) merged_records(m.new_name + ".rdat", from);
+    if (!from.empty() && !drop_records) merged_records(m.new_name + ".rdat", from);
   }
 
   // The validator: nothing on the result (sources' own findings are not
@@ -5062,6 +5120,10 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
     auto merge_records = [&](const std::vector<std::pair<std::size_t, std::string>>& from,
                              const fs::path& out_rdat, RecordLevel level, const std::string& ch,
                              const Uuid& level_uuid) {
+      if (o.drop_records) {
+        for (const auto& [k, rel] : from) cps[k]->drop_records_of(rel);
+        return;
+      }
       std::vector<Copier::OutRecord> all;
       std::optional<RawRecordFile> headers;
       std::size_t first = from.front().first;
@@ -5110,10 +5172,14 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
         if (!cp.copy_segment(*pc.segment, cdir, ch, number, next_start, pc.entries)) continue;
         const std::string stem = canonical_segment_stem(ch, number);
         if (m.sources[pc.source]->pf.source->exists(pc.segment->rdat())) {
+          if (o.drop_records) {
+            cp.drop_records_of(pc.segment->rdat());
+          } else {
           const si8 lo = pc.lo, hi = pc.hi;
           cp.copy_records(pc.segment->rdat(), cdir / (stem + ".segd") / (stem + ".rdat"),
                           RecordLevel::Segment, ch, number,
                           [lo, hi](si8 t) { return t >= lo && t < hi; });
+          }
         }
         cp.end_segment();
         ++number;

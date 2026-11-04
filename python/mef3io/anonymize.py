@@ -36,6 +36,7 @@ from ._copy import (  # shared with mef3io.transform (#73); re-exported here
     _cli_error,
     _cli_password,
     _copy_arguments,
+    _records_drop,
     _copy_output_password,
     _error,
     _time_range,
@@ -140,6 +141,8 @@ class AnonymizeReport:
     blocks_trimmed, records_outside_window : int
         A cut (``time_range``): edge blocks re-encoded to the window, and
         annotations left out.
+    records_dropped : int
+        ``records="drop"``: source annotations left out (``records`` is then 0).
     bytes_written : int
     output_encrypted : bool
     not_copied : tuple of str
@@ -189,6 +192,7 @@ class AnonymizeReport:
     seizure_channel_entries_dropped: int
     blocks_trimmed: int
     records_outside_window: int
+    records_dropped: int
     bytes_written: int
     output_encrypted: bool
     not_copied: Tuple[str, ...]
@@ -307,11 +311,12 @@ def _clear_flags(clear: Iterable[str], refusals: Optional[_Refusals] = None) -> 
 
 
 def _arguments(refusals: _Refusals, *, channels, exclude_channels, output_password, text,
-               clear, time_range=None, exact=True) -> dict:
+               clear, time_range=None, exact=True, records="keep") -> dict:
     """The checks made in Python, in the order anonymize_session makes them,
     and the extension's keyword arguments."""
     copy = _copy_arguments(refusals, channels=channels, exclude_channels=exclude_channels,
-                           output_password=output_password, time_range=time_range, exact=exact)
+                           output_password=output_password, time_range=time_range, exact=exact,
+                           records=records)
     if callable(text):
         text_mode, text_fn = "callback", text
     elif isinstance(text, str) and text in ("drop", "keep"):
@@ -338,6 +343,7 @@ def anonymize_session(
     exclude_channels: Optional[Sequence[str]] = None,
     time_range: Optional[Tuple[int, int]] = None,
     exact: bool = True,
+    records: str = "keep",
     progress: Optional[Callable[[int, int], object]] = None,
     cancel: Optional[CancelToken] = None,
 ) -> AnonymizeReport:
@@ -458,6 +464,14 @@ def anonymize_session(
     exact : bool, optional
         With ``time_range``: ``True`` (default) trims the edge blocks to the
         window exactly; ``False`` keeps them whole (nothing is decoded).
+    records : str, optional
+        ``"keep"`` (default) copies the annotations. ``"drop"`` leaves ALL of
+        them out (session, channel and segment level): the copy has no
+        ``.rdat``/``.ridx`` file, like a session that never had annotations;
+        a channel that holds only annotations is left out too. The source's
+        annotations are not copied or checked; the report's
+        ``records_dropped`` counts them. Anything else is refused
+        (``records-invalid``).
     progress : callable, optional
         ``progress(done, total)`` in bytes (the copy and its verification).
     cancel : CancelToken, optional
@@ -514,7 +528,8 @@ def anonymize_session(
     """
     a = _arguments(_Refusals(collect=False), channels=channels,
                    exclude_channels=exclude_channels, output_password=output_password,
-                   text=text, clear=clear, time_range=time_range, exact=exact)
+                   text=text, clear=clear, time_range=time_range, exact=exact,
+                   records=records)
     _warn_output_passwords(a)
     text_mode = a.pop("text_mode")
     raw = _backend().anonymize_session(
@@ -545,6 +560,7 @@ def check(
     exclude_channels: Optional[Sequence[str]] = None,
     time_range: Optional[Tuple[int, int]] = None,
     exact: bool = True,
+    records: str = "keep",
     cancel: Optional[CancelToken] = None,
 ) -> CheckReport:
     """Every check :func:`anonymize_session` makes before it writes, without writing.
@@ -621,7 +637,7 @@ def check(
     refusals = _Refusals(collect=True)
     a = _arguments(refusals, channels=channels, exclude_channels=exclude_channels,
                    output_password=output_password, text=text, clear=clear,
-                   time_range=time_range, exact=exact)
+                   time_range=time_range, exact=exact, records=records)
     # The clear flags decide what text the copy keeps, which check() tries
     # (text-unremovable), so they go through as for the copy.
     text_mode = a.pop("text_mode")
@@ -650,6 +666,7 @@ def verify(
     clear: Iterable[str] = _CLEAR_CHOICES,
     time_range: Optional[Tuple[int, int]] = None,
     exact: bool = True,
+    records: str = "keep",
     progress: Optional[Callable[[int, int], object]] = None,
     cancel: Optional[CancelToken] = None,
 ) -> VerifyReport:
@@ -673,7 +690,7 @@ def verify(
       recording-time offset; with a shift, every time differs from the
       source's by exactly ``shift_us``, in the same sign convention, and the
       offset is 0. In both, GMT offset 0 and DST "no entry";
-    * the records match in count, order and type;
+    * the records match in count, order and type (with ``records="drop"``: the copy holds none);
     * a **field-wise** leak scan finds nothing: with a shift, every time
       field (universal headers, section 3, block index, data-block headers,
       record headers, record index, Seiz/Epoc/Curs body times) is checked
@@ -715,6 +732,7 @@ def verify(
         **_clear_flags(clear),
         time_range=_time_range(time_range),
         exact=bool(exact),
+        drop_records=_records_drop(records),
         **_hooks(cancel, progress),
     )
     return VerifyReport._from(raw)
