@@ -5,7 +5,7 @@ Newest first.
 
 | Version | Released | Main changes |
 |---|---|---|
-| [2.2.0](2.2.0.md) | — | one-call merge pipeline (per-source time ranges, anonymize, `n_threads`), `records="drop"` for copies, far fewer file opens on network drives, Windows non-Latin paths, merge fix in Linux wheels |
+| [2.2.0](2.2.0.md) | 2026-11-04 | one-call merge pipeline (per-source time ranges, anonymize, `n_threads`), `records="drop"` for copies, far fewer file opens on network drives, Windows non-Latin paths, merge fix in Linux wheels |
 | [2.1.1](2.1.1.md) | 2026-10-31 | annotations in password-protected sessions are never plaintext (#167), validator check `records.encryption` |
 | [2.1.0](2.1.0.md) | — | multi-channel writes (`write_int32_many`, `write_many`), opt-in `Writer(flush="close")` |
 | [2.0.1](2.0.1.md) | 2026-10-26 | `write_annotations` only ever appends (never replaces stored annotations), recovery of interrupted annotation appends, recover/repair always keep a backup |
