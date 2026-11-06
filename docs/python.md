@@ -1198,7 +1198,10 @@ int32 primitive path, in-segment appends), `write_annotations`,
 `get_annotations`, plus the legacy writer knobs (`mef_block_len`,
 `get_mefblock_len`, `max_nans_written`, `record_offset`). Differences from
 the legacy stack are measured and documented in the
-[comparison](legacy_comparison.md). `get_data` with a list of channels reads
+[comparison](legacy_comparison.md). On a channel whose segments have different
+conversion factors the compat `MefReader` scales each segment by its own
+factor (the legacy `mef_tools` returns zeros there; see
+[Merging](merge.md)). `get_data` with a list of channels reads
 them with the multi-channel `read` (one call per sampling rate and window;
 unset stamps keep meaning each channel's own start and end), so the arrays
 are the same as before, only faster: each one its own array, and on an error

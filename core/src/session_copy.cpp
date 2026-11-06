@@ -4938,6 +4938,42 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
       add(RefusalKind::WriteConflict, "merge-rate-differs",
           "channel " + ch + " has different sampling rates in different sources", ch,
           "sampling_frequency");
+  // One units string per channel. Compared byte for byte as stored (the
+  // reader's own rule: "uV" and "µV" are different strings and are not
+  // folded). The result takes the first segment's units for the whole
+  // channel, so sources that each hold one string but not the same one would
+  // silently relabel the later data: refused. A source that is ALREADY mixed
+  // is kept as it is (nothing here creates the mix) and noted.
+  {
+    std::map<std::string, std::vector<std::pair<std::size_t, std::vector<std::string>>>> units;
+    for (std::size_t k = 0; k < n; ++k) {
+      if (!m.sources[k]->used) continue;
+      for (const auto& c : m.sources[k]->pf.plan->summary.channels)
+        if (m.kept.count(c.name) && !c.units_all.empty()) units[c.name].emplace_back(k, c.units_all);
+    }
+    for (const auto& [ch, per_source] : units) {
+      std::vector<std::string> distinct;
+      bool any_mixed = false;
+      for (const auto& [k, u] : per_source) {
+        any_mixed = any_mixed || u.size() > 1;
+        for (const auto& s : u)
+          if (std::find(distinct.begin(), distinct.end(), s) == distinct.end()) distinct.push_back(s);
+      }
+      if (distinct.size() < 2) continue;
+      std::string listed;
+      for (const auto& s : distinct) listed += (listed.empty() ? "" : ", ") + ("\"" + s + "\"");
+      if (!any_mixed) {
+        add(RefusalKind::WriteConflict, "merge-units-mismatch",
+            "channel " + ch + " has different units in different sources (" + listed +
+                "): the merged channel would carry one units string for all its data. Merge "
+                "only sources that agree, or fix the units of one source first",
+            ch, "units_description");
+      } else {
+        m.notes.push_back("channel " + ch + " has segments with different units (" + listed +
+                          ") in a source; they are kept as they are (see validator units.mixed)");
+      }
+    }
+  }
   // The patient: the same in every source, or set for the result, or (when
   // anonymizing) cleared from it: a field the result does not carry may
   // differ, and the identity of every source is removed and scanned for.

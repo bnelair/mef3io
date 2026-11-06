@@ -38,6 +38,7 @@ from ._copy import (
     _copy_arguments,
     _error,
     _Refusals,
+    _warn_mixed_factors,
     _warn_output_passwords,
 )
 from .anonymize import _CLEAR_CHOICES, _clear_flags
@@ -63,6 +64,7 @@ REFUSAL_CODES: Dict[str, Tuple[str, str]] = {
     "merge-rename": ("ValueError", "check"),
     "merge-rto-differs": ("WriteConflictError", "check"),
     "merge-rate-differs": ("WriteConflictError", "check"),
+    "merge-units-mismatch": ("WriteConflictError", "check"),
     "merge-identity-differs": ("WriteConflictError", "check"),
     "merge-overlap": ("WriteConflictError", "check"),
 }
@@ -394,6 +396,12 @@ def merge_sessions(
       records and stops, A continues. A source's own slightly overlapping
       blocks (recorder jitter) never count.
     * ``merge-rate-differs``: a channel has different sampling rates.
+    * ``merge-units-mismatch``: a channel has different units strings in
+      different sources (compared exactly as stored, so ``"uV"`` and
+      ``"µV"`` differ); the merged channel carries ONE units string, so the
+      later data would be mislabelled. Sources whose segments already
+      disagree among themselves are kept as they are and noted
+      (validator ``units.mixed``).
     * ``merge-rto-differs``: the sources use different recording-time offsets.
     * ``merge-identity-differs``: the sources' subject fields (names, ID,
       location) differ, which may mean different patients. Set the fields for
@@ -486,6 +494,7 @@ def merge_sessions(
                    n_threads=n_threads)
     _warn_output_passwords(a)
     raw = _backend().merge_sessions(dst=os.fspath(dst), **a, **_hooks(cancel, progress))
+    _warn_mixed_factors(dst, a)
     return MergeReport._from(raw)
 
 

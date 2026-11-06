@@ -875,6 +875,18 @@ const std::vector<CheckImpl>& check_impls() {
                  [](const SegmentState&, const SegmentTruth&, Finding&, bool&) {},
                  {}});
 
+    v.push_back({{"units.mixed", "A channel's segments share one units string",
+                  "Every segment of a channel should declare the same units_description (the "
+                  "reader reports the first segment's for the whole channel, so a segment in "
+                  "other units would be silently mislabelled). Compared byte for byte as "
+                  "stored (so \"uV\" and \"micro-V\" differ). A warning: samples are "
+                  "unaffected. NOT repairable: which of the strings is right is a decision "
+                  "about the recording, not something the data can answer.",
+                  Severity::Warning, false},
+                 // Judged across a channel's segments after the pass (see run()).
+                 [](const SegmentState&, const SegmentTruth&, Finding&, bool&) {},
+                 {}});
+
     return v;
   }();
   return impls;
@@ -1509,6 +1521,8 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     std::optional<std::size_t> crc_note_index;
   };
   std::vector<PendingRepair> pending;
+  // units.mixed is judged across a channel's segments once the pass is over.
+  std::map<std::string, std::vector<std::pair<int, std::string>>> units_seen;
   // The "this repair computes a body CRC" note is queued during the pass; when
   // the .tmet is then NOT rewritten it must stop saying so.
   auto withdraw_crc_note = [&](const PendingRepair& pr) {
@@ -1621,6 +1635,7 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
       skip("section 2 is encrypted and the password does not grant level-1 access");
       continue;
     }
+    units_seen[files.channel].emplace_back(files.segment_number, state.md.section2.units_description);
 
     const SegmentTruth truth =
         derive_truth(*src, state, opts, ctl, progress,
@@ -1924,6 +1939,27 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     }
   }
 
+  if (selected(opts.check_ids, "units.mixed")) {
+    for (auto& [channel, segs] : units_seen) {
+      std::sort(segs.begin(), segs.end());
+      for (const auto& [seg_no, units] : segs) {
+        if (units == segs.front().second) continue;
+        Finding f;
+        f.check_id = "units.mixed";
+        f.severity = Severity::Warning;
+        f.channel = channel;
+        f.segment_number = seg_no;
+        f.path = channel + ".timd";
+        f.field = "units_description";
+        f.stored = "\"" + units + "\"";
+        f.expected = "\"" + segs.front().second + "\" (segment " +
+                     std::to_string(segs.front().first) + ")";
+        f.message = "this segment declares other units than the channel's first segment, so "
+                    "readers label its samples with the first segment's units";
+        report.findings.push_back(std::move(f));
+      }
+    }
+  }
   if (selected(opts.check_ids, "records.encryption")) check_records_encryption(*src, segments, report);
 
   // segment-repaired: a non-last segment of these channels changed, so their

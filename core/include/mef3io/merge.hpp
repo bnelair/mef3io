@@ -99,6 +99,9 @@ struct MergeReport : TransformReport {
 ///     any per-source cut, so recordings that take turns merge; a source's
 ///     own overlapping blocks never count);
 ///   * `merge-rate-differs`: a channel has different sampling rates;
+///   * `merge-units-mismatch`: a channel has different units strings in
+///     different sources (exact, as stored; the result carries one string per
+///     channel); a source already mixed on its own is kept and noted;
 ///   * `merge-rto-differs`: the sources use different recording-time
 ///     offsets (times are copied verbatim);
 ///   * `merge-identity-differs`: the sources' subject fields differ and

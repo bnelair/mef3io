@@ -75,6 +75,23 @@ class MefWarning(UserWarning):
         return (_rebuild, (type(self), str(self), self.path, self.details))
 
 
+class MixedFactorsWarning(MefWarning):
+    """A copy holds a channel whose segments use different conversion factors.
+
+    Raised by :func:`mef3io.merge_sessions` and :func:`mef3io.transform_session`
+    when the result has such a channel (sources recorded at different gains,
+    merged or kept as they are). Nothing is wrong with the file: mef3io and
+    pymef scale each segment by its own factor and read the right values.
+    **Older tools that scale by the channel-level factor, such as the legacy
+    ``mef_tools`` ``MefReader.get_data``, read such a channel as all zeros**
+    (meflib stores 0 at channel level when segments differ). Use mef3io or
+    pymef to read it, or write it again with one factor per channel.
+
+    ``w.message.path`` is the result session; ``details`` lists the channel
+    names.
+    """
+
+
 def _rebuild(cls, message, path, details):
     return cls(message, path=path, details=details)
 

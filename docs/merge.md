@@ -62,6 +62,29 @@ time) stops the merge later and leaves nothing behind:
 Every check a [modified copy](transform.md) makes also applies to each
 recording: passwords, damaged files, channel selection and so on.
 
+**Units.** A channel must carry the same units string in every source,
+compared exactly as stored (so `uV` and `µV` are different strings; nothing is
+folded or guessed). The result has one units string per channel, so
+`mV` data merged with `uV` data would be silently labelled `uV`; that is
+refused as `merge-units-mismatch`, naming the channel and both strings.
+Samples are never rescaled by a merge. A source whose segments already
+disagree among themselves is kept as it is and noted (the validator reports
+it as `units.mixed`).
+
+## Mixed conversion factors and older tools
+
+Sources recorded at different gains give a merged channel whose segments
+have **different conversion factors**. This is valid MEF 3.0 and mef3io keeps
+it: every segment keeps its own factor and mef3io (`Reader`, `MultiReader`,
+the `mef_tools`-compatible `MefReader`) and pymef read the right values.
+**Older tools that scale a whole channel by the channel-level factor, such as
+the legacy `mef_tools` `MefReader.get_data`, return all zeros for such a
+channel**, because meflib stores 0 at channel level when segments differ.
+`merge_sessions` and `transform_session` therefore emit a
+`mef3io.MixedFactorsWarning` when the result has such a channel. If a file
+must be read by older tools, merge only recordings with the same factor, or
+read it with mef3io or pymef.
+
 ## How the result is laid out
 
 - **Segments:** each segment of each recording becomes a segment of the
@@ -186,5 +209,6 @@ Refusals work as for the other copies:
 | `merge-rename` | `ValueError` | check | `rename=False`: a merge is always named after its destination. |
 | `merge-rto-differs` | `WriteConflictError` | check | The sources use different recording-time offsets. |
 | `merge-rate-differs` | `WriteConflictError` | check | A channel has different sampling rates in different sources (`details["channel"]`). |
+| `merge-units-mismatch` | `WriteConflictError` | check | A channel has different units strings (`details["channel"]`) in different sources, compared exactly as stored (`"uV"` and `"µV"` differ). The merged channel carries one units string, so the later data would be mislabelled; samples are never rescaled. A source whose segments already disagree among themselves is kept as it is and noted (validator `units.mixed`). |
 | `merge-identity-differs` | `WriteConflictError` | check | The sources' patient field `details["field"]` differs; set it with `metadata`, or clear it with `anonymize`. |
 | `merge-overlap` | `WriteConflictError` | check | Two sources hold samples of the same channel at the same moment (`details["channel"]`). |

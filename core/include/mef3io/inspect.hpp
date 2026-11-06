@@ -92,6 +92,11 @@ struct InspectChannel {
   /// (#150; each segment's is in InspectSegment::units_conversion_factor).
   std::optional<sf8> sampling_frequency, units_conversion_factor;
   std::optional<std::string> units_description;
+  /// Every DISTINCT units string the readable segments declare, in order of
+  /// first appearance (byte for byte as stored). More than one = the channel's
+  /// segments disagree (validator `units.mixed`, merge `merge-units-mismatch`).
+  /// C++ only: not in the Python summary.
+  std::vector<std::string> units_all;
   /// Section 2's free-text channel description, as the first segment whose
   /// section 2 is readable states it (segments can differ; the identity
   /// table lists every distinct value). An IDENTITY value, so it is returned
