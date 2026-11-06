@@ -810,3 +810,107 @@ TEST_CASE("non-ASCII names work through the output file and the cached source") 
     CHECK(listed);
   }
 }
+
+// ---- a windowed check/run on many segments (network drives: requests) -------
+namespace {
+std::mutex g_rd_mu;
+std::map<std::string, int> g_reads;
+void note_read(const std::string& p) {
+  std::lock_guard<std::mutex> lk(g_rd_mu);
+  ++g_reads[p];
+}
+
+// CH channels x SEG segments of 2 s at 1 kHz, 10 s apart.
+std::string write_many_segments(const fsys::path& dir, int ch, int seg) {
+  const std::string path = (dir / "many.mefd").string();
+  SessionWriter w(path, true);
+  SessionMetadata md;
+  md.subject_name_1 = "Jane";
+  w.set_metadata(md);
+  for (int s = 0; s < seg; ++s)
+    for (int c = 0; c < ch; ++c) {
+      std::vector<si4> x(2000);
+      for (std::size_t i = 0; i < x.size(); ++i) x[i] = static_cast<si4>((i * 7 + c) % 1000);
+      w.write_int32("c" + std::to_string(c), x, 1.0, START + s * 10'000'000LL, 1000.0, {}, s > 0);
+    }
+  return path;
+}
+
+struct ReadWatch {
+  ReadWatch() {
+    g_reads.clear();
+    detail::source_read_observer = &note_read;
+  }
+  ~ReadWatch() { detail::source_read_observer = nullptr; }
+};
+}  // namespace
+
+TEST_CASE("a windowed check and run on many segments: every source file opened once, few reads") {
+  const auto dir = fresh("mef3io_window_requests");
+  constexpr int CH = 4, SEG = 12;
+  const std::string src = write_many_segments(dir, CH, SEG);
+  TransformOptions o;
+  o.time_range = std::make_pair(START + 8 * 10'000'000LL + 500'000, START + 8 * 10'000'000LL + 1'000'000);
+  const int files = CH * SEG;
+  for (const bool run : {false, true}) {
+    const std::string dst = (dir / (run ? "run.mefd" : "chk.mefd")).string();
+    OpenWatch watch;
+    ReadWatch rw;
+    if (run) {
+      REQUIRE(transform_session(src, dst, o).verification.ok);
+    } else {
+      REQUIRE(check_transform(src, dst, o).ok);
+    }
+    // No source path is opened twice (the result's own files are: written, then verified).
+    int opened = 0;
+    for (const auto& [path, n] : g_opens) {
+      if (path.find(src) != 0) continue;
+      ++opened;
+      INFO(path << " opened " << n << " times");
+      CHECK(n == 1);
+    }
+    CHECK(opened > 0);
+    // Reads of the source: the old per-segment binary searches cost ~15 reads
+    // per segment index; the bound is a couple per segment file (measured: check ~1, run ~3).
+    int reads = 0;
+    for (const auto& [path, n] : g_reads)
+      if (path.find(src) == 0) reads += n;
+    INFO((run ? "run" : "check") << ": " << reads << " source reads");
+    CHECK(reads <= (run ? 4 : 2) * files);
+  }
+}
+
+TEST_CASE("a windowed check still finds what the full check finds") {
+  const auto dir = fresh("mef3io_window_refusals");
+  const std::string src = write_many_segments(dir, 3, 6);
+  const si8 mid = START + 3 * 10'000'000LL;
+  {  // a window in a gap holds no samples
+    TransformOptions o;
+    o.time_range = std::make_pair(mid + 4'000'000, mid + 6'000'000);
+    const CopyCheck c = check_transform(src, (dir / "g.mefd").string(), o);
+    CHECK_FALSE(c.ok);
+    std::vector<std::string> codes;
+    for (const auto& r : c.refusals) codes.push_back(r.code);
+    CHECK(std::count(codes.begin(), codes.end(), "time-range-empty") == 1);
+  }
+  {  // a window beyond the margin of every segment
+    TransformOptions o;
+    o.time_range = std::make_pair(START + 400LL * 86400 * 1'000'000, START + 401LL * 86400 * 1'000'000);
+    CHECK_FALSE(check_transform(src, (dir / "far.mefd").string(), o).ok);
+  }
+  {  // a metadata refusal is still reported next to a window
+    TransformOptions o;
+    o.time_range = std::make_pair(mid, mid + 1'000'000);
+    o.metadata.subject_id = std::string(200, 'x');
+    const CopyCheck c = check_transform(src, (dir / "m.mefd").string(), o);
+    CHECK_FALSE(c.ok);
+    bool found = false;
+    for (const auto& r : c.refusals) found = found || r.code == "metadata-too-long";
+    CHECK(found);
+  }
+  {  // a good window passes
+    TransformOptions o;
+    o.time_range = std::make_pair(mid, mid + 1'000'000);
+    CHECK(check_transform(src, (dir / "ok.mefd").string(), o).ok);
+  }
+}

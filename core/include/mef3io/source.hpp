@@ -82,6 +82,8 @@ class DirectorySource : public SessionSource {
 
  private:
   std::string join(const std::string& rel) const;
+  std::shared_ptr<const std::vector<ui1>> memo_get(const std::string& path, const std::string& rel,
+                                                   bool fill) const;
   std::string root_;
   std::shared_ptr<detail::HandleCache> cache_;  // null = plain reads
 };
@@ -135,6 +137,10 @@ class ReadHandleScope {
 /// opens (cached or not). Must be thread-safe. Pins "each source file is
 /// opened at most N times in a merge".
 inline void (*source_open_observer)(const std::string& path) = nullptr;
+
+/// TEST HOOK: called with the path of every positional read a DirectorySource
+/// really issues (a request on a network drive; memo hits do not count).
+inline void (*source_read_observer)(const std::string& path) = nullptr;
 
 /// TEST HOOK: called before each positional read through a cached handle;
 /// a non-zero return is raised as that errno (POSIX) in place of the read.
