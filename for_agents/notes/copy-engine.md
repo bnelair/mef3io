@@ -392,3 +392,9 @@ in that manylinux image (cibuildwheel never runs ctest), and by
 together with the drop-records and one-pass merge tests, so the released
 toolchain is checked before upload. To reproduce a wheel-only defect: build in
 `quay.io/pypa/manylinux_2_28_x86_64`.
+
+Merge units (`merge-units-mismatch`): decided per channel in the plan's piece loop on the KEPT pieces
+(after the cut), not on whole sources. The channel label is the first kept piece's units; refused when
+any source's first kept piece carries another string (its data would be relabeled); a source already mixed
+among its kept segments is kept + noted (`units_mixed` excuses the validator's `units.mixed` in verify).
+Same plan feeds check, run and verify. Pinned in tests/test_p53 and core/tests/test_transform.cpp.

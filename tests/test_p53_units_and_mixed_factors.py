@@ -103,6 +103,44 @@ def test_already_mixed_source_is_kept_and_noted(tmp_path):
     assert any("different units" in n for n in rep.notes)
 
 
+def _label(path):
+    with mef3io.Reader(str(path)) as r:
+        return r.info("X")["units_description"]
+
+
+def _mixed_a(tmp_path):
+    a = _src(tmp_path / "a.mefd", "uV", T0, segs=((0.1, "uV"), (0.1, "uV")))
+    _set_units(a, "X", 1, "mV")  # segment 0 "uV", segment 1 "mV"
+    return a
+
+
+def test_keeping_only_part_of_mixed_a(tmp_path):
+    a = _mixed_a(tmp_path)
+    b = _src(tmp_path / "b.mefd", "mV", T0 + HOUR)
+    # only A's second ("mV") segment + B ("mV"): agrees, label mV
+    rngs = [(T0 + 2_000_000, T0 + 3_000_000), None]
+    mef3io.merge_sessions([a, b], tmp_path / "m.mefd", time_ranges=rngs)
+    assert _label(tmp_path / "m.mefd") == "mV"
+    # A's first ("uV") segment + B ("mV"): relabel -> refused
+    rngs = [(T0, T0 + 1_000_000), None]
+    rep = mef3io.merge.check([a, b], tmp_path / "n.mefd", time_ranges=rngs)
+    assert [r.code for r in rep.refusals] == ["merge-units-mismatch"]
+    with pytest.raises(mef3io.WriteConflictError):
+        mef3io.merge_sessions([a, b], tmp_path / "n.mefd", time_ranges=rngs)
+    # all of mixed A alone-in-merge + B "mV": B's data would carry "uV": refused
+    rep = mef3io.merge.check([a, b], tmp_path / "n.mefd")
+    assert [r.code for r in rep.refusals] == ["merge-units-mismatch"]
+
+
+def test_mixed_source_note_names_label(tmp_path):
+    a = _mixed_a(tmp_path)
+    b = _src(tmp_path / "b.mefd", "uV", T0 + HOUR)
+    rep = mef3io.merge.check([a, b], tmp_path / "m.mefd")
+    assert any("first kept segment" in n for n in rep.notes)
+    mef3io.merge_sessions([a, b], tmp_path / "m.mefd")
+    assert _label(tmp_path / "m.mefd") == "uV"
+
+
 # ---- mixed conversion factors ------------------------------------------------
 
 def _mixed_factor_session(path):

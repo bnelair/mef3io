@@ -331,6 +331,31 @@ TEST_CASE("merge_sessions: recordings that take turns merge; overlapping data is
                     [](const CopyRefusal& r) { return r.code == "merge-overlap"; }));
 }
 
+TEST_CASE("check_merge: units are decided on the kept data; a different string is refused") {
+  const auto dir = fresh("mef3io_merge_units");
+  auto write = [&](const std::string& name, const std::string& units, si8 t) {
+    const std::string path = (dir / name).string();
+    SessionWriter w(path, true);
+    w.set_units(units);
+    std::vector<si4> x(2000);
+    for (std::size_t i = 0; i < x.size(); ++i) x[i] = static_cast<si4>(i % 100);
+    w.write_int32("a", x, 1.0, START + t, 1000.0, {}, false);
+    return path;
+  };
+  const std::string a = write("a.mefd", "uV", 0);
+  const std::string b = write("b.mefd", "mV", 10'000'000);
+  auto has = [](const CopyCheck& c) {
+    return std::any_of(c.refusals.begin(), c.refusals.end(),
+                       [](const CopyRefusal& r) { return r.code == "merge-units-mismatch"; });
+  };
+  MergeOptions o;
+  CHECK(has(check_merge({a, b}, (dir / "m.mefd").string(), o)));
+  // A cut that keeps only B's data (A's range holds no sample of its own
+  // channel: A is then left out) agrees with itself.
+  const std::string b2 = write("b2.mefd", "mV", 20'000'000);
+  CHECK_FALSE(has(check_merge({b, b2}, (dir / "n.mefd").string(), o)));
+}
+
 TEST_CASE("check_merge: options a merge does not take are refused with their codes") {
   const auto dir = fresh("mef3io_merge_options");
   const std::string a = write_session(dir);

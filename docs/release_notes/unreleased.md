@@ -10,7 +10,9 @@
   merge itself, naming the channel and both strings. Before, the merged
   channel silently took the first segment's units. Units are compared exactly
   as stored (`uV` and `µV` are different strings). A source whose segments
-  already disagree is kept as it is and noted. Samples are never rescaled.
+  already disagree is kept as it is and noted. The decision is made on the
+  segments the result keeps (after `time_ranges`), and the channel carries the
+  first kept segment's units. Samples are never rescaled.
 - **Validator check `units.mixed`** (warning, not repairable) reports a
   channel whose segments declare different units.
 

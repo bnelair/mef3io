@@ -3497,6 +3497,9 @@ struct Preflight {
   /// A cut: kept channels with no sample in the window. They are left out
   /// of the copy (and counted with the excluded ones from then on).
   std::vector<std::string> without_samples;
+  /// Channels whose kept segments carry different units strings, accepted
+  /// (one already-mixed source): the validator's `units.mixed` on them is expected.
+  std::set<std::string> units_mixed;
 };
 
 /// One piece of source text an anonymized copy keeps (after redaction).
@@ -4542,6 +4545,7 @@ struct MergePiece {
   si8 start = 0;   ///< its first block's time (index, user uUTC)
   si8 lo = 0, hi = 0;  ///< the record times its segment-level annotations take
   Uuid level{};    ///< the result segment's level UUID (all its files)
+  std::string units;  ///< its source segment's units string, as stored
 };
 
 struct MergeSourcePlan {
@@ -4561,6 +4565,9 @@ struct MergePlan {
   /// Kept channels left out because no source has a sample of them in its
   /// range (also in `excluded`).
   std::vector<std::string> without_samples;
+  /// Channels whose kept segments carry different units strings, accepted
+  /// (one already-mixed source): the validator's `units.mixed` on them is expected.
+  std::set<std::string> units_mixed;
   bool anonymize = false;
   std::optional<si8> shift;   // anonymize: the shift (unset = times kept)
   std::string pseudonym;      // anonymize
@@ -4938,42 +4945,6 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
       add(RefusalKind::WriteConflict, "merge-rate-differs",
           "channel " + ch + " has different sampling rates in different sources", ch,
           "sampling_frequency");
-  // One units string per channel. Compared byte for byte as stored (the
-  // reader's own rule: "uV" and "µV" are different strings and are not
-  // folded). The result takes the first segment's units for the whole
-  // channel, so sources that each hold one string but not the same one would
-  // silently relabel the later data: refused. A source that is ALREADY mixed
-  // is kept as it is (nothing here creates the mix) and noted.
-  {
-    std::map<std::string, std::vector<std::pair<std::size_t, std::vector<std::string>>>> units;
-    for (std::size_t k = 0; k < n; ++k) {
-      if (!m.sources[k]->used) continue;
-      for (const auto& c : m.sources[k]->pf.plan->summary.channels)
-        if (m.kept.count(c.name) && !c.units_all.empty()) units[c.name].emplace_back(k, c.units_all);
-    }
-    for (const auto& [ch, per_source] : units) {
-      std::vector<std::string> distinct;
-      bool any_mixed = false;
-      for (const auto& [k, u] : per_source) {
-        any_mixed = any_mixed || u.size() > 1;
-        for (const auto& s : u)
-          if (std::find(distinct.begin(), distinct.end(), s) == distinct.end()) distinct.push_back(s);
-      }
-      if (distinct.size() < 2) continue;
-      std::string listed;
-      for (const auto& s : distinct) listed += (listed.empty() ? "" : ", ") + ("\"" + s + "\"");
-      if (!any_mixed) {
-        add(RefusalKind::WriteConflict, "merge-units-mismatch",
-            "channel " + ch + " has different units in different sources (" + listed +
-                "): the merged channel would carry one units string for all its data. Merge "
-                "only sources that agree, or fix the units of one source first",
-            ch, "units_description");
-      } else {
-        m.notes.push_back("channel " + ch + " has segments with different units (" + listed +
-                          ") in a source; they are kept as they are (see validator units.mixed)");
-      }
-    }
-  }
   // The patient: the same in every source, or set for the result, or (when
   // anonymizing) cleared from it: a field the result does not carry may
   // differ, and the identity of every source is removed and scanned for.
@@ -5025,6 +4996,7 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
       bool read = false;
     };
     std::vector<Seg> segs;
+    std::map<const detail::LayoutSegment*, std::string> seg_units;
     for (std::size_t k = 0; k < m.sources.size(); ++k) {
       const auto& sp = *m.sources[k];
       if (!sp.used || !sp.pf.kept.count(ch)) continue;
@@ -5066,6 +5038,7 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
             // which segments are compared; the comparison itself is on the
             // blocks the copy keeps, index_blocks.)
             segs.push_back({k, &seg, t.rto, fs, longest_block_us(s2), a, b, {}, false});
+            seg_units[&seg] = s2.units_description;
           } catch (...) {
             // the source's own pre-flight already reported it
           }
@@ -5163,6 +5136,47 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
         if (other.start > pc.start) pc.hi = std::min(pc.hi, other.start);
       }
       pc.level = random_uuid();
+    }
+    // One units string per channel, decided on the segments the result
+    // actually KEEPS (after the cut). Compared byte for byte as stored (the
+    // reader's own rule: "uV" and "µV" are different strings, not folded).
+    // The channel's label is the first kept segment's. No sample may end up
+    // under a label that differs from the string it was stored with, so every
+    // source's first kept segment must carry that label (a source whose
+    // kept segments all agree then agrees with it); a source that is ALREADY
+    // mixed keeps its own segments as they are (nothing here creates the mix)
+    // and is noted.
+    if (!pieces.empty()) {
+      for (auto& pc : pieces) pc.units = seg_units[pc.segment];
+      const std::string label = pieces.front().units;
+      std::vector<std::string> distinct;
+      std::map<std::size_t, std::string> first_of;
+      for (const auto& pc : pieces) {
+        if (std::find(distinct.begin(), distinct.end(), pc.units) == distinct.end())
+          distinct.push_back(pc.units);
+        first_of.emplace(pc.source, pc.units);  // pieces are by time: the first stays
+      }
+      if (distinct.size() > 1) {
+        std::string listed;
+        for (const auto& u : distinct) listed += (listed.empty() ? "" : ", ") + ("\"" + u + "\"");
+        const bool relabeled = std::any_of(first_of.begin(), first_of.end(),
+                                           [&](const auto& f) { return f.second != label; });
+        if (relabeled)
+          add(RefusalKind::WriteConflict, "merge-units-mismatch",
+              "channel " + ch + " has different units in the data the result keeps (" + listed +
+                  "): the merged channel would carry one units string (\"" + label +
+                  "\", the first kept segment's) for data stored under another. Merge only "
+                  "sources that agree, restrict time_ranges to data that agrees, or fix the "
+                  "units of one source first",
+              ch, "units_description");
+        else {
+          m.units_mixed.insert(ch);
+          m.notes.push_back("channel " + ch + " has segments with different units (" + listed +
+                            ") in a source; they are kept as they are, and the channel's label "
+                            "shows the first kept segment's units (\"" + label +
+                            "\") (see validator units.mixed)");
+        }
+      }
     }
     m.pieces[ch] = std::move(pieces);
   }
@@ -5623,7 +5637,8 @@ VerifyReport verify_merge_impl(MergePlan& m, const std::string& dst_path, const 
     const Report dr = handles ? detail::validate_session_through(handles->open(dst_path), dst_path, vo, inner)
                               : validate_session(dst_path, vo, inner);
     for (const auto& f : dr.findings)
-      if (f.severity != Severity::Info)
+      if (f.severity != Severity::Info &&
+          !(f.check_id == "units.mixed" && m.units_mixed.count(f.channel)))
         problem(f.path, f.check_id, "the validator reports on the result: " + f.message);
     for (const auto& sk : dr.skipped)
       problem(sk.path, "validator", "could not check a segment of the result: " + sk.reason);
