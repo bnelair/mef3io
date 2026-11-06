@@ -392,3 +392,5 @@ in that manylinux image (cibuildwheel never runs ctest), and by
 together with the drop-records and one-pass merge tests, so the released
 toolchain is checked before upload. To reproduce a wheel-only defect: build in
 `quay.io/pypa/manylinux_2_28_x86_64`.
+
+SEGMENT SELECTION BY A CUT (#184): whether a window (transform `time_range`, merge `time_ranges`) touches a segment is judged by `segment_span`/`segment_outside` (session_copy.cpp): the .tmet header start/end WIDENED to the index's first block start and last block end (two small index reads), never the header alone. A stale END (interrupted append, short-ending writer) or a late START header dropped a merge source's whole window silently (and made a transform fail verification); the same rule (INVARIANTS: #146) now covers the copy's own skip (`Copier::copy_segment`), the merge plan's spans, the pre-flight "has samples" look (day margin) and the verify's source-segment matching. An unset header side is unbounded (never skipped). Test-pinned: tests/test_p53_stale_header_windows.py (output == Reader.read of the source, stale/late x merge windowed/unwindowed, transform, anonymize).

@@ -1115,6 +1115,43 @@ std::pair<std::size_t, std::size_t> window_entries(const SessionSource& src,
   return {a >= 2 ? a - 2 : 0, std::min(n, b + 1)};
 }
 
+/// A segment's span in user uUTC, for deciding whether a cut [t0, t1) can
+/// touch it: the header's start/end WIDENED to the index's first block start
+/// and last block end. A header time is stale or late in the field (an
+/// interrupted append, a short-ending writer; #146 lost samples on both, and
+/// #184 dropped a merge source's whole window on a stale end), so it alone
+/// never rules a segment out - the blocks do, as the reader does. An unset
+/// header side is unbounded. At most two small index reads.
+std::pair<si8, si8> segment_span(const SessionSource& src, const std::string& tidx_rel, si8 rto,
+                                 sf8 fs, si8 hdr_start, si8 hdr_end) {
+  si8 a = is_sentinel(hdr_start, false) ? std::numeric_limits<si8>::min()
+                                        : to_user_time(hdr_start, rto);
+  si8 b = is_sentinel(hdr_end, false) ? std::numeric_limits<si8>::max()
+                                      : to_user_time(hdr_end, rto);
+  const std::uint64_t isize = src.file_size(tidx_rel);
+  if (isize >= fmt::UNIVERSAL_HEADER_BYTES + fmt::TIME_SERIES_INDEX_BYTES) {
+    const std::size_t cnt = static_cast<std::size_t>((isize - fmt::UNIVERSAL_HEADER_BYTES) /
+                                                     fmt::TIME_SERIES_INDEX_BYTES);
+    const auto e0 = src.read_range(tidx_rel, fmt::UNIVERSAL_HEADER_BYTES, fmt::TIME_SERIES_INDEX_BYTES);
+    const auto el = src.read_range(
+        tidx_rel, fmt::UNIVERSAL_HEADER_BYTES + (cnt - 1) * fmt::TIME_SERIES_INDEX_BYTES,
+        fmt::TIME_SERIES_INDEX_BYTES);
+    a = std::min(a, to_user_time(read<si8>(e0, 8), rto));
+    if (fs > 0)
+      b = std::max(b, sample_time(to_user_time(read<si8>(el, 8), rto), read<ui4>(el, 24), fs));
+  }
+  return {a, b};
+}
+
+/// Whether a segment lies wholly outside [t0 - margin, t1 + margin): its
+/// widened span (segment_span) does not meet it.
+bool segment_outside(const SessionSource& src, const std::string& tidx_rel, si8 rto, sf8 fs,
+                     si8 hdr_start, si8 hdr_end, si8 t0, si8 t1, si8 margin = 0) {
+  if (is_sentinel(hdr_start, false) || is_sentinel(hdr_end, false)) return false;
+  const auto [a, b] = segment_span(src, tidx_rel, rto, fs, hdr_start, hdr_end);
+  return !(a < saturating_add(t1, margin) && b > saturating_add(t0, -margin));
+}
+
 /// A cut's user time stored the way `like` was stored (meflib's negated
 /// form, or absolute); an unset `like` gets the negated form.
 si8 stored_like(si8 like, si8 user, si8 rto) {
@@ -1410,9 +1447,9 @@ class Copier {
     }
     if (window_) {
       // A segment outside the window is not read at all.
-      const si8 a = read<si8>(t.bytes, UH_START), b = read<si8>(t.bytes, UH_END);
-      if (!is_sentinel(a, false) && !is_sentinel(b, false) &&
-          !(to_user_time(a, t.rto) < window_->second && to_user_time(b, t.rto) > window_->first))
+      // (judged by the blocks too, not the header alone: #184)
+      if (segment_outside(src_, seg.tidx, t.rto, seg_fs_, read<si8>(t.bytes, UH_START),
+                          read<si8>(t.bytes, UH_END), window_->first, window_->second))
         return false;
     }
     if (reshape) {
@@ -3346,10 +3383,11 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
     std::vector<std::pair<si8, si8>> spans;  // source segments, user uUTC
     if (cut)
       for (const auto& x : sc.segments) {
-        const auto uh = src.read_range(x.tmet, 0, UH);
-        const si8 rto = segment_rto(load_time_series_metadata(src.read_all(x.tmet), o.password));
-        spans.push_back({to_user_time(read<si8>(uh, UH_START), rto),
-                         to_user_time(read<si8>(uh, UH_END), rto)});
+        const TmetImage t = open_tmet(src, x.tmet, o.password);
+        const auto m = fmt::TimeSeriesMetadataSection2::parse(
+            std::span<const ui1>(t.bytes).subspan(S2, S2_BYTES));
+        spans.push_back(segment_span(src, x.tidx, t.rto, m.sampling_frequency,
+                                     read<si8>(t.bytes, UH_START), read<si8>(t.bytes, UH_END)));
       }
     std::size_t next = 0;
     int expected_number = 0;  // a cut numbers each channel's segments from 0
@@ -3742,19 +3780,16 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
           if (has) break;
           ctl.check();
           try {
-            const auto uh = src.read_range(seg.tmet, 0, UH);
-            const si8 a = read<si8>(uh, UH_START), b = read<si8>(uh, UH_END);
-            // A first look with the segment's own offset (a day's margin;
-            // the session's may differ from it when segments disagree).
-            const si8 r = segment_rto_of(plan, seg.tmet);
-            if (!is_sentinel(a, false) && !is_sentinel(b, false) &&
-                !(to_user_time(a, r) < saturating_add(t1, DAY_US) &&
-                  to_user_time(b, r) > saturating_add(t0, -DAY_US)))
-              continue;
             const TmetImage t = open_tmet(src, seg.tmet, o.password);
             const auto m = fmt::TimeSeriesMetadataSection2::parse(
                 std::span<const ui1>(t.bytes).subspan(S2, S2_BYTES));
             const sf8 fs = m.sampling_frequency;
+            // A first look (a day's margin, the offset may differ): the
+            // header widened to the index, never the header alone (#184).
+            if (segment_outside(src, seg.tidx, segment_rto_of(plan, seg.tmet), fs,
+                                read<si8>(t.bytes, UH_START), read<si8>(t.bytes, UH_END), t0, t1,
+                                DAY_US))
+              continue;
             if (!(fs > 0)) continue;
             const auto [f, l] = window_entries(src, seg.tidx, t.rto, t0, t1, longest_block_us(m));
             if (f >= l) continue;
@@ -5010,9 +5045,8 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
             const si8 ua = read<si8>(t.bytes, UH_START), ub = read<si8>(t.bytes, UH_END);
             // A cut copies no segment outside its range, decided from this
             // header time (the copy's own rule).
-            if (win && !is_sentinel(ua, false) && !is_sentinel(ub, false) &&
-                !(to_user_time(ua, t.rto) < win->second && to_user_time(ub, t.rto) > win->first))
-              continue;
+            if (win && segment_outside(src, seg.tidx, t.rto, fs, ua, ub, win->first, win->second))
+              continue;  // (by the blocks too, not the header alone: #184)
             if (win && !(fs > 0)) continue;  // the source's own pre-flight left it out
             if (!is_sentinel(ua, false)) a = to_user_time(ua, t.rto);
             if (!is_sentinel(ub, false)) b = to_user_time(ub, t.rto);
