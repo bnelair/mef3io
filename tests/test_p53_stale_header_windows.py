@@ -105,3 +105,22 @@ def test_a_window_outside_every_block_is_still_left_out(tmp_path):
     with pytest.raises(Exception):
         mef3io.merge_sessions([src, oth], str(tmp_path / "m.mefd"),
                               time_ranges=[(T + 45 * S, T + 55 * S), (T, T + 1 * S)])
+
+
+def test_stale_end_with_a_zero_count_last_entry_matches_the_reader(tmp_path):
+    # the reader leaves a segment with a 0-count index entry open-ended (it is
+    # never skipped); the copy engine must judge it the same way (#184 review
+    # round 1): no refusal, no loss
+    src = _source(tmp_path / "s.mefd", "stale")
+    tidx = sorted(glob.glob(f"{src}/ch.timd/*-000000.segd/*.tidx"))[0]
+    raw = bytearray(open(tidx, "rb").read())
+    n = (len(raw) - 1024) // 56
+    struct.pack_into("<I", raw, 1024 + (n - 1) * 56 + 24, 0)
+    struct.pack_into("<I", raw, 4, m.crc32(bytes(raw[1024:])))
+    struct.pack_into("<I", raw, 0, m.crc32(bytes(raw[4:1024])))
+    open(tidx, "wb").write(bytes(raw))
+    oth = _other(tmp_path / "o.mefd")
+    want = mef3io.Reader(src).read("ch", *WIN)
+    mef3io.merge_sessions([src, oth], str(tmp_path / "m.mefd"), time_ranges=[WIN, None])
+    got = mef3io.Reader(str(tmp_path / "m.mefd")).read("ch", *WIN)
+    assert got.shape == want.shape and np.array_equal(got, want, equal_nan=True)
