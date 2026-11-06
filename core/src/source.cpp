@@ -109,10 +109,10 @@ class HandleCache {
   std::unordered_map<std::string, std::uint64_t> size_memo;
   std::unordered_map<std::string, std::vector<SourceDirEntry>> dir_memo;
   // Whole contents of the SMALL metadata files (.tmet/.tidx/.ridx, at most
-  // MEMO_FILE_BYTES each, MEMO_TOTAL_BYTES together) read by read_all: a file
+  // MEMO_FILE_BYTES each, detail::memo_total_budget together) read by read_all: a file
   // read again later (the validator, the planning, the verification) costs no
   // open even when the handle cap evicted its handle. Forgotten with release_under.
-  static constexpr std::size_t MEMO_FILE_BYTES = 1u << 20, MEMO_TOTAL_BYTES = 256u << 20;
+  static constexpr std::size_t MEMO_FILE_BYTES = 1u << 20;  // the total: detail::memo_total_budget
   std::unordered_map<std::string, std::shared_ptr<const std::vector<ui1>>> bytes_memo;
   std::size_t bytes_memo_total = 0;
 
@@ -272,6 +272,7 @@ bool pread_full(const Handle& h, std::size_t offset, std::size_t length, ui1* ou
   std::size_t done = 0;
   if (partial) *partial = 0;
   if (length && detail::source_read_observer) detail::source_read_observer(h.path);
+  detail::source_read_bytes.fetch_add(length, std::memory_order_relaxed);
   if (length && detail::read_fault_hook) {
     if (const int e = detail::read_fault_hook(h.path)) {
       const std::string what = "read failed: " + h.path + " (" +
@@ -477,7 +478,14 @@ std::shared_ptr<const std::vector<ui1>> DirectorySource::memo_get(const std::str
     if (it != c->bytes_memo.end()) return it->second;
   }
   if (!fill) return nullptr;
-  if (file_size(rel) > HandleCache::MEMO_FILE_BYTES) return nullptr;
+  const std::uint64_t size = file_size(rel);
+  if (size > HandleCache::MEMO_FILE_BYTES) return nullptr;
+  {
+    // Over budget: no whole-file read that read_all could not keep; the
+    // caller does its normal small read.
+    std::lock_guard<std::mutex> lk(c->mu);
+    if (c->bytes_memo_total + size > detail::memo_total_budget) return nullptr;
+  }
   read_all(rel);  // memoizes when the budget allows
   std::lock_guard<std::mutex> lk(c->mu);
   const auto it = c->bytes_memo.find(path);
@@ -503,7 +511,7 @@ std::vector<ui1> DirectorySource::read_all(const std::string& rel) const {
     ~Remember() {
       if (!on || buf.size() > HandleCache::MEMO_FILE_BYTES) return;
       std::lock_guard<std::mutex> lk(c->mu);
-      if (c->bytes_memo_total + buf.size() > HandleCache::MEMO_TOTAL_BYTES) return;
+      if (c->bytes_memo_total + buf.size() > detail::memo_total_budget) return;
       if (c->bytes_memo.emplace(path, std::make_shared<const std::vector<ui1>>(buf)).second)
         c->bytes_memo_total += buf.size();
     }

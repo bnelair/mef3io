@@ -163,10 +163,19 @@ MERGE IN ONE PASS (`merge.hpp`; MergeOptions gained `time_ranges`, `anonymize`,
   (random UUIDs). A text callback => copy on one thread (called in order).
   Progress: ProgressReporter is already serialised/monotonic; called from
   whichever worker crosses a step (NOT one fixed thread).
-* Verification still re-reads every source (copy pass: once; verify: again).
-  A digest taken during the copy would avoid the second read; not done (it
-  would stop the check comparing the copy with the sources as they are: only
-  as an explicit opt-in option, PROPOSED, not built).
+* Verification re-reads the SIGNAL DATA of every source (copy pass: once;
+  verify: again, fresh from disk: `.tdat` is never memoised) and compares it
+  with the output, so it still checks the copy against the sources as they are.
+  What it REUSES within one operation is the per-scope memo of the small
+  metadata/index files (`.tmet`/`.tidx`/`.ridx`, <= 1 MiB each, 256 MiB total,
+  `detail::memo_total_budget`; over budget a read falls back to the normal
+  small read, never a whole-file read thrown away): the verifier sees the
+  source metadata/index bytes the copier saw, with the CRCs still checked on
+  them. Safe because the sources are not written during the operation
+  (ReadHandleScope rule: a scope's sources do not change while it lives); the
+  OUTPUT is opened through the scope only after it is written, and
+  `release_under` forgets it before any rename. A digest of the signal taken
+  during the copy is still not done (PROPOSED opt-in only).
 * WINDOWED CHECK/RUN COST (perf/check-window-only; a network request is 2-5 ms,
   counts scale with channels x segments, not the window). (a) `window_entries`
   reads an index of <= 512 KiB (`WHOLE_INDEX_BYTES`, ~9k blocks) in ONE request

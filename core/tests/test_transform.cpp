@@ -880,6 +880,35 @@ TEST_CASE("a windowed check and run on many segments: every source file opened o
   }
 }
 
+TEST_CASE("memo over budget: a small read of an unmemoised index reads only what it asks for") {
+  const auto dir = fresh("mef3io_memo_budget");
+  const std::string src = write_many_segments(dir, 1, 2);
+  std::string tidx;
+  for (const auto& e : fsys::recursive_directory_iterator(src))
+    if (e.path().extension() == ".tidx") { tidx = e.path().string(); break; }
+  REQUIRE_FALSE(tidx.empty());
+  const std::string rel = fsys::relative(tidx, src).generic_string();
+  const std::uint64_t fsize = fsys::file_size(tidx);
+  REQUIRE(fsize > 64);
+  struct Restore {
+    std::size_t old = detail::memo_total_budget;
+    ~Restore() { detail::memo_total_budget = old; }
+  } restore;
+  for (const bool over : {false, true}) {
+    detail::memo_total_budget = over ? 0 : (256u << 20);
+    detail::ReadHandleScope scope;
+    const auto s = scope.open(src);
+    detail::source_read_bytes = 0;
+    const auto got = s->read_range(rel, 0, 16);
+    REQUIRE(got.size() == 16);
+    if (over) CHECK(detail::source_read_bytes.load() == 16);        // exactly the ask
+    else CHECK(detail::source_read_bytes.load() == fsize);          // memoised: whole file once
+    // the second small read is free in the memo case, one more small read otherwise
+    s->read_range(rel, 16, 8);
+    CHECK(detail::source_read_bytes.load() == (over ? 24 : fsize));
+  }
+}
+
 TEST_CASE("a windowed check still finds what the full check finds") {
   const auto dir = fresh("mef3io_window_refusals");
   const std::string src = write_many_segments(dir, 3, 6);
