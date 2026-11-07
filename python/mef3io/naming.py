@@ -59,11 +59,11 @@ class TimeRange:
 def time_range(path, password: str = "", *, cancel: Optional[CancelToken] = None) -> TimeRange:
     """The first and last sample time of a session, reading as little as possible.
 
-    Only the first and last segment's ``.tmet`` of each channel is read
-    (about 16 KB each), never a block index or data file, so it suits
-    ordering many sessions by time. Listing the session still checks that
-    each segment's files exist. Segments are assumed numbered in time order,
-    as every known writer numbers them: a middle segment earlier than the
+    Only the first and last complete segment's ``.tmet`` of each channel is
+    read (about 16 KB each), never a block index or data file. Only those
+    segments' files are checked for existence, the others are not touched, so it
+    suits ordering many sessions by time. Segments are assumed numbered in
+    time order, as every known writer numbers them: a middle segment earlier than the
     first and last is not seen. Works on ``.mefd`` folders and
     ``.mefd.tar`` archives. An encrypted session can be ordered without its
     password (``offset_known`` is then ``False``); a wrong password raises
