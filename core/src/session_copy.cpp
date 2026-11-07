@@ -1125,6 +1125,91 @@ std::pair<std::size_t, std::size_t> window_entries(const SessionSource& src,
   return {a >= 2 ? a - 2 : 0, std::min(n, b + 1)};
 }
 
+/// The span of ALL of a segment's index entries, read once (one range read of
+/// the entries, served by the per-copy handle cache), by the reader's own
+/// rule (Session::learn_span, core/src/session.cpp:131-160): every entry's
+/// [start, start + llround(n * 1e6 / fs)); an entry with no usable count
+/// (0 = damaged, NO_ENTRY) or an unusable rate leaves the span open (the
+/// reader's span_open: such a segment is never skipped).
+struct IndexSpan {
+  bool have = false;  // at least one entry was read
+  bool open = false;
+  si8 lo = 0, hi = 0;
+  si8 first_start = 0;  // the first entry's start, and the last entry's end
+  si8 last_end = 0;     // (start + n / fs; the start when fs is unusable)
+};
+
+IndexSpan index_span(const SessionSource& src, const std::string& tidx_rel, si8 rto, sf8 fs) {
+  IndexSpan sp;
+  const std::uint64_t isize = src.file_size(tidx_rel);
+  if (isize < fmt::UNIVERSAL_HEADER_BYTES + fmt::TIME_SERIES_INDEX_BYTES) return sp;
+  const std::size_t cnt = static_cast<std::size_t>((isize - fmt::UNIVERSAL_HEADER_BYTES) /
+                                                   fmt::TIME_SERIES_INDEX_BYTES);
+  const auto es = src.read_range(tidx_rel, fmt::UNIVERSAL_HEADER_BYTES,
+                                 cnt * fmt::TIME_SERIES_INDEX_BYTES);
+  sp.have = true;
+  sp.first_start = to_user_time(read<si8>(es, 8), rto);
+  {
+    const std::size_t o = (cnt - 1) * fmt::TIME_SERIES_INDEX_BYTES;
+    const si8 t = to_user_time(read<si8>(es, o + 8), rto);
+    sp.last_end = fs > 0 ? sample_time(t, read<ui4>(es, o + 24), fs) : t;
+  }
+  sp.open = !(fs > 0) || !std::isfinite(fs);
+  sp.lo = std::numeric_limits<si8>::max();
+  sp.hi = std::numeric_limits<si8>::min();
+  for (std::size_t i = 0; i < cnt && !sp.open; ++i) {
+    const ui4 n = read<ui4>(es, i * fmt::TIME_SERIES_INDEX_BYTES + 24);
+    if (n == 0 || n == fmt::UI4_NO_ENTRY) {
+      sp.open = true;
+      break;
+    }
+    const si8 b0 = to_user_time(read<si8>(es, i * fmt::TIME_SERIES_INDEX_BYTES + 8), rto);
+    sp.lo = std::min(sp.lo, b0);
+    sp.hi = std::max(sp.hi, b0 + static_cast<si8>(std::llround(static_cast<sf8>(n) * 1e6 / fs)));
+  }
+  return sp;
+}
+
+/// A segment's span in user uUTC, for deciding whether a cut [t0, t1) can
+/// touch it: the header's start/end WIDENED to the span of the index (all its
+/// entries, index_span). NOT padded: the reader skips by exactly this
+/// span, and a pad would keep segments the window has no samples in (the
+/// copy would then hold empty segments). A header time is
+/// stale or late in the field (an interrupted append, a short-ending writer;
+/// #146 lost samples on both, and #184 dropped a merge source's whole window
+/// on a stale end), so it alone never rules a segment out - the blocks do, as
+/// the reader does. An unset header side, or an open index span, is unbounded.
+std::pair<si8, si8> widened_span(const IndexSpan& ix, si8 hdr_start, si8 hdr_end, si8 rto) {
+  constexpr si8 LO = std::numeric_limits<si8>::min(), HI = std::numeric_limits<si8>::max();
+  si8 a = is_sentinel(hdr_start, false) ? LO : to_user_time(hdr_start, rto);
+  si8 b = is_sentinel(hdr_end, false) ? HI : to_user_time(hdr_end, rto);
+  if (ix.have) {
+    if (ix.open) return {LO, HI};
+    a = std::min(a, ix.lo);
+    b = std::max(b, ix.hi);
+  }
+  return {a, b};
+}
+
+std::pair<si8, si8> segment_span(const SessionSource& src, const std::string& tidx_rel, si8 rto,
+                                 sf8 fs, si8 hdr_start, si8 hdr_end) {
+  return widened_span(index_span(src, tidx_rel, rto, fs), hdr_start, hdr_end, rto);
+}
+
+/// Whether the span [a, b) lies wholly outside [t0 - margin, t1 + margin).
+bool span_outside(const std::pair<si8, si8>& span, si8 hdr_start, si8 hdr_end, si8 t0, si8 t1,
+                  si8 margin = 0) {
+  if (is_sentinel(hdr_start, false) || is_sentinel(hdr_end, false)) return false;
+  return !(span.first < saturating_add(t1, margin) && span.second > saturating_add(t0, -margin));
+}
+
+bool segment_outside(const SessionSource& src, const std::string& tidx_rel, si8 rto, sf8 fs,
+                     si8 hdr_start, si8 hdr_end, si8 t0, si8 t1, si8 margin = 0) {
+  if (is_sentinel(hdr_start, false) || is_sentinel(hdr_end, false)) return false;
+  return span_outside(segment_span(src, tidx_rel, rto, fs, hdr_start, hdr_end),
+                      hdr_start, hdr_end, t0, t1, margin);
+}
+
 /// A cut's user time stored the way `like` was stored (meflib's negated
 /// form, or absolute); an unset `like` gets the negated form.
 si8 stored_like(si8 like, si8 user, si8 rto) {
@@ -1420,9 +1505,9 @@ class Copier {
     }
     if (window_) {
       // A segment outside the window is not read at all.
-      const si8 a = read<si8>(t.bytes, UH_START), b = read<si8>(t.bytes, UH_END);
-      if (!is_sentinel(a, false) && !is_sentinel(b, false) &&
-          !(to_user_time(a, t.rto) < window_->second && to_user_time(b, t.rto) > window_->first))
+      // (judged by the blocks too, not the header alone: #184)
+      if (segment_outside(src_, seg.tidx, t.rto, seg_fs_, read<si8>(t.bytes, UH_START),
+                          read<si8>(t.bytes, UH_END), window_->first, window_->second))
         return false;
     }
     if (reshape) {
@@ -3356,10 +3441,11 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
     std::vector<std::pair<si8, si8>> spans;  // source segments, user uUTC
     if (cut)
       for (const auto& x : sc.segments) {
-        const auto uh = src.read_range(x.tmet, 0, UH);
-        const si8 rto = segment_rto(load_time_series_metadata(src.read_all(x.tmet), o.password));
-        spans.push_back({to_user_time(read<si8>(uh, UH_START), rto),
-                         to_user_time(read<si8>(uh, UH_END), rto)});
+        const TmetImage t = open_tmet(src, x.tmet, o.password);
+        const auto m = fmt::TimeSeriesMetadataSection2::parse(
+            std::span<const ui1>(t.bytes).subspan(S2, S2_BYTES));
+        spans.push_back(segment_span(src, x.tidx, t.rto, m.sampling_frequency,
+                                     read<si8>(t.bytes, UH_START), read<si8>(t.bytes, UH_END)));
       }
     std::size_t next = 0;
     int expected_number = 0;  // a cut numbers each channel's segments from 0
@@ -3787,15 +3873,21 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
           const auto& seg = c.segments[k];
           ctl.check();
           try {
-            const auto uh = src.read_range(seg.tmet, 0, UH);
-            const si8 a = read<si8>(uh, UH_START), b = read<si8>(uh, UH_END);
-            // The segment's own offset (the session's may differ from it
-            // when segments disagree).
-            const si8 r = segment_rto_of(plan, seg.tmet);
+            // The span is the header's WIDENED to the segment's index
+            // (segment_span, as the reader's learn_span; #184), never the
+            // header alone: a stale end or late start still reaches the
+            // window by its blocks. The segment's own offset (the session's
+            // may differ from it when segments disagree).
+            const TmetImage t = open_tmet(src, seg.tmet, o.password);
+            const sf8 sfs = fmt::TimeSeriesMetadataSection2::parse(
+                                std::span<const ui1>(t.bytes).subspan(S2, S2_BYTES))
+                                .sampling_frequency;
+            const si8 a = read<si8>(t.bytes, UH_START), b = read<si8>(t.bytes, UH_END);
             if (!is_sentinel(a, false) && !is_sentinel(b, false)) {
-              const si8 ua = to_user_time(a, r), ub = to_user_time(b, r);
-              heads[k].exact = ua < t1 && ub > t0;
-              heads[k].margin = ua < saturating_add(t1, DAY_US) && ub > saturating_add(t0, -DAY_US);
+              const auto sp = segment_span(src, seg.tidx, segment_rto_of(plan, seg.tmet), sfs, a, b);
+              heads[k].exact = sp.first < t1 && sp.second > t0;
+              heads[k].margin = sp.first < saturating_add(t1, DAY_US) &&
+                                sp.second > saturating_add(t0, -DAY_US);
             }
           } catch (...) {
             add_exception(std::current_exception(), "source-damaged", "source-crc",
@@ -5048,22 +5140,19 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
             // stale, and two segments are compared only where spans meet.
             si8 a = std::numeric_limits<si8>::max(), b = std::numeric_limits<si8>::min();
             const si8 ua = read<si8>(t.bytes, UH_START), ub = read<si8>(t.bytes, UH_END);
-            // A cut copies no segment outside its range, decided from this
-            // header time (the copy's own rule).
-            if (win && !is_sentinel(ua, false) && !is_sentinel(ub, false) &&
-                !(to_user_time(ua, t.rto) < win->second && to_user_time(ub, t.rto) > win->first))
+            // One read of the index (index_span); a cut copies no segment
+            // outside its range, judged by the blocks too, not the header
+            // alone (the copy's own rule, #184).
+            const IndexSpan ix = index_span(src, seg.tidx, t.rto, fs);
+            if (win && span_outside(widened_span(ix, ua, ub, t.rto), ua, ub,
+                                    win->first, win->second))
               continue;
             if (win && !(fs > 0)) continue;  // the source's own pre-flight left it out
             if (!is_sentinel(ua, false)) a = to_user_time(ua, t.rto);
             if (!is_sentinel(ub, false)) b = to_user_time(ub, t.rto);
-            const std::uint64_t isize = src.file_size(seg.tidx);
-            if (isize >= UH + ENTRY) {
-              const std::size_t cnt = static_cast<std::size_t>((isize - UH) / ENTRY);
-              const auto e0 = src.read_range(seg.tidx, UH, ENTRY);
-              const auto el = src.read_range(seg.tidx, UH + (cnt - 1) * ENTRY, ENTRY);
-              a = std::min(a, to_user_time(read<si8>(e0, 8), t.rto));
-              b = std::max(b, sample_time(to_user_time(read<si8>(el, 8), t.rto),
-                                          read<ui4>(el, 24), fs));
+            if (ix.have) {
+              a = std::min(a, ix.first_start);
+              if (fs > 0) b = std::max(b, ix.last_end);
             }
             // (Not clipped to the range: kept blocks extend past its end, by a
             // sample when exact, by a block otherwise. The span only prunes
