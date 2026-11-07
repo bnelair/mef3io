@@ -151,10 +151,13 @@ inline SessionLayout discover_layout(const SessionSource& src, int threads = 1,
           // memo makes the later exists() calls of this folder free,
           // DirectorySource::exists). A plain open keeps three exists(): a
           // listing costs more system calls than three stats (open calls test).
-          for (const auto& e : src.list_dir(w.bad.dir)) names.insert(e.name);
+          for (const auto& e : src.list_dir(w.bad.dir))
+            if (e.exists) names.insert(e.name);
         }
         auto has_file = [&](const char* ext) {
-          return by_listing ? names.count(leaf + ext) != 0 : src.exists(base + ext);
+          if (!by_listing) return src.exists(base + ext);
+          // (case-insensitive file systems: a name the listing lacks may still open)
+          return names.count(leaf + ext) != 0 || (kCaseInsensitiveFs && src.exists(base + ext));
         };
         const bool has[3] = {has_file(".tmet"), has_file(".tidx"), has_file(".tdat")};
         if (has[0] && has[1] && has[2]) {

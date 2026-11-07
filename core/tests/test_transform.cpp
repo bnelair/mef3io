@@ -935,10 +935,10 @@ bool ends_with(const std::string& s, const char* e) {
 }
 }  // namespace
 
-TEST_CASE("a windowed check and run read an index only near the window, and stat no segment file") {
-  // Segments a day and a half apart: only the segment holding the window, and
-  // the neighbours inside the one-day margin of the window by their header
-  // (none here), may have their .tidx read; the others' headers are far.
+TEST_CASE("a windowed check and run open every source file once and stat no segment file") {
+  // Segments a day and a half apart. The skip decision comes from the index
+  // (a header can be stale by any amount, #146), so every .tidx is read, but
+  // once (the memo), and nothing is stat'ed that a listing answered.
   const auto dir = fresh("mef3io_window_far_parts");
   constexpr int CH = 3, SEG = 8;
   constexpr si8 SPACING = 129'600'000'000LL;  // 1.5 days
@@ -947,12 +947,6 @@ TEST_CASE("a windowed check and run read an index only near the window, and stat
       write_many_segments(dir, CH, SEG, SPACING, START + SEG * SPACING, "b.mefd");
   const si8 win0 = START + 4 * SPACING + 500'000;
   const si8 win1 = win0 + 500'000;
-  auto count = [&](const std::string& root, const char* ext, const std::map<std::string, int>& m) {
-    int n = 0;
-    for (const auto& [p, k] : m)
-      if (p.find(root) == 0 && ends_with(p, ext)) n += k;
-    return n;
-  };
   struct Case {
     const char* what;
     bool merge, run;
@@ -980,17 +974,6 @@ TEST_CASE("a windowed check and run read an index only near the window, and stat
       if (path.find(a) != 0 && path.find(b) != 0) continue;
       INFO(path << " opened " << n << " times");
       CHECK(n == 1);
-    }
-    // (b) .tidx: a check reads the window's segment only in source a (one per
-    // channel), none of b but its own whole-source merge read; a RUN also
-    // validates the whole source (its verification gate), so there each once.
-    const int a_tidx = count(a, ".tidx", g_opens);
-    if (!c.run) {
-      CHECK(a_tidx <= CH * 2);
-      CHECK(a_tidx >= CH);
-      CHECK(count(b, ".tidx", g_opens) <= CH * SEG);
-    } else {
-      CHECK(a_tidx <= CH * SEG);
     }
     // (c) no stat of a segment file: a listing of its folder (or the open
     // handle) answered whether it exists and how big it is; (d) and the

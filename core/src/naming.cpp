@@ -51,9 +51,13 @@ TimeRange time_range(const std::string& path, const std::string& password, const
     std::sort(segd.begin(), segd.end());
     auto complete = [&](const std::pair<int, std::string>& sg) {
       std::set<std::string> names;
-      for (const auto& e : src->list_dir(entry.name + "/" + sg.second + ".segd")) names.insert(e.name);
-      return names.count(sg.second + ".tmet") && names.count(sg.second + ".tidx") &&
-             names.count(sg.second + ".tdat");
+      for (const auto& e : src->list_dir(entry.name + "/" + sg.second + ".segd"))
+        if (e.exists) names.insert(e.name);
+      auto has = [&](const std::string& n) {
+        return names.count(n) != 0 ||
+               (kCaseInsensitiveFs && src->exists(entry.name + "/" + sg.second + ".segd/" + n));
+      };
+      return has(sg.second + ".tmet") && has(sg.second + ".tidx") && has(sg.second + ".tdat");
     };
     std::vector<std::string> tmets;  // the first and the last complete segment's .tmet
     auto path_of = [&](const std::pair<int, std::string>& sg) {

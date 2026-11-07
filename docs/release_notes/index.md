@@ -5,7 +5,7 @@ Newest first.
 
 | Version | Released | Main changes |
 |---|---|---|
-| [Unreleased](unreleased.md) | — | windowed checks read an index only near the window (2.3.0 regression), far fewer file requests in copy checks and `time_range` |
+| [Unreleased](unreleased.md) | — | fewer stat requests in copy checks and `time_range` (more directory requests; local totals measured in the notes) |
 | [2.3.0](2.3.0.md) | — | windowed merge no longer drops a source's window when a segment header time is stale (#184; affected `merge_sessions(time_ranges=)` of 2.2.0), much cheaper checks of a short window on network drives, merge warns on mixed units (`MixedUnitsWarning`, validator `units.mixed`), `MixedFactorsWarning` for channels `mef_tools` reads as zeros |
 | [2.2.0](2.2.0.md) | 2026-11-04 | one-call merge pipeline (per-source time ranges, anonymize, `n_threads`), `records="drop"` for copies, far fewer file opens on network drives, Windows non-Latin paths, merge fix in Linux wheels |
 | [2.1.1](2.1.1.md) | 2026-10-31 | annotations in password-protected sessions are never plaintext (#167), validator check `records.encryption` |
