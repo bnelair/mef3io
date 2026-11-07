@@ -163,10 +163,43 @@ MERGE IN ONE PASS (`merge.hpp`; MergeOptions gained `time_ranges`, `anonymize`,
   (random UUIDs). A text callback => copy on one thread (called in order).
   Progress: ProgressReporter is already serialised/monotonic; called from
   whichever worker crosses a step (NOT one fixed thread).
-* Verification still re-reads every source (copy pass: once; verify: again).
-  A digest taken during the copy would avoid the second read; not done (it
-  would stop the check comparing the copy with the sources as they are: only
-  as an explicit opt-in option, PROPOSED, not built).
+* Verification re-reads the SIGNAL DATA of every source (copy pass: once;
+  verify: again, fresh from disk: `.tdat` is never memoised) and compares it
+  with the output, so it still checks the copy against the sources as they are.
+  What it REUSES within one operation is the per-scope memo of the small
+  metadata/index files (`.tmet`/`.tidx`/`.ridx`, <= 1 MiB each, 256 MiB total,
+  `detail::memo_total_budget`; over budget a read falls back to the normal
+  small read, never a whole-file read thrown away): the verifier sees the
+  source metadata/index bytes the copier saw, with the CRCs still checked on
+  them. Safe because the sources are not written during the operation
+  (ReadHandleScope rule: a scope's sources do not change while it lives); the
+  OUTPUT is opened through the scope only after it is written, and
+  `release_under` forgets it before any rename. A digest of the signal taken
+  during the copy is still not done (PROPOSED opt-in only).
+* WINDOWED CHECK/RUN COST (perf/check-window-only; a network request is 2-5 ms,
+  counts scale with channels x segments, not the window). (a) `window_entries`
+  reads an index of <= 512 KiB (`WHOLE_INDEX_BYTES`, ~9k blocks) in ONE request
+  and searches it in memory; only a bigger one binary-searches with 8-byte
+  reads. (b) The pre-flight cut test (which kept channels have samples) goes
+  in TWO passes per channel: first the segments whose header span overlaps the
+  window (a header read each, stop at the first sample), only if none did the
+  rest of the one-day margin. WHY the margin exists: a .tmet START/END can be
+  stale or late (#146: an interrupted append, writers that store the caller's
+  end), so a segment just outside the window by its header may hold samples of
+  it; skipping it would wrongly leave a channel out. It is needed only for a
+  channel nothing else answered, so only that channel pays for it. Not read any
+  more: the indexes of segments outside the window of a channel that already
+  has samples (damage there never touches the cut; validate_session is for
+  that). (c) The scope's cache memoises the WHOLE contents of small .tmet/.tidx/
+  .ridx files (<= 1 MiB each, 256 MiB total; `bytes_memo`, dropped by
+  `release_under`): read_all/read_head/read_range of such a file cost one read
+  ever, and a re-read after the fd LRU evicted the handle costs no open. A
+  source file is therefore opened at most once per check and per run (the
+  written copy's files twice by design: written, then opened for the
+  verification). Pinned in test_transform.cpp ("a windowed check and run on
+  many segments") with `source_open_observer` + `source_read_observer`.
+  `Session::block_envelope` is NOT narrowed by header times: INVARIANTS ("SKIPPING
+  SEGMENTS") forbids it (#146); it reads each index once, already.
 * FEWER OPENS (network drives; perf/merge-fewer-opens). (a) `detail::
   ReadHandleScope` (source.hpp; run_copy, run_merge, preflight, preflight_merge,
   verify_standalone, verify_merge) is PER COPY: it owns one `HandleCache` and
@@ -400,3 +433,5 @@ one: the channel goes into `MergePlan::units_mixed` -> `MergeReport::units_mixed
 alike; verify excuses `units.mixed` for it) and Python emits ONE `MixedUnitsWarning` per call
 (`_copy._warn_mixed_units`). Segments keep their own strings, values untouched, channel label = first kept
 segment's. Pinned in tests/test_p53 and core/tests/test_transform.cpp.
+
+SEGMENT SELECTION BY A CUT (#184): whether a window (transform `time_range`, merge `time_ranges`) touches a segment is judged by `segment_span`/`segment_outside` (session_copy.cpp): the .tmet header start/end WIDENED to the span of ALL index entries by the reader's own rule (`index_span` = Session::learn_span: min start .. max start + n/fs; a 0-count/NO_ENTRY entry leaves it open = never skipped), read ONCE per segment (the merge plan reuses it), never the header alone and NOT padded (a pad keeps segments with no samples in the window: test_p44 factor-boundary cut). A stale END (interrupted append, short-ending writer) or a late START header dropped a merge source's whole window silently (and made a transform fail verification); the same rule (INVARIANTS: #146) now covers the copy's own skip (`Copier::copy_segment`), the merge plan's spans, the pre-flight "has samples" look (day margin) and the verify's source-segment matching. An unset header side is unbounded (never skipped). Test-pinned: tests/test_p53_stale_header_windows.py (output == Reader.read of the source, stale/late x merge windowed/unwindowed, transform, anonymize).
