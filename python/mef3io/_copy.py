@@ -407,6 +407,25 @@ def _warn_mixed_factors(dst, a: dict) -> None:
              path=os.fspath(dst), details=tuple(names), stacklevel=3)
 
 
+def _warn_mixed_units(dst, units_mixed: dict) -> None:
+    """One MixedUnitsWarning per call, listing the channels whose kept
+    segments carry different units strings (``units_mixed``: channel -> the
+    distinct strings). Units are free text: a note and a warning, never a
+    refusal."""
+    from ._warnings import MixedUnitsWarning, emit
+
+    if not units_mixed:
+        return
+    names = sorted(units_mixed)
+    shown = "; ".join(
+        f"{n}: " + ", ".join(f'"{u}"' for u in units_mixed[n]) for n in names[:5])
+    emit(MixedUnitsWarning,
+         f"{len(names)} channel(s) of the result have segments with different units ({shown}"
+         + (", ..." if len(names) > 5 else "") + "). Every segment keeps its own units string "
+         "and nothing is rescaled; readers label the channel with the first segment's units.",
+         path=os.fspath(dst), details=tuple(names), stacklevel=3)
+
+
 def _check_report(raw: dict, refusals: _Refusals, a: dict) -> CheckReport:
     """The extension's check result, merged with the refusals found in Python
     (never twice) and the output-password notes."""

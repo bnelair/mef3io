@@ -331,7 +331,7 @@ TEST_CASE("merge_sessions: recordings that take turns merge; overlapping data is
                     [](const CopyRefusal& r) { return r.code == "merge-overlap"; }));
 }
 
-TEST_CASE("check_merge: units are decided on the kept data; a different string is refused") {
+TEST_CASE("check_merge: units are free text; a different string is noted, never refused") {
   const auto dir = fresh("mef3io_merge_units");
   auto write = [&](const std::string& name, const std::string& units, si8 t) {
     const std::string path = (dir / name).string();
@@ -344,16 +344,24 @@ TEST_CASE("check_merge: units are decided on the kept data; a different string i
   };
   const std::string a = write("a.mefd", "uV", 0);
   const std::string b = write("b.mefd", "mV", 10'000'000);
-  auto has = [](const CopyCheck& c) {
-    return std::any_of(c.refusals.begin(), c.refusals.end(),
-                       [](const CopyRefusal& r) { return r.code == "merge-units-mismatch"; });
+  auto mixed = [](const CopyCheck& c) {
+    return std::any_of(c.notes.begin(), c.notes.end(), [](const std::string& n) {
+      return n.find("different units") != std::string::npos;
+    });
   };
   MergeOptions o;
-  CHECK(has(check_merge({a, b}, (dir / "m.mefd").string(), o)));
+  // Units are free text: noted, never refused.
+  const CopyCheck cm = check_merge({a, b}, (dir / "m.mefd").string(), o);
+  CHECK(cm.ok);
+  CHECK(mixed(cm));
+  // The micro spellings are one unit.
+  const std::string au = write("au.mefd", "\xC2\xB5V", 0);
+  const std::string bu = write("bu.mefd", "\xCE\xBCV", 10'000'000);
+  CHECK_FALSE(mixed(check_merge({au, bu}, (dir / "u.mefd").string(), o)));
   // A cut that keeps only B's data (A's range holds no sample of its own
   // channel: A is then left out) agrees with itself.
   const std::string b2 = write("b2.mefd", "mV", 20'000'000);
-  CHECK_FALSE(has(check_merge({b, b2}, (dir / "n.mefd").string(), o)));
+  CHECK_FALSE(mixed(check_merge({b, b2}, (dir / "n.mefd").string(), o)));
 }
 
 TEST_CASE("check_merge: options a merge does not take are refused with their codes") {

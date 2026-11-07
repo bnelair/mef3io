@@ -194,6 +194,8 @@ see [Warnings carry the path as data](../python.md#warnings-carry-the-path-as-da
 
 ::: mef3io.MixedFactorsWarning
 
+::: mef3io.MixedUnitsWarning
+
 ::: mef3io.StepFallbackWarning
 
 ::: mef3io.ClampedSamplesWarning

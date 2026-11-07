@@ -71,7 +71,7 @@ from ._reader import (  # noqa: E402
     UnscaledSamplesWarning,
 )
 from ._multi import MultiReader, MultiReaderDifferenceWarning  # noqa: E402
-from ._warnings import MefWarning, MixedFactorsWarning  # noqa: E402
+from ._warnings import MefWarning, MixedFactorsWarning, MixedUnitsWarning  # noqa: E402
 from ._writer import (  # noqa: E402
     ClampedSamplesWarning,
     StepFallbackWarning,
@@ -131,6 +131,7 @@ __all__ = [
     "RecoveryReport", "RecoveredSegment", "RecoveredRecordFile",
     "MefWarning",
     "MixedFactorsWarning",
+    "MixedUnitsWarning",
     "BackupAlwaysKeptWarning",
     "BlockCopyWarning",
     "LegacyPasswordWarning",

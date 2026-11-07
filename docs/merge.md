@@ -62,19 +62,20 @@ time) stops the merge later and leaves nothing behind:
 Every check a [modified copy](transform.md) makes also applies to each
 recording: passwords, damaged files, channel selection and so on.
 
-**Units.** The units of a channel are decided on the segments the result
-actually keeps (after `time_ranges`), compared exactly as stored (so `uV` and
-`µV` are different strings; nothing is folded or guessed). The merged channel
-shows the units of its first kept segment, so `mV` data merged behind `uV`
-data would be silently labelled `uV`; that is refused as
-`merge-units-mismatch`, naming the channel and the strings. If the kept data
-agree (for example a `time_ranges` that keeps only the `mV` recording), the
-merge goes ahead and the channel carries exactly that string. Samples are
-never rescaled by a merge. A source whose segments already disagree among
-themselves is kept as it is and noted (the validator reports it as
-`units.mixed`); the channel's label then shows the first kept segment's
-units, and the merge is refused if another source's first kept segment
-carries a different string.
+**Units.** The units string is free text, so different units never block a
+merge. They are decided on the segments the result actually keeps (after
+`time_ranges`). `uV`, `µV` (micro sign) and `μV` (Greek mu) count as the same
+unit; otherwise strings are compared exactly as stored. When the kept segments
+of a channel carry different strings, the merge goes ahead, every segment keeps
+its own string, samples are never rescaled, and the channel's label is the
+first kept segment's. You are told in two ways, in `merge.check` and in the
+merge: a note in the report naming the channel and the distinct strings
+(`report.notes`, `report.units_mixed`), and, when the merge runs, one
+`mef3io.MixedUnitsWarning` per call listing the channels. The validator
+reports the same channel as `units.mixed` (a warning; the merge's own
+verification accepts it). To silence the warning when the mix is intended:
+`warnings.filterwarnings("ignore", category=mef3io.MixedUnitsWarning)` (or
+`mef3io.MefWarning` for all mef3io warnings).
 
 ## Mixed conversion factors and older tools
 
@@ -90,7 +91,7 @@ channel**, because meflib stores 0 at channel level when segments differ.
 must be read by older tools, merge only recordings with the same factor, or
 read it with mef3io or pymef. To silence the warning when the mix is
 intended: `warnings.filterwarnings("ignore", category=mef3io.MixedFactorsWarning)`
-(or `mef3io.MefWarning` for all mef3io warnings).
+(`MixedUnitsWarning` is silenced the same way; `mef3io.MefWarning` silences all mef3io warnings).
 
 ## How the result is laid out
 
@@ -216,6 +217,5 @@ Refusals work as for the other copies:
 | `merge-rename` | `ValueError` | check | `rename=False`: a merge is always named after its destination. |
 | `merge-rto-differs` | `WriteConflictError` | check | The sources use different recording-time offsets. |
 | `merge-rate-differs` | `WriteConflictError` | check | A channel has different sampling rates in different sources (`details["channel"]`). |
-| `merge-units-mismatch` | `WriteConflictError` | check | A channel has different units strings (`details["channel"]`) in different sources, compared exactly as stored (`"uV"` and `"µV"` differ). The merged channel carries one units string, so the later data would be mislabelled; samples are never rescaled. Decided on the segments the result keeps (after `time_ranges`): the channel shows its first kept segment's units. A source whose segments already disagree among themselves is kept as it is and noted (validator `units.mixed`), unless another source's first kept segment carries a different string. |
 | `merge-identity-differs` | `WriteConflictError` | check | The sources' patient field `details["field"]` differs; set it with `metadata`, or clear it with `anonymize`. |
 | `merge-overlap` | `WriteConflictError` | check | Two sources hold samples of the same channel at the same moment (`details["channel"]`). |

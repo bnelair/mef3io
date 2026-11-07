@@ -4,17 +4,17 @@
 
 ## Fixes
 
-- **`merge_sessions` no longer relabels data with other units.** A channel
-  whose units differ between the sources (for example `mV` in one and `uV` in
-  another) is refused with `merge-units-mismatch`, in `merge.check` and in the
-  merge itself, naming the channel and both strings. Before, the merged
-  channel silently took the first segment's units. Units are compared exactly
-  as stored (`uV` and `µV` are different strings). A source whose segments
-  already disagree is kept as it is and noted. The decision is made on the
-  segments the result keeps (after `time_ranges`), and the channel carries the
-  first kept segment's units. Samples are never rescaled.
+- **Merging different units warns, it never refuses.** Units are free text.
+  When the data a merge keeps holds different units strings for a channel (for
+  example `mV` and `uV`), `merge_sessions` goes ahead, every segment keeps its
+  own string, samples are never rescaled, and the channel's label is the first
+  kept segment's. The report names each such channel and its strings
+  (`notes`, `units_mixed`) in `merge.check` and in the merge, and the merge
+  emits one `mef3io.MixedUnitsWarning` per call. `uV`, `µV` and `μV` count as
+  the same unit. Silence it like `MixedFactorsWarning`:
+  `warnings.filterwarnings("ignore", category=mef3io.MixedUnitsWarning)`.
 - **Validator check `units.mixed`** (warning, not repairable) reports a
-  channel whose segments declare different units.
+  channel whose segments declare different units (`uV`, `µV`, `μV` equal).
 
 ## Mixed conversion factors
 

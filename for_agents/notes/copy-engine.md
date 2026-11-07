@@ -393,8 +393,10 @@ together with the drop-records and one-pass merge tests, so the released
 toolchain is checked before upload. To reproduce a wheel-only defect: build in
 `quay.io/pypa/manylinux_2_28_x86_64`.
 
-Merge units (`merge-units-mismatch`): decided per channel in the plan's piece loop on the KEPT pieces
-(after the cut), not on whole sources. The channel label is the first kept piece's units; refused when
-any source's first kept piece carries another string (its data would be relabeled); a source already mixed
-among its kept segments is kept + noted (`units_mixed` excuses the validator's `units.mixed` in verify).
-Same plan feeds check, run and verify. Pinned in tests/test_p53 and core/tests/test_transform.cpp.
+Merge units (maintainer 2026-11-06: units are free text, NEVER a refusal): decided per channel in the
+plan's piece loop on the KEPT pieces (after the cut). Distinct = different after `units_comparable`
+(U+00B5/U+03BC mapped to "u", nothing else; metadata.hpp, also used by validator `units.mixed`). More than
+one: the channel goes into `MergePlan::units_mixed` -> `MergeReport::units_mixed` + a note (check and run
+alike; verify excuses `units.mixed` for it) and Python emits ONE `MixedUnitsWarning` per call
+(`_copy._warn_mixed_units`). Segments keep their own strings, values untouched, channel label = first kept
+segment's. Pinned in tests/test_p53 and core/tests/test_transform.cpp.

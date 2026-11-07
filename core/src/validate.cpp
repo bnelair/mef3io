@@ -879,7 +879,7 @@ const std::vector<CheckImpl>& check_impls() {
                   "Every segment of a channel should declare the same units_description (the "
                   "reader reports the first segment's for the whole channel, so a segment in "
                   "other units would be silently mislabelled). Compared byte for byte as "
-                  "stored (so \"uV\" and \"micro-V\" differ). A warning: samples are "
+                  "stored, except that \"uV\", \"\u00B5V\" and \"\u03BCV\" count as one. A warning: samples are "
                   "unaffected. NOT repairable: which of the strings is right is a decision "
                   "about the recording, not something the data can answer.",
                   Severity::Warning, false},
@@ -1943,7 +1943,7 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     for (auto& [channel, segs] : units_seen) {
       std::sort(segs.begin(), segs.end());
       for (const auto& [seg_no, units] : segs) {
-        if (units == segs.front().second) continue;
+        if (units_comparable(units) == units_comparable(segs.front().second)) continue;
         Finding f;
         f.check_id = "units.mixed";
         f.severity = Severity::Warning;

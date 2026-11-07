@@ -93,8 +93,8 @@ struct InspectChannel {
   std::optional<sf8> sampling_frequency, units_conversion_factor;
   std::optional<std::string> units_description;
   /// Every DISTINCT units string the readable segments declare, in order of
-  /// first appearance (byte for byte as stored). More than one = the channel's
-  /// segments disagree (validator `units.mixed`, merge `merge-units-mismatch`).
+  /// first appearance (as stored; "uV", "\u00B5V" and "\u03BCV" count as one).
+  /// More than one = the channel's segments disagree (validator `units.mixed`).
   /// C++ only: not in the Python summary.
   std::vector<std::string> units_all;
   /// Section 2's free-text channel description, as the first segment whose

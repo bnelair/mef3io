@@ -92,6 +92,24 @@ class MixedFactorsWarning(MefWarning):
     """
 
 
+class MixedUnitsWarning(MefWarning):
+    """A merged channel holds segments with different units strings.
+
+    Raised by :func:`mef3io.merge_sessions` when the data the result keeps
+    carries more than one units string for a channel (``"mV"`` next to
+    ``"uV"``). Units are free text, so the merge goes ahead: every segment
+    keeps its own string, samples are never rescaled, and readers label the
+    whole channel with the FIRST kept segment's units. Check that the
+    recordings really use the units you expect. ``"uV"``, ``"\u00b5V"``
+    (micro sign) and ``"\u03bcV"`` (Greek mu) count as the same unit and never
+    warn. The merge report's ``units_mixed`` and ``notes`` give the same
+    information; the validator reports it as ``units.mixed``.
+
+    ``w.message.path`` is the result session; ``details`` lists the channel
+    names.
+    """
+
+
 def _rebuild(cls, message, path, details):
     return cls(message, path=path, details=details)
 

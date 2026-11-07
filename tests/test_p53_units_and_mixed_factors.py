@@ -1,8 +1,9 @@
 """Units strings and mixed conversion factors across merged sessions.
 
-* merge_sessions refuses (``merge-units-mismatch``) a channel whose units
-  differ between sources, in check and run; compared exactly as stored; a
-  source that is ALREADY mixed is kept and noted;
+* merge_sessions never refuses on units (free text): a channel whose kept
+  segments differ in units gets a note (check and run) and one
+  MixedUnitsWarning; uV / micro sign / Greek mu are one unit; values and
+  per-segment strings never change; the label is the first kept segment's;
 * the validator reports ``units.mixed`` (warning) for a channel whose
   segments disagree;
 * a channel with different conversion factors per segment reads correctly in
@@ -18,7 +19,6 @@ import pytest
 
 import mef3io
 from test_p29_anonymize import _reseal
-from mef3io.merge import REFUSAL_CODES
 
 FS = 256.0
 T0 = 1_600_000_000_000_000
@@ -50,18 +50,51 @@ def two(tmp_path):
     return a, b
 
 
-def test_refused_in_check_and_run(two, tmp_path):
+def _units_notes(rep):
+    return [n for n in rep.notes if "different units" in n]
+
+
+def test_warns_and_notes_never_refuses(two, tmp_path):
     a, b = two
-    assert "merge-units-mismatch" in REFUSAL_CODES
+    assert "merge-units-mismatch" not in mef3io.merge.REFUSAL_CODES
     rep = mef3io.merge.check([a, b], tmp_path / "m.mefd")
-    hits = [r for r in rep.refusals if r.code == "merge-units-mismatch"]
-    assert len(hits) == 1
-    assert hits[0].channel == "X"
-    assert '"uV"' in hits[0].message and '"mV"' in hits[0].message
-    with pytest.raises(mef3io.WriteConflictError) as e:
-        mef3io.merge_sessions([a, b], tmp_path / "m.mefd")
-    assert e.value.code == "merge-units-mismatch"
-    assert not (tmp_path / "m.mefd").exists()
+    assert rep.ok and not rep.refusals
+    notes = _units_notes(rep)
+    assert len(notes) == 1 and "X" in notes[0] and '"uV"' in notes[0] and '"mV"' in notes[0]
+    with pytest.warns(mef3io.MixedUnitsWarning) as rec:
+        out = mef3io.merge_sessions([a, b], tmp_path / "m.mefd")
+    ws = [x.message for x in rec if x.category is mef3io.MixedUnitsWarning]
+    assert len(ws) == 1 and ws[0].details == ("X",)
+    assert '"uV"' in str(ws[0]) and '"mV"' in str(ws[0]) and str(tmp_path) not in str(ws[0])
+    assert out.units_mixed == {"X": ("uV", "mV")}
+    assert len(_units_notes(out)) == 1
+    assert out.verification.ok  # verify accepts mixed units
+    assert _label(tmp_path / "m.mefd") == "uV"  # first kept segment's
+    with mef3io.Reader(str(tmp_path / "m.mefd")) as r:
+        assert np.count_nonzero(~np.isnan(r.read("X"))) == 1024
+    # per-segment strings are untouched (the validator sees both)
+    rep = mef3io.validate_session(str(tmp_path / "m.mefd"))
+    assert [f.check_id for f in rep.findings if f.check_id == "units.mixed"] == ["units.mixed"]
+
+
+@pytest.mark.parametrize("u1,u2", [("uV", "\u00b5V"), ("\u00b5V", "\u03bcV"), ("uV", "\u03bcV")])
+def test_micro_spellings_are_one_unit(tmp_path, u1, u2):
+    a = _src(tmp_path / "a.mefd", u1, T0)
+    b = _src(tmp_path / "b.mefd", u2, T0 + HOUR)
+    rep = mef3io.merge.check([a, b], tmp_path / "m.mefd")
+    assert rep.ok and not _units_notes(rep)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", mef3io.MixedUnitsWarning)
+        out = mef3io.merge_sessions([a, b], tmp_path / "m.mefd")
+    assert not out.units_mixed and out.verification.ok
+    rep = mef3io.validate_session(str(tmp_path / "m.mefd"))
+    assert not [f for f in rep.findings if f.check_id == "units.mixed"]
+
+
+def test_other_prefixes_still_differ(tmp_path):
+    a = _src(tmp_path / "a.mefd", "uV", T0)
+    b = _src(tmp_path / "b.mefd", "mV", T0 + HOUR)
+    assert _units_notes(mef3io.merge.check([a, b], tmp_path / "m.mefd"))
 
 
 def test_same_units_merge_and_values_unchanged(tmp_path):
@@ -71,13 +104,6 @@ def test_same_units_merge_and_values_unchanged(tmp_path):
     with mef3io.Reader(str(tmp_path / "m.mefd")) as r:
         assert r.info("X")["units_description"] == "mV"
         assert np.count_nonzero(~np.isnan(r.read("X"))) == 1024
-
-
-def test_exact_comparison_not_folded(tmp_path):
-    a = _src(tmp_path / "a.mefd", "uV", T0)
-    b = _src(tmp_path / "b.mefd", "µV", T0 + HOUR)
-    rep = mef3io.merge.check([a, b], tmp_path / "m.mefd")
-    assert [r.code for r in rep.refusals] == ["merge-units-mismatch"]
 
 
 def test_validator_units_mixed(tmp_path):
@@ -92,6 +118,8 @@ def test_validator_units_mixed(tmp_path):
     rep = mef3io.validate_session(str(p))
     assert mixed(rep) == [("units.mixed", "warning", "X", 1)]
     assert rep.ok  # a warning, not an error
+    _set_units(p, "X", 1, "\u00b5V")  # micro sign vs "uV": one unit
+    assert mixed(mef3io.validate_session(str(p))) == []
 
 
 def test_already_mixed_source_is_kept_and_noted(tmp_path):
@@ -99,7 +127,7 @@ def test_already_mixed_source_is_kept_and_noted(tmp_path):
     _set_units(a, "X", 1, "mV")
     b = _src(tmp_path / "b.mefd", "uV", T0 + HOUR)
     rep = mef3io.merge.check([a, b], tmp_path / "m.mefd")
-    assert not [r for r in rep.refusals if r.code == "merge-units-mismatch"]
+    assert rep.ok and not rep.refusals
     assert any("different units" in n for n in rep.notes)
 
 
@@ -121,15 +149,16 @@ def test_keeping_only_part_of_mixed_a(tmp_path):
     rngs = [(T0 + 2_000_000, T0 + 3_000_000), None]
     mef3io.merge_sessions([a, b], tmp_path / "m.mefd", time_ranges=rngs)
     assert _label(tmp_path / "m.mefd") == "mV"
-    # A's first ("uV") segment + B ("mV"): relabel -> refused
+    # A's first ("uV") segment + B ("mV"): mixed, warns, label is the first's
     rngs = [(T0, T0 + 1_000_000), None]
     rep = mef3io.merge.check([a, b], tmp_path / "n.mefd", time_ranges=rngs)
-    assert [r.code for r in rep.refusals] == ["merge-units-mismatch"]
-    with pytest.raises(mef3io.WriteConflictError):
+    assert rep.ok and len(_units_notes(rep)) == 1
+    with pytest.warns(mef3io.MixedUnitsWarning):
         mef3io.merge_sessions([a, b], tmp_path / "n.mefd", time_ranges=rngs)
-    # all of mixed A alone-in-merge + B "mV": B's data would carry "uV": refused
-    rep = mef3io.merge.check([a, b], tmp_path / "n.mefd")
-    assert [r.code for r in rep.refusals] == ["merge-units-mismatch"]
+    assert _label(tmp_path / "n.mefd") == "uV"
+    # all of mixed A + B "mV": noted, no refusal
+    rep = mef3io.merge.check([a, b], tmp_path / "o.mefd")
+    assert rep.ok and len(_units_notes(rep)) == 1
 
 
 def test_mixed_source_note_names_label(tmp_path):
@@ -137,7 +166,8 @@ def test_mixed_source_note_names_label(tmp_path):
     b = _src(tmp_path / "b.mefd", "uV", T0 + HOUR)
     rep = mef3io.merge.check([a, b], tmp_path / "m.mefd")
     assert any("first kept segment" in n for n in rep.notes)
-    mef3io.merge_sessions([a, b], tmp_path / "m.mefd")
+    with pytest.warns(mef3io.MixedUnitsWarning):
+        mef3io.merge_sessions([a, b], tmp_path / "m.mefd")
     assert _label(tmp_path / "m.mefd") == "uV"
 
 

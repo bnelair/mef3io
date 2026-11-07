@@ -62,4 +62,26 @@ TimeSeriesMetadata load_time_series_metadata(std::span<const ui1> tmet_bytes,
 TimeSeriesMetadata load_time_series_metadata_partial(std::span<const ui1> tmet_bytes,
                                                      const std::string& password = "");
 
+/// Units strings are free text. Two of them are the same unit when they are
+/// equal after mapping the micro prefix (U+00B5 MICRO SIGN, U+03BC GREEK SMALL
+/// LETTER MU, as UTF-8) to ASCII "u": "uV", "\u00B5V" and "\u03BCV" agree.
+/// Nothing else is folded. Used only to decide whether units MIX.
+inline std::string units_comparable(const std::string& s) {
+  std::string out;
+  out.reserve(s.size());
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    if (i + 1 < s.size()) {
+      const unsigned char d = static_cast<unsigned char>(s[i + 1]);
+      if ((c == 0xC2 && d == 0xB5) || (c == 0xCE && d == 0xBC)) {
+        out += 'u';
+        ++i;
+        continue;
+      }
+    }
+    out += s[i];
+  }
+  return out;
+}
+
 }  // namespace mef3io

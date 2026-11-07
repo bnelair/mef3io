@@ -3497,9 +3497,6 @@ struct Preflight {
   /// A cut: kept channels with no sample in the window. They are left out
   /// of the copy (and counted with the excluded ones from then on).
   std::vector<std::string> without_samples;
-  /// Channels whose kept segments carry different units strings, accepted
-  /// (one already-mixed source): the validator's `units.mixed` on them is expected.
-  std::set<std::string> units_mixed;
 };
 
 /// One piece of source text an anonymized copy keeps (after redaction).
@@ -4565,9 +4562,9 @@ struct MergePlan {
   /// Kept channels left out because no source has a sample of them in its
   /// range (also in `excluded`).
   std::vector<std::string> without_samples;
-  /// Channels whose kept segments carry different units strings, accepted
-  /// (one already-mixed source): the validator's `units.mixed` on them is expected.
-  std::set<std::string> units_mixed;
+  /// Channels whose kept segments carry different units strings (free text,
+  /// never a refusal): the validator's `units.mixed` on them is expected.
+  std::map<std::string, std::vector<std::string>> units_mixed;
   bool anonymize = false;
   std::optional<si8> shift;   // anonymize: the shift (unset = times kept)
   std::string pseudonym;      // anonymize
@@ -5137,45 +5134,28 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
       }
       pc.level = random_uuid();
     }
-    // One units string per channel, decided on the segments the result
-    // actually KEEPS (after the cut). Compared byte for byte as stored (the
-    // reader's own rule: "uV" and "µV" are different strings, not folded).
-    // The channel's label is the first kept segment's. No sample may end up
-    // under a label that differs from the string it was stored with, so every
-    // source's first kept segment must carry that label (a source whose
-    // kept segments all agree then agrees with it); a source that is ALREADY
-    // mixed keeps its own segments as they are (nothing here creates the mix)
-    // and is noted.
+    // Units are free text and never block a merge. Decided on the segments the
+    // result actually KEEPS (after the cut): when they carry different strings
+    // (after folding the micro prefix: "uV" = "\u00B5V" = "\u03BCV") the channel is
+    // listed in units_mixed and noted. Segments keep their own strings and
+    // samples are never rescaled; the channel's label is the first kept
+    // segment's.
     if (!pieces.empty()) {
       for (auto& pc : pieces) pc.units = seg_units[pc.segment];
-      const std::string label = pieces.front().units;
       std::vector<std::string> distinct;
-      std::map<std::size_t, std::string> first_of;
-      for (const auto& pc : pieces) {
-        if (std::find(distinct.begin(), distinct.end(), pc.units) == distinct.end())
+      for (const auto& pc : pieces)
+        if (std::none_of(distinct.begin(), distinct.end(), [&](const std::string& u) {
+              return units_comparable(u) == units_comparable(pc.units);
+            }))
           distinct.push_back(pc.units);
-        first_of.emplace(pc.source, pc.units);  // pieces are by time: the first stays
-      }
       if (distinct.size() > 1) {
         std::string listed;
         for (const auto& u : distinct) listed += (listed.empty() ? "" : ", ") + ("\"" + u + "\"");
-        const bool relabeled = std::any_of(first_of.begin(), first_of.end(),
-                                           [&](const auto& f) { return f.second != label; });
-        if (relabeled)
-          add(RefusalKind::WriteConflict, "merge-units-mismatch",
-              "channel " + ch + " has different units in the data the result keeps (" + listed +
-                  "): the merged channel would carry one units string (\"" + label +
-                  "\", the first kept segment's) for data stored under another. Merge only "
-                  "sources that agree, restrict time_ranges to data that agrees, or fix the "
-                  "units of one source first",
-              ch, "units_description");
-        else {
-          m.units_mixed.insert(ch);
-          m.notes.push_back("channel " + ch + " has segments with different units (" + listed +
-                            ") in a source; they are kept as they are, and the channel's label "
-                            "shows the first kept segment's units (\"" + label +
-                            "\") (see validator units.mixed)");
-        }
+        m.units_mixed[ch] = distinct;
+        m.notes.push_back("channel " + ch + " has different units in the data the result keeps (" +
+                          listed + "); every segment keeps its own units string, samples are not "
+                          "rescaled, and the channel's label shows the first kept segment's (\"" +
+                          distinct.front() + "\") (validator units.mixed)");
       }
     }
     m.pieces[ch] = std::move(pieces);
@@ -5665,6 +5645,7 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
   rep.channels_without_samples = m.without_samples;
   rep.output_encrypted = out.encrypt;
   rep.notes = m.notes;
+  rep.units_mixed = m.units_mixed;
   rep.segments_split = m.segments_split;
   const SourcePlan* plan0 = m.first_plan();
   std::optional<Redactor> red;
