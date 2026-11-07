@@ -140,6 +140,11 @@ class ReadHandleScope {
 /// opened at most N times in a merge".
 inline void (*source_open_observer)(const std::string& path) = nullptr;
 
+/// TEST HOOK: called with the path of every stat-like query a DirectorySource
+/// really issues (exists / file_size that no memo, listing or open handle
+/// answered). Must be thread-safe. Pins "no stat of a path a listing showed".
+inline void (*source_stat_observer)(const std::string& path) = nullptr;
+
 /// TEST HOOK: called with the path of every positional read a DirectorySource
 /// really issues (a request on a network drive; memo hits do not count).
 inline void (*source_read_observer)(const std::string& path) = nullptr;

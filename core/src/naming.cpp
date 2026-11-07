@@ -34,18 +34,44 @@ constexpr std::size_t UH_START = 16, UH_END = 24, UH_SESSION_NAME = 308, UH_NAME
 TimeRange time_range(const std::string& path, const std::string& password, const Control& ctl) {
   ctl.check();
   const auto src = open_session_source(path);
-  const auto layout = detail::discover_layout(*src);
   TimeRange r;
-  for (const auto& c : layout.channels) {
-    if (c.segments.empty()) continue;
+  // Only the channel folders are listed, and of each channel's segment
+  // folders only the ones looked at: the first and the last complete segment
+  // by number (a folder listing says whether its three files are there). The
+  // other segments are never listed, stat'ed or opened (2.3.1: a recording of
+  // thousands of segments cost thousands of requests for two reads a channel).
+  for (const auto& entry : src->list_dir("")) {
+    if (!entry.is_dir || !entry.name.ends_with(".timd")) continue;
+    std::vector<std::pair<int, std::string>> segd;  // (number, stem)
+    for (const auto& e : src->list_dir(entry.name))
+      if (e.is_dir && e.name.ends_with(".segd")) {
+        const std::string stem = e.name.substr(0, e.name.size() - 5);
+        segd.emplace_back(detail::layout_segment_number(stem), stem);
+      }
+    std::sort(segd.begin(), segd.end());
+    auto complete = [&](const std::pair<int, std::string>& sg) {
+      std::set<std::string> names;
+      for (const auto& e : src->list_dir(entry.name + "/" + sg.second + ".segd")) names.insert(e.name);
+      return names.count(sg.second + ".tmet") && names.count(sg.second + ".tidx") &&
+             names.count(sg.second + ".tdat");
+    };
+    std::vector<std::string> tmets;  // the first and the last complete segment's .tmet
+    auto path_of = [&](const std::pair<int, std::string>& sg) {
+      return entry.name + "/" + sg.second + ".segd/" + sg.second + ".tmet";
+    };
+    std::size_t lo = 0, hi = segd.size();
+    while (lo < hi && !complete(segd[lo])) ++lo;
+    if (lo == hi) continue;  // no complete segment: not counted
+    while (hi > lo + 1 && !complete(segd[hi - 1])) --hi;
+    tmets.push_back(path_of(segd[lo]));
+    if (hi - 1 != lo) tmets.push_back(path_of(segd[hi - 1]));
     ++r.channels;
-    // The first and last segment by number (time order for every writer we
-    // know of). Both files' start and end count, so two segments numbered
-    // against time order are still handled; a middle segment earlier than
-    // both is not seen (docs: time_range trades that for its speed).
-    for (const auto* seg : {&c.segments.front(), &c.segments.back()}) {
+    // Both files' start and end count, so two segments numbered against time
+    // order are still handled; a middle segment earlier than both is not seen
+    // (docs: time_range trades that for its speed).
+    for (const auto& tmet : tmets) {
       ctl.check();
-      const auto bytes = src->read_range(seg->tmet, 0, fmt::METADATA_FILE_BYTES);
+      const auto bytes = src->read_range(tmet, 0, fmt::METADATA_FILE_BYTES);
       ++r.files_read;
       const TimeSeriesMetadata md = load_time_series_metadata_partial(bytes, password);
       const si8 s = md.universal_header.start_time, e = md.universal_header.end_time;
@@ -60,7 +86,6 @@ TimeRange time_range(const std::string& path, const std::string& password, const
         r.start_uutc = std::min(r.start_uutc.value_or(t), t);
         r.end_uutc = std::max(r.end_uutc.value_or(t), t);
       }
-      if (&c.segments.front() == &c.segments.back()) break;
     }
   }
   return r;

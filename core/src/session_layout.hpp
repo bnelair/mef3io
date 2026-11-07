@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <exception>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -72,7 +73,8 @@ struct SessionLayout {
 };
 
 /// Walk the root and every `.timd`. One listing per channel; three existence
-/// checks per segment, exactly what the Session always did.
+/// checks per segment, exactly what the Session always did - or, with
+/// `by_listing` (the copy engine), one listing per segment folder instead.
 ///
 /// `threads` (the object's n_threads; 0 = automatic, resolved for file
 /// access) runs the per-channel listings and the per-segment existence checks
@@ -82,7 +84,8 @@ struct SessionLayout {
 /// listing order: its listing, then its segment folders in listing order,
 /// then its record-only check) — never whichever thread failed first. The
 /// same requests are made either way (more only when something fails).
-inline SessionLayout discover_layout(const SessionSource& src, int threads = 1) {
+inline SessionLayout discover_layout(const SessionSource& src, int threads = 1,
+                                     bool by_listing = false) {
   SessionLayout out;
   std::vector<std::string> timd;  // channel folder names, in root listing order
   for (const auto& entry : src.list_dir("")) {
@@ -137,8 +140,23 @@ inline SessionLayout discover_layout(const SessionSource& src, int threads = 1) 
       work.size(), threads,
       [&](std::size_t i) {
         SegWork& w = work[i];
-        const bool has[3] = {src.exists(w.seg.tmet), src.exists(w.seg.tidx),
-                             src.exists(w.seg.tdat)};
+        std::set<std::string> names;  // by_listing: the segment folder's files
+        const std::string dir = w.bad.dir + "/";
+        const std::string base = w.seg.tmet.substr(0, w.seg.tmet.size() - 5);
+        const std::string leaf = base.substr(dir.size());
+        if (by_listing) {
+          // ONE listing of the segment folder answers every "is this file
+          // there" (a stat per file is three round trips on a share, plus the
+          // .rdat/.ridx probes of the copy planning; the per-copy listing
+          // memo makes the later exists() calls of this folder free,
+          // DirectorySource::exists). A plain open keeps three exists(): a
+          // listing costs more system calls than three stats (open calls test).
+          for (const auto& e : src.list_dir(w.bad.dir)) names.insert(e.name);
+        }
+        auto has_file = [&](const char* ext) {
+          return by_listing ? names.count(leaf + ext) != 0 : src.exists(base + ext);
+        };
+        const bool has[3] = {has_file(".tmet"), has_file(".tidx"), has_file(".tdat")};
         if (has[0] && has[1] && has[2]) {
           w.complete = true;
           return;
@@ -152,11 +170,9 @@ inline SessionLayout discover_layout(const SessionSource& src, int threads = 1) 
             w.bad.missing += (w.bad.missing.empty() ? "" : ", ") + std::string(exts[k]);
           }
         }
-        const std::string base = w.seg.tmet.substr(0, w.seg.tmet.size() - 5);
         for (const char* ext : {".rdat", ".ridx"}) {
-          const std::string f = base + ext;
-          if (src.exists(f)) {
-            w.bad.present.push_back(f);
+          if (has_file(ext)) {
+            w.bad.present.push_back(base + ext);
             if (std::string(ext) == ".rdat") w.bad.has_records = true;
           }
         }

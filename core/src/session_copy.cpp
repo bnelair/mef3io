@@ -1203,9 +1203,31 @@ bool span_outside(const std::pair<si8, si8>& span, si8 hdr_start, si8 hdr_end, s
   return !(span.first < saturating_add(t1, margin) && span.second > saturating_add(t0, -margin));
 }
 
+/// Whether a segment's HEADER span lies wholly outside the window by more
+/// than the one-day margin of #146 (a header time can be stale or late, but
+/// not by more than that): its index is then not read at all. An unset side
+/// is never far. (2.3.1: a windowed check read the index of every part of a
+/// recording just to learn that most of them are nowhere near the window.)
+bool header_far(si8 hdr_start, si8 hdr_end, si8 rto, si8 t0, si8 t1) {
+  if (is_sentinel(hdr_start, false) || is_sentinel(hdr_end, false)) return false;
+  const si8 a = to_user_time(hdr_start, rto), b = to_user_time(hdr_end, rto);
+  return !(a < saturating_add(t1, DAY_US) && b > saturating_add(t0, -DAY_US));
+}
+
+/// segment_span, but a segment whose header is far from the window (header_far)
+/// keeps its header span and its index stays unread.
+std::pair<si8, si8> segment_span_near(const SessionSource& src, const std::string& tidx_rel, si8 rto,
+                                      sf8 fs, si8 hdr_start, si8 hdr_end,
+                                      const std::optional<std::pair<si8, si8>>& win) {
+  if (win && header_far(hdr_start, hdr_end, rto, win->first, win->second))
+    return widened_span(IndexSpan{}, hdr_start, hdr_end, rto);
+  return segment_span(src, tidx_rel, rto, fs, hdr_start, hdr_end);
+}
+
 bool segment_outside(const SessionSource& src, const std::string& tidx_rel, si8 rto, sf8 fs,
                      si8 hdr_start, si8 hdr_end, si8 t0, si8 t1, si8 margin = 0) {
   if (is_sentinel(hdr_start, false) || is_sentinel(hdr_end, false)) return false;
+  if (header_far(hdr_start, hdr_end, rto, t0, t1)) return true;  // (margin only widens it)
   return span_outside(segment_span(src, tidx_rel, rto, fs, hdr_start, hdr_end),
                       hdr_start, hdr_end, t0, t1, margin);
 }
@@ -2104,8 +2126,9 @@ SourcePlan plan_source(std::shared_ptr<const SessionSource> srcp, const std::str
   io.password = password;
   io.strict = true;
   io.include_values = true;
+  io.for_copy_plan = true;  // listings, and no size stat of every .tdat/.tidx
   p.summary = detail::inspect_session_through(srcp, path, io, ctl);
-  p.layout = detail::discover_layout(src, threads);
+  p.layout = detail::discover_layout(src, threads, true);
   for (const auto& c : p.layout.channels) p.all_channels.push_back(c.name);
   for (const auto& c : p.layout.record_only_channels) p.all_channels.push_back(c);
   std::sort(p.all_channels.begin(), p.all_channels.end());
@@ -3233,7 +3256,7 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
   // written, so these handles are fresh.)
   const auto dsrc = handles ? handles->open(dst_path) : open_session_source(dst_path);
   const SessionSource& dst = *dsrc;
-  const auto dlayout = detail::discover_layout(dst);
+  const auto dlayout = detail::discover_layout(dst, 1, true);
 
   // Channels: the copy's must be a subset of the source's.
   std::set<std::string> dch;
@@ -3390,6 +3413,8 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
       const auto m = fmt::TimeSeriesMetadataSection2::parse(
           std::span<const ui1>(t.bytes).subspan(S2, S2_BYTES));
       if (!(m.sampling_frequency > 0)) continue;
+      if (header_far(read<si8>(t.bytes, UH_START), read<si8>(t.bytes, UH_END), t.rto, t0, t1))
+        continue;  // (the plan's own rule: its index is not read)
       const auto [f, l] = window_entries(src, x.tidx, t.rto, t0, t1, longest_block_us(m));
       if (f >= l) continue;
       const auto es = src.read_range(x.tidx, UH + f * ENTRY, (l - f) * ENTRY);
@@ -3444,8 +3469,9 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
         const TmetImage t = open_tmet(src, x.tmet, o.password);
         const auto m = fmt::TimeSeriesMetadataSection2::parse(
             std::span<const ui1>(t.bytes).subspan(S2, S2_BYTES));
-        spans.push_back(segment_span(src, x.tidx, t.rto, m.sampling_frequency,
-                                     read<si8>(t.bytes, UH_START), read<si8>(t.bytes, UH_END)));
+        spans.push_back(segment_span_near(src, x.tidx, t.rto, m.sampling_frequency,
+                                          read<si8>(t.bytes, UH_START), read<si8>(t.bytes, UH_END),
+                                          o.time_range));
       }
     std::size_t next = 0;
     int expected_number = 0;  // a cut numbers each channel's segments from 0
@@ -3884,10 +3910,20 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
                                 .sampling_frequency;
             const si8 a = read<si8>(t.bytes, UH_START), b = read<si8>(t.bytes, UH_END);
             if (!is_sentinel(a, false) && !is_sentinel(b, false)) {
-              const auto sp = segment_span(src, seg.tidx, segment_rto_of(plan, seg.tmet), sfs, a, b);
-              heads[k].exact = sp.first < t1 && sp.second > t0;
-              heads[k].margin = sp.first < saturating_add(t1, DAY_US) &&
-                                sp.second > saturating_add(t0, -DAY_US);
+              const si8 srto = segment_rto_of(plan, seg.tmet);
+              const si8 ha = to_user_time(a, srto), hb = to_user_time(b, srto);
+              if (ha < t1 && hb > t0) {
+                // The header reaches the window: so does the (wider) span;
+                // no need to read the index to say so.
+                heads[k].exact = heads[k].margin = true;
+              } else if (header_far(a, b, srto, t0, t1)) {
+                heads[k].exact = heads[k].margin = false;  // index left unread
+              } else {
+                const auto sp = segment_span(src, seg.tidx, srto, sfs, a, b);
+                heads[k].exact = sp.first < t1 && sp.second > t0;
+                heads[k].margin = sp.first < saturating_add(t1, DAY_US) &&
+                                  sp.second > saturating_add(t0, -DAY_US);
+              }
             }
           } catch (...) {
             add_exception(std::current_exception(), "source-damaged", "source-crc",
@@ -4930,7 +4966,7 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
     } else {
       try {
         const auto src = handles.open(sources[k]);
-        const auto layout = detail::discover_layout(*src);
+        const auto layout = detail::discover_layout(*src, 1, true);
         for (const auto& c : layout.channels) holds[k].insert(c.name);
         for (const auto& c : layout.record_only_channels) holds[k].insert(c);
       } catch (...) {
@@ -5148,6 +5184,7 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
             // One read of the index (index_span); a cut copies no segment
             // outside its range, judged by the blocks too, not the header
             // alone (the copy's own rule, #184).
+            if (win && header_far(ua, ub, t.rto, win->first, win->second)) continue;
             const IndexSpan ix = index_span(src, seg.tidx, t.rto, fs);
             if (win && span_outside(widened_span(ix, ua, ub, t.rto), ua, ub,
                                     win->first, win->second))
@@ -5362,7 +5399,7 @@ VerifyReport verify_merge_impl(MergePlan& m, const std::string& dst_path, const 
   VerifyReport rep;
   const auto dsrc = handles ? handles->open(dst_path) : open_session_source(dst_path);
   const SessionSource& dst = *dsrc;
-  const auto dlayout = detail::discover_layout(dst, m.threads);
+  const auto dlayout = detail::discover_layout(dst, m.threads, true);
   const bool anon = m.anonymize;
   std::set<std::string> dch;
   for (const auto& c : dlayout.channels) dch.insert(c.name);
