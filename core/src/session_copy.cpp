@@ -2104,9 +2104,8 @@ SourcePlan plan_source(std::shared_ptr<const SessionSource> srcp, const std::str
   io.password = password;
   io.strict = true;
   io.include_values = true;
-  io.for_copy_plan = true;  // listings, and no size stat of every .tdat/.tidx
   p.summary = detail::inspect_session_through(srcp, path, io, ctl);
-  p.layout = detail::discover_layout(src, threads, true);
+  p.layout = detail::discover_layout(src, threads);
   for (const auto& c : p.layout.channels) p.all_channels.push_back(c.name);
   for (const auto& c : p.layout.record_only_channels) p.all_channels.push_back(c);
   std::sort(p.all_channels.begin(), p.all_channels.end());
@@ -3234,7 +3233,7 @@ VerifyReport verify_impl(const std::string& src_path, const SessionSource& src,
   // written, so these handles are fresh.)
   const auto dsrc = handles ? handles->open(dst_path) : open_session_source(dst_path);
   const SessionSource& dst = *dsrc;
-  const auto dlayout = detail::discover_layout(dst, 1, true);
+  const auto dlayout = detail::discover_layout(dst);
 
   // Channels: the copy's must be a subset of the source's.
   std::set<std::string> dch;
@@ -3885,18 +3884,10 @@ Preflight preflight(const std::string& src_path, const std::string& dst_path, co
                                 .sampling_frequency;
             const si8 a = read<si8>(t.bytes, UH_START), b = read<si8>(t.bytes, UH_END);
             if (!is_sentinel(a, false) && !is_sentinel(b, false)) {
-              const si8 srto = segment_rto_of(plan, seg.tmet);
-              const si8 ha = to_user_time(a, srto), hb = to_user_time(b, srto);
-              if (ha < t1 && hb > t0) {
-                // The header reaches the window: so does the (wider) span;
-                // no need to read the index to say so.
-                heads[k].exact = heads[k].margin = true;
-              } else {
-                const auto sp = segment_span(src, seg.tidx, srto, sfs, a, b);
-                heads[k].exact = sp.first < t1 && sp.second > t0;
-                heads[k].margin = sp.first < saturating_add(t1, DAY_US) &&
-                                  sp.second > saturating_add(t0, -DAY_US);
-              }
+              const auto sp = segment_span(src, seg.tidx, segment_rto_of(plan, seg.tmet), sfs, a, b);
+              heads[k].exact = sp.first < t1 && sp.second > t0;
+              heads[k].margin = sp.first < saturating_add(t1, DAY_US) &&
+                                sp.second > saturating_add(t0, -DAY_US);
             }
           } catch (...) {
             add_exception(std::current_exception(), "source-damaged", "source-crc",
@@ -4939,7 +4930,7 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
     } else {
       try {
         const auto src = handles.open(sources[k]);
-        const auto layout = detail::discover_layout(*src, 1, true);
+        const auto layout = detail::discover_layout(*src);
         for (const auto& c : layout.channels) holds[k].insert(c.name);
         for (const auto& c : layout.record_only_channels) holds[k].insert(c);
       } catch (...) {
@@ -5371,7 +5362,7 @@ VerifyReport verify_merge_impl(MergePlan& m, const std::string& dst_path, const 
   VerifyReport rep;
   const auto dsrc = handles ? handles->open(dst_path) : open_session_source(dst_path);
   const SessionSource& dst = *dsrc;
-  const auto dlayout = detail::discover_layout(dst, m.threads, true);
+  const auto dlayout = detail::discover_layout(dst, m.threads);
   const bool anon = m.anonymize;
   std::set<std::string> dch;
   for (const auto& c : dlayout.channels) dch.insert(c.name);

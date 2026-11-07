@@ -42,11 +42,6 @@ struct InspectOptions {
   /// the index's copy of each block's start time and count; the RED block
   /// header (the authoritative copy) is inside the .tdat and is never read.
   bool read_index = false;
-  /// INTERNAL (the copy engine's planning): list each segment folder once
-  /// instead of three existence checks per segment, and leave the files' byte
-  /// sizes (tidx_bytes, tdat_bytes, record_bytes) unfilled - the plan never
-  /// looks at them, so a windowed check stats no .tidx/.tdat/.rdat.
-  bool for_copy_plan = false;
 };
 
 struct InspectSegment {

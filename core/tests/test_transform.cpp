@@ -854,10 +854,8 @@ void note_read(const std::string& p) {
 }
 
 // CH channels x SEG segments of 2 s at 1 kHz, 10 s apart.
-std::string write_many_segments(const fsys::path& dir, int ch, int seg,
-                                si8 spacing = 10'000'000LL, si8 start0 = START,
-                                const char* name = "many.mefd") {
-  const std::string path = (dir / name).string();
+std::string write_many_segments(const fsys::path& dir, int ch, int seg) {
+  const std::string path = (dir / "many.mefd").string();
   SessionWriter w(path, true);
   SessionMetadata md;
   md.subject_name_1 = "Jane";
@@ -866,7 +864,7 @@ std::string write_many_segments(const fsys::path& dir, int ch, int seg,
     for (int c = 0; c < ch; ++c) {
       std::vector<si4> x(2000);
       for (std::size_t i = 0; i < x.size(); ++i) x[i] = static_cast<si4>((i * 7 + c) % 1000);
-      w.write_int32("c" + std::to_string(c), x, 1.0, start0 + s * spacing, 1000.0, {}, s > 0);
+      w.write_int32("c" + std::to_string(c), x, 1.0, START + s * 10'000'000LL, 1000.0, {}, s > 0);
     }
   return path;
 }
@@ -912,81 +910,6 @@ TEST_CASE("a windowed check and run on many segments: every source file opened o
       if (path.find(src) == 0) reads += n;
     INFO((run ? "run" : "check") << ": " << reads << " source reads");
     CHECK(reads <= (run ? 4 : 2) * files);
-  }
-}
-
-namespace {
-std::mutex g_st_mu;
-std::vector<std::string> g_stats;
-void note_stat(const std::string& p) {
-  std::lock_guard<std::mutex> lk(g_st_mu);
-  g_stats.push_back(p);
-}
-struct StatWatch {
-  StatWatch() {
-    g_stats.clear();
-    detail::source_stat_observer = &note_stat;
-  }
-  ~StatWatch() { detail::source_stat_observer = nullptr; }
-};
-bool ends_with(const std::string& s, const char* e) {
-  const std::string t(e);
-  return s.size() >= t.size() && s.compare(s.size() - t.size(), t.size(), t) == 0;
-}
-}  // namespace
-
-TEST_CASE("a windowed check and run open every source file once and stat no segment file") {
-  // Segments a day and a half apart. The skip decision comes from the index
-  // (a header can be stale by any amount, #146), so every .tidx is read, but
-  // once (the memo), and nothing is stat'ed that a listing answered.
-  const auto dir = fresh("mef3io_window_far_parts");
-  constexpr int CH = 3, SEG = 8;
-  constexpr si8 SPACING = 129'600'000'000LL;  // 1.5 days
-  const std::string a = write_many_segments(dir, CH, SEG, SPACING, START, "a.mefd");
-  const std::string b =
-      write_many_segments(dir, CH, SEG, SPACING, START + SEG * SPACING, "b.mefd");
-  const si8 win0 = START + 4 * SPACING + 500'000;
-  const si8 win1 = win0 + 500'000;
-  struct Case {
-    const char* what;
-    bool merge, run;
-  };
-  for (const Case c : {Case{"transform check", false, false}, Case{"transform run", false, true},
-                       Case{"merge check", true, false}, Case{"merge run", true, true}}) {
-    INFO(c.what);
-    const std::string dst = (dir / (std::string("o_") + c.what[0] + (c.run ? "r" : "c") +
-                                    (c.merge ? "m" : "t") + ".mefd")).string();
-    OpenWatch watch;
-    StatWatch sw;
-    if (c.merge) {
-      MergeOptions o;
-      o.time_ranges = {std::make_pair(win0, win1), std::nullopt};
-      if (c.run) REQUIRE(merge_sessions({a, b}, dst, o).verification.ok);
-      else REQUIRE(check_merge({a, b}, dst, o).ok);
-    } else {
-      TransformOptions o;
-      o.time_range = std::make_pair(win0, win1);
-      if (c.run) REQUIRE(transform_session(a, dst, o).verification.ok);
-      else REQUIRE(check_transform(a, dst, o).ok);
-    }
-    // (a) every source path is opened once
-    for (const auto& [path, n] : g_opens) {
-      if (path.find(a) != 0 && path.find(b) != 0) continue;
-      INFO(path << " opened " << n << " times");
-      CHECK(n == 1);
-    }
-    // (c) no stat of a segment file: a listing of its folder (or the open
-    // handle) answered whether it exists and how big it is; (d) and the
-    // stats that remain are few
-    int src_stats = 0;
-    for (const auto& p : g_stats) {
-      if (p.find(a) != 0 && p.find(b) != 0) continue;
-      ++src_stats;
-      INFO("stat of " << p);
-      CHECK_FALSE((ends_with(p, ".tmet") || ends_with(p, ".tidx") || ends_with(p, ".tdat") ||
-                   ends_with(p, ".rdat") || ends_with(p, ".ridx")));
-    }
-    CHECK(src_stats <= 4 * CH);
   }
 }
 

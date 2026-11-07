@@ -37,7 +37,7 @@ TimeRange time_range(const std::string& path, const std::string& password, const
   TimeRange r;
   // Only the channel folders are listed, and of each channel's segment
   // folders only the ones looked at: the first and the last complete segment
-  // by number (a folder listing says whether its three files are there). The
+  // by number (three existence checks each). The
   // other segments are never listed, stat'ed or opened (2.3.1: a recording of
   // thousands of segments cost thousands of requests for two reads a channel).
   for (const auto& entry : src->list_dir("")) {
@@ -50,14 +50,8 @@ TimeRange time_range(const std::string& path, const std::string& password, const
       }
     std::sort(segd.begin(), segd.end());
     auto complete = [&](const std::pair<int, std::string>& sg) {
-      std::set<std::string> names;
-      for (const auto& e : src->list_dir(entry.name + "/" + sg.second + ".segd"))
-        if (e.exists) names.insert(e.name);
-      auto has = [&](const std::string& n) {
-        return names.count(n) != 0 ||
-               (kCaseInsensitiveFs && src->exists(entry.name + "/" + sg.second + ".segd/" + n));
-      };
-      return has(sg.second + ".tmet") && has(sg.second + ".tidx") && has(sg.second + ".tdat");
+      const std::string base = entry.name + "/" + sg.second + ".segd/" + sg.second;
+      return src->exists(base + ".tmet") && src->exists(base + ".tidx") && src->exists(base + ".tdat");
     };
     std::vector<std::string> tmets;  // the first and the last complete segment's .tmet
     auto path_of = [&](const std::pair<int, std::string>& sg) {

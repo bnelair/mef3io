@@ -144,3 +144,20 @@ def test_rename_archive_refusals(tmp_path):
     (tmp_path / "s.mefd.tar.tmp").write_bytes(b"")
     with pytest.raises(mef3io.IoError, match="being written"):
         mef3io.rename_archive(tar, "z")
+
+
+def test_time_range_with_incomplete_edge_segments(tmp_path):
+    # the first/last COMPLETE segment by number count; an incomplete edge
+    # segment (missing .tdat) is skipped, matching the session layout
+    import glob, os
+    src = str(tmp_path / "s.mefd")
+    with mef3io.Writer(src, overwrite=True) as w:
+        for k in range(3):
+            w.write("ch", np.ones(100), 1_700_000_000_000_000 + k * 1000 * 1_000_000, 1.0,
+                    precision=0, new_segment=k > 0)
+    full = mef3io.time_range(src)
+    last = sorted(glob.glob(f"{src}/ch.timd/*.segd/*.tdat"))[-1]
+    os.remove(last)
+    cut = mef3io.time_range(src)
+    assert cut.start_uutc == full.start_uutc and cut.end_uutc < full.end_uutc
+    assert cut.channels == 1

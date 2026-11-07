@@ -426,14 +426,7 @@ std::vector<SourceDirEntry> DirectorySource::list_dir(const std::string& rel) co
   const auto list = [&] {
     std::vector<SourceDirEntry> out;
     for (const auto& entry : fs::directory_iterator(detail::utf8_path(path)))
-      {
-      std::error_code ec;
-      // (entry.* use the d_type the listing carried; only a symlink or an
-      // unknown type is resolved, once, for that entry alone.)
-      const bool dir = entry.is_directory(ec);
-      const bool there = dir || entry.exists(ec);
-      out.push_back({detail::path_utf8(entry.path().filename()), dir, there});
-    }
+      out.push_back({detail::path_utf8(entry.path().filename()), entry.is_directory()});
     return out;
   };
   return memoized<decltype(HandleCache::dir_memo)>(
@@ -443,29 +436,10 @@ std::vector<SourceDirEntry> DirectorySource::list_dir(const std::string& rel) co
 bool DirectorySource::exists(const std::string& rel) const {
   const std::string path = join(rel);
   HandleCache* const c = cache_.get();
-  // A path the memoised LISTING of its folder shows, or rules out, needs no
-  // query of its own: a listing is the one request that says which files of a
-  // folder exist (2.3.1: no stat of a path a listing already ruled out).
-  if (c && !rel.empty()) {
-    const auto slash = rel.rfind('/');
-    const std::string parent = join(slash == std::string::npos ? std::string() : rel.substr(0, slash));
-    const std::string leaf = slash == std::string::npos ? rel : rel.substr(slash + 1);
-    std::lock_guard<std::mutex> lk(c->mu);
-    const auto it = c->dir_memo.find(parent);
-    if (it != c->dir_memo.end()) {
-      const bool listed = std::any_of(it->second.begin(), it->second.end(), [&](const SourceDirEntry& e) {
-        return e.name == leaf && e.exists;  // (a dangling symlink is not there)
-      });
-      // Case-insensitive file systems: a name the listing lacks may still
-      // open, so only an exact hit answers; the rest asks the file system.
-      if (listed || !kCaseInsensitiveFs) return listed;
-    }
-  }
   return memoized<decltype(HandleCache::exists_memo)>(
       c, [](HandleCache& k) -> auto& { return k.exists_memo; }, path, [&] {
         // ONE query answers both "does it exist" and "how big is it".
         std::uint64_t size = UINT64_MAX;
-        if (detail::source_stat_observer) detail::source_stat_observer(path);
         if (!stat_exists(detail::utf8_path(path), size)) return false;
         if (size != UINT64_MAX && c) {
           std::lock_guard<std::mutex> lk(c->mu);
@@ -477,29 +451,9 @@ bool DirectorySource::exists(const std::string& rel) const {
 
 std::uint64_t DirectorySource::file_size(const std::string& rel) const {
   const std::string path = join(rel);
-  HandleCache* const c = cache_.get();
-  if (c) {
-    // The size of a file already open (or whose size was learnt) costs no
-    // query; a segment file is about to be read, so its open (which
-    // learns the size from the descriptor) replaces the stat before it.
-    {
-      std::lock_guard<std::mutex> lk(c->mu);
-      const auto h = c->index.find(path);
-      if (h != c->index.end()) return h->second->second->size;
-      const auto m = c->size_memo.find(path);
-      if (m != c->size_memo.end()) return m->second;
-    }
-    auto ends = [&](const char* e) { return path.size() > 5 && path.compare(path.size() - 5, 5, e) == 0; };
-    if (ends(".tmet") || ends(".tidx") || ends(".ridx") || ends(".tdat")) {
-      if (const auto h = acquire(*c, path)) return h->size;  // (null: plain path, usual error)
-    }
-  }
   return memoized<decltype(HandleCache::size_memo)>(
-      c, [](HandleCache& k) -> auto& { return k.size_memo; }, path,
-      [&] {
-        if (detail::source_stat_observer) detail::source_stat_observer(path);
-        return static_cast<std::uint64_t>(fs::file_size(detail::utf8_path(path)));
-      });
+      cache_.get(), [](HandleCache& c) -> auto& { return c.size_memo; }, path,
+      [&] { return static_cast<std::uint64_t>(fs::file_size(detail::utf8_path(path))); });
 }
 
 namespace {

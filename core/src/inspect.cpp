@@ -130,7 +130,7 @@ SessionSummary detail::inspect_session_through(std::shared_ptr<const SessionSour
                                                const std::string& path, const InspectOptions& opt,
                                                const Control& ctl) {
   SessionSummary out;
-  const auto layout = detail::discover_layout(*src, 1, opt.for_copy_plan);
+  const auto layout = detail::discover_layout(*src);
 
   // Progress (#69): bytes of the files the segment pass reads. Sized only for
   // a listener, so a plain inspect pays nothing for it.
@@ -273,18 +273,14 @@ SessionSummary detail::inspect_session_through(std::shared_ptr<const SessionSour
       std::vector<std::pair<si8, si8>> seg_spans;
 
       const std::string failure = contain(lc->name, ls.number, src->describe(ls.tmet), "segment", [&] {
-        if (!opt.for_copy_plan) {
-          is.tidx_bytes = src->file_size(ls.tidx);
-          is.tdat_bytes = src->file_size(ls.tdat);  // size only: never read
-        }
+        is.tidx_bytes = src->file_size(ls.tidx);
+        is.tdat_bytes = src->file_size(ls.tdat);  // size only: never read
         const std::string rdat = ls.rdat();
         if (src->exists(rdat)) {
           is.has_records = true;
-          if (!opt.for_copy_plan) {
-            is.record_bytes = src->file_size(rdat);
-            const std::string ridx = rdat.substr(0, rdat.size() - 5) + ".ridx";
-            if (src->exists(ridx)) is.record_bytes += src->file_size(ridx);
-          }
+          is.record_bytes = src->file_size(rdat);
+          const std::string ridx = rdat.substr(0, rdat.size() - 5) + ".ridx";
+          if (src->exists(ridx)) is.record_bytes += src->file_size(ridx);
         }
 
         const auto tmet_bytes = src->read_all(ls.tmet);  // whole file: its size is free

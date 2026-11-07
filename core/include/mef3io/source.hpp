@@ -19,18 +19,7 @@ namespace mef3io {
 struct SourceDirEntry {
   std::string name;
   bool is_dir = false;
-  /// False for an entry whose target does not resolve (a dangling symlink):
-  /// stat/open fail on it, so a listing must not count it as present (2.3.1).
-  bool exists = true;
 };
-
-/// Whether this platform's usual file systems ignore case (Windows, macOS
-/// default): a listing that lacks an exact name then cannot rule it out.
-#if defined(_WIN32) || defined(__APPLE__)
-inline constexpr bool kCaseInsensitiveFs = true;
-#else
-inline constexpr bool kCaseInsensitiveFs = false;
-#endif
 
 /// Read-only view of a session tree. Paths are source-relative, always
 /// '/'-separated; "" names the session root. Implementations must be safe for
@@ -150,11 +139,6 @@ class ReadHandleScope {
 /// opens (cached or not). Must be thread-safe. Pins "each source file is
 /// opened at most N times in a merge".
 inline void (*source_open_observer)(const std::string& path) = nullptr;
-
-/// TEST HOOK: called with the path of every stat-like query a DirectorySource
-/// really issues (exists / file_size that no memo, listing or open handle
-/// answered). Must be thread-safe. Pins "no stat of a path a listing showed".
-inline void (*source_stat_observer)(const std::string& path) = nullptr;
 
 /// TEST HOOK: called with the path of every positional read a DirectorySource
 /// really issues (a request on a network drive; memo hits do not count).

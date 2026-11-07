@@ -33,14 +33,7 @@
   is missing) while exists() is one stat — strace showed ~10% MORE syscalls,
   a local open 10-20% slower, a 2 ms/request FUSE mount only -12% with about
   the same kernel-request count, and per-segment TarSource::list_dir made
-  tar opens quadratic. DO NOT RETRY IT for the OPEN (Session::discover keeps 3 exists()
-  per segment, pinned by core/tests/test_open_calls.cpp). The COPY engine's planning
-  (`discover_layout(..., by_listing=true)`, `InspectOptions::for_copy_plan`) and
-  `time_range` DO list segment folders (2.3.1, measured with strace -f -y on 64 ch x
-  12 parts): there a stat per file was 3 stats + the .rdat/.ridx probes + the
-  .tidx/.tdat size stats for EVERY part of a windowed check, and the per-copy
-  listing memo makes later `exists()` of that folder free (DirectorySource::exists
-  never stats a path its folder's memoised listing shows or rules out). What stayed: (a) the `.tmet` is read
+  tar opens quadratic. DO NOT RETRY IT. What stayed: (a) the `.tmet` is read
   with `SessionSource::read_head(rel, METADATA_FILE_BYTES)` = first
   min(size, n) bytes, one open + one read, no seek-to-end (strace, 209 ch x
   10 seg: 20,454 -> 14,184 syscalls, all 6,270 lseeks gone; FUSE without
