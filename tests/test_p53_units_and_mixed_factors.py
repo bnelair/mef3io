@@ -222,3 +222,13 @@ def test_merge_and_transform_warn_about_mixed_factors(tmp_path):
     with warnings.catch_warnings():
         warnings.simplefilter("error", mef3io.MixedFactorsWarning)
         mef3io.transform_session(a, tmp_path / "t2.mefd")  # one factor: silent
+
+
+def test_every_check_description_is_utf8_with_both_micro_signs():
+    """Windows: a "\\u00B5" escape in a C++ string was stored in the ANSI code page
+    (one byte 0xB5) and every listing of the checks failed to decode. The text must
+    arrive as proper UTF-8 on every platform."""
+    checks = mef3io.available_checks()          # decodes every description
+    units = next(c for c in checks if c.id == "units.mixed")
+    text = " ".join(str(v) for v in vars(units).values())
+    assert "µV" in text and "μV" in text

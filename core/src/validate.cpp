@@ -879,7 +879,8 @@ const std::vector<CheckImpl>& check_impls() {
                   "Every segment of a channel should declare the same units_description (the "
                   "reader reports the first segment's for the whole channel, so a segment in "
                   "other units would be silently mislabelled). Compared byte for byte as "
-                  "stored, except that \"uV\", \"\u00B5V\" and \"\u03BCV\" count as one. A warning: samples are "
+                  "stored, except that \"uV\", \"\xC2\xB5" "V\" and \"\xCE\xBC" "V\" count as one (micro sign and "
+                  "Greek mu, written as UTF-8 bytes so every compiler stores them alike). A warning: samples are "
                   "unaffected. NOT repairable: which of the strings is right is a decision "
                   "about the recording, not something the data can answer.",
                   Severity::Warning, false},
