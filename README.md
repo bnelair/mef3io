@@ -167,7 +167,8 @@ pages such as
   different amplifiers. One call can also trim each recording to its own
   time range, make the result anonymous and use several threads
   (`n_threads=`). Overlapping data is refused before anything is written, and
-  the result is checked against every source. See
+  the result is checked against every source. Different units or conversion
+  factors in one channel are merged with a warning, not refused. See
   [Merging recordings](https://bnelair.github.io/mef3io/merge/).
   To read several recordings as one without writing anything,
   `mef3io.MultiReader([...])` is a drop-in for `Reader` (Python).
