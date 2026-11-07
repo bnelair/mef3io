@@ -3,6 +3,8 @@
 /// uncompressed .mefd.tar archive (random access into member byte ranges).
 #pragma once
 
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -82,6 +84,8 @@ class DirectorySource : public SessionSource {
 
  private:
   std::string join(const std::string& rel) const;
+  std::shared_ptr<const std::vector<ui1>> memo_get(const std::string& path, const std::string& rel,
+                                                   bool fill) const;
   std::string root_;
   std::shared_ptr<detail::HandleCache> cache_;  // null = plain reads
 };
@@ -135,6 +139,18 @@ class ReadHandleScope {
 /// opens (cached or not). Must be thread-safe. Pins "each source file is
 /// opened at most N times in a merge".
 inline void (*source_open_observer)(const std::string& path) = nullptr;
+
+/// TEST HOOK: called with the path of every positional read a DirectorySource
+/// really issues (a request on a network drive; memo hits do not count).
+inline void (*source_read_observer)(const std::string& path) = nullptr;
+
+/// TEST HOOK: total bytes of positional reads a DirectorySource really issued
+/// (memo hits do not count). Tests reset it to 0 and compare.
+inline std::atomic<std::uint64_t> source_read_bytes{0};
+
+/// Budget of the small-file memo (a HandleCache holds at most this many bytes
+/// of .tmet/.tidx/.ridx contents). A variable only so a test can lower it.
+inline std::size_t memo_total_budget = 256u << 20;
 
 /// TEST HOOK: called before each positional read through a cached handle;
 /// a non-zero return is raised as that errno (POSIX) in place of the read.

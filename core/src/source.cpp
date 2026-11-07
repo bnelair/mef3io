@@ -108,6 +108,13 @@ class HandleCache {
   std::unordered_map<std::string, bool> exists_memo;
   std::unordered_map<std::string, std::uint64_t> size_memo;
   std::unordered_map<std::string, std::vector<SourceDirEntry>> dir_memo;
+  // Whole contents of the SMALL metadata files (.tmet/.tidx/.ridx, at most
+  // MEMO_FILE_BYTES each, detail::memo_total_budget together) read by read_all: a file
+  // read again later (the validator, the planning, the verification) costs no
+  // open even when the handle cap evicted its handle. Forgotten with release_under.
+  static constexpr std::size_t MEMO_FILE_BYTES = 1u << 20;  // the total: detail::memo_total_budget
+  std::unordered_map<std::string, std::shared_ptr<const std::vector<ui1>>> bytes_memo;
+  std::size_t bytes_memo_total = 0;
 
   HandleCache() {
     // Half the process's descriptors, at most 4096: the rest stay for the
@@ -151,6 +158,14 @@ void ReadHandleScope::release_under(const std::string& prefix) const {
   std::erase_if(c.exists_memo, [&](const auto& kv) { return under_prefix(kv.first, prefix); });
   std::erase_if(c.size_memo, [&](const auto& kv) { return under_prefix(kv.first, prefix); });
   std::erase_if(c.dir_memo, [&](const auto& kv) { return under_prefix(kv.first, prefix); });
+  for (auto it = c.bytes_memo.begin(); it != c.bytes_memo.end();) {
+    if (under_prefix(it->first, prefix)) {
+      c.bytes_memo_total -= it->second->size();
+      it = c.bytes_memo.erase(it);
+    } else {
+      ++it;
+    }
+  }
   for (auto l = c.lru.begin(); l != c.lru.end();) {
     if (under_prefix(l->first, prefix)) {
       doomed.push_back(std::move(l->second));
@@ -256,6 +271,8 @@ bool pread_full(const Handle& h, std::size_t offset, std::size_t length, ui1* ou
                 std::size_t* partial = nullptr) {
   std::size_t done = 0;
   if (partial) *partial = 0;
+  if (length && detail::source_read_observer) detail::source_read_observer(h.path);
+  detail::source_read_bytes.fetch_add(length, std::memory_order_relaxed);
   if (length && detail::read_fault_hook) {
     if (const int e = detail::read_fault_hook(h.path)) {
       const std::string what = "read failed: " + h.path + " (" +
@@ -439,14 +456,73 @@ std::uint64_t DirectorySource::file_size(const std::string& rel) const {
       [&] { return static_cast<std::uint64_t>(fs::file_size(detail::utf8_path(path))); });
 }
 
+namespace {
+bool memo_path(const std::string& path) {
+  for (const char* e : {".tmet", ".tidx", ".ridx"})
+    if (path.size() > 5 && path.compare(path.size() - 5, 5, e) == 0) return true;
+  return false;
+}
+}  // namespace
+
+/// The cached whole contents of a small metadata file, or null. With `fill`,
+/// read it once now (when small enough and the memo has room) so every later
+/// read of any part of it costs no request.
+std::shared_ptr<const std::vector<ui1>> DirectorySource::memo_get(const std::string& path,
+                                                                    const std::string& rel,
+                                                                    bool fill) const {
+  HandleCache* const c = cache_.get();
+  if (!c || !memo_path(path)) return nullptr;
+  {
+    std::lock_guard<std::mutex> lk(c->mu);
+    const auto it = c->bytes_memo.find(path);
+    if (it != c->bytes_memo.end()) return it->second;
+  }
+  if (!fill) return nullptr;
+  const std::uint64_t size = file_size(rel);
+  if (size > HandleCache::MEMO_FILE_BYTES) return nullptr;
+  {
+    // Over budget: no whole-file read that read_all could not keep; the
+    // caller does its normal small read.
+    std::lock_guard<std::mutex> lk(c->mu);
+    if (c->bytes_memo_total + size > detail::memo_total_budget) return nullptr;
+  }
+  read_all(rel);  // memoizes when the budget allows
+  std::lock_guard<std::mutex> lk(c->mu);
+  const auto it = c->bytes_memo.find(path);
+  return it == c->bytes_memo.end() ? nullptr : it->second;
+}
+
 std::vector<ui1> DirectorySource::read_all(const std::string& rel) const {
   const std::string path = join(rel);
   std::vector<ui1> buf;
+  HandleCache* const mc = cache_.get();
+  const auto ends = [&](const char* e) { return path.size() > 5 && path.compare(path.size() - 5, 5, e) == 0; };
+  const bool memoizable = mc && (ends(".tmet") || ends(".tidx") || ends(".ridx"));
+  if (memoizable) {
+    std::lock_guard<std::mutex> lk(mc->mu);
+    const auto it = mc->bytes_memo.find(path);
+    if (it != mc->bytes_memo.end()) return *it->second;
+  }
+  struct Remember {
+    HandleCache* c;
+    const std::string& path;
+    const std::vector<ui1>& buf;
+    bool on;
+    ~Remember() {
+      if (!on || buf.size() > HandleCache::MEMO_FILE_BYTES) return;
+      std::lock_guard<std::mutex> lk(c->mu);
+      if (c->bytes_memo_total + buf.size() > detail::memo_total_budget) return;
+      if (c->bytes_memo.emplace(path, std::make_shared<const std::vector<ui1>>(buf)).second)
+        c->bytes_memo_total += buf.size();
+    }
+  };
   if (with_handle(cache_.get(), path, [&](const Handle& h) {
         buf.assign(static_cast<std::size_t>(h.size), 0);
         if (!pread_full(h, 0, buf.size(), buf.data())) throw IoError("short read: " + path);
-      }))
+      })) {
+    Remember{mc, path, buf, memoizable};
     return buf;
+  }
   if (detail::source_open_observer) detail::source_open_observer(path);
   std::ifstream f(detail::utf8_path(path), std::ios::binary | std::ios::ate);
   if (!f) throw IoError("cannot open file: " + path);
@@ -462,6 +538,8 @@ std::vector<ui1> DirectorySource::read_head(const std::string& rel, std::size_t 
   // the fixed-length .tmet costs one request whatever padding follows it.
   const std::string path = join(rel);
   std::vector<ui1> buf;
+  if (const auto m = memo_get(path, rel, /*fill=*/false))
+    return std::vector<ui1>(m->begin(), m->begin() + std::min(m->size(), max_bytes));
   if (with_handle(cache_.get(), path, [&](const Handle& h) {
         buf.assign(static_cast<std::size_t>(std::min<std::uint64_t>(h.size, max_bytes)), 0);
         std::size_t got = 0;
@@ -482,6 +560,10 @@ std::vector<ui1> DirectorySource::read_range(const std::string& rel, std::size_t
                                              std::size_t length) const {
   const std::string path = join(rel);
   std::vector<ui1> buf;
+  if (const auto m = memo_get(path, rel, /*fill=*/true)) {
+    if (offset > m->size() || length > m->size() - offset) throw IoError("short read: " + path);
+    return std::vector<ui1>(m->begin() + offset, m->begin() + offset + length);
+  }
   if (with_handle(cache_.get(), path, [&](const Handle& h) {
         buf.assign(length, 0);
         if (length && !pread_full(h, offset, length, buf.data())) throw IoError("short read: " + path);
