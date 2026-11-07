@@ -426,4 +426,12 @@ together with the drop-records and one-pass merge tests, so the released
 toolchain is checked before upload. To reproduce a wheel-only defect: build in
 `quay.io/pypa/manylinux_2_28_x86_64`.
 
+Merge units (maintainer 2026-11-06: units are free text, NEVER a refusal): decided per channel in the
+plan's piece loop on the KEPT pieces (after the cut). Distinct = different after `units_comparable`
+(U+00B5/U+03BC mapped to "u", nothing else; metadata.hpp, also used by validator `units.mixed`). More than
+one: the channel goes into `MergePlan::units_mixed` -> `MergeReport::units_mixed` + a note (check and run
+alike; verify excuses `units.mixed` for it) and Python emits ONE `MixedUnitsWarning` per call
+(`_copy._warn_mixed_units`). Segments keep their own strings, values untouched, channel label = first kept
+segment's. Pinned in tests/test_p53 and core/tests/test_transform.cpp.
+
 SEGMENT SELECTION BY A CUT (#184): whether a window (transform `time_range`, merge `time_ranges`) touches a segment is judged by `segment_span`/`segment_outside` (session_copy.cpp): the .tmet header start/end WIDENED to the span of ALL index entries by the reader's own rule (`index_span` = Session::learn_span: min start .. max start + n/fs; a 0-count/NO_ENTRY entry leaves it open = never skipped), read ONCE per segment (the merge plan reuses it), never the header alone and NOT padded (a pad keeps segments with no samples in the window: test_p44 factor-boundary cut). A stale END (interrupted append, short-ending writer) or a late START header dropped a merge source's whole window silently (and made a transform fail verification); the same rule (INVARIANTS: #146) now covers the copy's own skip (`Copier::copy_segment`), the merge plan's spans, the pre-flight "has samples" look (day margin) and the verify's source-segment matching. An unset header side is unbounded (never skipped). Test-pinned: tests/test_p53_stale_header_windows.py (output == Reader.read of the source, stale/late x merge windowed/unwindowed, transform, anonymize).

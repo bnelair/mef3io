@@ -381,6 +381,51 @@ def _warn_output_passwords(a: dict) -> None:
         warn_password_interop(a["output_password_1"], a["output_password_2"])
 
 
+def _warn_mixed_factors(dst, a: dict) -> None:
+    """Warn when the copy at ``dst`` holds a channel whose segments store
+    different conversion factors: older tools (``mef_tools``) read it as zeros.
+    Metadata only; a failure here never fails the finished copy."""
+    from ._inspect import inspect
+    from ._warnings import MixedFactorsWarning, emit
+
+    try:
+        summary = inspect(os.fspath(dst), a.get("output_password_2") or a.get("output_password_1") or "")
+        names = []
+        for ch in summary.channels:
+            vals = [s.units_conversion_factor for s in ch.segments if s.units_conversion_factor]
+            if any(abs(v - vals[0]) > 1e-12 * abs(vals[0]) for v in vals[1:]):
+                names.append(ch.name)
+    except Exception:  # noqa: BLE001 - a courtesy warning must never fail a finished copy
+        return
+    if names:
+        emit(MixedFactorsWarning,
+             f"{len(names)} channel(s) of the result have segments with different conversion "
+             "factors (" + ", ".join(names[:5]) + (", ..." if len(names) > 5 else "") + "). "
+             "mef3io and pymef scale each segment by its own factor and read correct values; "
+             "older tools that use the channel-level factor, such as mef_tools' "
+             "MefReader.get_data, read these channels as all zeros.",
+             path=os.fspath(dst), details=tuple(names), stacklevel=3)
+
+
+def _warn_mixed_units(dst, units_mixed: dict) -> None:
+    """One MixedUnitsWarning per call, listing the channels whose kept
+    segments carry different units strings (``units_mixed``: channel -> the
+    distinct strings). Units are free text: a note and a warning, never a
+    refusal."""
+    from ._warnings import MixedUnitsWarning, emit
+
+    if not units_mixed:
+        return
+    names = sorted(units_mixed)
+    shown = "; ".join(
+        f"{n}: " + ", ".join(f'"{u}"' for u in units_mixed[n]) for n in names[:5])
+    emit(MixedUnitsWarning,
+         f"{len(names)} channel(s) of the result have segments with different units ({shown}"
+         + (", ..." if len(names) > 5 else "") + "). Every segment keeps its own units string "
+         "and nothing is rescaled; readers label the channel with the first segment's units.",
+         path=os.fspath(dst), details=tuple(names), stacklevel=3)
+
+
 def _check_report(raw: dict, refusals: _Refusals, a: dict) -> CheckReport:
     """The extension's check result, merged with the refusals found in Python
     (never twice) and the output-password notes."""

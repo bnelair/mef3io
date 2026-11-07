@@ -1207,6 +1207,11 @@ NB_MODULE(_mef3io, m) {
         out["metadata_fields_changed"] = r.metadata_fields_changed;
         out["sources"] = r.sources;
         out["segments_split"] = r.segments_split;
+        {
+          nb::dict um;
+          for (const auto& [ch, us] : r.units_mixed) um[nb::str(ch.c_str())] = us;
+          out["units_mixed"] = um;
+        }
         out["pseudonym"] = r.pseudonym;
         out["shift_us"] = opt_or_none(r.shift_us);
         out["source_recording_time_offset"] = r.source_recording_time_offset;

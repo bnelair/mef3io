@@ -52,6 +52,16 @@ implementations did — the signal codec path is unchanged), and both are the sa
 ~7–8× ahead of the legacy pymef stack shown in the table above. Sessions
 written by either binding read back bit-identically in the other.
 
+## Channels with different conversion factors per segment
+
+A channel whose segments store different conversion factors (merged
+recordings made at different gains) is read correctly by mef3io and pymef,
+each scaling by the segment's own factor. The legacy `mef_tools`
+`MefReader.get_data` scales by meflib's channel-level factor, which meflib
+writes as 0 when segments differ, and so returns all zeros. mef3io's
+`merge_sessions` and `transform_session` warn (`MixedFactorsWarning`) when
+their result has such a channel. Pinned by `tests/test_p53_units_and_mixed_factors.py`.
+
 ## Level-1 password behavior — the main difference
 
 MEF 3.0 encrypts **section 2** (technical metadata: fs, sample counts,

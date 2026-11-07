@@ -3,7 +3,7 @@
 > Read before emitting any Python warning or touching inspect()'s warning data.
 > Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
-Warnings (#96): EVERY Python warning is a `MefWarning` (`python/mef3io/
+Warnings (#96; merge/transform also emit `MixedFactorsWarning`, merge `MixedUnitsWarning`: ONE per call, channels in `details`): EVERY Python warning is a `MefWarning` (`python/mef3io/
 _warnings.py`, a UserWarning) emitted through `_warnings.emit(cls, msg,
 path=, details=, stacklevel=)` — NEVER a bare `warnings.warn` (test_p30 bans
 importing `warnings` outside _warnings.py, by AST). The session goes in `w.message.path`, the structured

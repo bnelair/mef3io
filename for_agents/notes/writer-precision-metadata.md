@@ -19,16 +19,19 @@ the default path for that write (byte-identical to a default write's
 counts), `step_fallback` reason + Python `StepFallbackWarning`. MINIMUM
 EVIDENCE: a sample with < 16 distinct non-zero magnitudes (DC, square wave,
 a few levels) gives no step (the default path) — the level itself would
-become the channel's factor. A CHANNEL KEEPS ONE FACTOR: the reader scales a
-whole channel by its FIRST segment's factor (session.cpp
-load_channel_basic_info; per-segment scaling is #150) — a new segment with
-another factor reads back silently mis-scaled (PRE-EXISTING for the default
-path with new_segment=True; #150) — so "step" on a channel with segments
+become the channel's factor. A CHANNEL SHOULD KEEP ONE FACTOR: the reader scales PER SEGMENT by each
+segment's own factor (#150, reader.cpp; tests/test_p44_segment_factors.py
+pins it; inspect reports a channel-level factor of None when they differ), so a new segment with another
+factor reads back correctly in mef3io and pymef. The LEGACY mef_tools
+`get_data` instead scales by the channel-level factor, which meflib stores as
+0 when segments differ, and reads such a channel as all zeros (test_p53;
+`MixedFactorsWarning` from merge/transform). The writer still keeps one factor
+per channel, so "step" on a channel with segments
 (append OR new_segment) uses the channel's factor itself (never via a
 `precision` int: factors >= 10 have p < 0, the "infer" sentinel — review
 round 1 found that): exact if the data fits, else REFUSED
 (WriteConflictError, nothing written), never rounded (decided in review;
-once #150 lands a later change may start a new segment instead — not now).
+a later change may start a new segment instead — not now).
 The default `precision=-1` append onto a non-power-of-ten factor is refused
 with a WriteConflictError naming "step"/write_int32. NO INT32 WRAP anywhere — CLAMP (maintainer decision, #149 round 3):
 `quantize_to_int32` and `quantize_to_step` store a count beyond

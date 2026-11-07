@@ -478,6 +478,10 @@ SessionSummary detail::inspect_session_through(std::shared_ptr<const SessionSour
                                                  md.section2.units_conversion_factor)) {
           factor_differs = true;  // #150: segments store different factors
         }
+        if (std::none_of(ic.units_all.begin(), ic.units_all.end(), [&](const std::string& u) {
+              return units_comparable(u) == units_comparable(md.section2.units_description);
+            }))
+          ic.units_all.push_back(md.section2.units_description);
         // File-derived: a negative count is nonsense, and the sum must not overflow.
         if (md.section2.number_of_samples < 0)
           n_samples_known = false;

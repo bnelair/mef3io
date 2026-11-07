@@ -39,6 +39,7 @@ from ._copy import (
     _error,
     _fspaths,
     _Refusals,
+    _warn_mixed_factors,
     _warn_output_passwords,
 )
 
@@ -368,6 +369,7 @@ def transform_session(
     raw = _backend().transform_session(
         *_fspaths(src, dst), rename=bool(rename), password=password or "", **a,
         **_hooks(cancel, progress))
+    _warn_mixed_factors(_fspaths(src, dst)[1], a)
     return TransformReport._from(raw)
 
 

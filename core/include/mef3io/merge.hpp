@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -84,6 +85,10 @@ struct MergeReport : TransformReport {
   si8 source_recording_time_offset = 0;
   si8 record_text_fields_changed = 0;
   si8 record_bodies_cleared = 0;
+  /// Channels whose KEPT segments carry different units strings (free text,
+  /// never a refusal): channel -> the distinct strings as stored, in order.
+  /// Segments keep their own strings; the channel label is the first kept one's.
+  std::map<std::string, std::vector<std::string>> units_mixed;
   /// anonymize only. THE RE-IDENTIFICATION KEY over all sources (earliest
   /// start, latest end, and per kept channel): in memory only, as in
   /// AnonymizeReport.

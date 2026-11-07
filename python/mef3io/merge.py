@@ -38,6 +38,8 @@ from ._copy import (
     _copy_arguments,
     _error,
     _Refusals,
+    _warn_mixed_factors,
+    _warn_mixed_units,
     _warn_output_passwords,
 )
 from .anonymize import _CLEAR_CHOICES, _clear_flags
@@ -165,6 +167,10 @@ class MergeReport:
     )
     # Last, with a default: a report from 2.1.1 (no such key) still loads.
     records_dropped: int = 0
+    # Channels whose KEPT segments carry different units strings (free text,
+    # never a refusal): channel -> the distinct strings, as stored. A
+    # MixedUnitsWarning names them; the notes say it too.
+    units_mixed: Dict[str, Tuple[str, ...]] = field(default_factory=dict, compare=False)
 
     @classmethod
     def _from(cls, d: dict) -> "MergeReport":
@@ -177,6 +183,7 @@ class MergeReport:
                 d[k] = tuple(d[k])
         d.setdefault("source_count", len(d.get("sources", ())))
         d["source_channel_times"] = {k: tuple(v) for k, v in d.get("source_channel_times", {}).items()}
+        d["units_mixed"] = {k: tuple(v) for k, v in d.get("units_mixed", {}).items()}
         return cls(**d)
 
     def _public_notes(self) -> Tuple[str, ...]:
@@ -486,6 +493,8 @@ def merge_sessions(
                    n_threads=n_threads)
     _warn_output_passwords(a)
     raw = _backend().merge_sessions(dst=os.fspath(dst), **a, **_hooks(cancel, progress))
+    _warn_mixed_factors(dst, a)
+    _warn_mixed_units(dst, raw.get("units_mixed", {}))
     return MergeReport._from(raw)
 
 

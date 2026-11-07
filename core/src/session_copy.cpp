@@ -4674,6 +4674,7 @@ struct MergePiece {
   si8 start = 0;   ///< its first block's time (index, user uUTC)
   si8 lo = 0, hi = 0;  ///< the record times its segment-level annotations take
   Uuid level{};    ///< the result segment's level UUID (all its files)
+  std::string units;  ///< its source segment's units string, as stored
 };
 
 struct MergeSourcePlan {
@@ -4693,6 +4694,9 @@ struct MergePlan {
   /// Kept channels left out because no source has a sample of them in its
   /// range (also in `excluded`).
   std::vector<std::string> without_samples;
+  /// Channels whose kept segments carry different units strings (free text,
+  /// never a refusal): the validator's `units.mixed` on them is expected.
+  std::map<std::string, std::vector<std::string>> units_mixed;
   bool anonymize = false;
   std::optional<si8> shift;   // anonymize: the shift (unset = times kept)
   std::string pseudonym;      // anonymize
@@ -5121,6 +5125,7 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
       bool read = false;
     };
     std::vector<Seg> segs;
+    std::map<const detail::LayoutSegment*, std::string> seg_units;
     for (std::size_t k = 0; k < m.sources.size(); ++k) {
       const auto& sp = *m.sources[k];
       if (!sp.used || !sp.pf.kept.count(ch)) continue;
@@ -5159,6 +5164,7 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
             // which segments are compared; the comparison itself is on the
             // blocks the copy keeps, index_blocks.)
             segs.push_back({k, &seg, t.rto, fs, longest_block_us(s2), a, b, {}, false});
+            seg_units[&seg] = s2.units_description;
           } catch (...) {
             // the source's own pre-flight already reported it
           }
@@ -5256,6 +5262,30 @@ MergePlan preflight_merge(const std::vector<std::string>& sources, const std::st
         if (other.start > pc.start) pc.hi = std::min(pc.hi, other.start);
       }
       pc.level = random_uuid();
+    }
+    // Units are free text and never block a merge. Decided on the segments the
+    // result actually KEEPS (after the cut): when they carry different strings
+    // (after folding the micro prefix: "uV" = "\u00B5V" = "\u03BCV") the channel is
+    // listed in units_mixed and noted. Segments keep their own strings and
+    // samples are never rescaled; the channel's label is the first kept
+    // segment's.
+    if (!pieces.empty()) {
+      for (auto& pc : pieces) pc.units = seg_units[pc.segment];
+      std::vector<std::string> distinct;
+      for (const auto& pc : pieces)
+        if (std::none_of(distinct.begin(), distinct.end(), [&](const std::string& u) {
+              return units_comparable(u) == units_comparable(pc.units);
+            }))
+          distinct.push_back(pc.units);
+      if (distinct.size() > 1) {
+        std::string listed;
+        for (const auto& u : distinct) listed += (listed.empty() ? "" : ", ") + ("\"" + u + "\"");
+        m.units_mixed[ch] = distinct;
+        m.notes.push_back("channel " + ch + " has different units in the data the result keeps (" +
+                          listed + "); every segment keeps its own units string, samples are not "
+                          "rescaled, and the channel's label shows the first kept segment's (\"" +
+                          distinct.front() + "\") (validator units.mixed)");
+      }
     }
     m.pieces[ch] = std::move(pieces);
   }
@@ -5716,7 +5746,8 @@ VerifyReport verify_merge_impl(MergePlan& m, const std::string& dst_path, const 
     const Report dr = handles ? detail::validate_session_through(handles->open(dst_path), dst_path, vo, inner)
                               : validate_session(dst_path, vo, inner);
     for (const auto& f : dr.findings)
-      if (f.severity != Severity::Info)
+      if (f.severity != Severity::Info &&
+          !(f.check_id == "units.mixed" && m.units_mixed.count(f.channel)))
         problem(f.path, f.check_id, "the validator reports on the result: " + f.message);
     for (const auto& sk : dr.skipped)
       problem(sk.path, "validator", "could not check a segment of the result: " + sk.reason);
@@ -5743,6 +5774,7 @@ void run_merge(const std::vector<std::string>& sources, const std::string& dst_p
   rep.channels_without_samples = m.without_samples;
   rep.output_encrypted = out.encrypt;
   rep.notes = m.notes;
+  rep.units_mixed = m.units_mixed;
   rep.segments_split = m.segments_split;
   const SourcePlan* plan0 = m.first_plan();
   std::optional<Redactor> red;

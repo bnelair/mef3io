@@ -4,7 +4,7 @@
 > Split out of CLAUDE.md (verbatim except retargeted cross-references); "the private reader" = the private third-party reader named in CLAUDE.md.
 
 Validator/repair (`core/{include,src}/…/validate.{hpp,cpp}`, `python/mef3io/
-validate.py`, `python/mef3io/__main__.py`): a REGISTRY of 19 checks comparing a
+validate.py`, `python/mef3io/__main__.py`): a REGISTRY of 20 checks comparing a
 session's declarations against its data, run in a fixed order (integrity →
 structure → sizing → times → headers). Adding a check = ONE entry with
 `detect` + optional `repair` lambdas; ordering/filtering/reporting/bindings/CLI
@@ -35,6 +35,6 @@ naming the class there imports the wrong mef3io at pytest config time). Checks
 validated against the meflib C source: `recording_duration` is a SPAN
 (meflib.c:5479), `.tdat maximum_entry_size` is BYTES (pymef writes samples —
 its bug), and times must be compared as ABSOLUTE uUTC because pymef negates
-block times but not universal-header times. Docs: `docs/validation.md`. Tests:
+block times but not universal-header times. `units.mixed` and `records.encryption` are judged across files AFTER the segment pass (their `detect` is a no-op; `run()` collects each channel's units while the pass loads section 2), warning-only and not repairable. Docs: `docs/validation.md`. Tests:
 `tests/test_p13_validate.py` (asserts every repairable check has a corruption
 case, so a new one cannot ship untested) + a Catch2 case.

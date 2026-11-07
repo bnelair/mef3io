@@ -62,6 +62,37 @@ time) stops the merge later and leaves nothing behind:
 Every check a [modified copy](transform.md) makes also applies to each
 recording: passwords, damaged files, channel selection and so on.
 
+**Units.** The units string is free text, so different units never block a
+merge. They are decided on the segments the result actually keeps (after
+`time_ranges`). `uV`, `µV` (micro sign) and `μV` (Greek mu) count as the same
+unit; otherwise strings are compared exactly as stored. When the kept segments
+of a channel carry different strings, the merge goes ahead, every segment keeps
+its own string, samples are never rescaled, and the channel's label is the
+first kept segment's. You are told in two ways, in `merge.check` and in the
+merge: a note in the report naming the channel and the distinct strings
+(`report.notes`, `report.units_mixed`), and, when the merge runs, one
+`mef3io.MixedUnitsWarning` per call listing the channels. The validator
+reports the same channel as `units.mixed` (a warning; the merge's own
+verification accepts it). To silence the warning when the mix is intended:
+`warnings.filterwarnings("ignore", category=mef3io.MixedUnitsWarning)` (or
+`mef3io.MefWarning` for all mef3io warnings).
+
+## Mixed conversion factors and older tools
+
+Sources recorded at different gains give a merged channel whose segments
+have **different conversion factors**. This is valid MEF 3.0 and mef3io keeps
+it: every segment keeps its own factor and mef3io (`Reader`, `MultiReader`,
+the `mef_tools`-compatible `MefReader`) and pymef read the right values.
+**Older tools that scale a whole channel by the channel-level factor, such as
+the legacy `mef_tools` `MefReader.get_data`, return all zeros for such a
+channel**, because meflib stores 0 at channel level when segments differ.
+`merge_sessions` and `transform_session` therefore emit a
+`mef3io.MixedFactorsWarning` when the result has such a channel. If a file
+must be read by older tools, merge only recordings with the same factor, or
+read it with mef3io or pymef. To silence the warning when the mix is
+intended: `warnings.filterwarnings("ignore", category=mef3io.MixedFactorsWarning)`
+(`MixedUnitsWarning` is silenced the same way; `mef3io.MefWarning` silences all mef3io warnings).
+
 ## How the result is laid out
 
 - **Segments:** each segment of each recording becomes a segment of the

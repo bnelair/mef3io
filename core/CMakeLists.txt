@@ -26,6 +26,10 @@ target_link_libraries(mef3io_core PUBLIC Threads::Threads)
 
 if(MSVC)
   target_compile_options(mef3io_core PRIVATE /W4 /permissive-)
+  # Sources are UTF-8. Without /utf-8 MSVC stores a "\u00B5"-style escape in
+  # the ANSI code page (one byte 0xB5), which Python then cannot decode.
+  # PUBLIC, so the bindings and tests that use these headers compile alike.
+  target_compile_options(mef3io_core PUBLIC /utf-8)
 else()
   target_compile_options(mef3io_core PRIVATE -Wall -Wextra)
 endif()
