@@ -1693,9 +1693,12 @@ def test_a_zombie_pid_one_and_a_reused_pid_and_the_override(tmp_path):
     import signal
     import subprocess
     import time
-    # pid 1 is alive (and no start time is known): recovery refuses, the override settles
+    # a live process whose start time is not recorded (macOS, Windows; pid 1 on a POSIX box):
+    # recovery refuses, the override settles
+    alive = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    live_pid = 1 if os.name == "posix" else alive.pid
     p = _marker_crash(tmp_path, "one")
-    _set_owner(p, pid=1)
+    _set_owner(p, pid=live_pid)
     before = _snap(p)
     dry = mef3io.recover_session(str(p))
     assert dry.record_edits[0].running
@@ -1712,7 +1715,7 @@ def test_a_zombie_pid_one_and_a_reused_pid_and_the_override(tmp_path):
     # the CLI flag
     from mef3io import validate as _v
     q = _marker_crash(tmp_path, "cli")
-    _set_owner(q, pid=1)
+    _set_owner(q, pid=live_pid)
     assert _v._recover_main([str(q), "--apply"]) == 2 and mef3io.operation_marker(q) is not None
     assert _v._recover_main([str(q), "--apply", "--owner-gone"]) in (0, 1)
     assert mef3io.operation_marker(q) is None
@@ -1740,6 +1743,8 @@ def test_a_zombie_pid_one_and_a_reused_pid_and_the_override(tmp_path):
     finally:
         sleeper.kill()
         sleeper.wait()
+        alive.kill()
+        alive.wait()
 
 
 _PAUSED_EDIT = """
