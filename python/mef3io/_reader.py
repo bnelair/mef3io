@@ -448,14 +448,17 @@ class Reader:
         makes it persistent. Warm opens serve :attr:`channels` / :meth:`info`
         without touching the session tree.
     open_files : int or None, optional
-        How many data files this Reader keeps open between calls (default
-        ``None`` = the library's default, at most 128 and a quarter of the
-        process's descriptor limit). Paging through a recording then does not
-        reopen the same ``.tdat`` files for every read, which matters on a
-        network drive where every open is a round trip. ``0`` keeps nothing
-        open (every read opens and closes its file). Results never depend on
-        it. Changeable later through :attr:`open_files`; :meth:`release_files`
-        lets go of what is open now. See
+        How many data files this Reader keeps open between calls. Default
+        ``None`` = ``0``: nothing is kept open, every read opens and closes its
+        file, exactly as in 2.3.0. Switch it on (for example ``open_files=64``;
+        keep it well under a quarter of the process's descriptor limit) when ONE
+        or a few Readers read the
+        same files again and again on a slow or network drive, where every open
+        is a round trip. It costs descriptors held until
+        :meth:`release_files` / :meth:`close` (or garbage collection), and on
+        Windows a folder cannot be renamed or removed, nor a file replaced by
+        renaming over it, while files are held. Results never depend on it.
+        Changeable later through :attr:`open_files`. See
         [the long-recordings guide](https://bnelair.github.io/mef3io/long_recordings/).
     warn_declarations : bool, default True
         Emit a :class:`SessionDeclarationWarning` when the session leaves
@@ -744,9 +747,7 @@ class Reader:
                 return int(impl.open_files())
             if self._open_files is not None:
                 return self._open_files
-        from . import _mef3io
-
-        return int(_mef3io.default_open_files())
+        return 0  # the default: nothing kept open
 
     @open_files.setter
     def open_files(self, value: int) -> None:

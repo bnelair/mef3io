@@ -96,10 +96,16 @@ class SessionSource {
 namespace detail {
 class HandleCache;
 
-/// The default cap of kept-open files for one Reader/Session: 128, and at most
-/// a quarter of the process's descriptor limit (macOS: 256 -> 64), 0 when the
-/// limit is tiny. Windows has no such limit: 128.
+/// The default cap of kept-open files for one Reader/Session: 0 (off, as in
+/// 2.3.0). Opt in with Session::set_open_files / Reader(open_files=).
 std::size_t default_open_files();
+/// A sensible cap when it is switched on: 128, at most a quarter of the
+/// process's descriptor limit (macOS: 256 -> 64), 0 when the limit is tiny.
+/// Windows has no such limit: 128.
+std::size_t suggested_open_files();
+/// Close the kept files of EVERY live Reader cache in the process (what a
+/// failed open does when the process is out of descriptors).
+void release_all_reader_caches();
 /// A cache that keeps at most `cap` READ-ONLY .tdat files (and a tar archive)
 /// open for one Reader. It never memoizes anything (sizes, listings, contents
 /// are always asked of the file system), and validates a kept handle against
@@ -154,6 +160,10 @@ class DirectorySource : public SessionSource {
   /// Reader's cache, which never memoizes.
   detail::HandleCache* memo_cache() const;
   std::string join(const std::string& rel) const;
+  std::vector<ui1> read_all_once(const std::string& rel) const;
+  std::vector<ui1> read_head_once(const std::string& rel, std::size_t max_bytes) const;
+  std::vector<ui1> read_range_once(const std::string& rel, std::size_t offset,
+                                   std::size_t length) const;
   std::shared_ptr<const std::vector<ui1>> memo_get(const std::string& path, const std::string& rel,
                                                    bool fill) const;
   std::string root_;

@@ -36,6 +36,7 @@ START = 1_577_880_000_000_000
 SECOND = 1_000_000
 FS = 250.0
 CHANNELS = ("a", "b", "c", "d")
+ON = 64  # open_files is off by default; the tests that need kept files ask for them
 
 
 def _quiet(fn, *a, **kw):
@@ -95,12 +96,24 @@ def _kept(r):
 # the option
 # --------------------------------------------------------------------------
 
+def test_default_reader_holds_no_descriptor_after_a_read(tmp_path):
+    s = _write(tmp_path / "s.mefd")
+    with mef3io.Reader(str(s)) as r:
+        base = _fds()
+        r.read(list(CHANNELS), START, START + 25 * SECOND)
+        r.block_envelope("a")
+        assert _kept(r) == 0
+        if base is not None:
+            assert _fds() == base
+
+
 def test_default_and_setting(tmp_path):
     s = _write(tmp_path / "s.mefd")
-    default = mef3io._mef3io.default_open_files()
-    assert 0 < default <= 128 or sys.platform == "win32"
+    assert mef3io._mef3io.default_open_files() == 0
     with mef3io.Reader(str(s)) as r:
-        assert r.open_files == default
+        assert r.open_files == 0  # off unless asked for (as in 2.3.0)
+        r.read("a", START, START + SECOND)
+        assert _kept(r) == 0
         r.open_files = 5
         assert r.open_files == 5
         r.read("a", START, START + SECOND)
@@ -119,10 +132,10 @@ def test_argument_rules(tmp_path):
     for bad, exc in ((-1, ValueError), (True, TypeError), (1.5, TypeError), ("3", TypeError)):
         with pytest.raises(exc):
             mef3io.Reader(str(s), open_files=bad)
-        with mef3io.Reader(str(s)) as r:
+        with mef3io.Reader(str(s), open_files=ON) as r:
             with pytest.raises(exc):
                 r.open_files = bad
-    with mef3io.Reader(str(s)) as r:
+    with mef3io.Reader(str(s), open_files=ON) as r:
         with pytest.raises(TypeError):
             r.open_files = None  # the default is for the constructor only
         with pytest.raises(TypeError):
@@ -145,7 +158,7 @@ def test_a_warm_reader_applies_the_value_when_its_backend_is_built(tmp_path):
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("threads", [1, 2, 8])
-@pytest.mark.parametrize("cap", [1, 2, 3, 500, None])
+@pytest.mark.parametrize("cap", [1, 2, 3, 500, ON])
 @pytest.mark.parametrize("which", ["dir", "tar"])
 def test_results_are_identical_with_the_cache_off_tiny_and_default(tmp_path, which, cap, threads):
     s = _write(tmp_path / "s.mefd")
@@ -195,7 +208,7 @@ def test_the_cap_is_never_exceeded_and_close_lets_go(tmp_path):
 
 def test_release_files_closes_everything_and_the_reader_goes_on(tmp_path):
     s = _write(tmp_path / "s.mefd")
-    with mef3io.Reader(str(s)) as r:
+    with mef3io.Reader(str(s), open_files=ON) as r:
         first = r.read(list(CHANNELS), START, START + 25 * SECOND)
         assert _kept(r) >= len(CHANNELS)
         base = _fds()
@@ -213,7 +226,7 @@ def test_release_before_the_backend_exists_is_harmless(tmp_path):
     s = _write(tmp_path / "s.mefd")
     cache = tmp_path / "c.json"
     mef3io.Reader(str(s), cache=str(cache)).close()
-    with mef3io.Reader(str(s), cache=str(cache)) as r:
+    with mef3io.Reader(str(s), cache=str(cache), open_files=ON) as r:
         r.release_files()
 
 
@@ -243,7 +256,7 @@ def test_threads_sharing_one_reader_with_a_tiny_cap(tmp_path):
 
 def test_a_kept_handle_does_not_block_a_writer_appending_to_the_session(tmp_path):
     s = _write(tmp_path / "s.mefd", segments=1)
-    with mef3io.Reader(str(s)) as r:
+    with mef3io.Reader(str(s), open_files=ON) as r:
         r.read(list(CHANNELS), START, START + 2 * SECOND)
         assert _kept(r) == len(CHANNELS)
         # The Writer opens the same .tdat files for writing while we hold them
@@ -253,14 +266,14 @@ def test_a_kept_handle_does_not_block_a_writer_appending_to_the_session(tmp_path
                 w.write(ch, np.arange(1000, dtype=np.float64), START + 4 * SECOND, FS, precision=0)
             # annotations go into record files; also fine with the data files held.
             w.write_annotations([{"time": START + SECOND, "text": "n"}])
-    with mef3io.Reader(str(s)) as fresh:
+    with mef3io.Reader(str(s), open_files=ON) as fresh:
         assert fresh.info("a")["number_of_samples"] == 2000
 
 
 def test_a_kept_handle_does_not_block_a_rename_or_delete_of_the_file(tmp_path):
     s = _write(tmp_path / "s.mefd", segments=2)
     other = _write(tmp_path / "o.mefd", segments=2, seed=99)
-    with mef3io.Reader(str(s)) as r:
+    with mef3io.Reader(str(s), open_files=ON) as r:
         before = r.read("a", START + SECOND, START + 3 * SECOND)
         assert _kept(r) == 1
         # Replace a's segment-0 data with another recording's by renaming a copy
@@ -294,7 +307,7 @@ def test_a_renamed_session_fails_like_a_reader_that_keeps_nothing_open(tmp_path)
             r.read("a", START + SECOND, START + 3 * SECOND)
         return type(e.value), str(e.value)
 
-    with mef3io.Reader(str(s)) as kept, mef3io.Reader(str(s), open_files=0) as none:
+    with mef3io.Reader(str(s), open_files=ON) as kept, mef3io.Reader(str(s), open_files=0) as none:
         good = kept.read("a", START + SECOND, START + 3 * SECOND)
         none.read("a", START + SECOND, START + 3 * SECOND)
         os.rename(s, moved)
@@ -306,13 +319,84 @@ def test_a_renamed_session_fails_like_a_reader_that_keeps_nothing_open(tmp_path)
 
 def test_release_lets_a_folder_be_renamed_even_on_windows(tmp_path):  # (Windows: only after release)
     s = _write(tmp_path / "s.mefd")
-    with mef3io.Reader(str(s)) as r:
+    with mef3io.Reader(str(s), open_files=ON) as r:
         r.read(list(CHANNELS), START, START + 25 * SECOND)
         r.release_files()
         moved = tmp_path / "moved.mefd"
         os.rename(s, moved)
         os.rename(moved, s)
         assert r.read("a", START, START + SECOND).shape[0] > 0
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+def test_a_file_deleted_and_recreated_under_the_same_name_is_never_read_through_the_old_handle(
+        tmp_path, threads):
+    """Same size, other content, same name: the identity rule must see a new file.
+
+    (Windows' NTFS gives a recreated file back its old creation time within ~15 s,
+    so the rule there also compares the last-write time and size; where the OS keeps
+    the name reserved for a deleted file that is still held, the recreate cannot
+    happen and there is nothing to check.)"""
+    rng = np.random.default_rng(1)
+    base = rng.integers(-500, 500, 1000)
+    a = tmp_path / "a.mefd"
+    b = tmp_path / "b.mefd"
+    with mef3io.Writer(str(a), overwrite=True) as w:
+        w.write("a", base.astype(np.float64), START, FS, precision=0)
+    old, new = _tdat(a, "a", 0), _tdat(b, "a", 0)
+    for offset in range(1, 40):  # another recording of the same size (RED sizes follow the values)
+        with mef3io.Writer(str(b), overwrite=True) as w:
+            w.write("a", (base + offset).astype(np.float64), START, FS, precision=0)
+        if old.stat().st_size == new.stat().st_size:
+            break
+    assert old.stat().st_size == new.stat().st_size
+    with mef3io.Reader(str(a), open_files=ON, n_threads=threads) as r:
+        before = r.read("a", START, START + 4 * SECOND)
+        assert _kept(r) == 1
+        os.remove(old)
+        try:
+            old.write_bytes(new.read_bytes())
+        except OSError:
+            pytest.skip("this OS keeps the name of a deleted file that is still held")
+        after = r.read("a", START, START + 4 * SECOND)
+        assert after.tobytes() != before.tobytes()
+        with mef3io.Reader(str(a), open_files=0) as fresh:
+            assert after.tobytes() == fresh.read("a", START, START + 4 * SECOND).tobytes()
+
+
+_EXHAUST = """
+import resource, sys, warnings
+warnings.simplefilter("ignore")
+import mef3io
+path, limit = sys.argv[1], int(sys.argv[2])
+resource.setrlimit(resource.RLIMIT_NOFILE, (limit, limit))
+readers = [mef3io.Reader(path, open_files=64, n_threads=1) for _ in range(6)]
+chs = readers[0].channels
+want = None
+for rnd in range(2):
+    for r in readers:
+        got = r.read(chs, %d, %d)
+        if want is None:
+            want = got.tobytes()
+        assert got.tobytes() == want
+open(path + ".ok", "w").write("ok")
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs resource.setrlimit")
+def test_running_out_of_descriptors_heals(tmp_path):
+    import subprocess
+
+    s = _write(tmp_path / "s.mefd", segments=2, channels=tuple(f"c{i:02d}" for i in range(32)))
+    script = tmp_path / "exhaust.py"
+    script.write_text(_EXHAUST % (START, START + 40 * SECOND))
+    # 6 Readers x 64 files would be 384 descriptors: far over the limit of 120,
+    # which each Reader runs into in turn and recovers from by letting go.
+    env = dict(os.environ)
+    out = subprocess.run([sys.executable, str(script), str(s), "120"], capture_output=True, text=True,
+                         env=env, timeout=300)
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert Path(str(s) + ".ok").exists()
 
 
 # --------------------------------------------------------------------------
@@ -344,9 +428,9 @@ def test_multireader_open_files_is_a_total(tmp_path):
         assert sum(_kept(r) for r in m._readers) == 0
 
 
-def test_multireader_default_total_is_one_readers_default(tmp_path):
+def test_multireader_default_is_off(tmp_path):
     paths = _recordings(tmp_path, 3)
     with mef3io.MultiReader(paths) as m:
-        assert m.open_files == mef3io._mef3io.default_open_files()
-        total = sum(r.open_files for r in m._readers)
-        assert total <= m.open_files
+        assert m.open_files == 0
+        m.read(list(CHANNELS), START, START + 5 * SECOND)
+        assert sum(_kept(r) for r in m._readers) == 0

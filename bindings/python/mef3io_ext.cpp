@@ -1999,6 +1999,7 @@ NB_MODULE(_mef3io, m) {
   });
 
   m.def("default_open_files", [] { return mef3io::detail::default_open_files(); });
+  m.def("suggested_open_files", [] { return mef3io::detail::suggested_open_files(); });
 
   // --- Reader (P3 high-level API) ---
   auto opt_time = [](nb::object o) { return opt_si8(o, "t0/t1"); };

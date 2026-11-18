@@ -325,7 +325,7 @@ class MultiReader:
         self._n_threads = _check_threads(n_threads)
         # open_files is a TOTAL for the whole MultiReader, like n_threads: the
         # recordings never keep more files open together than this (see
-        # _share_files). None = one Reader's default.
+        # _share_files). None = the default, 0 (off).
         given_files = _check_open_files(open_files)
         if given_files is None:
             from . import _mef3io  # noqa: PLC0415

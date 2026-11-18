@@ -45,14 +45,17 @@ std::vector<si4> wave(int n, double phase) {
 }
 
 // 4 channels x 3 segments x 5000 samples (20 s at 250 Hz; 10 s gap between segments).
-std::string write_session(const std::string& name, double phase = 0.0) {
+std::string write_session(const std::string& name, double phase = 0.0, int offset = 0) {
   const auto dir = (fsys::temp_directory_path() / name).string();
   fsys::remove_all(dir);
   SessionWriter w(dir, true);
   for (int s = 0; s < SEGMENTS; ++s)
     for (std::size_t c = 0; c < CHANNELS.size(); ++c)
-      w.write_int32(CHANNELS[c], wave(5000, phase + 0.3 * static_cast<double>(c) + s), 0.5,
-                    START + s * SEG_STEP, FS, {}, s > 0);
+      {
+        auto x = wave(5000, phase + 0.3 * static_cast<double>(c) + s);
+        for (auto& v : x) v += offset;
+        w.write_int32(CHANNELS[c], x, 0.5, START + s * SEG_STEP, FS, {}, s > 0);
+      }
   return dir;
 }
 
@@ -141,9 +144,10 @@ TEST_CASE("kept files: results are identical with the cache off, tiny and defaul
   const auto want = battery(plain);
   for (const int threads : {1, 2, 8}) {
     for (const std::size_t cap : {std::size_t(0), std::size_t(1), std::size_t(2), std::size_t(5),
-                                  std::size_t(500), detail::default_open_files()}) {
+                                  std::size_t(500), detail::suggested_open_files()}) {
       INFO("threads " << threads << " cap " << cap);
       Reader r(dir, "", threads, true);
+      r.set_open_files(detail::suggested_open_files());
       r.set_open_files(cap);
       const auto got = battery(r);
       REQUIRE(got.size() == want.size());
@@ -156,8 +160,8 @@ TEST_CASE("kept files: results are identical with the cache off, tiny and defaul
 TEST_CASE("kept files: paging again and again opens each data file once", "[open_files]") {
   const auto dir = write_session("mef3io_of_once.mefd");
   Reader r(dir, "", 1, true);
-  REQUIRE(r.open_files() == detail::default_open_files());
-  REQUIRE(r.open_files() > 0);
+  r.set_open_files(detail::suggested_open_files());
+  REQUIRE(r.open_files() == detail::suggested_open_files());
   OpenWatch watch;
   for (int i = 0; i < 20; ++i) all(r, START + 2'000'000, START + 12'000'000);
   // Segment 0 of 4 channels: four files, one open each, however many reads.
@@ -177,6 +181,7 @@ TEST_CASE("kept files: paging again and again opens each data file once", "[open
 TEST_CASE("kept files: a read in one segment opens only that segment's data files", "[open_files]") {
   const auto dir = write_session("mef3io_of_seg.mefd");
   Reader r(dir, "", 1, true);
+  r.set_open_files(detail::suggested_open_files());
   r.read("a", START + SEG_STEP + 1'000'000, START + SEG_STEP + 5'000'000);  // learns every span
   r.release_open_files();
   OpenWatch watch;
@@ -190,6 +195,7 @@ TEST_CASE("kept files: the cap is never exceeded, eviction is least recently use
   const std::size_t base_fds = process_fds();
   {
     Reader r(dir, "", 1, true);
+    r.set_open_files(detail::suggested_open_files());
     r.set_open_files(3);
     // 12 data files, one read each: never more than 3 kept, and (Linux) never
     // more than 3 descriptors beyond what the process held before.
@@ -232,6 +238,7 @@ TEST_CASE("kept files: release lets go of everything and the Reader still works"
   const auto dir = write_session("mef3io_of_release.mefd");
   const std::size_t base_fds = process_fds();
   Reader r(dir, "", 1, true);
+  r.set_open_files(detail::suggested_open_files());
   const auto before = all(r, START, START + 3 * SEG_STEP);
   REQUIRE(r.open_file_count() == 12);
   r.release_open_files();
@@ -247,6 +254,7 @@ TEST_CASE("kept files: many threads on one Reader with a tiny cap read the same 
   off.set_open_files(0);
   const auto want = battery(off);
   Reader r(dir, "", 4, true);
+  r.set_open_files(detail::suggested_open_files());
   r.set_open_files(2);  // 12 files over 2 slots: constant eviction while others read
   std::atomic<int> bad{0};
   std::vector<std::thread> pool;
@@ -266,6 +274,7 @@ TEST_CASE("kept files: many threads on one Reader with a tiny cap read the same 
 TEST_CASE("kept files: a file appended in place is read to its new end", "[open_files]") {
   const auto dir = write_session("mef3io_of_append.mefd");
   Reader r(dir, "", 1, true);
+  r.set_open_files(detail::suggested_open_files());
   r.session().set_index_cache_bytes(1);  // the index is re-read per call, so appended blocks show
   const si8 last = START + 2 * SEG_STEP;  // segment 2 of "a" ends 20 s later
   REQUIRE(r.read("a", last + 1'000'000, last + 3'000'000).size() > 0);
@@ -290,6 +299,7 @@ TEST_CASE("kept files: a file replaced under a kept handle is never read through
   const auto dir = write_session("mef3io_of_replace.mefd");
   const auto other = write_session("mef3io_of_replace_other.mefd", 5.0);
   Reader r(dir, "", 1, true);
+  r.set_open_files(detail::suggested_open_files());
   r.session().set_index_cache_bytes(1);
   const si8 t0 = START + 1'000'000, t1 = START + 6'000'000;
   const auto before = r.read("a", t0, t1);
@@ -327,6 +337,7 @@ TEST_CASE("kept files: a renamed or deleted session fails like a Reader that kee
     return std::string("no error");
   };
   Reader kept(dir, "", 1, true);
+  kept.set_open_files(detail::suggested_open_files());
   Reader none(dir, "", 1, true);
   none.set_open_files(0);
   none.read("a", START + 1'000'000, START + 4'000'000);  // its index is cached, as kept's
@@ -351,6 +362,7 @@ TEST_CASE("kept files: a file that is deleted under a kept handle is not served 
   // (a replacing rename and a folder rename it refuses): remove the FILE.
   const auto dir = write_session("mef3io_of_remove.mefd");
   Reader r(dir, "", 1, true);
+  r.set_open_files(detail::suggested_open_files());
   r.read("b", START + 1'000'000, START + 4'000'000);
   REQUIRE(r.open_file_count() == 1);
   fsys::remove(tdat_of(dir, "b", 0));  // not blocked by the kept handle
@@ -370,6 +382,7 @@ TEST_CASE("kept files: a tar archive is read through its one kept file", "[open_
   for (const int threads : {1, 8}) {
     OpenWatch watch;
     Reader r(tar_path, "", threads, true);  // the open's own requests share the one handle too
+    r.set_open_files(detail::suggested_open_files());
     const auto got = battery(r);
     for (std::size_t i = 0; i < want.size(); ++i) REQUIRE(same(got[i], want[i]));
     REQUIRE(r.open_file_count() == 1);
@@ -383,10 +396,45 @@ TEST_CASE("kept files: a tar archive is read through its one kept file", "[open_
   }
 }
 
-TEST_CASE("kept files: the default cap respects the descriptor limit", "[open_files]") {
-  const auto cap = detail::default_open_files();
+TEST_CASE("kept files: off by default, nothing is held after a read", "[open_files]") {
+  const auto dir = write_session("mef3io_of_default.mefd");
+  REQUIRE(detail::default_open_files() == 0);
+  const std::size_t base = process_fds();
+  Reader r(dir, "", 1, true);
+  const std::size_t after_open = process_fds();
+  REQUIRE(r.open_files() == 0);
+  all(r, START, START + 3 * SEG_STEP);
+  REQUIRE(r.open_file_count() == 0);
+  if (base) REQUIRE(process_fds() == after_open);
+}
+
+TEST_CASE("kept files: the suggested cap respects the descriptor limit", "[open_files]") {
+  const auto cap = detail::suggested_open_files();
   REQUIRE(cap <= 128);
 #ifndef _WIN32
   REQUIRE(cap > 0);
 #endif
+}
+
+TEST_CASE("kept files: deleted and recreated under the same name (same size, other content) is a new file",
+          "[open_files]") {
+  const auto dir = write_session("mef3io_of_recreate.mefd");
+  const auto other = write_session("mef3io_of_recreate_o.mefd", 0.0, 3);
+  const auto old_path = tdat_of(dir, "a", 0), new_path = tdat_of(other, "a", 0);
+  REQUIRE(fsys::file_size(old_path) == fsys::file_size(new_path));
+  Reader r(dir, "", 1, true);
+  r.set_open_files(detail::suggested_open_files());
+  const si8 t0 = START + 1'000'000, t1 = START + 6'000'000;
+  const auto before = r.read("a", t0, t1);
+  REQUIRE(r.open_file_count() == 1);
+  try {
+    fsys::remove(old_path);
+    fsys::copy_file(new_path, old_path);
+  } catch (const fsys::filesystem_error&) {
+    return;  // the OS keeps the name of a deleted file that is still held: no recreate to check
+  }
+  const auto after = r.read("a", t0, t1);
+  Reader fresh(dir, "", 1, true);
+  REQUIRE(same(after, fresh.read("a", t0, t1)));
+  REQUIRE_FALSE(same(after, before));
 }

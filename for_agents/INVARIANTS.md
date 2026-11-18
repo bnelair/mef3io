@@ -308,7 +308,7 @@ copy/merge, bound only to the DirectorySources that copy opens through
 no path matching: a Reader/Session/SessionWriter in another thread, even on the
 same files, always reads fresh state; pinned in test_transform.cpp). It is
 freed with the last source holding it (copy-engine.md "FEWER OPENS").
-A READER's kept-open `.tdat` handles are the second owner of such a cache:
+A READER's OPT-IN (default off) kept-open `.tdat` handles are the second owner of such a cache:
 `Session` owns one (`reader_mode`: handles only, NO memo of any size, listing
 or content), threads of that Session share it, nothing else does, and every
 use is validated against the path (large-files-and-append.md (f2)). A first

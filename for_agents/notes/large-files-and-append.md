@@ -35,57 +35,64 @@
   Segment METADATA is loaded by the open and IMMUTABLE afterwards:
   `segment_metadata` is const and lock-free (#110); never add a lazy load.
   Pinned by core/tests/test_concurrency.cpp (TSan recipe in its header) and
-  tests/test_p31. (f2) KEPT-OPEN DATA FILES (`Reader(open_files=)`, `Session::
+  tests/test_p31. (f2) KEPT-OPEN DATA FILES, OPT-IN (`Reader(open_files=)`, `Session::
   set_open_files`, core/src/source.cpp `detail::kept_pread`, `SessionSource::
   read_extent`; core/tests/test_open_files.cpp, tests/test_p54_open_files.py).
+  DEFAULT 0 = OFF, ON EVERY PLATFORM (review round 1 of #191, maintainer
+  decision): on by default it held `cap x Readers` descriptors (8 Readers on a
+  limit of 256 failed with "cannot open file") and on Windows made folder
+  rename/remove fail while any Reader lived. Never make it the default without
+  a process-wide budget AND a release before every library rename/overwrite.
   WHY: on a network drive every open/stat/close is a round trip and a viewer
   paging through a recording paid open + size query + read + close per
   channel and segment per call. WHAT: each Session owns a `HandleCache` in
   `reader_mode` (the copy engine's `ReadHandleScope` class, reused: pread /
   OVERLAPPED ReadFile, LRU, one opener per path) that keeps up to
-  `open_files` (default `default_open_files()`: min(128, RLIMIT_NOFILE/4),
-  Windows 128; 0 = off = the old behaviour byte for byte) READ-ONLY handles
-  of `.tdat` files (a tar: the one archive, for every member read incl. the
-  open's). Nothing else is kept: `.tmet`/`.tidx` are read once per need (the
-  index is cached in memory, f), and reader mode NEVER memoizes sizes,
-  listings, existence or contents (`memo_cache()` is null; the copy's memos
-  rest on "the files do not change while the scope lives", which a Reader
-  cannot say). THE STALENESS RULE (decided here; the Reader treats a growing
-  session as "read the file as it is now, per call", so a kept handle must
-  not be worse): every read does ONE path stat (`stat_stamp`: size + file
-  identity = POSIX dev/inode, Windows creation time) which REPLACES the old
-  `file_size` query, then preads through the cached handle ONLY if its
-  identity equals the path's; otherwise (replaced/recreated/rename-over) the
-  handle is dropped and the path reopened; a path that is gone drops the
-  handle and falls to the plain read, which raises the old error (renamed or
-  deleted session = same exception as with 0). The size checked against the
-  index is the stat's (Windows: the handle's `GetFileSizeEx`, the directory
-  entry lags a writer that still holds the file), so an in-place append is
-  seen at once, a short file is `past_end` (-> "index points past end of
-  .tdat", as before), a shrink between stat and pread too. Do NOT drop the
-  stat for speed without a written freshness rule: modelled with a per-call
-  delay it is the half of what is left (stat + pread per file instead of
-  open + stat + read + close). A stale-handle error (ESTALE/EIO/EBADF,
-  Windows net errors) evicts and retries once through a fresh open. THE CAP:
-  bounds KEPT handles; a read in flight on an evicted handle finishes on it,
-  so up to `n_threads` more can be open for a moment (descriptors counted in
-  the tests). WINDOWS SHARING: handles are opened
-  `FILE_SHARE_READ|WRITE|DELETE` (the same open the copy engine uses), so the
-  Writer's append, `write_annotations`, repair/recover, `rename` of the FILE
-  and delete/move-away of the file are never blocked by a kept handle (CI:
-  an append + `write_annotations`, an `os.remove` under a handle); but WINDOWS
-  REFUSES (ACCESS_DENIED, found by CI, not by reading) a rename OVER a file
-  anyone holds open and a rename/remove of a FOLDER with open files, whatever
-  the share flags: hence `Reader.release_files()` / `close()`, documented.
-  Tests that replace or rename are `#ifndef _WIN32` / `skipif`. A deleted name stays
-  reserved on Windows until the handle closes. The Reader's first read of a
-  channel still reads EVERY segment's `.tidx`: skipping a segment from
-  anything but the cached index's own span is the #146 data loss
+  `open_files` READ-ONLY handles of `.tdat` files (a tar: the one archive, for
+  every member read incl. the open's). `detail::suggested_open_files()` =
+  min(128, RLIMIT_NOFILE/4), Windows 128, is only a suggestion. Nothing else
+  is kept: `.tmet`/`.tidx` are read once per need (the index is cached in
+  memory, f), and reader mode NEVER memoizes sizes, listings, existence or
+  contents (`memo_cache()` is null). THE STALENESS RULE: every read does ONE
+  path stat (`stat_stamp`) which REPLACES the old `file_size` query, then
+  preads through the cached handle ONLY if `same_file` holds: POSIX
+  device+inode (the kept descriptor pins the inode, so it cannot be recycled);
+  WINDOWS creation time + last-write time + size, all from the PATH query, as
+  recorded when the handle was opened (creation time alone is restored by
+  NTFS tunnelling after a delete + recreate within ~15 s, review round 1; an
+  in-place write changes mtime/size = one reopen, correct). The size checked
+  against the index is the PATH's from that same query, never the handle's.
+  Residual, documented: a Windows replacement with identical creation time,
+  last-write time and size; a file system with unstable/constant inode numbers
+  (not compared: birth time, finding 7, left out). Otherwise (replaced, a gone
+  path) the handle is dropped and the path reopened, or the plain read runs
+  and raises the old error. A range past the path's size, or a short pread,
+  returns "not served" and the PLAIN read decides (same error as 2.3.0, or the
+  data a lagging Windows directory entry does not show yet). A stale-handle
+  error evicts and retries once. DESCRIPTOR EXHAUSTION HEALS: when an open for
+  the cache (EMFILE/ENFILE, Windows ERROR_TOO_MANY_OPEN_FILES, `last_open_error`)
+  or a plain read of a Session with the cache on fails, this Session's kept
+  handles are released and the open retried, then EVERY live Reader cache
+  (`g_reader_caches`, weak registry, `release_all_reader_caches`) and retried
+  once more; tests/test_p54 lowers RLIMIT_NOFILE in a subprocess (6 Readers x 64
+  files on 120). THE CAP bounds KEPT handles; a read in flight on an evicted
+  handle finishes on it (up to `n_threads` more for a moment). LRU THRASH is
+  documented, not engineered away: a call touching more files than the cap
+  reopens them (plus one stat each); a bypass for the overflow would stop new
+  segments from ever being cached when paging. WINDOWS SHARING: handles are
+  `FILE_SHARE_READ|WRITE|DELETE`, so the Writer's append, `write_annotations`
+  and delete/move-away of the file are not blocked (CI), but WINDOWS REFUSES
+  (ACCESS_DENIED, found by CI) a rename OVER a file anyone holds open and a
+  rename/remove of a FOLDER with open files, whatever the share flags: hence
+  `Reader.release_files()` / `close()`. Tests that replace/rename are
+  `#ifndef _WIN32` / `skipif`; delete + recreate (same size, other content)
+  runs everywhere (a Windows that keeps a deleted held name makes it a no-op).
+  The first read of a channel still reads EVERY segment's `.tidx`: skipping a
+  segment from anything but the cached index's own span is the #146 data loss
   (INVARIANTS 12), so there is NO lazy "only the touched segment's index";
-  and a partial `.tidx` read cannot skip entries either (the walks do not
-  assume a sorted index). MultiReader: ONE budget, see multireader.md.
-  C ABI/MATLAB: unchanged API, but they get the default (a MATLAB Reader
-  keeps files until it is deleted). (g) Benchmark the real shape with
+  and a partial `.tidx` read cannot skip entries either. MultiReader: ONE
+  budget, see multireader.md. C ABI/MATLAB: unchanged API, default off like
+  everywhere. (g) Benchmark the real shape with
   `benchmarks/long_session_benchmark.py` (24 h x 16 ch @ 512 Hz, 10-min
   appends, windowed reads): watch GROWTH (must stay ~1.00), write/read
   AMPLIFICATION and duty cycle. It validates + dry-run recovers at the end
