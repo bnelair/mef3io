@@ -402,6 +402,74 @@ terabytes. Nothing on a read path may touch a whole `.tdat`:
 bytes actually read. A one-minute window out of a ten-hour channel reads
 **0.57 %** of the file; before that gate existed, `read_runs` read 100 %.
 
+## Paging through a recording on a network drive
+
+On a network drive every open, size query and close is a round trip, so a
+viewer that pages through a recording pays several of them per channel and
+segment on every call. A `Reader` can keep a bounded number of data files open
+between calls and read from them directly. **It is off by default** (a `Reader`
+holds no file open between calls, as before); you switch it on:
+
+```python
+r = mef3io.Reader(path, open_files=64)   # keep up to 64 data files open between calls
+r.read(channels, t0, t1)                 # opens each .tdat once ...
+r.read(channels, t1, t1 + (t1 - t0))     # ... and pages on without reopening it
+r.release_files()                        # let go of them now
+r.open_files = 0                         # or keep nothing open again
+```
+
+**When to turn it on:** ONE or a few Readers that read the same files again and
+again on a slow or network drive (a viewer, an analysis paging through days).
+Set it to at least the number of files one call touches (channels x segments in
+the window), and well under a quarter of the process's descriptor limit.
+**When not to:** many Readers alive at once, a script that moves, replaces or
+deletes sessions while Readers are alive, or a local fast disk, where it gains
+little.
+
+**What it costs:**
+
+- **Descriptors are held** until `release_files()`, `close()` or the Reader is
+  garbage collected. If the process runs out of descriptors ("too many open
+  files"), the library tries to recover: every Reader with the option on lets go
+  of its kept files and the open is retried once. This is best effort (other
+  threads can refill the descriptors in between, and other code that opens
+  files competes with the cache), so keep `open_files` well under the limit.
+- **On Windows, a folder cannot be renamed or removed, and a file cannot be
+  replaced by renaming over it, while any file in it is held** (the OS refuses
+  it for every open handle, whatever the sharing). Appending, deleting or moving
+  away a file is not blocked. Call `release_files()` (or `close()`) first, as
+  you would before archiving the session or syncing over it.
+- **One call that touches more files than `open_files`** evicts and reopens
+  files within the call (least recently used first), costing what a Reader
+  without the option costs plus one size query per file. Raise `open_files` to
+  the width of your widest call; the library does not grow it for you.
+
+**What it keeps, and how it stays correct.** Only data files (`.tdat`; for a tar
+session, the one archive) are kept, read-only; a `MultiReader` has ONE budget
+for all its recordings. Every read first asks the path for the file's size and
+identity (one query, which replaces the size query a read always made) and
+reads through the kept file only if it is still the same file; the size used is
+the one from that query. An appended file is read to its new end; a file
+replaced by renaming over it, or deleted and recreated under the same name, is
+opened afresh; a missing file raises exactly what a Reader without the option
+raises. The identity is the device and inode (Linux, macOS) or, on Windows,
+creation time + last-write time + size as the path reports them. What the rule
+cannot see: on Windows, a replacement with the SAME creation time, last-write
+time and size (a copy tool that preserves times, onto a file nothing wrote to);
+on a file system with unstable or constant inode numbers (some FUSE and network
+mounts), a replacement that reuses the number. The block index and metadata are
+not affected by any of this: they are read when needed, as before.
+
+Results never depend on the option (same samples at every setting and thread
+count, directory or tar); only the number of file requests does.
+
+Measured on a local disk with a counting tool (`strace`), 64 channels x 20
+segments, 16 channels read in 10 s windows, option on: the 20 reads that follow
+the first went from 400 opens, 400 size queries, 400 reads and 400 closes to 96
+opens (one per file the windows reached), the same 400 queries and reads, and no
+closes. How much that saves on a given network drive depends on the drive; the
+numbers are requests, not seconds.
+
 ## Accuracy at length
 
 Long sessions are also where declarations drift, because every append rewrites

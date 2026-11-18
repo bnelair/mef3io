@@ -225,7 +225,8 @@ std::string TarSource::session_name() const {
   return session_name_from_path(root_.empty() ? tar_path_ : root_);
 }
 
-TarSource::TarSource(const std::string& tar_path) : tar_path_(tar_path) {
+TarSource::TarSource(const std::string& tar_path, std::shared_ptr<detail::HandleCache> cache)
+    : cache_(std::move(cache)), tar_path_(tar_path) {
   TarIndex idx(tar_path);
   if (idx.files().empty()) throw FormatError("tar archive contains no files: " + tar_path);
 
@@ -306,6 +307,17 @@ std::vector<ui1> TarSource::read_range(const std::string& rel, std::size_t offse
                                        std::size_t length) const {
   const TarMember& m = member(rel);
   if (offset + length > m.size) throw IoError("read past end of archived file: " + describe(rel));
+  if (cache_) {
+    // One kept handle on the archive; the stat inside proves it is still the
+    // file at that path (an archive replaced meanwhile is opened afresh).
+    std::vector<ui1> buf;
+    bool past_end = false;
+    if (detail::kept_pread(*cache_, tar_path_, static_cast<std::size_t>(m.offset + offset), length,
+                           buf, past_end)) {
+      if (past_end) throw IoError("short read: " + describe(rel));
+      return buf;
+    }
+  }
   std::ifstream f(detail::utf8_path(tar_path_), std::ios::binary);
   if (!f) throw IoError("cannot open archive: " + tar_path_);
   f.seekg(static_cast<std::streamoff>(m.offset + offset));
@@ -313,6 +325,17 @@ std::vector<ui1> TarSource::read_range(const std::string& rel, std::size_t offse
   if (length && !f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(length)))
     throw IoError("short read: " + describe(rel));
   return buf;
+}
+
+void TarSource::set_open_files(std::size_t n) const {
+  if (cache_) detail::set_cache_cap(*cache_, n);
+}
+std::size_t TarSource::open_files() const { return cache_ ? detail::cache_cap(*cache_) : 0; }
+void TarSource::release_open_files() const {
+  if (cache_) detail::release_cache(*cache_);
+}
+std::size_t TarSource::open_file_count() const {
+  return cache_ ? detail::cache_open_count(*cache_) : 0;
 }
 
 std::string TarSource::describe(const std::string& rel) const {

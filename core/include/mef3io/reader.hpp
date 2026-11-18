@@ -110,6 +110,12 @@ class Reader {
   void set_threads(int n) { session_.set_threads(n); }
   /// The thread count as set (0 = automatic), not resolved.
   int threads() const { return session_.threads(); }
+  /// Data files kept open between calls (Session::set_open_files).
+  void set_open_files(std::size_t n) { session_.set_open_files(n); }
+  std::size_t open_files() const { return session_.open_files(); }
+  /// Close every kept file now; the next read opens again.
+  void release_open_files() { session_.release_open_files(); }
+  std::size_t open_file_count() const { return session_.open_file_count(); }
 
   /// Channel names present in the session.
   const std::vector<std::string>& channels() const { return session_.channels(); }

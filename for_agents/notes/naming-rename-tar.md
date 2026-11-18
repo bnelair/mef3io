@@ -19,7 +19,11 @@ deleted. Python `mef3io.archive_session`/`extract_session`; MATLAB
 dirs must end `.mefd`, archives `.mefd.tar` — reader (`open_session_source`),
 writer ctor, archive and extract all throw IoError otherwise
 (case-insensitive, trailing separators OK; `path_has_suffix` in source.hpp).
-`SegmentInfo.path` for tar reads is `"<archive>::<member>"`. cache.py fingerprints a tar session as the single
+`SegmentInfo.path` for tar reads is `"<archive>::<member>"`. A tar READER
+keeps the archive open: `TarSource` takes the Reader's `HandleCache` and every
+member read (the open's `.tmet` reads too) is one `kept_pread` at
+`member.offset + offset` (stat-validated per read; a replaced archive is
+reopened; large-files-and-append.md (f2)). cache.py fingerprints a tar session as the single
 file (an empty fingerprint dict would validate stale caches forever).
 Benchmarked (docs/benchmarks.md, `benchmarks/access_modes_benchmark.py`,
 2.2 GB / 768 segments): once open a tar reads like the dir (full and warm
