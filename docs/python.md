@@ -331,31 +331,65 @@ report.removed, report.added          # 1, 1
   read back; then a marker file in the session (`.mef3io-operation`) records the
   plan and the files are swapped by rename. After a crash or power cut the
   session is either as it was, or carries the marker: opening it warns
-  (`SessionOperationWarning`), writes are refused, `validate_session` reports
-  `records.interrupted-edit`, and `recover_session(path, apply=True)` finishes
-  the swap (or rolls it back when a new file is not intact). The next
-  `remove_annotations` does the same first (`report.resumed`). Until then,
-  annotations of the affected level should not be trusted.
+  (`SessionOperationWarning`), writes are refused, **`Reader.records()` raises
+  (`edit-interrupted`) instead of returning a half-swapped level as if it were
+  whole** (reading samples keeps working), `validate_session` reports
+  `records.interrupted-edit`, and `recover_session(path, apply=True)` settles
+  it: it finishes the swap when every new file is intact, and otherwise rolls
+  it back to the old annotations (the report then says **the removal was NOT
+  done** and why, and `python -m mef3io recover` exits with status 1; this also
+  happens when the new files were deleted by someone). The next
+  `remove_annotations` does the same first (`report.resumed`).
+  If the marker's plan itself cannot be read (a damaged file system, a newer
+  layout), recovery decides from the files alone: a record pair that is whole
+  and consistent stays, a mixed or missing one is restored from its intact
+  `.old` files, and anything else is refused (`edit-unsettled`) with the files
+  to look at. Leftover `.new` / `.old` files are **moved** to
+  `<session>.edit-leftovers` beside the session, never deleted. `clear_operation_marker`
+  does not clear this marker.
+- **A torn annotation file is never trimmed silently.** If bytes lie after the
+  last record the header counts (a record or a fragment an interrupted
+  `write_annotations` left) or the index disagrees with the data, the call
+  refuses (`record-torn`, `record-index-mismatch`) and changes nothing. Run
+  `recover_session(apply=True)` first, which keeps every whole record.
 - **What a selector can tell apart.** Records are compared on the fields
   mef3io decodes (every type at version 1.0). A record whose body it cannot
   decode (an unknown type, another version) is matched on its location, type
   and time only, so two such records at the same time look identical: the call
   then refuses (`ambiguous`) unless you say `expect=2` or `all_copies=True`.
-  An annotation file is held in memory a few times over while the call works.
+  Bytes a selector cannot see (anything after a text's terminating NUL, the
+  record version) make no difference either: records that differ only there
+  are identical copies, and `all_copies=True` removes all of them. Note text
+  that is not valid UTF-8 (written by another tool) is shown with replacement
+  characters by `Reader.records()`, so a selector built from it matches
+  nothing and is refused (`no-match`), never matched wrongly; such a note
+  cannot be removed through this call. A selector's `time` must be a whole
+  number of microseconds (a float with a fraction is refused, not rounded).
+- **Memory.** The annotation files of the levels involved are held in memory
+  several times over while the call works (measured at roughly ten to twenty
+  times the size of the files); a record file of many gigabytes needs that much
+  memory.
 - **Cancel / progress** (`cancel=`, `progress=`) work before the swap; after it
   starts it always completes. `dry_run=True` reports what would change and
   writes nothing.
 - **Refused:** a `.mefd.tar` (`tar-read-only`), an annotation file that cannot be
   read in full (`record-damaged`, `record-crc`, `record-index-mismatch`,
-  `record-index-missing`; run `recover_session` first), wrong or missing
-  passwords (`password`, `record-locked`), a session being written or
+  `record-index-missing`, `record-torn`; run `recover_session` first), wrong or
+  missing passwords (`password`, `record-locked`), a session being written or
   mid-operation (`being-written`, `mid-operation`), annotations that changed
   while the call worked (`records-changed`), an unknown recording-time offset
-  (`offset-unknown`).
+  (`offset-unknown`), a record to add at a negative time (`add-time`).
 - **Other writers.** There is no cross-process write lock: stop other writers of
-  the session first. On Windows a record file another program holds open
-  stops the swap (`edit-failed`, the old files are put back). An open
-  `Reader` shows the old annotations until it is reopened.
+  the session first. The call refuses while it sees a write in progress, puts
+  its marker down before it moves anything, and checks the old files again
+  before it renames each of them, rolling back on a difference. What remains:
+  **a write call that was already running when the edit started (it checked for
+  the marker before the marker existed) can still append to an old file after
+  the last check, and that record is lost.** On Windows a record file another
+  program holds open stops the swap (`edit-failed`, the old files are put
+  back). An open `Reader` reads the files by path on every call, so it shows
+  the new annotations (and none for a level that lost its last record) as soon
+  as the swap is done.
 
 Python and C++ only; there is no MATLAB equivalent (MATLAB's
 `writeAnnotations` only appends).

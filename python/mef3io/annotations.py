@@ -215,6 +215,10 @@ def remove_annotations(
     >>> mef3io.remove_annotations(path, remove=wrong,
     ...                           add=[{"time": wrong[0]["time"], "text": "fixed"}])
     """
+    for name, value in (("remove", remove), ("add", add)):
+        if isinstance(value, (Mapping, str, bytes)):
+            raise TypeError(f"{name} must be a list of dicts (one per record), not a single "
+                            f"{type(value).__name__}: wrap it in a list")
     remove = [dict(r) for r in remove]
     for r in remove:
         if all_copies and "all_copies" not in r:

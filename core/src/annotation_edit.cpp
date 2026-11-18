@@ -29,10 +29,12 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "durability.hpp"
 #include "operation_marker.hpp"
@@ -104,11 +106,14 @@ struct SimulatedCrash : IoError {
   using IoError::IoError;
 };
 
+void note_point();  // defined with the test seam below (it needs `note`)
+
 struct Steps {
   int crash_at = -1, fail_at = -1;
   int n = 0;
   void point(const std::function<void()>& partial = {}) {
     const int k = n++;
+    note_point();
     if (fail_at == k) throw IoError("simulated failure at step " + std::to_string(k));
     if (crash_at == k) {
       if (partial) partial();
@@ -174,18 +179,42 @@ fs::path sibling(const fs::path& target, const std::string& id, const char* ext)
   return target.parent_path() / from8(u8(target.filename()) + "." + id + ext);
 }
 
+// ---- the test seam: what durable operations ran, in order --------------------------
+
+std::mutex g_obs_mu;
+testing::EditObserver g_obs;
+bool g_skip_flush = false;
+
+void note(const char* kind, const std::string& path = {}) {
+  testing::EditObserver o;
+  {
+    std::lock_guard<std::mutex> lk(g_obs_mu);
+    o = g_obs;
+  }
+  if (o) o(kind, path);
+}
+
+bool skip_flush() {
+  std::lock_guard<std::mutex> lk(g_obs_mu);
+  return g_skip_flush;
+}
+
 /// Flush the folders (their entries: new names, renames, removals). NTFS may
 /// refuse a folder flush; only that refusal is ignored (durability.hpp).
 void flush_dirs(const std::vector<fs::path>& dirs) {
+  if (skip_flush()) return;  // test seam only: the negative control of the order test
   std::set<fs::path> seen;
   for (const auto& d : dirs) {
     if (!seen.insert(d).second) continue;
+    note("flush-dir", u8(d));
     std::string why;
     if (!detail::fsync_directory(d, &why) && why.find("[ntfs-refused]") == std::string::npos)
       throw IoError("could not flush to disk, the write is not durable: " + u8(d) +
                     (why.empty() ? "" : " (" + why + ")"));
   }
 }
+
+void note_point() { note("point"); }
 
 std::string tool_name() { return std::string("mef3io ") + version(); }
 
@@ -198,6 +227,15 @@ struct JFile {
   fs::path target, fresh, old;
   bool had_old = true;  ///< the file existed before the edit
   bool has_new = true;  ///< the file exists after it (false: the pair is removed)
+  /// CRC of the whole new file (carried by the marker): a target that is the
+  /// only file left must be THIS to count as "the swap was done".
+  bool has_crc = false;
+  ui4 new_crc = 0;
+  /// What the old file looked like when it was read (in-process only): checked
+  /// again immediately before it is renamed away.
+  bool has_snap = false;
+  std::uintmax_t snap_size = 0;
+  fs::file_time_type snap_mtime{};
 };
 
 struct JPlan {
@@ -224,6 +262,13 @@ JFile make_jfile(const fs::path& root, const std::string& rel, const std::string
   return f;
 }
 
+std::string crc_hex(ui4 v) {
+  static const char* d = "0123456789abcdef";
+  std::string o(8, '0');
+  for (int i = 7; i >= 0; --i, v >>= 4) o[static_cast<std::size_t>(i)] = d[v & 15];
+  return o;
+}
+
 /// The marker for a plan: the marker IS the journal.
 OperationMarker marker_for(const JPlan& p) {
   OperationMarker m{tool_name(), OP, p.id, {}};
@@ -231,7 +276,8 @@ OperationMarker marker_for(const JPlan& p) {
   if (p.back) m.details.push_back("direction back");
   for (const auto& f : p.files)
     m.details.push_back(std::string("file ") + (f.had_old ? "1" : "0") + " " +
-                        (f.has_new ? "1" : "0") + " " + to_hex(f.rel));
+                        (f.has_new ? "1" : "0") + " " + to_hex(f.rel) +
+                        (f.has_crc ? " " + crc_hex(f.new_crc) : std::string()));
   return m;
 }
 
@@ -256,11 +302,27 @@ std::optional<JPlan> plan_from_marker(const fs::path& root, const OperationMarke
         line[7] < '0' || line[7] > '1')
       refuse(RefusalKind::Format, "edit-journal-inconsistent",
              "the session's operation marker carries a plan this version cannot read");
-    const auto rel = from_hex(line.substr(9));
+    std::string hex = line.substr(9);
+    std::optional<ui4> crc_of_new;
+    if (const auto sp = hex.find(' '); sp != std::string::npos) {
+      const std::string c = hex.substr(sp + 1);
+      hex = hex.substr(0, sp);
+      if (c.size() != 8 || !from_hex(c))
+        refuse(RefusalKind::Format, "edit-journal-inconsistent",
+               "the session's operation marker carries a plan this version cannot read");
+      ui4 v = 0;
+      for (char ch : c) v = v * 16 + static_cast<ui4>(ch <= '9' ? ch - '0' : ch - 'a' + 10);
+      crc_of_new = v;
+    }
+    const auto rel = from_hex(hex);
     if (!rel || rel->empty() || rel->find("..") != std::string::npos || (*rel)[0] == '/')
       refuse(RefusalKind::Format, "edit-journal-inconsistent",
              "the session's operation marker carries a plan this version cannot read");
     p.files.push_back(make_jfile(root, *rel, m.id, line[5] == '1', line[7] == '1'));
+    if (crc_of_new) {
+      p.files.back().has_crc = true;
+      p.files.back().new_crc = *crc_of_new;
+    }
   }
   if (!format || p.files.empty() || m.id.size() != 32)
     refuse(RefusalKind::Format, "edit-journal-inconsistent",
@@ -323,7 +385,7 @@ struct Decision {
 /// every file can still be put back; else the edit cannot be settled.
 Decision decide(const JPlan& p) {
   if (p.back) return {Dir::Back, "the edit was already being rolled back"};
-  bool forward_ok = true, back_ok = true;
+  bool forward_ok = true, back_ok = true, lost = false;
   for (const auto& f : p.files) {
     const St s = state_of(f);
     if (s == St::Bad)
@@ -331,30 +393,59 @@ Decision decide(const JPlan& p) {
              "the files of the interrupted annotation edit are in a state no step of it leaves (" +
                  f.rel + "); nothing was touched");
     if ((s == St::S0 || s == St::S1) && f.has_new && !new_file_intact(f.fresh)) forward_ok = false;
-    if (s == St::S3 && f.had_old) back_ok = false;
+    if (s == St::S3 && f.had_old) {
+      // "only the target is left" is either a finished swap or a new file that
+      // never got in place and was lost: the marker's CRC of the new file tells.
+      bool applied = true;
+      if (f.has_new && f.has_crc) {
+        try {
+          applied = crc::calculate(slurp(f.target)) == f.new_crc;
+        } catch (const std::exception&) {
+          applied = false;
+        }
+      }
+      if (applied) back_ok = false;
+      else lost = true;
+    }
   }
   Decision d;
-  if (forward_ok) return d;
+  if (forward_ok && !lost) return d;
   if (!back_ok)
     refuse(RefusalKind::Format, "edit-journal-inconsistent",
-           "a new annotation file of the interrupted edit is damaged and the old one is already "
-           "gone; nothing was touched");
+           "a new annotation file of the interrupted edit is damaged or missing and the old one is "
+           "already gone; nothing was touched");
   d.dir = Dir::Back;
-  d.why = "a new annotation file is not intact";
+  d.why = lost ? "a new annotation file is missing: the removal was never carried out"
+               : "a new annotation file is not intact";
   return d;
 }
 
 void move_file(const fs::path& from, const fs::path& to, Steps* st) {
   point(st);
   if (has(to)) throw IoError("cannot move " + u8(from) + ": " + u8(to) + " exists");
+  note("rename", u8(from) + "|" + u8(to));
   detail::replace_file(from, to);
 }
 
 void remove_file(const fs::path& p, Steps* st) {
   point(st);
+  note("remove", u8(p));
   std::error_code ec;
   fs::remove(p, ec);
   if (ec) throw IoError("cannot remove " + u8(p) + ": " + ec.message());
+}
+
+/// Immediately before an old file is renamed away: is it still what was read?
+/// (A writer that was already past its marker check may have appended.)
+void require_unchanged(const JFile& f) {
+  if (!f.has_snap) return;
+  std::error_code ec;
+  const auto size = fs::file_size(f.target, ec);
+  const auto mtime = fs::last_write_time(f.target, ec);
+  if (ec || size != f.snap_size || mtime != f.snap_mtime)
+    refuse(RefusalKind::WriteConflict, "records-changed",
+           "an annotation file changed while this call was working (another program or writer "
+           "added or changed annotations): nothing was changed; try again");
 }
 
 /// Replace the marker with `p`'s (atomic: written beside it, flushed, renamed
@@ -372,15 +463,15 @@ void rewrite_marker(const JPlan& p) {
       for (const auto& d : m.details) out << d << "\n";
       detail::finish_stream(out, u8(part));
     }
-    detail::fsync_file_or_throw(u8(part));
+    if (!skip_flush()) detail::fsync_file_or_throw(u8(part));
     detail::replace_file(part, file);
   } catch (...) {
     std::error_code ec;
     fs::remove(part, ec);
     throw;
   }
-  std::string why;
-  detail::fsync_directory(p.root, &why);
+  flush_dirs({p.root});  // the direction must be durable before anything is undone
+  note("direction-durable");
 }
 
 /// Carry the plan out from whatever state its files are in, in direction
@@ -406,7 +497,10 @@ void settle(const JPlan& given, Dir dir, Steps* st) {
       if (state_of(f) == St::Bad) inconsistent();
       const St s = state_of(f);
       if (s == St::S0) {
-        if (f.had_old) move_file(f.target, f.old, st);
+        if (f.had_old) {
+          require_unchanged(f);
+          move_file(f.target, f.old, st);
+        }
         if (f.has_new) move_file(f.fresh, f.target, st);
       } else if (s == St::S1) {
         move_file(f.fresh, f.target, st);
@@ -439,6 +533,7 @@ void settle(const JPlan& given, Dir dir, Steps* st) {
   flush_dirs(p.dirs());
   point(st);
   detail::remove_operation_marker(p.root);
+  note("marker-removed");
   point(st);
 }
 
@@ -710,8 +805,20 @@ si8 level_offset(const fs::path& root, const Target& t, const std::string& passw
 
 // ---- one record file, read, edited in memory --------------------------------------------
 
+/// What a file looked like when it was read.
+struct Snap {
+  std::uintmax_t size = 0;
+  fs::file_time_type mtime{};
+  std::vector<ui1> head;  // the first UH bytes
+};
+
 struct FilePlan {
   Target target;
+  Snap rdat_snap, ridx_snap;
+  std::vector<std::size_t> rec_len;     // stored length of each record (header + body)
+  si8 n_before = 0;
+  std::size_t old_end = 0;              // where the last record of the old .rdat ends
+  std::size_t kept_bytes = 0, removed_bytes = 0;  // record bytes carried over / taken out
   fs::path rdat, ridx;
   std::string rel_rdat, rel_ridx;
   std::vector<ui1> old_rdat, old_ridx;  // whole files as read
@@ -727,6 +834,9 @@ struct FilePlan {
 };
 
 void raw_refuse(RefusalKind kind, std::string code, std::string message) {
+  if (code != "record-locked")
+    message += "; nothing was changed (run recover_session, which keeps every whole record, or "
+               "validate_session first)";
   refuse(kind, std::move(code), std::move(message));
 }
 
@@ -757,7 +867,7 @@ std::vector<ui1> sealed(const std::vector<ui1>& old_uh_bytes, std::span<const ui
 
 /// Build the new images of `fp` (drop[] and adds[] decided).
 void build_images(FilePlan& fp, const crypto::AccessKeys& keys, bool encrypt_adds) {
-  const auto& raw = fp.raw;
+  auto& raw = fp.raw;
   std::unordered_map<si8, std::size_t> by_offset;
   for (std::size_t i = 0; i < raw.ridx.size(); ++i) by_offset[read<si8>(raw.ridx[i], 8)] = i;
 
@@ -769,10 +879,15 @@ void build_images(FilePlan& fp, const crypto::AccessKeys& keys, bool encrypt_add
     hi = hi == fmt::UUTC_NO_ENTRY ? t : std::max(hi, t);
   };
   fp.expected.clear();
+  std::size_t kept_bytes = 0, removed_bytes = 0;
   for (std::size_t i = 0; i < raw.records.size(); ++i) {
-    if (fp.drop[i]) continue;
+    if (fp.drop[i]) {
+      removed_bytes += fp.rec_len[i];
+      continue;
+    }
     const std::size_t off = static_cast<std::size_t>(raw.record_offsets[i]);
-    const std::size_t len = RHDR + raw.records[i].body.size();
+    const std::size_t len = fp.rec_len[i];
+    kept_bytes += len;
     const auto it = by_offset.find(raw.record_offsets[i]);
     if (it == by_offset.end())
       refuse(RefusalKind::Format, "record-index-mismatch",
@@ -785,9 +900,17 @@ void build_images(FilePlan& fp, const crypto::AccessKeys& keys, bool encrypt_add
     ridx_body.insert(ridx_body.end(), entry.begin(), entry.end());
     max_size = std::max<si8>(max_size, static_cast<si8>(len));
     widen(fp.decoded[i].time);
-    fp.expected.push_back(fp.decoded[i]);
+    fp.expected.push_back(std::move(fp.decoded[i]));
     ++n;
   }
+  // By construction nothing can be lost: every old record byte is either kept
+  // or belongs to a record the caller named.
+  if (kept_bytes + removed_bytes != fp.old_end - UH)
+    refuse(RefusalKind::Io, "verify-failed",
+           "internal check failed: the records kept and removed do not add up to the old file; "
+           "nothing was changed");
+  fp.kept_bytes = kept_bytes;
+  fp.removed_bytes = removed_bytes;
   if (!fp.adds.empty()) {
     const auto enc = encode_records_for_file(fp.adds, fp.rto, encrypt_adds, keys);
     for (std::size_t i = 0; i < enc.size(); ++i) {
@@ -865,7 +988,10 @@ void write_new(const fs::path& to, const std::vector<ui1>& bytes, const fs::path
   spit(to, bytes);
   detail::copy_file_identity(like, to);
   point(st);
-  detail::fsync_file_or_throw(u8(to));
+  if (!skip_flush()) {
+    detail::fsync_file_or_throw(u8(to));
+    note("fsync-file", u8(to));
+  }
 }
 
 Record normalised_add(Record r, const Target& t) {
@@ -925,7 +1051,9 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
 
   // An edit this session was interrupted in is finished (or rolled back) first.
   if (const auto m = detail::read_operation_marker(root)) {
-    if (m->operation != OP)
+    const bool ours =
+        m->operation == OP || (m->operation == "unknown" && !leftover_files(root).empty());
+    if (!ours)
       refuse(RefusalKind::WriteConflict, "mid-operation", detail::mid_operation_message(*m));
     if (opts.dry_run) {
       refuse(RefusalKind::WriteConflict, "edit-interrupted",
@@ -936,9 +1064,12 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
       const auto done = finish_interrupted_record_edit(path);
       if (done) {
         report.resumed = done->id;
-        report.notes.push_back("an earlier annotation edit was interrupted and has been " +
-                               std::string(done->action == "finish" ? "finished" : "rolled back") +
-                               " first");
+        report.notes.push_back(
+            "an earlier annotation edit was interrupted and has been " +
+            std::string(done->action == "finish"      ? "finished"
+                        : done->action == "roll back" ? "rolled back (that removal was NOT done)"
+                                                      : "settled from the files") +
+            " first");
       }
     }
   }
@@ -1001,7 +1132,14 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
                                                                         : std::optional<std::string>(t.channel),
                                   opts.password_1, opts.password_2, access);
     } catch (const PasswordError& e) {
-      refuse(RefusalKind::Password, "password", e.what(), t.channel);
+      std::string m = e.what();
+      for (const auto& [from, to] : {std::pair<const char*, const char*>{"to add annotations", "to change annotations"},
+                                     {"add annotations", "change annotations"},
+                                     {"nothing was written", "nothing was changed"}}) {
+        const auto at = m.find(from);
+        if (at != std::string::npos) m.replace(at, std::strlen(from), to);
+      }
+      refuse(RefusalKind::Password, "password", m, t.channel);
     }
     std::error_code ec;
     total += 3 * (fs::file_size(fp.rdat, ec) + fs::file_size(fp.ridx, ec));
@@ -1018,9 +1156,18 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
   // ---- A: read, decode, select ------------------------------------------------------
   for (auto& fp : plans) {
     ctl.check();
+    std::error_code mt_ec;
+    fp.rdat_snap.mtime = fs::last_write_time(fp.rdat, mt_ec);
+    fp.ridx_snap.mtime = fs::last_write_time(fp.ridx, mt_ec);
     fp.old_rdat = slurp(fp.rdat);
     fp.old_ridx = slurp(fp.ridx);
     progress.add(fp.old_rdat.size() + fp.old_ridx.size());
+    fp.rdat_snap.size = fp.old_rdat.size();
+    fp.ridx_snap.size = fp.old_ridx.size();
+    fp.rdat_snap.head.assign(fp.old_rdat.begin(),
+                             fp.old_rdat.begin() + std::min<std::size_t>(UH, fp.old_rdat.size()));
+    fp.ridx_snap.head.assign(fp.old_ridx.begin(),
+                             fp.old_ridx.begin() + std::min<std::size_t>(UH, fp.old_ridx.size()));
     const std::string where = display_for(fp.target);
     fp.raw = detail::parse_record_file(fp.old_rdat, &fp.old_ridx, where, where + " (index)", pw,
                                        raw_refuse);
@@ -1034,6 +1181,41 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
         refuse(RefusalKind::Crc, "record-damaged",
                std::string("the header of the ") + (k ? "index of the " : "") + where +
                    " fails its CRC; run recover_session or validate first, nothing was changed",
+               fp.target.channel);
+    }
+    // EVERY byte of the old files must be carried over or named: a whole record
+    // or a fragment after the last record the header counts (what an interrupted
+    // append leaves), or an index that disagrees with the data, would otherwise
+    // be dropped silently by the rebuild. recover_session keeps such a record.
+    {
+      fp.old_end = fp.raw.records.empty()
+                       ? UH
+                       : static_cast<std::size_t>(fp.raw.record_offsets.back()) + RHDR +
+                             fp.raw.records.back().body.size();
+      const si8 declared = read<si8>(fp.old_rdat, 32);
+      const bool zero_tail =
+          declared == -1 &&
+          detail::all_zero_bytes(std::span<const ui1>(fp.old_rdat).subspan(fp.old_end));
+      const auto idx_uh = fmt::UniversalHeader::parse(fp.old_ridx);
+      const si8 idx_declared = idx_uh.number_of_entries;
+      const char* torn =
+          "hold bytes or index entries that the header does not count (a record an interrupted "
+          "append left); remove_annotations would not carry them over, so nothing was changed. "
+          "Run recover_session first, which keeps every whole record and repairs the files";
+      if (fp.old_end != fp.old_rdat.size() && !zero_tail)
+        refuse(RefusalKind::Format, "record-torn", "the " + where + " " + torn, fp.target.channel);
+      if (idx_declared != -1 && idx_declared != static_cast<si8>(fp.raw.ridx.size()))
+        refuse(RefusalKind::Format, "record-torn", "the index of the " + where + " " + torn,
+               fp.target.channel);
+      std::unordered_set<si8> offs;
+      for (const auto& e : fp.raw.ridx) offs.insert(read<si8>(e, 8));
+      bool each = offs.size() == fp.raw.ridx.size();
+      for (const si8 o : fp.raw.record_offsets) each = each && offs.count(o) == 1;
+      if (!each)
+        refuse(RefusalKind::Format, "record-index-mismatch",
+               "the record index of the " + where +
+                   " does not list the records the file holds; which is right is unknown, so "
+                   "nothing was changed (run recover_session first)",
                fp.target.channel);
     }
     fp.protected_ = fmt::UniversalHeader::parse(fp.old_rdat).is_password_protected();
@@ -1052,15 +1234,27 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
       r.segment = fp.target.segment;
     }
     fp.drop.assign(fp.decoded.size(), false);
+    fp.n_before = static_cast<si8>(fp.decoded.size());
+    for (auto& r : fp.raw.records) {  // only the stored lengths are needed from here on
+      fp.rec_len.push_back(RHDR + r.body.size());
+      std::vector<ui1>().swap(r.body);
+    }
   }
 
   std::vector<std::vector<std::size_t>> hits(remove.size());
   std::vector<si8> removed_per_file(plans.size(), 0);
   for (std::size_t p = 0; p < plans.size(); ++p) {
     auto& fp = plans[p];
+    // records by (type, time): a selector only looks at those
+    std::unordered_map<std::string, std::vector<std::size_t>> by_key;
+    for (std::size_t r = 0; r < fp.decoded.size(); ++r)
+      by_key[fp.decoded[r].type + '\0' + std::to_string(fp.decoded[r].time)].push_back(r);
     std::vector<int> owner(fp.decoded.size(), -1);
     for (std::size_t i : sel_of[fp.target]) {
-      for (std::size_t r = 0; r < fp.decoded.size(); ++r) {
+      ctl.check();
+      const auto cand = by_key.find(remove[i].type + '\0' + std::to_string(remove[i].time));
+      if (cand == by_key.end()) continue;
+      for (std::size_t r : cand->second) {
         std::string missing;
         const Match m = match_record(remove[i], fp.decoded[r], missing);
         if (m == Match::Incomplete)
@@ -1084,7 +1278,10 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
       if (n == 0)
         refuse(RefusalKind::InvalidArgument, "no-match",
                "selector " + std::to_string(i) + " (" + remove[i].type + " at the " +
-                   display_for(fp.target) + ") matches no stored record; nothing was changed",
+                   display_for(fp.target) +
+                   ") matches no stored record; nothing was changed (note text that is not valid "
+                   "UTF-8 is shown with replacement characters by Reader.records() and cannot be "
+                   "matched by a selector built from it)",
                fp.target.channel);
       if (!remove[i].all_copies && n != remove[i].expect)
         refuse(RefusalKind::InvalidArgument, n > remove[i].expect ? "ambiguous" : "count-mismatch",
@@ -1107,6 +1304,11 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
     auto& fp = plans[p];
     crypto::AccessKeys keys = fp.raw.keys;
     for (std::size_t i : add_of[fp.target]) {
+      if (add[i].time < 0)
+        refuse(RefusalKind::WriteConflict, "add-time",
+               "a record to add has a negative time: a record time is microseconds since the "
+               "Unix epoch and cannot be negative; nothing was changed",
+               fp.target.channel);
       try {
         require_storable_time(add[i].time, fp.rto, "record time");
       } catch (const WriteConflictError& e) {
@@ -1135,13 +1337,19 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
       refuse(RefusalKind::WriteConflict, "add-time", e.what(), fp.target.channel);
     }
     if (!fp.remove_pair) check_images(fp, fp.new_rdat, fp.new_ridx, keys, "verify-failed");
+    std::vector<ui1>().swap(fp.old_rdat);  // only the snapshots are needed from here on
+    std::vector<ui1>().swap(fp.old_ridx);
+    fp.raw.ridx.clear();
+    fp.raw.ridx.shrink_to_fit();
+    fp.decoded.clear();
+    fp.decoded.shrink_to_fit();
 
     RecordFileEdit e;
     e.level = fp.target.level;
     e.channel = fp.target.channel;
     e.segment = fp.target.segment;
     e.file = fp.rel_rdat;
-    e.records_before = static_cast<si8>(fp.decoded.size());
+    e.records_before = fp.n_before;
     e.removed = removed_per_file[p];
     e.added = static_cast<si8>(fp.adds.size());
     e.records_after = e.records_before - e.removed + e.added;
@@ -1164,6 +1372,17 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
   for (const auto& fp : plans) {
     plan.files.push_back(make_jfile(root, fp.rel_rdat, id, true, !fp.remove_pair));
     plan.files.push_back(make_jfile(root, fp.rel_ridx, id, true, !fp.remove_pair));
+    for (int k = 0; k < 2; ++k) {
+      JFile& f = plan.files[plan.files.size() - 2 + static_cast<std::size_t>(k)];
+      const Snap& sn = k == 0 ? fp.rdat_snap : fp.ridx_snap;
+      f.has_snap = true;
+      f.snap_size = sn.size;
+      f.snap_mtime = sn.mtime;
+      if (!fp.remove_pair) {
+        f.has_crc = true;
+        f.new_crc = crc::calculate(k == 0 ? fp.new_rdat : fp.new_ridx);
+      }
+    }
   }
   const auto cleanup_staged = [&] {
     for (const auto& f : plan.files) {
@@ -1210,6 +1429,7 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
   try {
     point(&steps);
     detail::write_operation_marker(root, marker_for(plan));
+    note("marker-durable");
   } catch (const SimulatedCrash&) {
     throw;
   } catch (...) {
@@ -1225,13 +1445,13 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
     for (std::size_t p = 0; p < plans.size(); ++p) {
       for (int k = 0; k < 2; ++k) {
         const auto& f = plan.files[2 * p + static_cast<std::size_t>(k)];
-        const auto& was = k == 0 ? plans[p].old_rdat : plans[p].old_ridx;
+        const Snap& was = k == 0 ? plans[p].rdat_snap : plans[p].ridx_snap;
         std::error_code ec;
         const auto size = fs::file_size(f.target, ec);
         std::vector<ui1> head(UH);
         std::ifstream in(f.target, std::ios::binary);
         in.read(reinterpret_cast<char*>(head.data()), static_cast<std::streamsize>(UH));
-        if (ec || size != was.size() || !std::equal(head.begin(), head.end(), was.begin()))
+        if (ec || size != was.size || !std::equal(head.begin(), head.end(), was.head.begin()))
           refuse(RefusalKind::WriteConflict, "records-changed",
                  "the annotation files changed while this call was working (another program or "
                  "writer added or changed annotations): nothing was changed; try again");
@@ -1287,36 +1507,230 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
 // interrupted edits
 // ================================================================================
 
+namespace {
+
+/// A record file pair that is whole and agrees with itself, judged from the
+/// files alone (no password: record bodies are not read, only walked): both
+/// headers and body CRCs, the counts, every record's CRC, and the index
+/// pointing at exactly the records the data holds, to the last byte.
+bool pair_consistent(const fs::path& rdat, const fs::path& ridx) {
+  try {
+    if (!has(rdat) || !has(ridx)) return false;
+    const auto d = slurp(rdat), x = slurp(ridx);
+    if (d.size() < UH || x.size() < UH || (x.size() - UH) % RIDX != 0) return false;
+    const auto du = fmt::UniversalHeader::parse(d), xu = fmt::UniversalHeader::parse(x);
+    if (du.file_type_string != fmt::FILE_TYPE_RECORD_DATA ||
+        xu.file_type_string != fmt::FILE_TYPE_RECORD_INDICES)
+      return false;
+    if (du.header_crc != fmt::CRC_NO_ENTRY && !du.header_crc_valid(d)) return false;
+    if (xu.header_crc != fmt::CRC_NO_ENTRY && !xu.header_crc_valid(x)) return false;
+    if (du.body_crc != fmt::CRC_NO_ENTRY &&
+        crc::calculate(std::span<const ui1>(d).subspan(UH)) != du.body_crc)
+      return false;
+    if (xu.body_crc != fmt::CRC_NO_ENTRY &&
+        crc::calculate(std::span<const ui1>(x).subspan(UH)) != xu.body_crc)
+      return false;
+    const si8 n = static_cast<si8>((x.size() - UH) / RIDX);
+    if ((du.number_of_entries != n && du.number_of_entries != -1) ||
+        (xu.number_of_entries != n && xu.number_of_entries != -1))
+      return false;
+    std::size_t off = UH;
+    for (si8 i = 0; i < n; ++i) {
+      if (off + RHDR > d.size()) return false;
+      const ui4 nb = read<ui4>(d, off + 12);
+      if (nb > d.size() - off - RHDR) return false;
+      const ui4 stored = read<ui4>(d, off);
+      if (stored != fmt::CRC_NO_ENTRY &&
+          crc::calculate(std::span<const ui1>(d).subspan(off + 4, RHDR - 4 + nb)) != stored)
+        return false;
+      if (read<si8>(x, UH + static_cast<std::size_t>(i) * RIDX + 8) != static_cast<si8>(off))
+        return false;
+      off += RHDR + nb;
+    }
+    return off == d.size();
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
+/// An edit marker whose plan cannot be used: decide from the files alone.
+/// Every record pair an edit left traces of (a `.new` / `.old` file beside it)
+/// must end whole: a pair that is intact stays; a mixed or missing one is
+/// restored from an intact `.old` pair; anything else is refused with the
+/// files to look at. NOTHING IS EVER DELETED here: leftovers (and a pair put
+/// aside) move to `<session>.edit-leftovers/`, because they may hold the only
+/// copy of something. The marker is removed last.
+InterruptedRecordEdit settle_from_files(const fs::path& root, const OperationMarker& m, bool apply) {
+  struct Group {
+    fs::path dir;
+    std::string stem;  // "name" of name.rdat / name.ridx
+    std::vector<fs::path> leftovers;
+    fs::path old_rdat, old_ridx;
+  };
+  std::map<std::string, Group> groups;
+  std::vector<fs::path> loose;  // leftovers that belong to no pair (a marker .part)
+  for (const auto& f : leftover_files(root)) {
+    const std::string name = u8(f.filename());
+    if (name == std::string(detail::OPERATION_MARKER) + ".part") {
+      loose.push_back(f);
+      continue;
+    }
+    // <stem>.<rdat|ridx>.<32 hex>.<new|old>
+    const std::string rest = name.substr(0, name.size() - 4 - 33);
+    const std::string ext = rest.substr(rest.size() - 4);
+    const std::string stem = rest.substr(0, rest.size() - 5);
+    Group& g = groups[u8(f.parent_path()) + "/" + stem];
+    g.dir = f.parent_path();
+    g.stem = stem;
+    g.leftovers.push_back(f);
+    if (name.compare(name.size() - 4, 4, ".old") == 0)
+      (ext == "rdat" ? g.old_rdat : g.old_ridx) = f;
+  }
+  struct Move {
+    fs::path from, to;
+    bool to_aside = false;
+  };
+  std::vector<Move> moves;
+  std::vector<std::string> kept, restored, problems, files;
+  const fs::path aside_root =
+      root.parent_path() / from8(u8(root.filename()) + ".edit-leftovers");
+  const auto rel = [&](const fs::path& f) { return detail::path_generic_utf8(fs::relative(f, root)); };
+  std::set<fs::path> moved_aside;
+  const auto aside = [&](const fs::path& f) {
+    if (moved_aside.insert(f).second) moves.push_back({f, aside_root / fs::relative(f, root), true});
+  };
+  for (auto& [key, g] : groups) {
+    const fs::path trdat = g.dir / from8(g.stem + ".rdat"), tridx = g.dir / from8(g.stem + ".ridx");
+    files.push_back(rel(trdat));
+    if (pair_consistent(trdat, tridx)) {
+      kept.push_back(rel(trdat));
+      for (const auto& l : g.leftovers) aside(l);
+    } else if ((!g.old_rdat.empty() || !g.old_ridx.empty()) &&
+               pair_consistent(g.old_rdat.empty() ? trdat : g.old_rdat,
+                               g.old_ridx.empty() ? tridx : g.old_ridx)) {
+      // the old pair: each half is its `.old` file when there is one, else the
+      // target itself (a swap that stopped between the two halves)
+      restored.push_back(rel(trdat));
+      for (const auto& l : g.leftovers)
+        if (l != g.old_rdat && l != g.old_ridx) aside(l);
+      if (!g.old_rdat.empty()) {
+        if (has(trdat)) aside(trdat);
+        moves.push_back({g.old_rdat, trdat, false});
+      }
+      if (!g.old_ridx.empty()) {
+        if (has(tridx)) aside(tridx);
+        moves.push_back({g.old_ridx, tridx, false});
+      }
+    } else {
+      std::string names;
+      for (const auto& l : g.leftovers) names += (names.empty() ? "" : ", ") + rel(l);
+      problems.push_back(rel(trdat) + " / " + rel(tridx) + " (leftovers: " + names + ")");
+    }
+  }
+  for (const auto& l : loose) aside(l);
+  if (!problems.empty()) {
+    std::string list;
+    for (const auto& pr : problems) list += (list.empty() ? "" : "; ") + pr;
+    refuse(RefusalKind::Format, "edit-unsettled",
+           "the marker's plan of the interrupted annotation edit cannot be read, and the files "
+           "alone do not say how to finish it: no record pair is whole (and no whole .old pair "
+           "exists) for " + list +
+               ". Nothing was touched and no file was deleted: look at these files, put a whole "
+               "pair (.rdat and .ridx) in place by hand, then run recover_session again");
+  }
+  InterruptedRecordEdit e;
+  e.id = m.id;
+  e.files = files;
+  e.action = "settle";
+  e.reason = "the marker's plan cannot be read, so the files alone decided: " +
+             std::to_string(kept.size()) + " record pair(s) whole and kept as they are, " +
+             std::to_string(restored.size()) + " restored from their .old files (that removal was NOT done), " +
+             std::to_string(moved_aside.size()) + " other file(s) " + (apply ? "moved" : "to be moved") +
+             " aside (never deleted) to " + u8(aside_root.filename()) + " beside the session";
+  if (!apply) return e;
+  std::error_code ec;
+  for (const auto& mv : moves) {
+    fs::path to = mv.to;
+    if (mv.to_aside) {
+      fs::create_directories(to.parent_path(), ec);
+      for (int n = 1; has(to); ++n)
+        to = mv.to.parent_path() / from8(u8(mv.to.filename()) + "." + std::to_string(n));
+    } else if (has(to)) {
+      throw IoError("cannot restore " + u8(mv.from) + ": " + u8(to) + " is in the way");
+    }
+    note("rename", u8(mv.from) + "|" + u8(to));
+    detail::replace_file(mv.from, to);
+  }
+  std::vector<fs::path> dirs;
+  for (const auto& mv : moves) {
+    dirs.push_back(mv.from.parent_path());
+    dirs.push_back(mv.to.parent_path());
+  }
+  flush_dirs(dirs);
+  detail::remove_operation_marker(root);
+  note("marker-removed");
+  e.applied = true;
+  return e;
+}
+
+/// Is this marker the one of an annotation edit? A marker whose first lines
+/// cannot be read still is, when the files of an edit lie beside the records.
+bool is_edit_marker(const fs::path& root, const OperationMarker& m) {
+  if (m.operation == OP) return true;
+  return m.operation == "unknown" && !leftover_files(root).empty();
+}
+
+bool is_unreadable_plan(const CopyError& e) { return e.code() == "edit-journal-inconsistent"; }
+
+}  // namespace
+
 std::optional<InterruptedRecordEdit> interrupted_record_edit(const std::string& path) {
   if (path_has_suffix(path, ".tar")) return std::nullopt;
   const fs::path root = from8(path);
   const auto m = detail::read_operation_marker(root);
-  if (!m || m->operation != OP) return std::nullopt;
-  const auto plan = plan_from_marker(root, *m);
-  InterruptedRecordEdit e;
-  e.id = plan->id;
-  for (const auto& f : plan->files) e.files.push_back(f.rel);
-  e.action = decide(*plan).dir == Dir::Forward ? "finish" : "roll back";
-  return e;
+  if (!m || !is_edit_marker(root, *m)) return std::nullopt;
+  try {
+    const auto plan = plan_from_marker(root, *m);
+    if (plan) {
+      InterruptedRecordEdit e;
+      e.id = plan->id;
+      for (const auto& f : plan->files) e.files.push_back(f.rel);
+      const Decision d = decide(*plan);
+      e.action = d.dir == Dir::Forward ? "finish" : "roll back";
+      e.reason = d.why;
+      return e;
+    }
+  } catch (const CopyError& e) {
+    if (!is_unreadable_plan(e)) throw;
+  }
+  return settle_from_files(root, *m, false);
 }
 
 std::optional<InterruptedRecordEdit> finish_interrupted_record_edit(const std::string& path,
                                                                     int crash_at, int fail_at) {
   const fs::path root = session_root(path);
   const auto m = detail::read_operation_marker(root);
-  if (!m || m->operation != OP) return std::nullopt;
-  const auto plan = plan_from_marker(root, *m);
-  InterruptedRecordEdit e;
-  e.id = plan->id;
-  for (const auto& f : plan->files) e.files.push_back(f.rel);
-  const Decision d = decide(*plan);
-  e.action = d.dir == Dir::Forward ? "finish" : "roll back";
+  if (!m || !is_edit_marker(root, *m)) return std::nullopt;
   Steps steps;
   steps.crash_at = crash_at;
   steps.fail_at = fail_at;
-  settle(*plan, d.dir, (crash_at >= 0 || fail_at >= 0) ? &steps : nullptr);
-  e.applied = true;
-  return e;
+  try {
+    const auto plan = plan_from_marker(root, *m);
+    if (plan) {
+      InterruptedRecordEdit e;
+      e.id = plan->id;
+      for (const auto& f : plan->files) e.files.push_back(f.rel);
+      const Decision d = decide(*plan);
+      e.action = d.dir == Dir::Forward ? "finish" : "roll back";
+      e.reason = d.why;
+      settle(*plan, d.dir, (crash_at >= 0 || fail_at >= 0) ? &steps : nullptr);
+      e.applied = true;
+      return e;
+    }
+  } catch (const CopyError& e) {
+    if (!is_unreadable_plan(e)) throw;
+  }
+  return settle_from_files(root, *m, true);
 }
 
 std::vector<std::string> record_edit_leftovers(const std::string& path, bool apply) {
@@ -1334,5 +1748,16 @@ std::vector<std::string> record_edit_leftovers(const std::string& path, bool app
   }
   return out;
 }
+
+namespace testing {
+void set_edit_observer(EditObserver observer) {
+  std::lock_guard<std::mutex> lk(g_obs_mu);
+  g_obs = std::move(observer);
+}
+void set_edit_skip_flush(bool skip) {
+  std::lock_guard<std::mutex> lk(g_obs_mu);
+  g_skip_flush = skip;
+}
+}  // namespace testing
 
 }  // namespace mef3io

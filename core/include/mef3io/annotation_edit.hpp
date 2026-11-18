@@ -33,6 +33,7 @@
 // Python + C++ only (no C ABI, no MATLAB).
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -126,7 +127,7 @@ struct RemoveAnnotationsReport {
 /// to create one). They are stored after the kept records, in time order.
 ///
 /// Refusals are CopyError-coded exceptions of their usual type (code list in
-/// docs/annotations.md): tar archives (`tar-read-only`), a record file that
+/// docs/python.md, "remove_annotations"): tar archives (`tar-read-only`), a record file that
 /// cannot be read in full (`record-damaged`, `record-crc`,
 /// `record-index-mismatch`, `record-locked`), a wrong or missing password
 /// (`password`), selectors that match nothing (`no-match`), too few or too
@@ -150,9 +151,13 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
 struct InterruptedRecordEdit {
   std::string id;                  ///< the edit's id (names its temporary files)
   std::vector<std::string> files;  ///< session-relative record files it concerns
-  /// "finish" (every new file is intact: the swap is completed) or "roll back"
-  /// (a new file is damaged and the old ones are still there).
+  /// "finish" (every new file is intact: the swap is completed), "roll back"
+  /// (a new file is damaged or missing and the old ones are still there: the
+  /// removal was NOT done) or "settle" (the marker's plan cannot be read: the
+  /// files alone decide, see `reason`).
   std::string action;
+  /// Why recovery goes back, or what it found when it settles from the files.
+  std::string reason;
   bool applied = false;
 };
 
@@ -172,5 +177,20 @@ std::optional<InterruptedRecordEdit> finish_interrupted_record_edit(const std::s
 /// Returns their session-relative paths; removes them when `apply`. With a
 /// marker present nothing is touched.
 std::vector<std::string> record_edit_leftovers(const std::string& path, bool apply);
+
+/// TEST SEAM (never needed by a caller): every durable step an edit takes, in
+/// order, as `(kind, absolute path)`: "fsync-file", "flush-dir", "rename"
+/// (path = "from|to"), "remove", "marker-durable", "direction-durable",
+/// "marker-removed" and "point" (a crash/failure point). The observer runs
+/// on the editing thread, may act (a test appends to a record file from it)
+/// and must not call back into the library for the same session. Pass an
+/// empty function to stop.
+namespace testing {
+using EditObserver = std::function<void(const std::string& kind, const std::string& path)>;
+void set_edit_observer(EditObserver observer);
+/// Make the edit skip its folder flushes and file flushes (the negative
+/// control of the durability-order test: the test must then fail).
+void set_edit_skip_flush(bool skip);
+}  // namespace testing
 
 }  // namespace mef3io

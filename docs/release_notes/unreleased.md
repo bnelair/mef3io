@@ -29,6 +29,12 @@
     result is reported in `RecoveryReport.record_edits`). The next
     `remove_annotations` does the same first. Unused temporary files are
     swept by `recover_session`.
+  - A torn annotation file (bytes after the last counted record, an index that
+    disagrees) is refused (`record-torn`), never silently trimmed. While an
+    interrupted edit's marker is present, `Reader.records()` raises
+    `edit-interrupted` instead of returning a half-swapped level. A marker whose
+    plan cannot be read is settled from the files alone; nothing is ever deleted
+    (leftovers move to `<session>.edit-leftovers`).
   - Password-protected sessions: pass both passwords as for `Writer`; added
     records are level-2 encrypted. Tar archives are refused
     (`tar-read-only`). Cancel and progress work until the swap starts.

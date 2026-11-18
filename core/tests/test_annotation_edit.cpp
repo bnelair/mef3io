@@ -179,3 +179,25 @@ TEST_CASE("remove_annotations refuses a tar archive and leaves a cancelled call 
           "tar-read-only");
   fsys::remove_all(p.parent_path());
 }
+
+TEST_CASE("remove_annotations refuses a file with bytes after the last counted record") {
+  const auto p = make_session("mef3io_remove_torn");
+  const auto recs = stored(p);
+  // a whole, valid record appended to the .rdat only (data landed, header and index did not)
+  const auto enc = encode_records_for_file({note(9, "TAILREC")}, 0, false, {});
+  const auto rdat = p / "s.rdat";
+  {
+    std::ofstream f(rdat, std::ios::binary | std::ios::app);
+    f.write(reinterpret_cast<const char*>(enc[0].bytes.data()),
+            static_cast<std::streamsize>(enc[0].bytes.size()));
+  }
+  const auto size = fsys::file_size(rdat);
+  REQUIRE(code_of([&] { remove_annotations(p.string(), {selector_for(recs[0])}); }) ==
+          "record-torn");
+  REQUIRE(fsys::file_size(rdat) == size);
+  // recovery keeps the record, then the removal works and the record survives
+  recover_session(p.string(), true);
+  REQUIRE(remove_annotations(p.string(), {selector_for(recs[0])}).removed == 1);
+  REQUIRE(texts(p) == std::vector<std::string>{"b", "c", "TAILREC"});
+  fsys::remove_all(p.parent_path());
+}

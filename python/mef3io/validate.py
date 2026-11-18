@@ -728,15 +728,25 @@ class InterruptedRecordEdit:
     """An annotation edit (:func:`remove_annotations`) this session was interrupted in.
 
     ``action`` is what recovery does (or did): ``"finish"`` the swap of the
-    record files (every new file is intact) or ``"roll back"`` (a new file is
-    damaged and the old ones are still there). ``files`` are session-relative
-    record files; ``id`` names the edit's temporary files.
+    record files (every new file is intact), ``"roll back"`` (a new file is
+    damaged or missing and the old ones are still there: **the removal was not
+    done**, ``reason`` says why) or ``"settle"`` (the marker's plan could not
+    be read, so the files alone decided; ``reason`` says what was found and
+    kept, nothing is ever deleted). ``files`` are session-relative record
+    files; ``id`` names the edit's temporary files.
     """
 
     id: str = ""
     files: tuple[str, ...] = ()
     action: str = ""
+    #: Why recovery goes back, or what it found when it settles from the files.
+    reason: str = ""
     applied: bool = False
+
+    @property
+    def not_done(self) -> bool:
+        """The removal was NOT carried out (recovery rolls it back)."""
+        return self.action == "roll back"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -775,10 +785,16 @@ class RecoveryReport:
         for f in self.record_files:
             lines.append(f"    {f.path}: {f.action}")
         for e in self.record_edits:
-            lines.append(
-                f"    interrupted annotation edit ({len(e.files)} record file(s)): "
-                + (f"{e.action} done" if e.applied else f"would {e.action}")
-            )
+            what = ("interrupted annotation edit (%d record file(s)): " % len(e.files))
+            if e.action == "roll back":
+                what += ("rolled back" if e.applied else "would be rolled back") + (
+                    ": the removal was NOT done" + (f" ({e.reason})" if e.reason else ""))
+            elif e.action == "settle":
+                what += ("settled from the files alone: " if e.applied
+                         else "would be settled from the files alone: ") + e.reason
+            else:
+                what += "finished" if e.applied else "would be finished"
+            lines.append("    " + what)
         for s in self.skipped:
             lines.append(f"    skipped {s}")
         for n in self.notes:
@@ -884,7 +900,7 @@ def recover_session(
         record_files=tuple(RecoveredRecordFile(**f) for f in raw.get("record_files", ())),
         record_edits=tuple(
             InterruptedRecordEdit(id=e["id"], files=tuple(e["files"]), action=e["action"],
-                                  applied=e["applied"])
+                                  reason=e.get("reason", ""), applied=e["applied"])
             for e in raw.get("record_edits", ())
         ),
         skipped=tuple(raw["skipped"]),
@@ -939,6 +955,9 @@ def _recover_main(argv) -> int:
         print("Recovered. Check the whole session with:  python -m mef3io validate "
               + args.path)
 
+    if any(e.not_done for e in report.record_edits):
+        print("\nThe interrupted annotation removal was NOT done (the old annotations are back).")
+        return 1
     if report.skipped:
         return 1
     return 0

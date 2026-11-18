@@ -79,7 +79,7 @@ renamed as one, it does so under the session's operation marker:
 | a crash or power cut ... | the session is | what repairs it |
 |---|---|---|
 | before the marker is written (while the new files are being written beside the old) | exactly as before; unused `<file>.<id>.new` files lie beside the records | nothing is needed; `recover_session(apply=True)` removes the unused files |
-| after the marker, before every swap is done | the marker is there: the open warns, writes are refused, the validator reports `records.interrupted-edit`; a level's pair may be half swapped | `recover_session(apply=True)` finishes the swap, or rolls it back to the exact old files when a new file is not intact; the next `remove_annotations` does the same first |
+| after the marker, before every swap is done | the marker is there: the open warns, writes are refused, `Reader.records()` raises `edit-interrupted`, the validator reports `records.interrupted-edit`; a level's pair may be half swapped | `recover_session(apply=True)` finishes the swap, or rolls it back to the exact old files when a new file is damaged or missing (the report then says the removal was NOT done); if the marker's plan is unreadable it decides from the files alone and moves leftovers aside, never deleting them; the next `remove_annotations` does the same first |
 | after the swap, before the marker is removed | the new annotations, plus the marker | the same: recovery only removes the leftovers and the marker |
 
 A removed annotation is gone: the old files are kept only until the swap is

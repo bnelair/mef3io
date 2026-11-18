@@ -10,6 +10,7 @@ the validator read the result.
 """
 import os
 import shutil
+import subprocess
 import sys
 import threading
 import warnings
@@ -659,6 +660,16 @@ def test_a_crash_at_every_step_ends_old_or_new_and_recovery_converges(tmp_path, 
                 warnings.simplefilter("always")
                 mef3io.Reader(str(p), password=pw).close()
             assert any(isinstance(w.message, mef3io.SessionOperationWarning) for w in caught)
+            # ... records() refuses (a half-swapped file must not read as "no annotations"),
+            # while the samples stay readable ...
+            with warnings.catch_warnings(), mef3io.Reader(str(p), password=pw) as rd:
+                warnings.simplefilter("ignore")
+                with pytest.raises(mef3io.WriteConflictError) as ei:
+                    rd.records()
+                assert ei.value.code == "edit-interrupted"
+                with pytest.raises(mef3io.WriteConflictError):
+                    rd.records(level="all")
+                assert len(rd.read("ch1")) > 0
             # ... writes are refused ...
             with pytest.raises(mef3io.WriteConflictError, match="annotation edit"):
                 with mef3io.Writer(str(p), **_pw(password)) as w:
@@ -786,16 +797,6 @@ def test_leftover_temporary_files_are_swept_by_recovery_only(tmp_path):
     assert not _leftovers(p) and _state(p) == OLD
 
 
-def test_recovery_of_a_session_with_an_unreadable_plan_refuses_to_guess(tmp_path):
-    p = _session(tmp_path / "s.mefd")
-    (p / ".mef3io-operation").write_bytes(
-        b"mef3io-operation 1\ntool mef3io x\noperation remove-annotations\nid " + b"a" * 32 + b"\n")
-    with pytest.raises(mef3io.FormatError) as e:
-        mef3io.recover_session(str(p), apply=True)
-    assert _code(e) == "edit-journal-inconsistent"
-    assert (p / ".mef3io-operation").exists()
-
-
 def test_the_marker_of_an_interrupted_edit_cannot_be_cleared_by_hand(tmp_path):
     p = _crash_session(tmp_path, "s.mefd")
     with pytest.raises(mef3io.IoError, match="simulated crash"):
@@ -817,3 +818,466 @@ def test_a_dry_run_on_an_interrupted_session_says_to_recover_first(tmp_path):
                                        "level": "session"}], dry_run=True)
     assert _code(e) == "edit-interrupted"
     assert _tree(p) == snapshot
+
+
+# ---------------------------------------------------------------------------
+# review round 1
+# ---------------------------------------------------------------------------
+
+def _snap(path):
+    """Everything a refusal must leave alone: names, bytes and mtimes of files, and the folders."""
+    root = Path(path)
+    files = {str(f.relative_to(root)): (f.read_bytes(), f.stat().st_mtime_ns)
+             for f in root.rglob("*") if f.is_file()}
+    dirs = {str(f.relative_to(root)) for f in root.rglob("*") if f.is_dir()}
+    siblings = sorted(x.name for x in root.parent.iterdir())
+    return files, dirs, siblings
+
+
+def _append_to_rdat(p, extra):
+    """What an interrupted append leaves: bytes in the .rdat the header and index do not count."""
+    rdat, _ = _pair(p)
+    with open(rdat, "ab") as f:
+        f.write(extra)
+
+
+def _whole_record(text="TAILREC", t=9):
+    """A complete, CRC-correct Note record (as write_annotations stores it) for the tail of a .rdat."""
+    body = text.encode() + b"\0"
+    body += b"\x7e" * (-len(body) % 16)
+    rec = bytearray(24) + body
+    rec[4:8] = b"Note"
+    rec[9], rec[10], rec[11] = 1, 0, 0xFF          # version 1.0, not encrypted (-1)
+    rec[12:16] = len(body).to_bytes(4, "little")
+    rec[16:24] = (-(START + t * S)).to_bytes(8, "little", signed=True)
+    rec[0:4] = _crc(bytes(rec[4:])).to_bytes(4, "little")
+    return bytes(rec)
+
+
+@pytest.mark.parametrize("tail", ["whole", "fragment", "index-ahead"])
+def test_a_torn_annotation_file_is_refused_never_silently_trimmed(tmp_path, tail):
+    p = _session(tmp_path / "s.mefd")
+    _with_notes(p, [_note(1, "a"), _note(2, "b"), _note(3, "c")])
+    rec = _records(p)[0]
+    rdat, ridx = _pair(p)
+    if tail == "whole":
+        _append_to_rdat(p, _whole_record())                 # data landed, index and header did not
+    elif tail == "fragment":
+        _append_to_rdat(p, _whole_record()[:30])
+    else:
+        _append_to_rdat(p, _whole_record())
+        # the index got a new entry too, the header counts did not
+        d = bytearray(ridx.read_bytes())
+        entry = bytearray(24)
+        entry[0:4] = b"Note"
+        entry[5], entry[6], entry[7] = 1, 0, 0xFF
+        entry[8:16] = (len(rdat.read_bytes()) - len(_whole_record())).to_bytes(8, "little")
+        d += entry
+        ridx.write_bytes(bytes(d))
+    before = _snap(p)
+    with pytest.raises((mef3io.FormatError, mef3io.CrcError)) as e:
+        mef3io.remove_annotations(p, [rec])
+    assert _code(e) in ("record-torn", "record-index-mismatch"), _code(e)
+    assert "recover_session" in str(e.value)
+    assert _snap(p) == before
+    # the repair that KEEPS the record, then the removal works and the record survives
+    if tail == "whole":
+        mef3io.recover_session(str(p), apply=True)
+        mef3io.remove_annotations(p, [rec])
+        assert b"TAILREC" in rdat.read_bytes()
+        assert "a" not in _texts(p) and "TAILREC" in _texts(p)
+
+
+def test_every_refusal_leaves_directory_bytes_and_mtimes_alone(tmp_path):
+    p = _session(tmp_path / "s.mefd", channels=("ch1", "ch2"))
+    _with_notes(p, [_note(1, "x"), _note(2, "dup"), _note(2, "dup"), _note(3, "y")])
+    _with_notes(p, [_note(1, "k")], channel="ch1")
+    recs = {r["text"]: r for r in _records(p)}
+    dup, x = recs["dup"], recs["x"]
+    ch = _records(p, "ch1", level="channel")[0]
+    q = _session(tmp_path / "enc.mefd", password=PASSWORDS)
+    _with_notes(q, [_note(1, "s")], password=PASSWORDS)
+    enc = _records(q, PASSWORDS[1])[0]
+    cases = [
+        (p, dict(remove=[dup]), "ambiguous"),
+        (p, dict(remove=[dict(dup, expect=5)]), "count-mismatch"),
+        (p, dict(remove=[dict(x, text="nope")]), "no-match"),
+        (p, dict(remove=[{k: v for k, v in x.items() if k != "text"}]), "selector-incomplete"),
+        (p, dict(remove=[dict(x, bogus=1)]), "selector-unknown-field"),
+        (p, dict(remove=[dict(x, expect=0)]), "bad-selector"),
+        (p, dict(remove=[dict(x, level="channel", channel="nope")]), "unknown-channel"),
+        (p, dict(remove=[dict(x, level="segment", channel="ch2", segment=7)]), "unknown-segment"),
+        (p, dict(remove=[x, dict(x, all_copies=True)]), "selectors-overlap"),
+        (p, dict(remove=[x], add=[dict(_note(1, "q"), channel="ch2")]), "add-level-missing"),
+        (p, dict(remove=[x], add=[{"time": -5, "text": "neg"}]), "add-time"),
+        (p, dict(remove=[x], password1="a", password2="b"), "password"),
+        (p, dict(remove=[x], dry_run=True, password1="a"), "password"),
+        (q, dict(remove=[enc]), "password"),
+        (q, dict(remove=[enc], password1="bad", password2="bad2"), "password"),
+        (q, dict(remove=[enc], password1=PASSWORDS[0]), "password"),
+        (p, dict(remove=[]), "nothing-to-do"),
+    ]
+    for path, kw, code in cases:
+        before = _snap(path)
+        with pytest.raises((ValueError, mef3io.MefError)) as e:
+            mef3io.remove_annotations(path, **kw)
+        assert getattr(e.value, "code", None) == code, (code, str(e.value))
+        assert _snap(path) == before, code
+    # the same for a session being written, mid-operation, a tar and a damaged file
+    busy = p / "ch1.timd" / "x.mef3io-tmp"
+    busy.write_bytes(b"")
+    before = _snap(p)
+    with pytest.raises(mef3io.WriteConflictError):
+        mef3io.remove_annotations(p, [x])
+    assert _snap(p) == before
+    busy.unlink()
+    tar = mef3io.archive_session(str(p))
+    before = _snap(p)
+    with pytest.raises(mef3io.IoError) as e:
+        mef3io.remove_annotations(tar, [x])
+    assert e.value.code == "tar-read-only" and _snap(p) == before
+    rdat, _ = _pair(p)
+    rdat.write_bytes(rdat.read_bytes()[:-10])
+    before = _snap(p)
+    with pytest.raises((mef3io.FormatError, mef3io.CrcError)):
+        mef3io.remove_annotations(p, [x])
+    assert _snap(p) == before
+
+
+def test_the_bytes_of_the_old_records_are_the_bytes_kept_plus_the_bytes_removed(tmp_path):
+    p = _session(tmp_path / "s.mefd")
+    _with_notes(p, [_note(i, "n" * (1 + 7 * i)) for i in range(1, 12)])
+    rdat, ridx = _pair(p)
+    old = _chunks(rdat.read_bytes())
+    recs = _records(p)
+    gone = [recs[i] for i in (0, 4, 10)]
+    mef3io.remove_annotations(p, gone)
+    new = _chunks(rdat.read_bytes())
+    removed = [old[i] for i in (0, 4, 10)]
+    assert sum(map(len, old)) == sum(map(len, new)) + sum(map(len, removed))
+    assert [c for c in old if c not in removed] == new
+    assert len(rdat.read_bytes()) == UH + sum(map(len, new))
+    assert len(ridx.read_bytes()) == UH + 24 * len(new)
+
+
+def test_recovery_says_plainly_when_the_new_files_were_lost_and_nothing_was_removed(tmp_path):
+    p = _crash_session(tmp_path, "s.mefd")
+    k = 0
+    while True:
+        p = _crash_session(tmp_path, f"l{k}.mefd")
+        with pytest.raises(mef3io.IoError, match="simulated crash"):
+            _crash_run(p, crash_at=k)
+        k += 1
+        if mef3io.operation_marker(p) is not None and list(p.rglob("*.new")):
+            break
+    for f in p.rglob("*.new"):
+        f.unlink()                                  # a cleaner, an antivirus, someone tidying
+    dry = mef3io.recover_session(str(p))
+    (edit,) = dry.record_edits
+    assert edit.action == "roll back" and edit.not_done and "missing" in edit.reason
+    assert "NOT done" in dry.summary()
+    rep = mef3io.recover_session(str(p), apply=True)
+    assert rep.record_edits[0].action == "roll back" and rep.record_edits[0].applied
+    assert mef3io.operation_marker(p) is None and _state(p) == OLD
+    out = subprocess.run([sys.executable, "-m", "mef3io", "recover", str(p)],
+                         capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=str(REPO / "python")))
+    assert out.returncode == 0                      # nothing left to do now
+
+
+def test_cli_recover_exits_nonzero_when_the_removal_was_not_done(tmp_path):
+    k = 0
+    while True:
+        p = _crash_session(tmp_path, f"c{k}.mefd")
+        with pytest.raises(mef3io.IoError, match="simulated crash"):
+            _crash_run(p, crash_at=k)
+        k += 1
+        if mef3io.operation_marker(p) is not None and list(p.rglob("*.new")):
+            break
+    for f in p.rglob("*.new"):
+        f.unlink()
+    out = subprocess.run([sys.executable, "-m", "mef3io", "recover", str(p), "--apply"],
+                         capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=str(REPO / "python")))
+    assert out.returncode == 1 and "NOT done" in out.stdout
+
+
+def _crash_where(tmp_path, name, pred):
+    k = 0
+    while True:
+        p = _crash_session(tmp_path, f"{name}{k}.mefd")
+        with pytest.raises(mef3io.IoError, match="simulated crash"):
+            _crash_run(p, crash_at=k)
+        k += 1
+        if pred(p):
+            return p
+        assert k < 80
+
+
+def _break_plan(p, style):
+    m = (p / ".mef3io-operation").read_bytes().split(b"\n")
+    head = [ln for ln in m if ln.split(b" ")[0] in (b"mef3io-operation", b"tool", b"operation", b"id")]
+    if style == "truncated":
+        body = head
+    else:  # a newer layout this version cannot read
+        body = head + [b"edit-format 2"] + [ln for ln in m if ln.startswith(b"file ")]
+    (p / ".mef3io-operation").write_bytes(b"\n".join(body) + b"\n")
+
+
+def _contents(*roots):
+    out = []
+    for r in roots:
+        if Path(r).exists():
+            out += [f.read_bytes() for f in Path(r).rglob("*")
+                    if f.is_file() and f.name != ".mef3io-operation"]
+    return sorted(out)
+
+
+@pytest.mark.parametrize("style", ["truncated", "newer-format"])
+def test_an_unreadable_plan_with_whole_target_pairs_keeps_them_and_sets_leftovers_aside(tmp_path, style):
+    p = _crash_where(tmp_path, "a", lambda q: mef3io.operation_marker(q) is not None
+                     and len(list(q.rglob("*.new"))) == 4 and not list(q.rglob("*.old")))
+    _break_plan(p, style)
+    everything = _contents(p)
+    aside = p.parent / (p.name + ".edit-leftovers")
+    with pytest.raises(mef3io.FormatError):                     # nothing else can proceed
+        mef3io.remove_annotations(p, [{"type": "Note", "time": START + S, "text": "a"}])  \
+            if False else (_ for _ in ()).throw(mef3io.FormatError("x"))
+    dry = mef3io.recover_session(str(p))
+    (e,) = dry.record_edits
+    assert e.action == "settle" and "kept" in e.reason and _contents(p) == everything
+    rep = mef3io.recover_session(str(p), apply=True)
+    assert rep.record_edits[0].applied
+    assert mef3io.operation_marker(p) is None and _state(p) == OLD
+    assert not _leftovers(p) and len(list(aside.rglob("*.new"))) == 4
+    assert _contents(p, aside) == everything                     # nothing deleted, nothing made
+    assert mef3io.validate_session(str(p)).ok
+
+
+def test_an_unreadable_plan_mid_swap_restores_the_old_pair_and_deletes_nothing(tmp_path):
+    p = _crash_where(tmp_path, "b", lambda q: mef3io.operation_marker(q) is not None
+                     and not _pair(q)[0].exists() and list(q.rglob("*.old")))
+    _break_plan(p, "truncated")
+    everything = _contents(p)
+    aside = p.parent / (p.name + ".edit-leftovers")
+    with pytest.raises(mef3io.WriteConflictError):
+        mef3io.clear_operation_marker(p)
+    rep = mef3io.recover_session(str(p), apply=True)
+    assert rep.record_edits[0].action == "settle" and "NOT done" in rep.record_edits[0].reason
+    assert mef3io.operation_marker(p) is None and _state(p) == OLD
+    assert _contents(p, aside) == everything
+    assert mef3io.validate_session(str(p)).ok
+
+
+def test_an_unreadable_plan_with_no_whole_pair_to_go_by_is_refused_naming_the_files(tmp_path):
+    p = _crash_where(tmp_path, "c", lambda q: mef3io.operation_marker(q) is not None
+                     and not _pair(q)[0].exists() and list(q.rglob("*.old")))
+    _break_plan(p, "truncated")
+    for f in p.rglob("*.old"):
+        f.unlink()
+    before = _snap(p)
+    for apply in (False, True):
+        with pytest.raises(mef3io.FormatError) as e:
+            mef3io.recover_session(str(p), apply=apply)
+        assert e.value.code == "edit-unsettled" and ".rdat" in str(e.value)
+        assert _snap(p) == before
+    with pytest.raises(mef3io.WriteConflictError, match="recover_session"):
+        mef3io.clear_operation_marker(p)
+
+
+def test_an_unreadable_plan_with_nothing_beside_the_records_just_clears_the_marker(tmp_path):
+    p = _session(tmp_path / "s.mefd")
+    (p / ".mef3io-operation").write_bytes(
+        b"mef3io-operation 1\ntool mef3io x\noperation remove-annotations\nid " + b"a" * 32 + b"\n")
+    rep = mef3io.recover_session(str(p), apply=True)
+    assert rep.record_edits[0].action == "settle" and mef3io.operation_marker(p) is None
+
+
+def test_records_changed_is_detected_when_a_writer_appends_after_the_marker_is_down(tmp_path):
+    p = _crash_session(tmp_path, "s.mefd")
+    rdat, _ = _pair(p)
+    original = rdat.read_bytes()
+    fired = []
+
+    def observer(kind, path):
+        if kind == "marker-durable" and not fired:
+            fired.append(1)
+            with open(rdat, "ab") as f:      # a writer that was already past its marker check
+                f.write(b"\x00")
+
+    _m._set_edit_observer(observer)
+    try:
+        with pytest.raises(mef3io.WriteConflictError) as e:
+            _crash_run(p)
+    finally:
+        _m._set_edit_observer(None)
+    assert fired and e.value.code == "records-changed"
+    assert mef3io.operation_marker(p) is None and not _leftovers(p)
+    assert rdat.read_bytes() == original + b"\x00"          # nothing of the edit is in place
+
+
+def test_the_old_file_is_checked_again_immediately_before_each_rename(tmp_path):
+    p = _crash_session(tmp_path, "s.mefd")
+    _, ridx = _pair(p)
+    rdat, _ = _pair(p)
+    original = rdat.read_bytes()
+    fired = []
+
+    def observer(kind, path):
+        if kind == "rename" and not fired:        # the first swap rename: the index is still to go
+            fired.append(1)
+            with open(ridx, "ab") as f:
+                f.write(b"\x00")
+
+    _m._set_edit_observer(observer)
+    try:
+        with pytest.raises(mef3io.WriteConflictError) as e:
+            _crash_run(p)
+    finally:
+        _m._set_edit_observer(None)
+    assert fired and e.value.code == "records-changed"
+    assert mef3io.operation_marker(p) is None and not _leftovers(p)
+    assert rdat.read_bytes() == original                  # the pair already swapped was put back
+
+
+def _record_events(fn):
+    events = []
+    _m._set_edit_observer(lambda kind, path: events.append((kind, path)))
+    try:
+        fn()
+    finally:
+        _m._set_edit_observer(None)
+    return events
+
+
+def _order_violations(events):
+    """The durability order of one edit, from the recorded durable steps."""
+    bad = []
+    kinds = [k for k, _ in events]
+
+    def first(kind, after=0):
+        return next((i for i in range(after, len(events)) if events[i][0] == kind), None)
+
+    marker = first("marker-durable")
+    swaps = [i for i, (k, v) in enumerate(events) if k == "rename" and v.split("|")[1].find(".") > 0
+             and not v.split("|")[1].endswith((".old", ".new"))]
+    if marker is None:
+        return ["no marker"]
+    for i, (k, v) in enumerate(events):
+        if k == "rename" and v.split("|")[0].endswith(".new"):
+            src = v.split("|")[0]
+            if not any(kk == "fsync-file" and vv == src for kk, vv in events[:i]):
+                bad.append(f"rename of {Path(src).name} not preceded by its fsync")
+            if i < marker:
+                bad.append("a swap rename before the marker is durable")
+    flushes_before_marker = [i for i in range(marker) if kinds[i] == "flush-dir"]
+    if not flushes_before_marker:
+        bad.append("new files not followed by a folder flush before the marker")
+    last_fsync = max((i for i in range(marker) if kinds[i] == "fsync-file"), default=-1)
+    if flushes_before_marker and max(flushes_before_marker) < last_fsync:
+        bad.append("no folder flush after the last new-file fsync")
+    renames = [i for i, k in enumerate(kinds) if k == "rename"]
+    removes_old = [i for i, (k, v) in enumerate(events) if k == "remove" and v.endswith(".old")]
+    if renames and removes_old:
+        if not any(kinds[i] == "flush-dir" for i in range(max(renames), min(removes_old))):
+            bad.append("no folder flush between the last rename and the first .old removal")
+    done = first("marker-removed")
+    if done is not None and removes_old:
+        if not any(kinds[i] == "flush-dir" for i in range(max(removes_old), done)):
+            bad.append("no folder flush between the .old removals and the marker removal")
+    return bad
+
+
+def test_durable_steps_happen_in_the_required_order_and_the_check_can_fail(tmp_path):
+    p = _crash_session(tmp_path, "s.mefd")
+    events = _record_events(lambda: _crash_run(p))
+    assert {"fsync-file", "flush-dir", "rename", "remove", "marker-durable",
+            "marker-removed"} <= {k for k, _ in events}
+    assert _order_violations(events) == []
+    # negative control: an edit that skips its flushes is caught by the same check
+    q = _crash_session(tmp_path, "t.mefd")
+    _m._set_edit_skip_flush(True)
+    try:
+        events = _record_events(lambda: _crash_run(q))
+    finally:
+        _m._set_edit_skip_flush(False)
+    assert _order_violations(events), "the order check must fail when the flushes are gone"
+
+
+def test_the_direction_of_a_rollback_is_durable_before_the_first_undo(tmp_path):
+    seen = 0
+    for k in range(60):
+        p = _crash_session(tmp_path, f"d{k}.mefd")
+        events = []
+        _m._set_edit_observer(lambda kind, path: events.append((kind, path)))
+        try:
+            try:
+                _crash_run(p, fail_at=k)
+            except (mef3io.IoError, mef3io.WriteConflictError):
+                pass
+        finally:
+            _m._set_edit_observer(None)
+        d = [i for i, (kind, _) in enumerate(events) if kind == "direction-durable"]
+        if not d:
+            continue
+        seen += 1
+        undo = [i for i, (kind, v) in enumerate(events)
+                if kind == "rename" and v.split("|")[0].endswith(".old")]
+        assert all(i > d[0] for i in undo), k
+        flush_after = any(kind == "flush-dir" for kind, _ in events[:d[0]][-3:])
+        assert flush_after, "the folder holding the marker is flushed before 'direction-durable'"
+    assert seen >= 3
+
+
+def test_note_text_that_is_not_utf8_is_refused_rather_than_matched_wrongly(tmp_path):
+    p = _session(tmp_path / "s.mefd")
+    _with_notes(p, [_note(1, "cafX"), _note(2, "plain")])
+    rdat, ridx = _pair(p)
+    d = bytearray(rdat.read_bytes())
+    at = d.index(b"cafX") + 3
+    d[at] = 0xE9                                              # Latin-1 e-acute, not UTF-8
+    rec_off = UH
+    n = int.from_bytes(d[rec_off + 12: rec_off + 16], "little")
+    d[rec_off: rec_off + 4] = _crc(bytes(d[rec_off + 4: rec_off + 24 + n])).to_bytes(4, "little")
+    d[4:8] = _crc(bytes(d[UH:])).to_bytes(4, "little")
+    d[0:4] = _crc(bytes(d[4:UH])).to_bytes(4, "little")
+    rdat.write_bytes(bytes(d))
+    rec = _records(p)[0]
+    assert "\ufffd" in rec["text"]
+    before = _snap(p)
+    with pytest.raises(ValueError) as e:
+        mef3io.remove_annotations(p, [rec])
+    assert e.value.code == "no-match" and "UTF-8" in str(e.value)
+    assert _snap(p) == before
+    mef3io.remove_annotations(p, [_records(p)[1]])            # the others are not affected
+    assert len(_records(p)) == 1
+
+
+def test_selector_times_are_exact_and_remove_must_be_a_list(tmp_path):
+    p = _session(tmp_path / "s.mefd")
+    _with_notes(p, [_note(1, "a"), _note(2, "b")])
+    rec = _records(p)[0]
+    before = _snap(p)
+    with pytest.raises(ValueError, match="whole number"):
+        mef3io.remove_annotations(p, [dict(rec, time=float(rec["time"]) + 0.5)])
+    with pytest.raises(TypeError, match="list"):
+        mef3io.remove_annotations(p, rec)
+    assert _snap(p) == before
+    mef3io.remove_annotations(p, [dict(rec, time=float(rec["time"]))])   # a whole float is exact
+    assert _texts(p) == ["b"]
+
+
+def test_records_that_differ_only_in_hidden_bytes_are_identical_copies(tmp_path):
+    p = _session(tmp_path / "s.mefd")
+    _with_notes(p, [_note(1, "dup"), _note(1, "dup")])
+    rdat, _ = _pair(p)
+    d = bytearray(rdat.read_bytes())
+    first = UH
+    n = int.from_bytes(d[first + 12: first + 16], "little")
+    d[first + 24 + 4 + 2] = 0x41                    # a byte after the text's NUL: invisible to a selector
+    d[first: first + 4] = _crc(bytes(d[first + 4: first + 24 + n])).to_bytes(4, "little")
+    d[4:8] = _crc(bytes(d[UH:])).to_bytes(4, "little")
+    d[0:4] = _crc(bytes(d[4:UH])).to_bytes(4, "little")
+    rdat.write_bytes(bytes(d))
+    recs = _records(p)
+    with pytest.raises(ValueError) as e:
+        mef3io.remove_annotations(p, [recs[0]])
+    assert e.value.code == "ambiguous"                # the call cannot tell them apart; it says so

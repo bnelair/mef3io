@@ -172,3 +172,36 @@ between the read and the swap; a Writer that is open and idle, or an append land
 inside the few microseconds between E and the rename, is lost. Documented as "stop
 other writers first". Two processes running `remove_annotations`/`recover_session`
 on one session at the same time are not supported either.
+
+REVIEW ROUND 1 ADDITIONS (same call):
+- NOTHING IS DROPPED SILENTLY: `record_raw.hpp` stops at the header count, so after the
+  walk `remove_annotations` refuses (`record-torn`) when the `.rdat` holds ANY byte after
+  the last counted record (a whole record or fragment an interrupted append left; only an
+  all-zero tail of a count -1 file passes), when the `.ridx` header count disagrees with
+  its entries, or when the index does not list exactly the records the data holds
+  (`record-index-mismatch`). The rebuild also asserts kept + removed record bytes ==
+  old record bytes (`verify-failed` if not). The message says to run `recover_session`
+  (which keeps whole records). Tests: whole / fragment / index-ahead tails and the
+  byte-sum invariant in test_p54.
+- The marker's `file` lines carry the CRC of the whole NEW file: "only the target is
+  left" (S3) is a finished swap only when the target IS that file; otherwise the new
+  file was lost and recovery rolls back, reporting that the removal was NOT done
+  (`InterruptedRecordEdit.reason`, `.not_done`, CLI exit 1).
+- UNREADABLE PLAN: `settle_from_files` decides from the files alone (no password: whole-pair
+  consistency by CRCs/counts/offsets): whole target pair kept, mixed/missing restored from
+  `.old` (each half = its `.old` else the target), otherwise `edit-unsettled`. NEVER
+  deletes: leftovers move to `<session>.edit-leftovers`. Also used when `settle` meets a
+  state no step leaves. `clear_operation_marker` refuses this marker.
+- READER: `Reader.records()` (Python) raises `edit-interrupted` while the marker is
+  present (one stat per call); samples keep reading. C++ `Session::read_records` is
+  unchanged (the read path belongs to another change). Chosen because it is the simplest
+  correct rule: no per-level plan logic in a reader.
+- RACES: step E (marker down, size + header of every old file) plus `require_unchanged`
+  (size + mtime) immediately before each old file is renamed away; a difference rolls back
+  (`records-changed`). A write call that passed its marker check before the marker existed
+  is not detectable (no per-session registry or lock exists: `being-written` is file-name
+  based) and can still append after the last check; documented in one sentence.
+- TEST SEAM: `mef3io::testing::set_edit_observer` / `set_edit_skip_flush` (Python
+  `_set_edit_observer`, `_set_edit_skip_flush`) record every durable step (fsync-file,
+  flush-dir, rename, remove, marker-durable, direction-durable, marker-removed, point); the
+  order test asserts the invariants and its negative control (flushes skipped) must fail.

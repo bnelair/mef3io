@@ -1139,11 +1139,30 @@ class Reader:
         IndexError
             Unknown channel or segment number.
         """
+        self._refuse_while_edit_interrupted()
         pending: list = []
         try:
             return self._records(channel, segment, level, pending)
         finally:
             _flush(pending, stacklevel=2)
+
+    def _refuse_while_edit_interrupted(self) -> None:
+        """records() would show a half-swapped annotation file as if it were whole."""
+        from . import _mef3io as _ext  # noqa: PLC0415 - one stat per call, never cached
+
+        if self._path.endswith(".tar"):
+            return
+        marker = _ext.operation_marker(self._path)
+        if marker is not None and marker["operation"] == "remove-annotations":
+            err = _ext.WriteConflictError(
+                "the annotations cannot be read reliably: an annotation edit "
+                "(remove_annotations) was interrupted, so a level's annotation files may be "
+                "half swapped. Samples are unaffected. Run "
+                "mef3io.recover_session(path, apply=True), which finishes the edit or rolls "
+                "it back, then read again")
+            err.code = "edit-interrupted"
+            err.details = {"channel": None, "field": None, "inspect_code": None}
+            raise err
 
     def _records(self, channel, segment, level, pending: list) -> list:
         # records() with its warnings collected into `pending` (see _flush);

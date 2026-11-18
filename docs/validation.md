@@ -410,7 +410,8 @@ would do); a healthy file, including one written by the legacy stack, is
 never listed. A session left in the middle of an annotation edit
 ([`remove_annotations`](python.md#remove_annotations)) carries its operation
 marker: `recover_session(apply=True)` **first** finishes that edit (or rolls it
-back when a new file is not intact), and the dry run lists it in
+back when a new file is damaged or missing: the report then says the removal was
+NOT done, and `python -m mef3io recover` exits with status 1), and the dry run lists it in
 `report.record_edits` with what it would do; the annotation files themselves
 are not examined until then. Temporary files an interrupted edit left unused
 are reported in `report.notes` and removed with `apply`. A whole record that fails its CRC (bit rot, foreign damage; not

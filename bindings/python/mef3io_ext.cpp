@@ -270,12 +270,24 @@ void level_from_dict(nb::dict d, mef3io::RecordLevel& level, std::string& channe
   }
 }
 
+/// A time in an exact-by-content call: a whole number of microseconds (an int,
+/// or a float that is one); anything else is refused, never rounded.
+mef3io::si8 exact_time(nb::object o, const char* what) {
+  if (PyFloat_Check(o.ptr())) {
+    const double v = nb::cast<double>(o);
+    if (!std::isfinite(v) || std::floor(v) != v)
+      throw std::invalid_argument(std::string(what) + " must be a whole number of microseconds, got " +
+                                  std::to_string(v));
+  }
+  return to_si8(o, what);
+}
+
 mef3io::RecordSelector selector_from_dict(nb::dict d) {
   mef3io::RecordSelector s;
   if (!d.contains("type")) throw std::invalid_argument("a selector needs a record type");
   if (!d.contains("time")) throw std::invalid_argument("a selector needs the record's time");
   s.type = nb::cast<std::string>(d["type"]);
-  s.time = to_si8(d["time"], "record time");
+  s.time = exact_time(d["time"], "a selector's time");
   level_from_dict(d, s.level, s.channel, s.segment);
   for (auto item : d) {
     const std::string key = nb::cast<std::string>(item.first);
@@ -301,7 +313,7 @@ mef3io::Record add_record_from_dict(nb::dict d) {
   mef3io::Record r;
   r.type = d.contains("type") ? nb::cast<std::string>(d["type"]) : std::string("Note");
   if (!d.contains("time")) throw std::invalid_argument("a record to add needs its time");
-  r.time = to_si8(d["time"], "record time");
+  r.time = exact_time(d["time"], "a record's time");
   level_from_dict(d, r.level, r.channel, r.segment);
   if (d.contains("text")) {
     nb::object t = d["text"];
@@ -319,6 +331,7 @@ nb::dict interrupted_edit_dict(const mef3io::InterruptedRecordEdit& e) {
   d["id"] = e.id;
   d["files"] = e.files;
   d["action"] = e.action;
+  d["reason"] = e.reason;
   d["applied"] = e.applied;
   return d;
 }
@@ -982,6 +995,28 @@ NB_MODULE(_mef3io, m) {
       nb::arg("progress") = nb::none(),
       "Remove annotations by content (and add others) in one crash-safe rewrite of the "
       "record files of the levels involved (see mef3io.remove_annotations).");
+  // TEST SEAM: the durable steps of an edit, in order (see mef3io::testing).
+  m.def(
+      "_set_edit_observer",
+      [](nb::object fn) {
+        static nb::object* observer = new nb::object();  // leaked on purpose: no teardown order
+        if (fn.is_none()) {
+          mef3io::testing::set_edit_observer({});
+          *observer = nb::none();
+          return;
+        }
+        *observer = fn;
+        mef3io::testing::set_edit_observer([](const std::string& kind, const std::string& path) {
+          nb::gil_scoped_acquire gil;
+          try {
+            (*observer)(kind, path);
+          } catch (nb::python_error& e) {
+            throw mef3io::IoError(std::string("the edit observer raised: ") + e.what());
+          }
+        });
+      },
+      nb::arg("observer").none());
+  m.def("_set_edit_skip_flush", &mef3io::testing::set_edit_skip_flush, nb::arg("skip"));
   m.def(
       "interrupted_record_edit",
       [](const std::string& path) -> nb::object {

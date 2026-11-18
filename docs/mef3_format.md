@@ -178,7 +178,6 @@ Offsets are relative to the region; add 960 for the position in the file.
 | 7 | `rename` | `rename_session` or `fix_name_drift` (#72) changed the stored session name in place (and any description that was equal to it); stamped on every file whose header changed |
 | 8 | `transform` | the file belongs to a copy made by `transform_session` (#73): a choice of channels, new passwords, a new name or edited descriptive metadata, with every time and sample copied verbatim; stamped on every file of the copy (a region another program owns is left as it is) |
 | 9 | `segment-repaired` | stamped on a channel's **last** segment's `.tmet` when `repair_session` or `recover_session` modified **another** segment of that channel. The last segment itself was not repaired: that file only records that something earlier in its channel was. |
-
 | 10 | `records-edit` | `remove_annotations` rewrote this record file pair (`.rdat` / `.ridx`) without some of its records, or with others added; every kept record is carried over byte for byte. Stamped on both files of each rewritten pair. |
 
 `segment-repaired` exists so that one file per channel, the last segment's
