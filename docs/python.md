@@ -288,8 +288,9 @@ refused until `recover_session` has repaired the file (see
 ### `remove_annotations`
 
 ```python
-mef3io.remove_annotations(path, remove, add=(), *, password1="", password2="",
-                          all_copies=False, dry_run=False, cancel=None, progress=None)
+mef3io.remove_annotations(path, remove=(), add=(), *, password1="", password2="",
+                          all_copies=False, dry_run=False, assume_owner_gone=False,
+                          cancel=None, progress=None)
 ```
 
 Removes stored annotations **by content** and, in the same call, may add
@@ -315,7 +316,10 @@ report.removed, report.added          # 1, 1
   `all_copies=True`), fewer (`count-mismatch`) or names a record another
   selector names (`selectors-overlap`) is refused with `.code` on the
   exception, and **nothing is removed**: the call is all or nothing, across
-  levels.
+  levels. Refusals about the session or the selection carry a `.code`; an
+  argument of the wrong type or form (a fractional or non-numeric `time`, an
+  unknown `level`, `remove=` given a single dict instead of a list) raises a
+  plain `ValueError` / `TypeError` without one.
 - **What is rewritten.** Only the annotation files (`.rdat` + `.ridx`) of the
   levels involved. Signal files and metadata are never opened for writing.
   Every record that stays is carried over byte for byte (body, CRC, time,

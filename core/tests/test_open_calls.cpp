@@ -170,6 +170,20 @@ double best_of_3(const std::function<void()>& fn) {
   return best;
 }
 
+// The median of `n` runs: one run is a wall-clock ratio of single measurements and
+// a noisy neighbour (a CI VM, a busy laptop) can spoil any one of them; the median
+// of several is stable while a real slowdown of every run still shows.
+double median_of(int n, const std::function<void()>& fn) {
+  std::vector<double> t;
+  for (int i = 0; i < n; ++i) {
+    const auto t0 = std::chrono::steady_clock::now();
+    fn();
+    t.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+  }
+  std::sort(t.begin(), t.end());
+  return t[t.size() / 2];
+}
+
 // Every folder of a tar session lists exactly as the same folder on disk.
 void require_same_listings(const SessionSource& dir, const SessionSource& tar,
                            const std::string& rel = "") {
@@ -240,19 +254,47 @@ TEST_CASE("an open scales linearly in segments, directory and tar", "[open-calls
   // bug made it ~3-6x slower at 3200 segments; it is ~1.0-1.2x). ONE thread:
   // this pins the cost per request, and a parallel open would hide it behind
   // the tar index scan, which is serial (each header gives the next offset).
-  struct Cost { double dir, tar; };
-  auto per_segment = [](int segments) {
-    const auto path = write_session("mef3io_open_scale.mefd", 1, segments);
-    const auto tar = archive_session(path, "", true);
-    Cost c{best_of_3([&] { Session s(path, "", true, 1); }) / segments,
-           best_of_3([&] { Session s(tar, "", true, 1); }) / segments};
-    fsys::remove(tar);
-    fsys::remove_all(path);
-    return c;
+  // Noise (a busy CI VM, frequency changes) comes in phases longer than one
+  // measurement, so single numbers, even their best or median of several, can
+  // be off by 2-3x. Every round therefore times all four opens back to back,
+  // the RATIOS are formed inside the round (a phase hits all four alike), and
+  // the bounds apply to the median of the rounds' ratios. A real slowdown of
+  // the tar open or of the per-segment cost shows in every round.
+  struct Sessions { std::string dir, tar; int segments; };
+  auto make = [](const char* name, int segments) {
+    const auto path = write_session(name, 1, segments);
+    return Sessions{path, archive_session(path, "", true), segments};
   };
-  const Cost small = per_segment(100), big = per_segment(3200);
-  CAPTURE(small.dir, small.tar, big.dir, big.tar);
-  CHECK(big.dir < 3 * small.dir);
-  CHECK(big.tar < 3 * small.tar);
-  CHECK(big.tar < 2 * big.dir);
+  auto once = [](const std::function<void()>& fn) {
+    const auto t0 = std::chrono::steady_clock::now();
+    fn();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  };
+  const Sessions small = make("mef3io_open_scale_small.mefd", 100);
+  const Sessions big = make("mef3io_open_scale_big.mefd", 3200);
+  std::vector<double> dir_growth, tar_growth, tar_vs_dir;
+  for (int round = 0; round < 7; ++round) {
+    const double sd = once([&] { Session s(small.dir, "", true, 1); }) / small.segments;
+    const double st = once([&] { Session s(small.tar, "", true, 1); }) / small.segments;
+    const double bd = once([&] { Session s(big.dir, "", true, 1); }) / big.segments;
+    const double bt = once([&] { Session s(big.tar, "", true, 1); }) / big.segments;
+    dir_growth.push_back(bd / sd);
+    tar_growth.push_back(bt / st);
+    tar_vs_dir.push_back(bt / bd);
+  }
+  auto median = [](std::vector<double> v) {
+    std::sort(v.begin(), v.end());
+    return v[v.size() / 2];
+  };
+  const double dg = median(dir_growth), tg = median(tar_growth), tv = median(tar_vs_dir);
+  CAPTURE(dg, tg, tv);
+  if (std::getenv("MEF3IO_PRINT_TIMINGS"))
+    std::printf("RATIOS dir-growth %.3g tar-growth %.3g tar-vs-dir %.3g\n", dg, tg, tv);
+  fsys::remove(small.tar);
+  fsys::remove_all(small.dir);
+  fsys::remove(big.tar);
+  fsys::remove_all(big.dir);
+  CHECK(dg < 3);   // per-segment cost of a directory open, 32x the segments
+  CHECK(tg < 3);   // the same through a tar
+  CHECK(tv < 2);   // a tar opens about as fast as the same session on disk
 }

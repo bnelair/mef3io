@@ -91,8 +91,6 @@ def remove_annotations(
     assume_owner_gone: bool = False,
     cancel: Optional[CancelToken] = None,
     progress: Optional[ProgressCallback] = None,
-    _crash_at: int = -1,
-    _fail_at: int = -1,
 ) -> RemoveAnnotationsReport:
     """Remove stored annotations by content, and optionally add others.
 
@@ -194,8 +192,12 @@ def remove_annotations(
     IoError
         A tar archive (``tar-read-only``), a path that is not a ``.mefd``
         folder, or a failure while swapping the files (``edit-failed``; the
-        old files are put back). Every refusal exception has a stable
-        ``.code``.
+        old files are put back). Every refusal about the session or the
+        selection (everything listed above) carries a stable ``.code``; an
+        argument of the wrong type or form (a fractional or non-numeric
+        selector ``time``, an unknown ``level``, ``remove=`` given a single
+        dict instead of a list) raises plain ``ValueError`` / ``TypeError``
+        with ``.code`` ``None``.
     Cancelled
         ``cancel`` was set in time.
 
@@ -233,6 +235,29 @@ def remove_annotations(
     >>> mef3io.remove_annotations(path, remove=wrong,
     ...                           add=[{"time": wrong[0]["time"], "text": "fixed"}])
     """
+    return _remove_annotations(
+        path, remove, add, password1=password1, password2=password2,
+        all_copies=all_copies, dry_run=dry_run, assume_owner_gone=assume_owner_gone,
+        cancel=cancel, progress=progress)
+
+
+def _remove_annotations(
+    path,
+    remove,
+    add,
+    *,
+    password1: str = "",
+    password2: str = "",
+    all_copies: bool = False,
+    dry_run: bool = False,
+    assume_owner_gone: bool = False,
+    cancel=None,
+    progress=None,
+    _crash_at: int = -1,
+    _fail_at: int = -1,
+) -> RemoveAnnotationsReport:
+    """:func:`remove_annotations` with the test hooks (a simulated crash or
+    failure at step ``_crash_at`` / ``_fail_at``); the public call passes -1."""
     for name, value in (("remove", remove), ("add", add)):
         if isinstance(value, (Mapping, str, bytes)):
             raise TypeError(f"{name} must be a list of dicts (one per record), not a single "

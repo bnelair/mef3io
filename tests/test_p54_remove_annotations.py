@@ -605,7 +605,7 @@ def _crash_session(tmp_path, name, password=None):
 def _crash_run(p, *, password=None, crash_at=-1, fail_at=-1):
     rec = _records(p, password=(password[1] if password else ""), level="session")[1]
     kc = _records(p, password=(password[1] if password else ""), level="channel", channel="ch1")[0]
-    return mef3io.remove_annotations(p, [rec, kc], add=[_note(2, "b fixed")],
+    return mef3io.annotations._remove_annotations(p, [rec, kc], add=[_note(2, "b fixed")],
                                      _crash_at=crash_at, _fail_at=fail_at, **_pw(password))
 
 
@@ -1344,7 +1344,7 @@ def _three_channel_session(tmp_path, name):
 def _three_channel_run(p, crash_at=-1):
     rm = [_records(p, level="session")[1]] + [
         _records(p, channel=ch, level="channel")[0] for ch in ("ch1", "ch2", "ch3")]
-    return mef3io.remove_annotations(p, rm, add=[_note(2, "b fixed")], _crash_at=crash_at)
+    return mef3io.annotations._remove_annotations(p, rm, add=[_note(2, "b fixed")], _crash_at=crash_at)
 
 
 def _levels(p):
@@ -1489,7 +1489,7 @@ def test_inspect_json_reports_no_channel_count_while_an_edit_is_interrupted(tmp_
 def _fail_then_crash_in_rollback(p, fail_at, crash_at):
     rm = [_records(p, level="session")[1]] + [
         _records(p, channel=ch, level="channel")[0] for ch in ("ch1", "ch2", "ch3")]
-    return mef3io.remove_annotations(p, rm, add=[_note(2, "b fixed")],
+    return mef3io.annotations._remove_annotations(p, rm, add=[_note(2, "b fixed")],
                                      _fail_at=fail_at, _crash_at=crash_at)
 
 
