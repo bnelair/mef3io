@@ -196,8 +196,8 @@ def remove_annotations(
         selection (everything listed above) carries a stable ``.code``; an
         argument of the wrong type or form (a fractional or non-numeric
         selector ``time``, an unknown ``level``, ``remove=`` given a single
-        dict instead of a list) raises plain ``ValueError`` / ``TypeError``
-        with ``.code`` ``None``.
+        dict instead of a list) raises plain ``ValueError`` / ``TypeError``,
+        which has no ``.code`` attribute.
     Cancelled
         ``cancel`` was set in time.
 

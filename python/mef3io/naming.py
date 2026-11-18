@@ -234,7 +234,8 @@ def _descriptions(descriptions: Optional[Sequence[str]]) -> Optional[List[str]]:
 
 
 def rename_session(path, new_name: str, *, password: str = "", backup_dir=None,
-                   descriptions: Optional[Sequence[str]] = None) -> RenameReport:
+                   descriptions: Optional[Sequence[str]] = None,
+                   _crash_at: int = -1, _fail_at: int = -1) -> RenameReport:
     """Rename a ``.mefd`` session in every place its name lives.
 
     A session's name is stored in four places, and other MEF software reads
@@ -298,13 +299,6 @@ def rename_session(path, new_name: str, *, password: str = "", backup_dir=None,
     names decomposed) a long accented name can be refused by the file
     system at the last step; the operation is then rolled back.
     """
-    return _rename_session(path, new_name, password=password, backup_dir=backup_dir,
-                           descriptions=descriptions)
-
-
-def _rename_session(path, new_name, *, password="", backup_dir=None, descriptions=None,
-                    _crash_at: int = -1, _fail_at: int = -1) -> RenameReport:
-    """:func:`rename_session` with the test hooks (a simulated crash or failure)."""
     d = _backend().rename_session(os.fspath(path), new_name, password or "",
                                   os.fspath(backup_dir) if backup_dir else "",
                                   _descriptions(descriptions), _crash_at, _fail_at)
@@ -312,7 +306,8 @@ def _rename_session(path, new_name, *, password="", backup_dir=None, description
 
 
 def fix_name_drift(path, target: Optional[str] = None, *, password: str = "", backup_dir=None,
-                   descriptions: Optional[Sequence[str]] = None) -> RenameReport:
+                   descriptions: Optional[Sequence[str]] = None,
+                   _crash_at: int = -1, _fail_at: int = -1) -> RenameReport:
     """Bring a session's stored names in line with its folder.
 
     For a session whose folder another tool renamed (:func:`name_drift`
@@ -326,13 +321,6 @@ def fix_name_drift(path, target: Optional[str] = None, *, password: str = "", ba
     or there are several session-level annotation files. Undo with
     ``report.undo()``.
     """
-    return _fix_name_drift(path, target, password=password, backup_dir=backup_dir,
-                           descriptions=descriptions)
-
-
-def _fix_name_drift(path, target=None, *, password="", backup_dir=None, descriptions=None,
-                    _crash_at: int = -1, _fail_at: int = -1) -> RenameReport:
-    """:func:`fix_name_drift` with the test hooks."""
     d = _backend().fix_name_drift(os.fspath(path), target or "", password or "",
                                   os.fspath(backup_dir) if backup_dir else "",
                                   _descriptions(descriptions), _crash_at, _fail_at)

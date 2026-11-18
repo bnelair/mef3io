@@ -170,20 +170,6 @@ double best_of_3(const std::function<void()>& fn) {
   return best;
 }
 
-// The median of `n` runs: one run is a wall-clock ratio of single measurements and
-// a noisy neighbour (a CI VM, a busy laptop) can spoil any one of them; the median
-// of several is stable while a real slowdown of every run still shows.
-double median_of(int n, const std::function<void()>& fn) {
-  std::vector<double> t;
-  for (int i = 0; i < n; ++i) {
-    const auto t0 = std::chrono::steady_clock::now();
-    fn();
-    t.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
-  }
-  std::sort(t.begin(), t.end());
-  return t[t.size() / 2];
-}
-
 // Every folder of a tar session lists exactly as the same folder on disk.
 void require_same_listings(const SessionSource& dir, const SessionSource& tar,
                            const std::string& rel = "") {

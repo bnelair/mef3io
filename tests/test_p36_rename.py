@@ -276,7 +276,7 @@ def test_a_crash_at_every_point_is_rolled_back(tmp_path):
         src = _session(root / "a.mefd")
         before = _files(src)
         with pytest.raises(mef3io.IoError, match="simulated crash"):
-            mef3io.naming._rename_session(src, "b", _crash_at=k)
+            mef3io.rename_session(src, "b", _crash_at=k)
         where = src if src.exists() else root / "b.mefd"
         marked = mef3io.operation_marker(where) is not None
         assert marked == (1 <= k < points - 1), k
@@ -312,7 +312,7 @@ def test_a_failure_at_every_point_is_rolled_back_in_process(tmp_path):
         src = _session(root / "a.mefd")
         before = _files(src)
         with pytest.raises(mef3io.IoError, match="simulated failure"):
-            mef3io.naming._rename_session(src, "b", _fail_at=k)
+            mef3io.rename_session(src, "b", _fail_at=k)
         assert _files(src) == before, k
         assert mef3io.operation_marker(src) is None
         assert [p.name for p in root.iterdir()] == ["a.mefd"], k
@@ -321,7 +321,7 @@ def test_a_failure_at_every_point_is_rolled_back_in_process(tmp_path):
 def test_a_copy_made_mid_operation_does_not_roll_back_the_original(tmp_path):
     src = _session(tmp_path / "a.mefd", segments=1, channels=("A",))
     with pytest.raises(mef3io.IoError):
-        mef3io.naming._rename_session(src, "b", _crash_at=3)
+        mef3io.rename_session(src, "b", _crash_at=3)
     copy = tmp_path / "c.mefd"
     shutil.copytree(src, copy)
     original = _files(src)
@@ -337,7 +337,7 @@ def test_a_rollback_keeps_an_append_made_meanwhile(tmp_path):
     crash and the rollback: the rollback restores the names, not the bytes."""
     src = _session(tmp_path / "a.mefd", segments=1, channels=("A",), description="a")
     with pytest.raises(mef3io.IoError):
-        mef3io.naming._rename_session(src, "b", _crash_at=4)
+        mef3io.rename_session(src, "b", _crash_at=4)
     marker = src / ".mef3io-operation"
     saved = marker.read_bytes()
     marker.unlink()
@@ -360,7 +360,7 @@ def test_a_metadata_file_lost_in_a_power_cut_is_restored(tmp_path, keep):
     src = _session(tmp_path / "a.mefd", segments=1, channels=("A",))
     before = _files(src)
     with pytest.raises(mef3io.IoError):
-        mef3io.naming._rename_session(src, "b", _crash_at=6)  # every header patched
+        mef3io.rename_session(src, "b", _crash_at=6)  # every header patched
     tmet = next(src.rglob("*.tmet"))
     assert tmet.read_bytes() != before[tmet.relative_to(src).as_posix()]
     tmet.write_bytes(tmet.read_bytes()[:keep])
@@ -371,7 +371,7 @@ def test_a_metadata_file_lost_in_a_power_cut_is_restored(tmp_path, keep):
 def test_incomplete_backups_change_nothing(tmp_path):
     src = _session(tmp_path / "a.mefd", segments=1, channels=("A",))
     with pytest.raises(mef3io.IoError):
-        mef3io.naming._rename_session(src, "b", _crash_at=4)
+        mef3io.rename_session(src, "b", _crash_at=4)
     (blob,) = (tmp_path / "a.mefd.repair-backup").glob("*.backup")
     blob.write_bytes(blob.read_bytes()[:-100])
     mid = _files(src)
@@ -384,7 +384,7 @@ def test_rollback_restores_the_old_bytes(tmp_path):
     src = _session(tmp_path / "a.mefd", description="a")
     before = _files(src)
     with pytest.raises(mef3io.IoError):
-        mef3io.naming._rename_session(src, "b", _crash_at=6)  # mid-headers
+        mef3io.rename_session(src, "b", _crash_at=6)  # mid-headers
     # Roll back by renaming to the old name's opposite... the next call
     # rolls back first; a rename to "a" after that is refused as "already
     # named", which proves the rollback left "a" in place.
@@ -397,7 +397,7 @@ def test_rollback_restores_the_old_bytes(tmp_path):
 def test_the_journal_names_temporary_entries_by_token(tmp_path):
     src = _session(tmp_path / ("n" * 200 + ".mefd"), segments=1, channels=("A",))
     with pytest.raises(mef3io.IoError):
-        mef3io.naming._rename_session(src, "m" * 250, _crash_at=1)
+        mef3io.rename_session(src, "m" * 250, _crash_at=1)
     backup = tmp_path / ("n" * 200 + ".mefd.repair-backup")
     (journal,) = backup.glob("*.journal")
     text = journal.read_text()
@@ -414,7 +414,7 @@ def test_the_journal_names_temporary_entries_by_token(tmp_path):
 def test_a_marker_without_its_journal(tmp_path):
     src = _session(tmp_path / "a.mefd", segments=1, channels=("A",))
     with pytest.raises(mef3io.IoError):
-        mef3io.naming._rename_session(src, "b", _crash_at=4)  # some headers changed
+        mef3io.rename_session(src, "b", _crash_at=4)  # some headers changed
     shutil.rmtree(tmp_path / "a.mefd.repair-backup")  # the journal is lost
     for call in (lambda: mef3io.rename_session(src, "c"),
                  lambda: mef3io.fix_name_drift(src),
@@ -430,7 +430,7 @@ def test_a_marker_without_its_journal(tmp_path):
     # Nothing changed yet (crash right after the marker): clearing is allowed.
     other = _session(tmp_path / "x.mefd", segments=1, channels=("A",))
     with pytest.raises(mef3io.IoError):
-        mef3io.naming._rename_session(other, "y", _crash_at=1)
+        mef3io.rename_session(other, "y", _crash_at=1)
     shutil.rmtree(tmp_path / "x.mefd.repair-backup")
     mef3io.clear_operation_marker(other)
     assert mef3io.operation_marker(other) is None
@@ -442,7 +442,7 @@ def test_a_marker_without_its_journal(tmp_path):
 def test_a_copy_refuses_a_source_mid_operation(tmp_path):
     src = _session(tmp_path / "a.mefd", segments=1, channels=("A",))
     with pytest.raises(mef3io.IoError):
-        mef3io.naming._rename_session(src, "b", _crash_at=1)
+        mef3io.rename_session(src, "b", _crash_at=1)
     check = mef3io.transform.check(src, tmp_path / "copy.mefd")
     assert "source-mid-operation" in [r.code for r in check.refusals]
 
@@ -462,7 +462,7 @@ def test_backup_dir_holds_the_journal_and_is_emptied(tmp_path):
     backups = tmp_path / "private"
     backups.mkdir()
     with pytest.raises(mef3io.IoError):
-        mef3io.naming._rename_session(src, "b", backup_dir=backups, _crash_at=3)
+        mef3io.rename_session(src, "b", backup_dir=backups, _crash_at=3)
     assert len(list(backups.glob("*.journal"))) == 1
     # Without the backup folder the journal is not found: refused.
     with pytest.raises(mef3io.WriteConflictError):
