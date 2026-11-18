@@ -50,7 +50,10 @@ class TarIndex {
 /// session dir (".timd" trees at top level) work too.
 class TarSource : public SessionSource {
  public:
-  explicit TarSource(const std::string& tar_path);
+  /// `cache` (make_reader_cache): the archive is read through ONE kept open
+  /// handle (positional reads), not opened per request; null = open per read.
+  explicit TarSource(const std::string& tar_path,
+                     std::shared_ptr<detail::HandleCache> cache = nullptr);
 
   std::vector<SourceDirEntry> list_dir(const std::string& rel) const override;
   bool exists(const std::string& rel) const override;
@@ -63,9 +66,14 @@ class TarSource : public SessionSource {
   /// The in-archive session folder's name; the archive file's name only when
   /// the archive has no single root folder.
   std::string session_name() const override;
+  void set_open_files(std::size_t n) const override;
+  std::size_t open_files() const override;
+  void release_open_files() const override;
+  std::size_t open_file_count() const override;
 
  private:
   const TarMember& member(const std::string& rel) const;
+  std::shared_ptr<detail::HandleCache> cache_;  // null = open the archive per read
 
   std::string tar_path_;
   std::string root_;                        // stripped member prefix ("" if none)

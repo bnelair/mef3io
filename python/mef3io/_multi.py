@@ -24,6 +24,7 @@ import numpy as np
 
 from ._cancel import CancelToken, Cancelled, _hooks
 from ._reader import (Reader, UnscaledSamplesWarning, _Announced, _channels_argument,
+                      _check_open_files,
                       _check_threads, _effective_factor, _float32_argument, _flush,
                       _format_error, _one_rate_message, _unscaled_warning_text,
                       _unusable_rate_message,
@@ -317,10 +318,20 @@ class MultiReader:
         cache=None,
         warn_declarations: bool = True,
         strict: bool = True,
+        open_files: int | None = None,
     ):
         given = _paths_argument(paths)
         caches = _cache_argument(cache, len(given))
         self._n_threads = _check_threads(n_threads)
+        # open_files is a TOTAL for the whole MultiReader, like n_threads: the
+        # recordings never keep more files open together than this (see
+        # _share_files). None = one Reader's default.
+        given_files = _check_open_files(open_files)
+        if given_files is None:
+            from . import _mef3io  # noqa: PLC0415
+
+            given_files = int(_mef3io.default_open_files())
+        self._open_files = given_files
         self._closed = False
         self._lock = threading.Lock()
         self._announced = _Announced()  # warnings given once (UnscaledSamplesWarning)
@@ -333,7 +344,8 @@ class MultiReader:
 
         def open_one(i):
             return Reader(given[i], password, backend, per_open, caches[i],
-                          warn_declarations, strict, _defer_warnings=True)
+                          warn_declarations, strict, given_files // len(given),
+                          _defer_warnings=True)
 
         opened: list = [None] * len(given)
         error = None
@@ -698,6 +710,7 @@ class MultiReader:
         # (each part's count is passed per call, privately: Reader._read_raw's
         # _split). A read inside one recording gets all of it.
         workers, per_read = _split(_resolve(self._n_threads), len(touched))
+        self._share_files(touched)
 
         internal = None
         if cancel is None and len(touched) > 1:
@@ -1038,6 +1051,54 @@ class MultiReader:
             _, per_open = self._open_split(len(self._readers))
             for r in self._readers:
                 r.n_threads = per_open
+
+    @property
+    def open_files(self) -> int:
+        """How many data files this MultiReader may keep open between calls, IN TOTAL.
+
+        Like :attr:`n_threads` it is one budget for all recordings: a read
+        gives each recording it touches an equal share and lets the files of
+        the others go, so the count never exceeds this however many recordings
+        there are. ``0`` keeps nothing open. Settable at any time; results never
+        depend on it. See :attr:`Reader.open_files`.
+        """
+        return self._open_files
+
+    @open_files.setter
+    def open_files(self, value: int) -> None:
+        value = _check_open_files(value)
+        if value is None:
+            raise TypeError("open_files must be an int, not None")
+        with self._lock:
+            self._open_files = value
+            # Until the next read says which recordings are in use, each
+            # recording holds an equal share: the total is never exceeded.
+            share = value // max(1, len(self._readers))
+            for r in self._readers:
+                r.open_files = share
+
+    def release_files(self) -> None:
+        """Close every data file every recording keeps open, now (see :meth:`Reader.release_files`)."""
+        for r in self._readers:
+            r.release_files()
+
+    def _share_files(self, touched: list) -> None:
+        """Give the recordings a read touches the file budget, the others none.
+
+        An equal share each (a read inside one recording gets all of it), and
+        a recording left alone lets its files go: paging through a day-by-day
+        stack keeps the budget with the day being read. Called from every read;
+        a no-op while the shares already stand.
+        """
+        if not touched:
+            return
+        with self._lock:
+            share = self._open_files // len(touched)
+            want = dict.fromkeys(touched, share)
+            for k, r in enumerate(self._readers):
+                n = want.get(k, 0)
+                if r._open_files != n:
+                    r.open_files = n
 
     def _segment_map(self, channel: str):
         """``({(k, folder number): number in segments()}, segments list)``, cached."""

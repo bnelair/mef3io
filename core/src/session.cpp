@@ -36,7 +36,7 @@ std::size_t index_entry_count(std::span<const ui1> idx, const std::string& path)
 }  // namespace
 
 Session::Session(const std::string& mefd_path, std::string password, bool strict, int n_threads)
-    : mefd_path_(mefd_path), source_(open_session_source(mefd_path)),
+    : mefd_path_(mefd_path), source_(open_session_source(mefd_path, detail::default_open_files())),
       password_(std::move(password)), strict_(strict) {
   n_threads_.store(check_threads(n_threads));
   discover();
@@ -317,11 +317,11 @@ std::vector<DataRun> Session::read_runs(const std::string& channel, std::optiona
       range_begin = std::min(range_begin, off);
       range_end = std::max(range_end, off + e.block_bytes);
     }
-    const std::size_t tdat_size = static_cast<std::size_t>(source_->file_size(seg.tdat_path));
-    if (range_end > tdat_size)
+    bool past_end = false;
+    const std::vector<ui1> tdat =
+        source_->read_extent(seg.tdat_path, range_begin, range_end - range_begin, past_end);
+    if (past_end)
       throw FormatError("index points past end of .tdat: " + source_->describe(seg.tdat_path));
-    const std::vector<ui1> tdat = source_->read_range(seg.tdat_path, range_begin,
-                                                      range_end - range_begin);
 
     const sf8 factor = md.section2.units_conversion_factor;
     for (const auto& e : hits) {
@@ -726,12 +726,13 @@ BlockJobs Session::fetch_blocks(const std::string& channel, BlockSelection&& sel
       range_begin = std::min(range_begin, off);
       range_end = std::max(range_end, off + e.block_bytes);
     }
-    const std::size_t tdat_size = static_cast<std::size_t>(source_->file_size(seg.tdat_path));
-    if (range_end > tdat_size)
+    bool past_end = false;
+    auto extent =
+        source_->read_extent(seg.tdat_path, range_begin, range_end - range_begin, past_end);
+    if (past_end)
       throw FormatError("index points past end of .tdat: " + source_->describe(seg.tdat_path));
     std::size_t buf_index = out.buffers.size();
-    out.buffers.push_back(
-        source_->read_range(seg.tdat_path, range_begin, range_end - range_begin));
+    out.buffers.push_back(std::move(extent));
     const std::vector<ui1>& buf = out.buffers[buf_index];
     for (std::size_t hi = 0; hi < hits.size(); ++hi) {
       const auto& e = hits[hi];

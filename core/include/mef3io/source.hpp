@@ -58,11 +58,66 @@ class SessionSource {
   /// without ".mefd". For an archive that is the folder INSIDE it, not the
   /// archive's own file name, which can be renamed freely.
   virtual std::string session_name() const = 0;
+
+  /// Read exactly [offset, offset+length) of a file that the caller has
+  /// already checked against an INDEX, or report that the file is shorter
+  /// (`past_end` = true, nothing returned) — what `file_size` followed by
+  /// `read_range` answers, in one call. The default is exactly that pair; a
+  /// source that keeps files open overrides it so the size check and the read
+  /// share one look at the file (a reader paging through a recording on a
+  /// network drive: every request is a round trip).
+  virtual std::vector<ui1> read_extent(const std::string& rel, std::size_t offset,
+                                       std::size_t length, bool& past_end) const {
+    past_end = false;
+    const std::uint64_t size = file_size(rel);
+    if (offset > size || length > size - offset) {
+      past_end = true;
+      return {};
+    }
+    return read_range(rel, offset, length);
+  }
+
+  // --- Kept-open files (a Reader/Session's own, see detail::HandleCache) ----
+  // Every one is a no-op / 0 for a source that keeps nothing open (a plain
+  // source, or a tar's member table). Safe to call while other threads read.
+
+  /// How many files may be kept open between calls (0 = none: every read opens
+  /// and closes its file, as before). Takes effect now: extra handles close.
+  virtual void set_open_files(std::size_t) const {}
+  /// The cap as set.
+  virtual std::size_t open_files() const { return 0; }
+  /// Close every kept file now (a handle a thread is reading from closes when
+  /// that read ends). The next read opens again.
+  virtual void release_open_files() const {}
+  /// How many files are kept open right now (tests, diagnostics).
+  virtual std::size_t open_file_count() const { return 0; }
 };
 
 namespace detail {
 class HandleCache;
-}
+
+/// The default cap of kept-open files for one Reader/Session: 128, and at most
+/// a quarter of the process's descriptor limit (macOS: 256 -> 64), 0 when the
+/// limit is tiny. Windows has no such limit: 128.
+std::size_t default_open_files();
+/// A cache that keeps at most `cap` READ-ONLY .tdat files (and a tar archive)
+/// open for one Reader. It never memoizes anything (sizes, listings, contents
+/// are always asked of the file system), and validates a kept handle against
+/// the path on every use (see DirectorySource::read_extent).
+std::shared_ptr<HandleCache> make_reader_cache(std::size_t cap);
+void set_cache_cap(HandleCache& c, std::size_t cap);
+std::size_t cache_cap(HandleCache& c);
+void release_cache(HandleCache& c);
+std::size_t cache_open_count(HandleCache& c);
+/// Read [offset, offset+length) of the file at `path` through a kept handle
+/// (opening and keeping it if needed), after checking the handle still is the
+/// file at that path. false = not served this way (cap 0, a file that cannot be
+/// opened, a path that does not exist: the caller reads the plain way and
+/// raises its usual error). true = served: `out` holds the bytes, or
+/// `past_end` says the file is shorter than offset+length.
+bool kept_pread(HandleCache& c, const std::string& path, std::size_t offset, std::size_t length,
+                std::vector<ui1>& out, bool& past_end);
+}  // namespace detail
 
 /// Plain directory tree on the local filesystem (the classic .mefd layout).
 class DirectorySource : public SessionSource {
@@ -81,8 +136,23 @@ class DirectorySource : public SessionSource {
                               std::size_t length) const override;
   std::string describe(const std::string& rel) const override;
   std::string session_name() const override;
+  /// With a Reader's cache (make_reader_cache): a .tdat extent through a kept
+  /// handle, ONE path stat + ONE positional read per call (no open, no close).
+  /// The stat both sizes the file now (an in-place append is seen) and proves
+  /// the handle still IS the file at the path: a file replaced, recreated or
+  /// removed since the handle was opened is never read through the old handle
+  /// (the new one is opened; a missing one raises the plain open's error).
+  std::vector<ui1> read_extent(const std::string& rel, std::size_t offset, std::size_t length,
+                               bool& past_end) const override;
+  void set_open_files(std::size_t n) const override;
+  std::size_t open_files() const override;
+  void release_open_files() const override;
+  std::size_t open_file_count() const override;
 
  private:
+  /// The copy engine's cache (memos + handles for every file); null for a
+  /// Reader's cache, which never memoizes.
+  detail::HandleCache* memo_cache() const;
   std::string join(const std::string& rel) const;
   std::shared_ptr<const std::vector<ui1>> memo_get(const std::string& path, const std::string& rel,
                                                    bool fill) const;
@@ -171,5 +241,12 @@ std::string session_name_from_path(std::string path);
 /// (TarSource; compressed archives are rejected with a clear message).
 /// Naming is enforced: directories must end ".mefd", archives ".mefd.tar".
 std::shared_ptr<const SessionSource> open_session_source(const std::string& path);
+
+/// The same, for a READER: the source keeps up to `open_files` data files open
+/// between calls (0 = none; changeable later through set_open_files). Used by
+/// Session's path constructor; every other caller (validate, inspect, copies,
+/// rename) keeps the plain one above.
+std::shared_ptr<const SessionSource> open_session_source(const std::string& path,
+                                                         std::size_t open_files);
 
 }  // namespace mef3io

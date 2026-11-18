@@ -92,6 +92,9 @@ struct Handle {
   }
 #endif
   std::uint64_t size = 0;
+  // Which file this handle is (POSIX: device + inode; Windows: creation time),
+  // taken from the open handle; only set for a Reader's cache.
+  std::uint64_t id1 = 0, id2 = 0;
 };
 
 /// The open handles and the answers of the sources bound to one scope.
@@ -103,6 +106,9 @@ class HandleCache {
   std::list<std::pair<std::string, std::shared_ptr<Handle>>> lru;  // front = newest
   std::unordered_map<std::string, decltype(lru)::iterator> index;
   std::size_t cap = 0;
+  // A Reader's cache (make_reader_cache): handles only, for .tdat files and a
+  // tar archive; no memo of any answer; every use is validated against the path.
+  bool reader_mode = false;
   // What the bound sources were told already (their files do not change while
   // the scope lives): whether a path exists, a file's size, a folder listing.
   std::unordered_map<std::string, bool> exists_memo;
@@ -186,21 +192,40 @@ namespace {
 using detail::Handle;
 using detail::HandleCache;
 
-std::shared_ptr<Handle> open_handle(const std::string& path, std::uint64_t known_size);
+std::shared_ptr<Handle> open_handle(const std::string& path, std::uint64_t known_size,
+                                    bool want_ids = false);
+
+/// What a path (or an open handle) says about the file: its size, and which
+/// file it is. POSIX: device + inode. Windows: the creation time (a path query
+/// has no file index); a file recreated or replaced has another one.
+struct Stamp {
+  bool ok = false;
+  std::uint64_t size = 0, id1 = 0, id2 = 0;
+};
 
 /// The cached handle of `path`, opening it if it is not open yet; null =
 /// cannot be opened (the caller takes the plain path, which raises its usual
 /// error). One thread opens a given path at a time; the others wait for it
 /// and share the handle, so a file is opened once however many threads ask.
-std::shared_ptr<Handle> acquire(HandleCache& c, const std::string& path) {
+/// With `expect` (a Reader's cache): a cached handle whose file is not the one
+/// the path shows now is dropped and the path opened afresh.
+std::shared_ptr<Handle> acquire(HandleCache& c, const std::string& path,
+                                const Stamp* expect = nullptr) {
   std::uint64_t known_size = UINT64_MAX;  // exists() already stat'ed a regular file
+  std::shared_ptr<Handle> replaced;       // closed after the lock is released
   {
     std::unique_lock<std::mutex> lk(c.mu);
     for (;;) {
       auto it = c.index.find(path);
       if (it != c.index.end()) {
-        c.lru.splice(c.lru.begin(), c.lru, it->second);
-        return it->second->second;
+        const Handle& have = *it->second->second;
+        if (!expect || (have.id1 == expect->id1 && have.id2 == expect->id2)) {
+          c.lru.splice(c.lru.begin(), c.lru, it->second);
+          return it->second->second;
+        }
+        replaced = std::move(it->second->second);  // another file now: forget this one
+        c.lru.erase(it->second);
+        c.index.erase(it);
       }
       if (!c.opening.count(path)) break;
       c.opened.wait(lk);
@@ -219,7 +244,7 @@ std::shared_ptr<Handle> acquire(HandleCache& c, const std::string& path) {
     }
   } done{c, path};
   if (detail::source_open_observer) detail::source_open_observer(path);
-  auto h = open_handle(path, known_size);
+  auto h = open_handle(path, known_size, expect != nullptr);
   if (!h) return nullptr;
   std::vector<std::shared_ptr<Handle>> doomed;
   {
@@ -250,7 +275,7 @@ void evict(HandleCache& c, const std::string& path, const std::shared_ptr<Handle
 template <class Map, class F>
 auto memoized(HandleCache* c, Map& (*pick)(HandleCache&), const std::string& path, F&& fill)
     -> decltype(fill()) {
-  if (!c) return fill();
+  if (!c || c->reader_mode) return fill();
   {
     std::lock_guard<std::mutex> lk(c->mu);
     auto& m = pick(*c);
@@ -356,7 +381,8 @@ bool with_handle(HandleCache* c, const std::string& path, F&& fn) {
 
 /// Open `path` for positional reads; null if it cannot be opened or is not a
 /// regular file. `known_size` (UINT64_MAX = unknown) saves the size query.
-std::shared_ptr<Handle> open_handle(const std::string& text, std::uint64_t known_size) {
+std::shared_ptr<Handle> open_handle(const std::string& text, std::uint64_t known_size,
+                                    bool want_ids) {
   auto h = std::make_shared<Handle>();
   h->path = text;
   const fs::path path = detail::utf8_path(text);
@@ -373,15 +399,23 @@ std::shared_ptr<Handle> open_handle(const std::string& text, std::uint64_t known
     if (!GetFileSizeEx(h->fd, &sz)) return nullptr;  // ~Handle closes
     h->size = static_cast<std::uint64_t>(sz.QuadPart);
   }
+  if (want_ids) {
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(h->fd, &info)) return nullptr;  // ~Handle closes
+    h->id1 = (static_cast<std::uint64_t>(info.ftCreationTime.dwHighDateTime) << 32) |
+             info.ftCreationTime.dwLowDateTime;
+  }
 #else
   h->fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
   if (h->fd < 0) return nullptr;
-  if (known_size != UINT64_MAX) {
+  if (known_size != UINT64_MAX && !want_ids) {
     h->size = known_size;
   } else {
     struct stat st {};
     if (::fstat(h->fd, &st) != 0 || !S_ISREG(st.st_mode)) return nullptr;  // ~Handle closes
     h->size = static_cast<std::uint64_t>(st.st_size);
+    h->id1 = static_cast<std::uint64_t>(st.st_dev);
+    h->id2 = static_cast<std::uint64_t>(st.st_ino);
   }
 #endif
   return h;
@@ -409,12 +443,182 @@ bool stat_exists(const fs::path& path, std::uint64_t& size) {
 #endif
 }
 
+/// The stamp of the regular file at `path` (not ok: missing, or not a regular
+/// file). ONE query.
+Stamp stat_stamp(const fs::path& path) {
+  Stamp s;
+#ifdef _WIN32
+  WIN32_FILE_ATTRIBUTE_DATA d{};
+  if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &d)) return s;
+  if (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return s;
+  s.size = (static_cast<std::uint64_t>(d.nFileSizeHigh) << 32) | d.nFileSizeLow;
+  s.id1 = (static_cast<std::uint64_t>(d.ftCreationTime.dwHighDateTime) << 32) |
+          d.ftCreationTime.dwLowDateTime;
+  s.ok = true;
+#else
+  struct stat st {};
+  if (::stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return s;
+  s.size = static_cast<std::uint64_t>(st.st_size);
+  s.id1 = static_cast<std::uint64_t>(st.st_dev);
+  s.id2 = static_cast<std::uint64_t>(st.st_ino);
+  s.ok = true;
+#endif
+  return s;
+}
+
+/// The file's size as the OPEN handle sees it. POSIX: the path stat just made
+/// is exact (same inode, checked). Windows: the directory entry's size can lag
+/// behind a writer that still holds the file, the handle's cannot.
+std::uint64_t current_size(const Handle& h, const Stamp& from_path) {
+#ifdef _WIN32
+  LARGE_INTEGER sz{};
+  if (GetFileSizeEx(h.fd, &sz)) return static_cast<std::uint64_t>(sz.QuadPart);
+#else
+  (void)h;
+#endif
+  return from_path.size;
+}
+
+/// Close a cache's handle for `path` (a file that is gone).
+void drop(HandleCache& c, const std::string& path) {
+  std::shared_ptr<Handle> doomed;
+  std::lock_guard<std::mutex> lk(c.mu);
+  auto it = c.index.find(path);
+  if (it == c.index.end()) return;
+  doomed = std::move(it->second->second);
+  c.lru.erase(it->second);
+  c.index.erase(it);
+}
+
 }  // namespace
+
+namespace detail {
+
+std::size_t default_open_files() {
+#ifdef _WIN32
+  return 128;
+#else
+  std::size_t cap = 128;
+  struct rlimit rl {};
+  if (::getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY)
+    cap = std::min<std::size_t>(cap, static_cast<std::size_t>(rl.rlim_cur) / 4);
+  return cap;
+#endif
+}
+
+std::shared_ptr<HandleCache> make_reader_cache(std::size_t cap) {
+  auto c = std::make_shared<HandleCache>();
+  c->reader_mode = true;
+  c->cap = cap;
+  return c;
+}
+
+void set_cache_cap(HandleCache& c, std::size_t cap) {
+  std::vector<std::shared_ptr<Handle>> doomed;  // closed outside the lock
+  std::lock_guard<std::mutex> lk(c.mu);
+  c.cap = cap;
+  while (c.lru.size() > c.cap) {
+    doomed.push_back(std::move(c.lru.back().second));
+    c.index.erase(c.lru.back().first);
+    c.lru.pop_back();
+  }
+}
+
+std::size_t cache_cap(HandleCache& c) {
+  std::lock_guard<std::mutex> lk(c.mu);
+  return c.cap;
+}
+
+void release_cache(HandleCache& c) {
+  std::vector<std::shared_ptr<Handle>> doomed;
+  std::lock_guard<std::mutex> lk(c.mu);
+  for (auto& e : c.lru) doomed.push_back(std::move(e.second));
+  c.lru.clear();
+  c.index.clear();
+}
+
+std::size_t cache_open_count(HandleCache& c) {
+  std::lock_guard<std::mutex> lk(c.mu);
+  return c.lru.size();
+}
+
+bool kept_pread(HandleCache& c, const std::string& path, std::size_t offset, std::size_t length,
+                std::vector<ui1>& out, bool& past_end) {
+  {
+    std::lock_guard<std::mutex> lk(c.mu);
+    if (c.cap == 0) return false;
+  }
+  const fs::path native = utf8_path(path);
+  for (int attempt = 0;; ++attempt) {
+    // ONE query: the file's size now and which file the path names. It replaces
+    // the plain path's size query and proves the kept handle is still this file.
+    const Stamp now = stat_stamp(native);
+    if (!now.ok) {
+      drop(c, path);
+      return false;  // the plain read raises its usual error
+    }
+    const auto h = acquire(c, path, &now);
+    if (!h) return false;
+    const std::uint64_t size = current_size(*h, now);
+    if (offset > size || length > size - offset) {
+      past_end = true;
+      return true;
+    }
+    try {
+      out.assign(length, 0);
+      if (length && !pread_full(*h, offset, length, out.data())) {
+        evict(c, path, h);  // shrank since the size was taken
+        out.clear();
+        past_end = true;
+        return true;
+      }
+      past_end = false;
+      return true;
+    } catch (const StaleRead& e) {
+      evict(c, path, h);
+      if (attempt == 1) throw IoError(e.what + " (also after reopening)");
+    }
+  }
+}
+
+}  // namespace detail
 
 DirectorySource::DirectorySource(std::string root) : root_(std::move(root)) {}
 
 DirectorySource::DirectorySource(std::string root, std::shared_ptr<detail::HandleCache> cache)
     : root_(std::move(root)), cache_(std::move(cache)) {}
+
+detail::HandleCache* DirectorySource::memo_cache() const {
+  return cache_ && !cache_->reader_mode ? cache_.get() : nullptr;
+}
+
+std::vector<ui1> DirectorySource::read_extent(const std::string& rel, std::size_t offset,
+                                              std::size_t length, bool& past_end) const {
+  if (cache_ && cache_->reader_mode) {
+    const std::string path = join(rel);
+    if (path.size() > 5 && path.compare(path.size() - 5, 5, ".tdat") == 0) {
+      std::vector<ui1> out;
+      if (detail::kept_pread(*cache_, path, offset, length, out, past_end)) return out;
+    }
+  }
+  return SessionSource::read_extent(rel, offset, length, past_end);
+}
+
+void DirectorySource::set_open_files(std::size_t n) const {
+  if (cache_ && cache_->reader_mode) detail::set_cache_cap(*cache_, n);
+}
+
+std::size_t DirectorySource::open_files() const {
+  return cache_ && cache_->reader_mode ? detail::cache_cap(*cache_) : 0;
+}
+
+void DirectorySource::release_open_files() const {
+  if (cache_ && cache_->reader_mode) detail::release_cache(*cache_);
+}
+
+std::size_t DirectorySource::open_file_count() const {
+  return cache_ && cache_->reader_mode ? detail::cache_open_count(*cache_) : 0;
+}
 
 std::string DirectorySource::join(const std::string& rel) const {
   if (rel.empty()) return root_;
@@ -430,12 +634,12 @@ std::vector<SourceDirEntry> DirectorySource::list_dir(const std::string& rel) co
     return out;
   };
   return memoized<decltype(HandleCache::dir_memo)>(
-      cache_.get(), [](HandleCache& c) -> auto& { return c.dir_memo; }, path, list);
+      memo_cache(), [](HandleCache& c) -> auto& { return c.dir_memo; }, path, list);
 }
 
 bool DirectorySource::exists(const std::string& rel) const {
   const std::string path = join(rel);
-  HandleCache* const c = cache_.get();
+  HandleCache* const c = memo_cache();
   return memoized<decltype(HandleCache::exists_memo)>(
       c, [](HandleCache& k) -> auto& { return k.exists_memo; }, path, [&] {
         // ONE query answers both "does it exist" and "how big is it".
@@ -452,7 +656,7 @@ bool DirectorySource::exists(const std::string& rel) const {
 std::uint64_t DirectorySource::file_size(const std::string& rel) const {
   const std::string path = join(rel);
   return memoized<decltype(HandleCache::size_memo)>(
-      cache_.get(), [](HandleCache& c) -> auto& { return c.size_memo; }, path,
+      memo_cache(), [](HandleCache& c) -> auto& { return c.size_memo; }, path,
       [&] { return static_cast<std::uint64_t>(fs::file_size(detail::utf8_path(path))); });
 }
 
@@ -470,7 +674,7 @@ bool memo_path(const std::string& path) {
 std::shared_ptr<const std::vector<ui1>> DirectorySource::memo_get(const std::string& path,
                                                                     const std::string& rel,
                                                                     bool fill) const {
-  HandleCache* const c = cache_.get();
+  HandleCache* const c = memo_cache();
   if (!c || !memo_path(path)) return nullptr;
   {
     std::lock_guard<std::mutex> lk(c->mu);
@@ -495,7 +699,7 @@ std::shared_ptr<const std::vector<ui1>> DirectorySource::memo_get(const std::str
 std::vector<ui1> DirectorySource::read_all(const std::string& rel) const {
   const std::string path = join(rel);
   std::vector<ui1> buf;
-  HandleCache* const mc = cache_.get();
+  HandleCache* const mc = memo_cache();
   const auto ends = [&](const char* e) { return path.size() > 5 && path.compare(path.size() - 5, 5, e) == 0; };
   const bool memoizable = mc && (ends(".tmet") || ends(".tidx") || ends(".ridx"));
   if (memoizable) {
@@ -516,7 +720,7 @@ std::vector<ui1> DirectorySource::read_all(const std::string& rel) const {
         c->bytes_memo_total += buf.size();
     }
   };
-  if (with_handle(cache_.get(), path, [&](const Handle& h) {
+  if (with_handle(memo_cache(), path, [&](const Handle& h) {
         buf.assign(static_cast<std::size_t>(h.size), 0);
         if (!pread_full(h, 0, buf.size(), buf.data())) throw IoError("short read: " + path);
       })) {
@@ -540,7 +744,7 @@ std::vector<ui1> DirectorySource::read_head(const std::string& rel, std::size_t 
   std::vector<ui1> buf;
   if (const auto m = memo_get(path, rel, /*fill=*/false))
     return std::vector<ui1>(m->begin(), m->begin() + std::min(m->size(), max_bytes));
-  if (with_handle(cache_.get(), path, [&](const Handle& h) {
+  if (with_handle(memo_cache(), path, [&](const Handle& h) {
         buf.assign(static_cast<std::size_t>(std::min<std::uint64_t>(h.size, max_bytes)), 0);
         std::size_t got = 0;
         if (!pread_full(h, 0, buf.size(), buf.data(), &got)) buf.resize(got);  // shrank: what it has
@@ -564,7 +768,7 @@ std::vector<ui1> DirectorySource::read_range(const std::string& rel, std::size_t
     if (offset > m->size() || length > m->size() - offset) throw IoError("short read: " + path);
     return std::vector<ui1>(m->begin() + offset, m->begin() + offset + length);
   }
-  if (with_handle(cache_.get(), path, [&](const Handle& h) {
+  if (with_handle(memo_cache(), path, [&](const Handle& h) {
         buf.assign(length, 0);
         if (length && !pread_full(h, offset, length, buf.data())) throw IoError("short read: " + path);
       }))
@@ -609,21 +813,34 @@ bool path_has_suffix(const std::string& path, const std::string& suffix) {
   return true;
 }
 
-std::shared_ptr<const SessionSource> open_session_source(const std::string& path) {
+namespace {
+std::shared_ptr<const SessionSource> open_source_with(const std::string& path,
+                                                      std::shared_ptr<detail::HandleCache> cache) {
   // Session naming is a safety contract: only clearly-marked paths are ever
   // opened, so a stray directory or file cannot be misread as a session.
   const fs::path native = detail::utf8_path(path);  // UTF-8 in, wide on Windows
   if (fs::is_directory(native)) {
     if (!path_has_suffix(path, ".mefd"))
       throw IoError("session directory must end with .mefd: " + path);
-    return std::make_shared<DirectorySource>(path);
+    return cache ? std::make_shared<DirectorySource>(path, std::move(cache))
+                 : std::make_shared<DirectorySource>(path);
   }
   if (fs::is_regular_file(native)) {
     if (!path_has_suffix(path, ".mefd.tar"))
       throw IoError("session archive must end with .mefd.tar: " + path);
-    return std::make_shared<TarSource>(path);
+    return std::make_shared<TarSource>(path, std::move(cache));
   }
   throw IoError("session path is not a directory or tar archive: " + path);
+}
+}  // namespace
+
+std::shared_ptr<const SessionSource> open_session_source(const std::string& path) {
+  return open_source_with(path, nullptr);
+}
+
+std::shared_ptr<const SessionSource> open_session_source(const std::string& path,
+                                                         std::size_t open_files) {
+  return open_source_with(path, detail::make_reader_cache(open_files));
 }
 
 }  // namespace mef3io

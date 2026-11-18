@@ -446,6 +446,20 @@ class Session {
   }
   std::size_t index_cache_bytes() const;
 
+  /// How many data files (.tdat; for a tar session the archive) this Session
+  /// keeps open between calls, so paging through a recording does not reopen
+  /// the same files (on a network drive every open is a round trip). Default
+  /// `detail::default_open_files()`; 0 = none (every read opens and closes its
+  /// file). A kept file is validated against its path on every read, so a file
+  /// replaced or removed meanwhile is never served stale. Safe while other
+  /// threads read; extra handles close at once.
+  void set_open_files(std::size_t n) { source_->set_open_files(n); }
+  std::size_t open_files() const { return source_->open_files(); }
+  /// Close every kept file now; the next read opens again.
+  void release_open_files() { source_->release_open_files(); }
+  /// Files kept open right now (tests, diagnostics).
+  std::size_t open_file_count() const { return source_->open_file_count(); }
+
   /// Which record levels read_records returns.
   ///
   /// `Default` keeps the historical meaning of each scope: no channel ->
