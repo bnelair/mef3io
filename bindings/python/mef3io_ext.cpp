@@ -1016,7 +1016,6 @@ NB_MODULE(_mef3io, m) {
         });
       },
       nb::arg("observer").none());
-  m.def("_set_edit_skip_flush", &mef3io::testing::set_edit_skip_flush, nb::arg("skip"));
   m.def(
       "interrupted_record_edit",
       [](const std::string& path) -> nb::object {

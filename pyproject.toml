@@ -67,6 +67,7 @@ regex = "^(?P<value>.+?)\\s*$"
 
 [tool.scikit-build.cmake.define]
 MEF3IO_BUILD_TESTS = "OFF"
+MEF3IO_TEST_SEAMS = "OFF"
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "python/mef3io"]

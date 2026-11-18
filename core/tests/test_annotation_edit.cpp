@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "mef3io/annotation_edit.hpp"
+#include "mef3io/c_api.h"
 #include "mef3io/errors.hpp"
 #include "mef3io/naming.hpp"
 #include "mef3io/reader.hpp"
@@ -200,4 +201,95 @@ TEST_CASE("remove_annotations refuses a file with bytes after the last counted r
   REQUIRE(remove_annotations(p.string(), {selector_for(recs[0])}).removed == 1);
   REQUIRE(texts(p) == std::vector<std::string>{"b", "c", "TAILREC"});
   fsys::remove_all(p.parent_path());
+}
+
+namespace {
+
+using Events = std::vector<std::pair<std::string, std::string>>;
+
+Events run_edit_recording(const char* name) {
+  const auto p = make_session(name);
+  const auto sess = stored(p), chan = stored(p, std::string("ch1"));
+  Events events;
+  testing::set_edit_observer(
+      [&](const std::string& k, const std::string& v) { events.emplace_back(k, v); });
+  remove_annotations(p.string(), {selector_for(sess[1]), selector_for(chan[0])}, {note(2, "x")});
+  testing::set_edit_observer({});
+  fsys::remove_all(p.parent_path());
+  return events;
+}
+
+/// The durable order of one edit: every new file fsynced, then a folder flush, then the
+/// marker (its part file fsynced, renamed into place, folder flushed) BEFORE the first
+/// target -> .old rename.
+bool order_holds(const Events& e) {
+  auto index = [&](const std::string& kind, const std::string& ends, std::size_t from = 0) {
+    for (std::size_t i = from; i < e.size(); ++i)
+      if (e[i].first == kind && e[i].second.size() >= ends.size() &&
+          e[i].second.compare(e[i].second.size() - ends.size(), ends.size(), ends) == 0)
+        return i;
+    return e.size();
+  };
+  std::size_t last_new_fsync = e.size();
+  for (std::size_t i = 0; i < e.size(); ++i)
+    if (e[i].first == "fsync-file" && e[i].second.size() > 4 &&
+        e[i].second.compare(e[i].second.size() - 4, 4, ".new") == 0)
+      last_new_fsync = i;
+  const std::size_t marker = index("marker-durable", "");
+  const std::size_t part_fsync = index("fsync-file", ".mef3io-operation.part");
+  if (last_new_fsync == e.size() || marker == e.size() || part_fsync == e.size()) return false;
+  bool flush_between = false;
+  for (std::size_t i = last_new_fsync; i < marker; ++i) flush_between = flush_between || e[i].first == "flush-dir";
+  bool flush_after_part = false;
+  for (std::size_t i = part_fsync; i < marker; ++i) flush_after_part = flush_after_part || e[i].first == "flush-dir";
+  std::size_t to_old = e.size();
+  for (std::size_t i = 0; i < e.size(); ++i)
+    if (e[i].first == "rename") {
+      const auto bar = e[i].second.find('|');
+      const std::string dst = e[i].second.substr(bar + 1);
+      if (dst.size() > 4 && dst.compare(dst.size() - 4, 4, ".old") == 0) {
+        to_old = i;
+        break;
+      }
+    }
+  return flush_between && flush_after_part && part_fsync < marker && marker < to_old;
+}
+
+}  // namespace
+
+TEST_CASE("the durable steps of an edit come in the required order, and the check can fail") {
+  REQUIRE(order_holds(run_edit_recording("mef3io_remove_order")));
+#ifdef MEF3IO_TEST_SEAMS
+  // negative control: an edit that skips its flushes must NOT satisfy the same check
+  testing::set_edit_skip_flush(true);
+  const auto skipped = run_edit_recording("mef3io_remove_order_skip");
+  testing::set_edit_skip_flush(false);
+  REQUIRE_FALSE(order_holds(skipped));
+#endif
+}
+
+TEST_CASE("every reader of records refuses while an edit is interrupted (C ABI included)") {
+  for (int k = 0;; ++k) {
+    const auto p = make_session("mef3io_remove_capi");
+    const auto sess = stored(p);
+    RemoveAnnotationsOptions o;
+    o.crash_at = k;
+    try {
+      remove_annotations(p.string(), {selector_for(sess[1])}, {}, o);
+      fsys::remove_all(p.parent_path());
+      break;
+    } catch (const IoError&) {
+    }
+    if (has_interrupted_edit(p.string())) {
+      REQUIRE(code_of([&] { Session(p.string(), "").read_records(); }) == "edit-interrupted");
+      mef3io_reader* r = nullptr;
+      REQUIRE(mef3io_reader_open(p.string().c_str(), "", 1, &r) == MEF3IO_OK);
+      mef3io_record_list* list = nullptr;
+      REQUIRE(mef3io_reader_read_records(r, nullptr, -1, MEF3IO_RECORD_LEVEL_ALL, &list) !=
+              MEF3IO_OK);
+      REQUIRE(std::string(mef3io_last_error()).find("annotation edit") != std::string::npos);
+      mef3io_reader_close(r);
+    }
+    fsys::remove_all(p.parent_path());
+  }
 }

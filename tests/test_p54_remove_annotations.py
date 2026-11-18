@@ -1037,12 +1037,10 @@ def test_an_unreadable_plan_with_whole_target_pairs_keeps_them_and_sets_leftover
     _break_plan(p, style)
     everything = _contents(p)
     aside = p.parent / (p.name + ".edit-leftovers")
-    with pytest.raises(mef3io.FormatError):                     # nothing else can proceed
-        mef3io.remove_annotations(p, [{"type": "Note", "time": START + S, "text": "a"}])  \
-            if False else (_ for _ in ()).throw(mef3io.FormatError("x"))
     dry = mef3io.recover_session(str(p))
     (e,) = dry.record_edits
-    assert e.action == "settle" and "kept" in e.reason and _contents(p) == everything
+    assert e.action == "roll back" and e.not_done and "NOT done" in e.reason
+    assert _contents(p) == everything
     rep = mef3io.recover_session(str(p), apply=True)
     assert rep.record_edits[0].applied
     assert mef3io.operation_marker(p) is None and _state(p) == OLD
@@ -1060,7 +1058,7 @@ def test_an_unreadable_plan_mid_swap_restores_the_old_pair_and_deletes_nothing(t
     with pytest.raises(mef3io.WriteConflictError):
         mef3io.clear_operation_marker(p)
     rep = mef3io.recover_session(str(p), apply=True)
-    assert rep.record_edits[0].action == "settle" and "NOT done" in rep.record_edits[0].reason
+    assert rep.record_edits[0].action == "roll back" and "NOT done" in rep.record_edits[0].reason
     assert mef3io.operation_marker(p) is None and _state(p) == OLD
     assert _contents(p, aside) == everything
     assert mef3io.validate_session(str(p)).ok
@@ -1151,54 +1149,58 @@ def _order_violations(events):
     """The durability order of one edit, from the recorded durable steps."""
     bad = []
     kinds = [k for k, _ in events]
-
-    def first(kind, after=0):
-        return next((i for i in range(after, len(events)) if events[i][0] == kind), None)
-
-    marker = first("marker-durable")
-    swaps = [i for i, (k, v) in enumerate(events) if k == "rename" and v.split("|")[1].find(".") > 0
-             and not v.split("|")[1].endswith((".old", ".new"))]
-    if marker is None:
+    if "marker-durable" not in kinds:
         return ["no marker"]
+    marker = kinds.index("marker-durable")
+    # every new file is fsynced before it is renamed into place, and nothing is swapped before
+    # the marker is durable
     for i, (k, v) in enumerate(events):
-        if k == "rename" and v.split("|")[0].endswith(".new"):
-            src = v.split("|")[0]
+        if k != "rename":
+            continue
+        src, dst = v.split("|")
+        if src.endswith(".new"):
             if not any(kk == "fsync-file" and vv == src for kk, vv in events[:i]):
                 bad.append(f"rename of {Path(src).name} not preceded by its fsync")
-            if i < marker:
-                bad.append("a swap rename before the marker is durable")
-    flushes_before_marker = [i for i in range(marker) if kinds[i] == "flush-dir"]
-    if not flushes_before_marker:
-        bad.append("new files not followed by a folder flush before the marker")
-    last_fsync = max((i for i in range(marker) if kinds[i] == "fsync-file"), default=-1)
-    if flushes_before_marker and max(flushes_before_marker) < last_fsync:
-        bad.append("no folder flush after the last new-file fsync")
-    renames = [i for i, k in enumerate(kinds) if k == "rename"]
+        if (src.endswith(".new") or dst.endswith(".old")) and i < marker:
+            bad.append("a swap rename before the marker is durable")
+    news = [i for i, (k, v) in enumerate(events) if k == "fsync-file" and v.endswith(".new")]
+    if not news or not any(kinds[i] == "flush-dir" for i in range(max(news), marker)):
+        bad.append("no folder flush after the last new-file fsync and before the marker")
+    to_old = [i for i, (k, v) in enumerate(events) if k == "rename" and v.split("|")[1].endswith(".old")]
+    if not to_old or min(to_old) < marker:
+        bad.append("target -> .old must come after the marker is durable")
+    renames = [i for i, k in enumerate(kinds) if k == "rename" and i > marker]
     removes_old = [i for i, (k, v) in enumerate(events) if k == "remove" and v.endswith(".old")]
     if renames and removes_old:
         if not any(kinds[i] == "flush-dir" for i in range(max(renames), min(removes_old))):
             bad.append("no folder flush between the last rename and the first .old removal")
-    done = first("marker-removed")
+    done = kinds.index("marker-removed") if "marker-removed" in kinds else None
     if done is not None and removes_old:
         if not any(kinds[i] == "flush-dir" for i in range(max(removes_old), done)):
             bad.append("no folder flush between the .old removals and the marker removal")
     return bad
 
 
-def test_durable_steps_happen_in_the_required_order_and_the_check_can_fail(tmp_path):
+def test_durable_steps_happen_in_the_required_order(tmp_path):
     p = _crash_session(tmp_path, "s.mefd")
     events = _record_events(lambda: _crash_run(p))
     assert {"fsync-file", "flush-dir", "rename", "remove", "marker-durable",
             "marker-removed"} <= {k for k, _ in events}
     assert _order_violations(events) == []
-    # negative control: an edit that skips its flushes is caught by the same check
-    q = _crash_session(tmp_path, "t.mefd")
-    _m._set_edit_skip_flush(True)
-    try:
-        events = _record_events(lambda: _crash_run(q))
-    finally:
-        _m._set_edit_skip_flush(False)
-    assert _order_violations(events), "the order check must fail when the flushes are gone"
+    # the marker's own steps are seen: its part file is fsynced, renamed into place and the
+    # folder flushed, all before "marker-durable"
+    md = [k for k, _ in events].index("marker-durable")
+    before = events[:md]
+    part = [i for i, (k, v) in enumerate(before) if k == "fsync-file" and v.endswith(".mef3io-operation.part")]
+    ren = [i for i, (k, v) in enumerate(before) if k == "rename" and v.endswith("|" + str(p / ".mef3io-operation"))]
+    assert part and ren and part[0] < ren[0] < md and any(k == "flush-dir" for k, _ in before[ren[0]:])
+    # the negative control (an edit that skips its flushes must fail this check) needs the
+    # test-only build option and lives in the C++ suite: core/tests/test_annotation_edit.cpp
+
+
+def test_a_release_module_has_no_way_to_turn_flushes_off():
+    assert not [n for n in dir(_m) if "skip" in n.lower() and "flush" in n.lower()]
+    assert not hasattr(_m, "_set_edit_skip_flush")
 
 
 def test_the_direction_of_a_rollback_is_durable_before_the_first_undo(tmp_path):
@@ -1280,3 +1282,190 @@ def test_records_that_differ_only_in_hidden_bytes_are_identical_copies(tmp_path)
     with pytest.raises(ValueError) as e:
         mef3io.remove_annotations(p, [recs[0]])
     assert e.value.code == "ambiguous"                # the call cannot tell them apart; it says so
+
+
+# ---------------------------------------------------------------------------
+# review round 2
+# ---------------------------------------------------------------------------
+
+def _marker_crash(tmp_path, name):
+    """A session + channel edit crashed in the middle of its swap (marker present)."""
+    return _crash_where(tmp_path, name, lambda q: mef3io.operation_marker(q) is not None
+                        and not _pair(q)[0].exists())
+
+
+def test_every_route_to_the_records_refuses_while_an_edit_is_interrupted(tmp_path):
+    p = _marker_crash(tmp_path, "r")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        # Reader, MultiReader, the extension's raw reader
+        with mef3io.Reader(str(p)) as r:
+            with pytest.raises(mef3io.WriteConflictError) as e:
+                r.records()
+            assert e.value.code == "edit-interrupted"
+            assert len(r.read("ch1")) > 0                       # samples stay readable
+        with mef3io.MultiReader([str(p)]) as mr:
+            with pytest.raises(mef3io.WriteConflictError) as e:
+                mr.records()
+            assert e.value.code == "edit-interrupted"
+        raw = _m.Reader(str(p))
+        with pytest.raises(mef3io.WriteConflictError):
+            raw.records(None, None, "all")
+        # compat
+        with pytest.raises(mef3io.WriteConflictError):
+            mef3io.MefReader(str(p)).get_annotations()
+        # inspect still describes the session, and says the records are NOT reported
+        s = mef3io.inspect(str(p))
+    assert [w.code for w in s.warnings].count("annotation-edit-interrupted") == 1
+    assert s.records == [] and [c.name for c in s.channels] == ["ch1"]
+    assert all(c.records == 0 for c in s.channels)
+    from mef3io._inspect import _main as inspect_main
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        inspect_main([str(p)])
+    assert "records: NOT reported" in buf.getvalue()
+    # recovery settles it, and every route reads again
+    mef3io.recover_session(str(p), apply=True)
+    assert len(mef3io.Reader(str(p)).records()) > 0
+    assert not [w for w in mef3io.inspect(str(p)).warnings if w.code == "annotation-edit-interrupted"]
+
+
+def _three_channel_session(tmp_path, name):
+    p = _session(tmp_path / name, channels=("ch1", "ch2", "ch3"))
+    _with_notes(p, [_note(1, "a"), _note(2, "b"), _note(3, "c")])
+    for ch in ("ch1", "ch2", "ch3"):
+        _with_notes(p, [_note(1, "k1"), _note(2, "k2")], channel=ch)
+    return p
+
+
+def _three_channel_run(p, crash_at=-1):
+    rm = [_records(p, level="session")[1]] + [
+        _records(p, channel=ch, level="channel")[0] for ch in ("ch1", "ch2", "ch3")]
+    return mef3io.remove_annotations(p, rm, add=[_note(2, "b fixed")], _crash_at=crash_at)
+
+
+def _levels(p):
+    return (tuple(_texts(p, level="session")),) + tuple(
+        tuple(_texts(p, channel=ch, level="channel")) for ch in ("ch1", "ch2", "ch3"))
+
+
+OLD3 = (("a", "b", "c"),) + (("k1", "k2"),) * 3
+NEW3 = (("a", "b fixed", "c"),) + (("k2",),) * 3
+
+
+def _damage_plan(p, how):
+    raw = (p / ".mef3io-operation").read_bytes().split(b"\n")
+    out = []
+    for ln in raw:
+        if how == "torn-crc" and ln.startswith(b"file "):
+            ln = ln[:-3]                                         # 5 digits of the CRC
+        elif how == "wrong-crc" and ln.startswith(b"file "):
+            ln = ln[:-8] + b"0" * 8
+        elif how == "format-2" and ln == b"edit-format 1":
+            ln = b"edit-format 2"
+        out.append(ln)
+    if how == "truncated":
+        out = [ln for ln in out if ln.split(b" ")[0] in (b"mef3io-operation", b"tool", b"operation", b"id")]
+        out.append(b"")
+    (p / ".mef3io-operation").write_bytes(b"\n".join(out))
+
+
+@pytest.mark.parametrize("how", ["truncated", "torn-crc", "format-2", "wrong-crc"])
+@pytest.mark.parametrize("shape", ["session+channel", "session+3-channels"])
+def test_an_unreadable_plan_never_settles_to_a_mixed_state(tmp_path, how, shape):
+    three = shape == "session+3-channels"
+    make = (lambda n: _three_channel_session(tmp_path, n)) if three else (lambda n: _crash_session(tmp_path, n))
+    run = (lambda q, k: _three_channel_run(q, k)) if three else (lambda q, k: _crash_run(q, crash_at=k))
+    state = _levels if three else _state
+    old, new = (OLD3, NEW3) if three else (OLD, NEW)
+    k = 0
+    verdicts = set()
+    while True:
+        p = make(f"u{how[:3]}{k}.mefd")
+        try:
+            run(p, k)
+        except mef3io.IoError as e:
+            assert "simulated crash" in str(e)
+        else:
+            break                                                 # the call completed: done
+        k += 1
+        if mef3io.operation_marker(p) is None:
+            continue
+        _damage_plan(p, how)
+        before = _snap(p)
+        try:
+            rep = mef3io.recover_session(str(p), apply=True)
+        except mef3io.FormatError as e:
+            assert e.code in ("edit-unsettled", "edit-journal-inconsistent")
+            assert _snap(p) == before                              # refused, untouched
+            verdicts.add("refused")
+            continue
+        (edit,) = rep.record_edits
+        got = state(p)
+        assert got in (old, new), (how, k, got)                    # never mixed
+        if how != "wrong-crc":                                     # a wrong CRC may call a finished edit "not done"
+            assert edit.not_done == (got == old), (how, k, edit.action, got)
+        verdicts.add("old" if got == old else "new")
+        assert mef3io.operation_marker(p) is None and mef3io.validate_session(str(p)).ok
+    assert k >= 14 and verdicts <= {"old", "new", "refused"} and verdicts
+
+
+def test_the_cli_exit_code_tells_done_rolled_back_and_refused_apart(tmp_path, capsys):
+    from mef3io import validate as _v
+    # done
+    p = _crash_where(tmp_path, "x", lambda q: mef3io.operation_marker(q) is not None
+                     and not _pair(q)[0].exists())
+    assert _v._recover_main([str(p), "--apply"]) == 0 and _state(p) == NEW
+    # rolled back (NOT done)
+    q = _crash_where(tmp_path, "y", lambda q: mef3io.operation_marker(q) is not None
+                     and not _pair(q)[0].exists())
+    for f in q.rglob("*.new"):
+        f.unlink()
+    assert _v._recover_main([str(q), "--apply"]) == 1 and _state(q) == OLD
+    # refused
+    r = _crash_where(tmp_path, "z", lambda q: mef3io.operation_marker(q) is not None
+                     and not _pair(q)[0].exists())
+    _damage_plan(r, "truncated")
+    for f in r.rglob("*.old"):
+        f.unlink()
+    assert _v._recover_main([str(r), "--apply"]) == 2
+    capsys.readouterr()
+
+
+def test_a_writer_rechecks_the_marker_right_before_and_right_after_its_append(tmp_path):
+    p = _session(tmp_path / "s.mefd")
+    _with_notes(p, [_note(1, "a")])
+    rdat, _ = _pair(p)
+    marker = p / ".mef3io-operation"
+    text = (b"mef3io-operation 1\ntool mef3io x\noperation remove-annotations\nid " + b"a" * 32 + b"\n")
+    # an edit starts after the writer's first check, before the append: nothing is appended
+    before = rdat.read_bytes()
+
+    def at(kind_wanted):
+        def observer(kind, path):
+            if kind == kind_wanted and not marker.exists():
+                marker.write_bytes(text)
+        return observer
+
+    with mef3io.Writer(str(p)) as w:
+        _m._set_edit_observer(at("before-append"))
+        try:
+            with pytest.raises(mef3io.WriteConflictError, match="middle of"):
+                w.write_annotations([_note(5, "late")])
+        finally:
+            _m._set_edit_observer(None)
+    assert rdat.read_bytes() == before
+    marker.unlink()
+    # an edit starts during the append: the record IS appended, and the writer says so
+    with mef3io.Writer(str(p)) as w:
+        _m._set_edit_observer(at("after-append"))
+        try:
+            with pytest.raises(mef3io.WriteConflictError, match="may have been lost"):
+                w.write_annotations([_note(5, "late")])
+        finally:
+            _m._set_edit_observer(None)
+    marker.unlink()
+    assert "late" in _texts(p)

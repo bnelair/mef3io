@@ -205,3 +205,27 @@ REVIEW ROUND 1 ADDITIONS (same call):
   `_set_edit_observer`, `_set_edit_skip_flush`) record every durable step (fsync-file,
   flush-dir, rename, remove, marker-durable, direction-durable, marker-removed, point); the
   order test asserts the invariants and its negative control (flushes skipped) must fail.
+
+REVIEW ROUND 2 ADDITIONS:
+- ONE guard for every reader: `require_no_interrupted_edit` (annotation_edit.cpp) is called
+  by `Session::read_records`, so Reader / MultiReader / the raw extension / the C ABI
+  (MATLAB gets the message) / compat all refuse (`edit-interrupted`); the Python-level check
+  is gone. compat's `get_annotations` swallows errors by design and re-raises this one.
+  `inspect_session` reads no record while the marker is present and says so (warning
+  `annotation-edit-interrupted`; the text report prints "records: NOT reported").
+- UNREADABLE PLAN, ONE DIRECTION FOR ALL LEVELS (`settle_from_files`): levels = groups with
+  `.new`/`.old` leftovers; no `.new` anywhere and every target a whole pair -> keep new (done);
+  else every swapped/half-swapped level has an intact old pair (each half = its `.old`, else
+  the target) and every unswapped level a whole target -> restore all (NOT done); else
+  `edit-unsettled`. A level whose `.new` AND plan are gone is invisible (documented limit).
+  The marker-with-plan decision (`decide`): an S3-looking file (only the target left) that
+  stands before a swapped-but-not-cleaned file (S2) in plan order is applied (cleanup runs in
+  plan order after all swaps); elsewhere the recorded new-file CRC decides.
+- TEST SEAMS: `set_edit_skip_flush` exists only under `MEF3IO_TEST_SEAMS` (CMake option,
+  OFF by default, forced on by MEF3IO_BUILD_TESTS, OFF in pyproject.toml): the order test's
+  negative control is in the C++ suite. The observer stays in every build (it only observes).
+  The marker is placed by `place_marker` (not `write_operation_marker`) so its fsync, rename and
+  folder flush are visible to the observer.
+- `SessionWriter::write_records` looks at the marker again right before the append and once after.
+- Kept handles of `open_files` (#191) are `.tdat` only (`DirectorySource::read_extent`): record
+  files are read with plain opens and renamed by the edit, nothing of this PR holds them.

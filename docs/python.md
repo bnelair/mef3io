@@ -331,9 +331,14 @@ report.removed, report.added          # 1, 1
   read back; then a marker file in the session (`.mef3io-operation`) records the
   plan and the files are swapped by rename. After a crash or power cut the
   session is either as it was, or carries the marker: opening it warns
-  (`SessionOperationWarning`), writes are refused, **`Reader.records()` raises
-  (`edit-interrupted`) instead of returning a half-swapped level as if it were
-  whole** (reading samples keeps working), `validate_session` reports
+  (`SessionOperationWarning`), writes are refused, **every reader of annotations
+  raises (`edit-interrupted`) instead of returning a half-swapped level as if it
+  were whole**: `Reader.records()`, `MultiReader.records()`, `MefReader.get_annotations()`,
+  the extension's raw `records`, the C API (so MATLAB's `records`) and C++
+  `Session::read_records`; `inspect` (library and command line) still describes the
+  session but says the records are **not reported** (warning
+  `annotation-edit-interrupted`) instead of showing a count. Reading samples keeps
+  working, `validate_session` reports
   `records.interrupted-edit`, and `recover_session(path, apply=True)` settles
   it: it finishes the swap when every new file is intact, and otherwise rolls
   it back to the old annotations (the report then says **the removal was NOT
@@ -341,12 +346,20 @@ report.removed, report.added          # 1, 1
   happens when the new files were deleted by someone). The next
   `remove_annotations` does the same first (`report.resumed`).
   If the marker's plan itself cannot be read (a damaged file system, a newer
-  layout), recovery decides from the files alone: a record pair that is whole
-  and consistent stays, a mixed or missing one is restored from its intact
-  `.old` files, and anything else is refused (`edit-unsettled`) with the files
-  to look at. Leftover `.new` / `.old` files are **moved** to
-  `<session>.edit-leftovers` beside the session, never deleted. `clear_operation_marker`
-  does not clear this marker.
+  layout), recovery decides from the files alone, **for all levels of the edit
+  together** (the levels are those with `.new` / `.old` leftovers beside their
+  files), so a multi-level edit never ends half new and half old: if no `.new`
+  file is left and every target is a whole pair, the swaps were all done and the
+  new pairs stay (done); otherwise, if every level that was swapped still has
+  its intact `.old` pair, every level goes back to the old pair (the removal was
+  **NOT done**); anything else is refused (`edit-unsettled`) with the files to
+  look at and nothing touched. The report and `python -m mef3io recover` tell
+  the three apart (exit 0 done, 1 rolled back and NOT done, 2 refused). Leftover
+  `.new` / `.old` files are **moved** to `<session>.edit-leftovers` beside the
+  session, never deleted. `clear_operation_marker` does not clear this marker.
+  Limits: a removal whose plan AND `.new` files are both gone cannot be told from
+  a finished one, and a marker whose recorded CRC is wrong (not torn) can make a
+  finished removal be reported as not done; the state is never mixed.
 - **A torn annotation file is never trimmed silently.** If bytes lie after the
   last record the header counts (a record or a fragment an interrupted
   `write_annotations` left) or the index disagrees with the data, the call
@@ -382,10 +395,12 @@ report.removed, report.added          # 1, 1
 - **Other writers.** There is no cross-process write lock: stop other writers of
   the session first. The call refuses while it sees a write in progress, puts
   its marker down before it moves anything, and checks the old files again
-  before it renames each of them, rolling back on a difference. What remains:
-  **a write call that was already running when the edit started (it checked for
-  the marker before the marker existed) can still append to an old file after
-  the last check, and that record is lost.** On Windows a record file another
+  before it renames each of them, rolling back on a difference. A
+  `Writer.write_annotations` call looks for the marker at its start, again right
+  before it appends, and once more after (an edit that started during the append
+  makes it raise "may have been lost"). What remains: **an append that is already
+  running when the marker appears, and lands after the edit's last check of that
+  file, is lost** (the writer's own check after the append says so). On Windows a record file another
   program holds open stops the swap (`edit-failed`, the old files are put
   back). An open `Reader` reads the files by path on every call, so it shows
   the new annotations (and none for a level that lost its last record) as soon

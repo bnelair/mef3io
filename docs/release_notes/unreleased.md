@@ -31,8 +31,11 @@
     swept by `recover_session`.
   - A torn annotation file (bytes after the last counted record, an index that
     disagrees) is refused (`record-torn`), never silently trimmed. While an
-    interrupted edit's marker is present, `Reader.records()` raises
-    `edit-interrupted` instead of returning a half-swapped level. A marker whose
+    interrupted edit's marker is present, every reader of annotations
+    (`Reader`, `MultiReader`, `MefReader.get_annotations`, the C API and so
+    MATLAB, C++ `Session::read_records`) raises `edit-interrupted` instead of
+    returning a half-swapped level, and `inspect` says the records are not
+    reported. A marker whose
     plan cannot be read is settled from the files alone; nothing is ever deleted
     (leftovers move to `<session>.edit-leftovers`).
   - Password-protected sessions: pass both passwords as for `Writer`; added

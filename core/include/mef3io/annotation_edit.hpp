@@ -172,13 +172,26 @@ std::optional<InterruptedRecordEdit> finish_interrupted_record_edit(const std::s
                                                                     int crash_at = -1,
                                                                     int fail_at = -1);
 
+/// Whether the session carries the marker of an interrupted annotation edit
+/// (a directory session; never throws). While it does, a level's record files
+/// may be half swapped, so EVERY reader of records (Session::read_records, so
+/// Reader, MultiReader, the extension, the C ABI and MATLAB; inspect_session,
+/// which reports it as a warning instead) refuses or says so, and signal
+/// reads keep working.
+bool has_interrupted_edit(const std::string& path);
+
+/// Throws the coded refusal "edit-interrupted" (WriteConflictError) when
+/// has_interrupted_edit(path). Called by Session::read_records.
+void require_no_interrupted_edit(const std::string& path);
+
 /// Temporary files an edit left (`<record file>.<id>.new` / `.old`, a marker
 /// `.part`) in a session that carries no edit marker: harmless, never read.
 /// Returns their session-relative paths; removes them when `apply`. With a
 /// marker present nothing is touched.
 std::vector<std::string> record_edit_leftovers(const std::string& path, bool apply);
 
-/// TEST SEAM (never needed by a caller): every durable step an edit takes, in
+/// TEST SEAM (never needed by a caller; it only OBSERVES, it cannot change what an
+/// edit does, so it is compiled into every build): every durable step an edit takes, in
 /// order, as `(kind, absolute path)`: "fsync-file", "flush-dir", "rename"
 /// (path = "from|to"), "remove", "marker-durable", "direction-durable",
 /// "marker-removed" and "point" (a crash/failure point). The observer runs
@@ -188,9 +201,16 @@ std::vector<std::string> record_edit_leftovers(const std::string& path, bool app
 namespace testing {
 using EditObserver = std::function<void(const std::string& kind, const std::string& path)>;
 void set_edit_observer(EditObserver observer);
+/// Called by a writer at a point a test may want to act at ("before-append",
+/// "after-append" around the record append of SessionWriter::write_records).
+void emit_write_event(const std::string& kind, const std::string& path);
+#ifdef MEF3IO_TEST_SEAMS
 /// Make the edit skip its folder flushes and file flushes (the negative
-/// control of the durability-order test: the test must then fail).
+/// control of the durability-order test: the test must then fail). ONLY in a
+/// build configured with -DMEF3IO_TEST_SEAMS=ON (the C++ test build); a release
+/// library has no such function.
 void set_edit_skip_flush(bool skip);
+#endif
 }  // namespace testing
 
 }  // namespace mef3io

@@ -498,9 +498,13 @@ def _render(s: SessionSummary) -> str:
         out.append("  NOTE: section 3 is locked; times marked * assume offset 0 (not verified)")
     mark = " *" if s.offset_assumed_zero else ""
     out.append(f"  samples: {_t(s.start_time)} -> {_t(s.end_time)}{mark}")
-    out.append(f"  records: {len(s.records)}"
-               + (f", {_t(s.records_start_time)} -> {_t(s.records_end_time)}{mark}"
-                  if s.records_start_time is not None else ""))
+    if any(w.code == "annotation-edit-interrupted" for w in s.warnings):
+        out.append("  records: NOT reported (an annotation edit was interrupted; "
+                   "recover_session finishes or rolls it back)")
+    else:
+        out.append(f"  records: {len(s.records)}"
+                   + (f", {_t(s.records_start_time)} -> {_t(s.records_end_time)}{mark}"
+                      if s.records_start_time is not None else ""))
     out.append(f"  overall: {_t(s.first_time)} -> {_t(s.last_time)}{mark}")
     out.append(f"  channels: {len(s.channels)}"
                + (f"; record-only: {', '.join(s.record_only_channels)}" if s.record_only_channels else "")

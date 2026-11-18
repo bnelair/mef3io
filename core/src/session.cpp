@@ -2,6 +2,7 @@
 // goes through the SessionSource, so a session reads identically from a .mefd
 // directory and from an uncompressed .mefd.tar archive.
 #include "mef3io/session.hpp"
+#include "mef3io/annotation_edit.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -499,6 +500,8 @@ void Session::read_record_file(std::vector<Record>& out, const std::string& rdat
 
 std::vector<Record> Session::read_records(std::optional<std::string> channel,
                                           std::optional<int> segment, RecordLevels levels) {
+  // A half-swapped annotation file must never read as "no annotations".
+  require_no_interrupted_edit(mefd_path_);
   // Validate the query first, so a bad one fails the same whether or not any
   // record files happen to exist.
   if (segment && !channel)

@@ -183,7 +183,9 @@ fs::path sibling(const fs::path& target, const std::string& id, const char* ext)
 
 std::mutex g_obs_mu;
 testing::EditObserver g_obs;
+#ifdef MEF3IO_TEST_SEAMS
 bool g_skip_flush = false;
+#endif
 
 void note(const char* kind, const std::string& path = {}) {
   testing::EditObserver o;
@@ -195,8 +197,12 @@ void note(const char* kind, const std::string& path = {}) {
 }
 
 bool skip_flush() {
+#ifdef MEF3IO_TEST_SEAMS
   std::lock_guard<std::mutex> lk(g_obs_mu);
   return g_skip_flush;
+#else
+  return false;
+#endif
 }
 
 /// Flush the folders (their entries: new names, renames, removals). NTFS may
@@ -386,7 +392,21 @@ struct Decision {
 Decision decide(const JPlan& p) {
   if (p.back) return {Dir::Back, "the edit was already being rolled back"};
   bool forward_ok = true, back_ok = true, lost = false;
-  for (const auto& f : p.files) {
+  // "only the target is left" is a finished swap, or a new file that never got in
+  // place and was lost. The order of the steps tells where they can: the old files are
+  // removed in plan order and only after EVERY swap, while swaps also run in plan order.
+  // So a file that stands before a file whose swap is done but whose old file is still
+  // there (S2) has been cleaned up: applied. Elsewhere the CRC the marker recorded for
+  // the new file decides.
+  std::size_t last_s2 = 0;
+  bool any_s2 = false;
+  for (std::size_t i = 0; i < p.files.size(); ++i)
+    if (state_of(p.files[i]) == St::S2) {
+      last_s2 = i;
+      any_s2 = true;
+    }
+  for (std::size_t i = 0; i < p.files.size(); ++i) {
+    const auto& f = p.files[i];
     const St s = state_of(f);
     if (s == St::Bad)
       refuse(RefusalKind::Format, "edit-journal-inconsistent",
@@ -394,10 +414,8 @@ Decision decide(const JPlan& p) {
                  f.rel + "); nothing was touched");
     if ((s == St::S0 || s == St::S1) && f.has_new && !new_file_intact(f.fresh)) forward_ok = false;
     if (s == St::S3 && f.had_old) {
-      // "only the target is left" is either a finished swap or a new file that
-      // never got in place and was lost: the marker's CRC of the new file tells.
       bool applied = true;
-      if (f.has_new && f.has_crc) {
+      if (f.has_new && f.has_crc && !(any_s2 && i < last_s2)) {
         try {
           applied = crc::calculate(slurp(f.target)) == f.new_crc;
         } catch (const std::exception&) {
@@ -446,6 +464,50 @@ void require_unchanged(const JFile& f) {
     refuse(RefusalKind::WriteConflict, "records-changed",
            "an annotation file changed while this call was working (another program or writer "
            "added or changed annotations): nothing was changed; try again");
+}
+
+/// Write the marker (it carries the plan) exactly like detail::write_operation_marker
+/// -- written whole beside, flushed, renamed WITHOUT replacing, folder flushed -- but
+/// with every durable step visible to the test seam.
+void place_marker(const fs::path& root, const OperationMarker& m) {
+  const fs::path file = root / detail::OPERATION_MARKER;
+  const fs::path part = root / from8(std::string(detail::OPERATION_MARKER) + ".part");
+  try {
+    {
+      std::ofstream out(part, std::ios::binary | std::ios::trunc);
+      if (!out) throw IoError("cannot write the operation marker: " + u8(part));
+      out << detail::OPERATION_MARKER_MAGIC << "\ntool " << m.tool << "\noperation " << m.operation
+          << "\nid " << m.id << "\n";
+      for (const auto& d : m.details) out << d << "\n";
+      detail::finish_stream(out, u8(part));
+    }
+    if (!skip_flush()) {
+      detail::fsync_file_or_throw(u8(part));
+      note("fsync-file", u8(part));
+    }
+    std::string why;
+    switch (detail::rename_no_replace(part, file, why)) {
+      case detail::NoReplaceResult::Renamed: break;
+      case detail::NoReplaceResult::TargetExists:
+        throw WriteConflictError("the session already carries an operation marker: " + u8(root));
+      default: throw IoError("cannot place the operation marker (" + why + ")");
+    }
+    note("rename", u8(part) + "|" + u8(file));
+  } catch (...) {
+    std::error_code ec;
+    fs::remove(part, ec);
+    throw;
+  }
+  flush_dirs({root});
+  note("marker-durable");
+}
+
+void remove_marker(const fs::path& root) {
+  std::error_code ec;
+  fs::remove(root / detail::OPERATION_MARKER, ec);
+  if (ec) throw IoError("cannot remove the operation marker in " + u8(root) + ": " + ec.message());
+  flush_dirs({root});
+  note("marker-removed");
 }
 
 /// Replace the marker with `p`'s (atomic: written beside it, flushed, renamed
@@ -532,8 +594,7 @@ void settle(const JPlan& given, Dir dir, Steps* st) {
   point(st);
   flush_dirs(p.dirs());
   point(st);
-  detail::remove_operation_marker(p.root);
-  note("marker-removed");
+  remove_marker(p.root);
   point(st);
 }
 
@@ -903,12 +964,10 @@ void build_images(FilePlan& fp, const crypto::AccessKeys& keys, bool encrypt_add
     fp.expected.push_back(std::move(fp.decoded[i]));
     ++n;
   }
-  // By construction nothing can be lost: every old record byte is either kept
-  // or belongs to a record the caller named.
-  if (kept_bytes + removed_bytes != fp.old_end - UH)
-    refuse(RefusalKind::Io, "verify-failed",
-           "internal check failed: the records kept and removed do not add up to the old file; "
-           "nothing was changed");
+  // Nothing can be lost silently, and the guards are NOT this loop (it walks the parsed
+  // records, which are gap-free by construction): they are the checks made before it,
+  // that the last parsed record ends at the end of the file (only a zero tail of a
+  // count -1 file excepted) and that the index lists exactly the records the data holds.
   fp.kept_bytes = kept_bytes;
   fp.removed_bytes = removed_bytes;
   if (!fp.adds.empty()) {
@@ -1428,8 +1487,7 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
   // ---- D: the marker (the journal), durable before anything is moved -----------------
   try {
     point(&steps);
-    detail::write_operation_marker(root, marker_for(plan));
-    note("marker-durable");
+    place_marker(root, marker_for(plan));
   } catch (const SimulatedCrash&) {
     throw;
   } catch (...) {
@@ -1553,19 +1611,29 @@ bool pair_consistent(const fs::path& rdat, const fs::path& ridx) {
   }
 }
 
-/// An edit marker whose plan cannot be used: decide from the files alone.
-/// Every record pair an edit left traces of (a `.new` / `.old` file beside it)
-/// must end whole: a pair that is intact stays; a mixed or missing one is
-/// restored from an intact `.old` pair; anything else is refused with the
-/// files to look at. NOTHING IS EVER DELETED here: leftovers (and a pair put
-/// aside) move to `<session>.edit-leftovers/`, because they may hold the only
-/// copy of something. The marker is removed last.
+/// An edit marker whose plan cannot be used: decide from the files alone, for ALL
+/// levels together, so a multi-level edit never ends half new and half old.
+/// The levels of the edit are those with leftovers (`.new` / `.old`) beside their
+/// files. One direction for all of them:
+///   * no `.new` anywhere and every level's target is a whole pair: the swaps were
+///     all done, only the cleanup was left -> keep the new pairs ("done");
+///   * else every level that was (or half was) swapped still has its intact `.old`
+///     pair (each half = its `.old`, else the target) and every other level's target
+///     is a whole pair -> restore ALL from `.old` ("rolled back, the removal was NOT
+///     done"); leftovers `.new` go aside;
+///   * else refuse, naming the files, touching nothing (`edit-unsettled`).
+/// NOTHING IS EVER DELETED: leftovers (and a pair put aside) move to
+/// `<session>.edit-leftovers/`, because they may hold the only copy of something.
+/// The marker is removed last. (An edit whose `.new` files were lost as well as its
+/// plan cannot be told from a finished one: the levels without leftovers are not
+/// seen.)
 InterruptedRecordEdit settle_from_files(const fs::path& root, const OperationMarker& m, bool apply) {
   struct Group {
     fs::path dir;
     std::string stem;  // "name" of name.rdat / name.ridx
     std::vector<fs::path> leftovers;
     fs::path old_rdat, old_ridx;
+    bool has_new = false;
   };
   std::map<std::string, Group> groups;
   std::vector<fs::path> loose;  // leftovers that belong to no pair (a marker .part)
@@ -1585,13 +1653,15 @@ InterruptedRecordEdit settle_from_files(const fs::path& root, const OperationMar
     g.leftovers.push_back(f);
     if (name.compare(name.size() - 4, 4, ".old") == 0)
       (ext == "rdat" ? g.old_rdat : g.old_ridx) = f;
+    else
+      g.has_new = true;
   }
   struct Move {
     fs::path from, to;
     bool to_aside = false;
   };
   std::vector<Move> moves;
-  std::vector<std::string> kept, restored, problems, files;
+  std::vector<std::string> files, problems;
   const fs::path aside_root =
       root.parent_path() / from8(u8(root.filename()) + ".edit-leftovers");
   const auto rel = [&](const fs::path& f) { return detail::path_generic_utf8(fs::relative(f, root)); };
@@ -1599,54 +1669,101 @@ InterruptedRecordEdit settle_from_files(const fs::path& root, const OperationMar
   const auto aside = [&](const fs::path& f) {
     if (moved_aside.insert(f).second) moves.push_back({f, aside_root / fs::relative(f, root), true});
   };
+
+  struct Judged {
+    Group* g;
+    fs::path trdat, tridx;
+    bool target_whole = false;
+    bool restorable = false;  // the old pair can be put back
+  };
+  std::vector<Judged> judged;
+  bool any_new = false, all_whole = true;
   for (auto& [key, g] : groups) {
-    const fs::path trdat = g.dir / from8(g.stem + ".rdat"), tridx = g.dir / from8(g.stem + ".ridx");
-    files.push_back(rel(trdat));
-    if (pair_consistent(trdat, tridx)) {
-      kept.push_back(rel(trdat));
-      for (const auto& l : g.leftovers) aside(l);
-    } else if ((!g.old_rdat.empty() || !g.old_ridx.empty()) &&
-               pair_consistent(g.old_rdat.empty() ? trdat : g.old_rdat,
-                               g.old_ridx.empty() ? tridx : g.old_ridx)) {
-      // the old pair: each half is its `.old` file when there is one, else the
-      // target itself (a swap that stopped between the two halves)
-      restored.push_back(rel(trdat));
-      for (const auto& l : g.leftovers)
-        if (l != g.old_rdat && l != g.old_ridx) aside(l);
-      if (!g.old_rdat.empty()) {
-        if (has(trdat)) aside(trdat);
-        moves.push_back({g.old_rdat, trdat, false});
-      }
-      if (!g.old_ridx.empty()) {
-        if (has(tridx)) aside(tridx);
-        moves.push_back({g.old_ridx, tridx, false});
-      }
+    Judged j{&g, g.dir / from8(g.stem + ".rdat"), g.dir / from8(g.stem + ".ridx")};
+    j.target_whole = pair_consistent(j.trdat, j.tridx);
+    j.restorable = (!g.old_rdat.empty() || !g.old_ridx.empty()) &&
+                   pair_consistent(g.old_rdat.empty() ? j.trdat : g.old_rdat,
+                                   g.old_ridx.empty() ? j.tridx : g.old_ridx);
+    any_new = any_new || g.has_new;
+    all_whole = all_whole && j.target_whole;
+    files.push_back(rel(j.trdat));
+    judged.push_back(std::move(j));
+  }
+  enum class Way { Nothing, Keep, Back } way = Way::Nothing;
+  if (!judged.empty()) {
+    if (!any_new && all_whole) {
+      way = Way::Keep;
     } else {
-      std::string names;
-      for (const auto& l : g.leftovers) names += (names.empty() ? "" : ", ") + rel(l);
-      problems.push_back(rel(trdat) + " / " + rel(tridx) + " (leftovers: " + names + ")");
+      bool ok = true;
+      for (const auto& j : judged) {
+        const bool swapped_or_half = !j.g->old_rdat.empty() || !j.g->old_ridx.empty();
+        // an unswapped level is already old and whole; a swapped one must be restorable
+        if (swapped_or_half ? !j.restorable : !j.target_whole) {
+          ok = false;
+          std::string names;
+          for (const auto& l : j.g->leftovers) names += (names.empty() ? "" : ", ") + rel(l);
+          problems.push_back(rel(j.trdat) + " / " + rel(j.tridx) + " (leftovers: " + names + ")");
+        }
+      }
+      if (ok) way = Way::Back;
     }
   }
-  for (const auto& l : loose) aside(l);
   if (!problems.empty()) {
     std::string list;
     for (const auto& pr : problems) list += (list.empty() ? "" : "; ") + pr;
     refuse(RefusalKind::Format, "edit-unsettled",
            "the marker's plan of the interrupted annotation edit cannot be read, and the files "
-           "alone do not say how to finish it: no record pair is whole (and no whole .old pair "
-           "exists) for " + list +
-               ". Nothing was touched and no file was deleted: look at these files, put a whole "
-               "pair (.rdat and .ridx) in place by hand, then run recover_session again");
+           "alone do not say how to settle it without leaving some levels new and others old: "
+           "for " + list +
+               " no whole old pair (.old) and no whole current pair can be had. Nothing was "
+               "touched and no file was deleted: look at these files, put a whole pair (.rdat "
+               "and .ridx) in place by hand, then run recover_session again");
   }
+  std::size_t restored = 0;
+  if (way == Way::Keep) {
+    for (const auto& j : judged)
+      for (const auto& l : j.g->leftovers) aside(l);
+  } else if (way == Way::Back) {
+    for (const auto& j : judged) {
+      Group& g = *j.g;
+      const bool swapped_or_half = !g.old_rdat.empty() || !g.old_ridx.empty();
+      for (const auto& l : g.leftovers)
+        if (l != g.old_rdat && l != g.old_ridx) aside(l);
+      if (!swapped_or_half) continue;  // never swapped: already the old pair
+      ++restored;
+      if (!g.old_rdat.empty()) {
+        if (has(j.trdat)) aside(j.trdat);
+        moves.push_back({g.old_rdat, j.trdat, false});
+      }
+      if (!g.old_ridx.empty()) {
+        if (has(j.tridx)) aside(j.tridx);
+        moves.push_back({g.old_ridx, j.tridx, false});
+      }
+    }
+  }
+  for (const auto& l : loose) aside(l);
   InterruptedRecordEdit e;
   e.id = m.id;
   e.files = files;
-  e.action = "settle";
-  e.reason = "the marker's plan cannot be read, so the files alone decided: " +
-             std::to_string(kept.size()) + " record pair(s) whole and kept as they are, " +
-             std::to_string(restored.size()) + " restored from their .old files (that removal was NOT done), " +
-             std::to_string(moved_aside.size()) + " other file(s) " + (apply ? "moved" : "to be moved") +
-             " aside (never deleted) to " + u8(aside_root.filename()) + " beside the session";
+  const std::string tail = std::to_string(moved_aside.size()) + " other file(s) " +
+                           (apply ? "moved" : "to be moved") + " aside (never deleted) to " +
+                           u8(aside_root.filename()) + " beside the session";
+  if (way == Way::Keep) {
+    e.action = "finish";
+    e.reason = "the marker's plan cannot be read, so the files alone decided: every swap was done, "
+               "only the cleanup was left, so the new annotation files stay (the removal is "
+               "done); " + tail;
+  } else if (way == Way::Back) {
+    e.action = "roll back";
+    e.reason = "the marker's plan cannot be read, so the files alone decided: " +
+               std::to_string(judged.size()) + " level(s) of the edit go back to the old "
+               "annotation files (" + std::to_string(restored) + " restored from .old): the "
+               "removal was NOT done; " + tail;
+  } else {
+    e.action = "settle";
+    e.reason = "the marker's plan cannot be read and nothing of an edit lies beside the "
+               "records: the marker is removed";
+  }
   if (!apply) return e;
   std::error_code ec;
   for (const auto& mv : moves) {
@@ -1667,8 +1784,7 @@ InterruptedRecordEdit settle_from_files(const fs::path& root, const OperationMar
     dirs.push_back(mv.to.parent_path());
   }
   flush_dirs(dirs);
-  detail::remove_operation_marker(root);
-  note("marker-removed");
+  remove_marker(root);
   e.applied = true;
   return e;
 }
@@ -1749,15 +1865,38 @@ std::vector<std::string> record_edit_leftovers(const std::string& path, bool app
   return out;
 }
 
+bool has_interrupted_edit(const std::string& path) {
+  try {
+    if (path_has_suffix(path, ".tar")) return false;
+    const fs::path root = from8(path);
+    const auto m = detail::read_operation_marker(root);
+    return m && is_edit_marker(root, *m);
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
+void require_no_interrupted_edit(const std::string& path) {
+  if (has_interrupted_edit(path))
+    refuse(RefusalKind::WriteConflict, "edit-interrupted",
+           "the annotations cannot be read reliably: an annotation edit (remove_annotations) was "
+           "interrupted, so a level's annotation files may be half swapped. Samples are "
+           "unaffected. Run recover_session with apply=True, which finishes the edit or rolls it "
+           "back, then read again");
+}
+
 namespace testing {
 void set_edit_observer(EditObserver observer) {
   std::lock_guard<std::mutex> lk(g_obs_mu);
   g_obs = std::move(observer);
 }
+void emit_write_event(const std::string& kind, const std::string& path) { note(kind.c_str(), path); }
+#ifdef MEF3IO_TEST_SEAMS
 void set_edit_skip_flush(bool skip) {
   std::lock_guard<std::mutex> lk(g_obs_mu);
   g_skip_flush = skip;
 }
+#endif
 }  // namespace testing
 
 }  // namespace mef3io

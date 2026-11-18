@@ -1,5 +1,6 @@
 // mef3io — high-level session writer.
 #include "operation_marker.hpp"
+#include "mef3io/annotation_edit.hpp"
 #include "mef3io/session_writer.hpp"
 
 #include <algorithm>
@@ -475,8 +476,14 @@ void SessionWriter::write_records(std::optional<std::string> channel,
     if (!existing.empty()) base = existing.substr(0, existing.size() - 5);  // strip ".rdat"
   }
   try {
+    // The marker was checked at the start of the call; the preparation above is not
+    // instant (headers, offsets, encryption), so look again right before the append
+    // (an annotation edit may have started meanwhile), and once after it.
+    testing::emit_write_event("before-append", dir);
+    detail::refuse_if_mid_operation(mefd_path_);
     mef3io::write_records(dir, base, session_name_, channel.value_or(""), 0, records, rto,
                           password_1_, password_2_);
+    testing::emit_write_event("after-append", dir);
   } catch (...) {
     // write_records validates before it writes; leave no empty channel
     // directory behind for a write that never happened.
@@ -492,6 +499,11 @@ void SessionWriter::write_records(std::optional<std::string> channel,
     flush_recording_failure(files);
   else
     unflushed_.insert(files.begin(), files.end());
+  if (detail::read_operation_marker(detail::utf8_path(mefd_path_)))
+    throw WriteConflictError(
+        "an operation on the session (an annotation edit?) started while these annotations were "
+        "being written; they were appended, but if an annotation edit was running they may have "
+        "been lost: read the annotations back and write them again if they are missing");
 }
 
 SessionWriter::~SessionWriter() {
