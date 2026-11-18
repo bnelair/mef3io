@@ -34,6 +34,15 @@ else()
   target_compile_options(mef3io_core PRIVATE -Wall -Wextra)
 endif()
 
+# Test-only switches compiled into the library (today: the negative control of
+# the durability-order test, which makes an annotation edit skip its flushes).
+# OFF by default, OFF in the wheel build (pyproject.toml), and defined for the
+# C++ test build only: a release library has no way to turn a flush off.
+option(MEF3IO_TEST_SEAMS "Compile test-only seams (never for a release)" OFF)
+if(MEF3IO_TEST_SEAMS OR MEF3IO_BUILD_TESTS)
+  target_compile_definitions(mef3io_core PUBLIC MEF3IO_TEST_SEAMS)
+endif()
+
 # --- Tests (Catch2, fetched only when building tests standalone) ---
 option(MEF3IO_BUILD_TESTS "Build mef3io C++ unit tests" OFF)
 if(MEF3IO_BUILD_TESTS)

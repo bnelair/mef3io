@@ -8,7 +8,7 @@ of scope. The legacy `mef_tools`/`pymef` stack is the correctness oracle.
 
 Status: read + write complete, cross-validated **both directions** vs
 pymef/mef_tools (values, NaN gaps, times, encryption none/L1+L2, fractional fs,
-records). Annotation writes (`write_annotations`) ONLY APPEND, in place, creating the files when absent, never replacing/deleting (#156, notes/records-and-time.md). In-segment append + per-segment map implemented. Tar session
+records). `write_annotations` ONLY APPENDS, in place, creating the files when absent, never replacing/deleting (#156). Removing or changing a stored annotation is a SEPARATE, explicitly named call, `remove_annotations` (Python + C++ only): it selects by content, rewrites only the record files of the levels named, crash-safely (staged `.new` files, the operation marker as journal, finished or rolled back by `recover_session`); a removed annotation is gone, there is no undo (notes/records-and-time.md, "Removing annotations"). In-segment append + per-segment map implemented. Tar session
 archives (single-file `.mefd.tar`, read in place) implemented. Session
 validator + targeted repair + recovery implemented (+ an open-time warning).
 `inspect` (metadata-only description, #67), cancel/progress on long
@@ -44,8 +44,8 @@ directory. `reference_files/` (meflib/pymef/mef3_dump) stayed in the old repo.
 
 ## Module map (short; full text in `for_agents/notes/module-map.md`)
 
-- `core/` (C++17/20): byte/CRC/crypto/header layers (`byteio`, `crc`, `crypto`, `headers`, `metadata`), codec `red`, read side (`session`, `source` = Directory/Tar, `tar`, `reader`, `records`, `inspect`), write side (`writer`, `session_writer`), `validate`/`recover`, copy engine (`session_copy.cpp` behind `anonymize.hpp`/`transform.hpp`/`merge.hpp`, `segment_copy.hpp`), `parallel.hpp` (the thread rule), `control.hpp` (cancel/progress), `errors`, `time`, `c_api.h` (flat C ABI under the MEX).
-- `python/mef3io/`: `Reader`, `MultiReader`, `Writer`, `compat` (mef_tools drop-in), `cache`, `anonymize`, `transform`, `_copy`, `_inspect`, `validate`, `metadata`, `_archive`, `_warnings`, `__main__` (CLI). Bindings: `bindings/python/mef3io_ext.cpp` (nanobind); `matlab/` (MEX + `+mef3io`); `examples/` 01-13; docs site from `docs/` (MkDocs Material, `PYTHONPATH=python mkdocs build --strict` must stay green; deployed by `.github/workflows/docs.yml`). `for_agents/` (repo root) is agent handoff docs, NOT on the site. `docs/design.md` = full design; `docs/encryption_model.md` = crypto model; `docs/mef3_format.md` = format reference.
+- `core/` (C++17/20): byte/CRC/crypto/header layers (`byteio`, `crc`, `crypto`, `headers`, `metadata`), codec `red`, read side (`session`, `source` = Directory/Tar, `tar`, `reader`, `records`, `annotation_edit` = `remove_annotations`, `inspect`), write side (`writer`, `session_writer`), `validate`/`recover`, copy engine (`session_copy.cpp` behind `anonymize.hpp`/`transform.hpp`/`merge.hpp`, `segment_copy.hpp`), `parallel.hpp` (the thread rule), `control.hpp` (cancel/progress), `errors`, `time`, `c_api.h` (flat C ABI under the MEX).
+- `python/mef3io/`: `Reader`, `MultiReader`, `Writer`, `compat` (mef_tools drop-in), `cache`, `anonymize`, `transform`, `_copy`, `_inspect`, `annotations` (`remove_annotations`), `validate`, `metadata`, `_archive`, `_warnings`, `__main__` (CLI). Bindings: `bindings/python/mef3io_ext.cpp` (nanobind); `matlab/` (MEX + `+mef3io`); `examples/` 01-13; docs site from `docs/` (MkDocs Material, `PYTHONPATH=python mkdocs build --strict` must stay green; deployed by `.github/workflows/docs.yml`). `for_agents/` (repo root) is agent handoff docs, NOT on the site. `docs/design.md` = full design; `docs/encryption_model.md` = crypto model; `docs/mef3_format.md` = format reference.
 
 ## Topic notes (read the file BEFORE touching its area)
 
@@ -60,7 +60,7 @@ files (see "Public text" below; they say "the private reader").
 | `notes/large-files-and-append.md` | any `.tdat`/`.tidx` read or write, append (O(new data)), flush/close/wait_for_disk, fsync/durability, recovery backups (INVARIANTS §1, §2, §4) |
 | `notes/sizing-contract.md` | section-2 `maximum_*` declarations, sizing/times validator checks |
 | `notes/provenance.md` | any universal-header write, any new write path editing a segment |
-| `notes/records-and-time.md` | records read/write, `to_stored_time`, rto, damaged record files |
+| `notes/records-and-time.md` | records read/write/REMOVE, `to_stored_time`, rto, damaged record files, `remove_annotations` |
 | `notes/reader-placement-and-factors.md` | `reader.cpp` grid rules, `claim_range`, RED-header authority, `block_envelope`, `read_many`, per-segment factors, `strict=False` isolation |
 | `notes/threads-gil-concurrency.md` | a new long binding call or constructor, shared Session/Reader state, the parallel open (INVARIANTS §12) |
 | `notes/copy-engine.md` | anonymize / transform / cut / merge, `session_copy.cpp`, refusal codes (INVARIANTS §11, §14) |

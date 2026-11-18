@@ -145,6 +145,17 @@ auto sums = w.write_int32_many({"ch1", "ch2"}, counts_2xN, {0.01, 0.01}, start_u
 w.write_records("ch1", {{.type = "Note", .time = t, .text = "marker"}});
 ```
 
+```cpp
+// Remove (and so change) stored annotations: by content, crash-safe, C++ and
+// Python only. A selector names the record as Session::read_records returns it.
+auto recs = r.records();                          // as read back
+auto rep = mef3io::remove_annotations(
+    "s.mefd", {mef3io::selector_for(recs[1])},    // remove this one ...
+    {{.type = "Note", .time = recs[1].time, .text = "fixed"}});  // ... and add this
+// refusals are CopyError-coded exceptions (e.code() == "no-match", "ambiguous", ...);
+// an interrupted edit is finished by recover_session(path, /*apply=*/true).
+```
+
 A write returns once its data is handed to the operating system (each
 segment's `.tmet` is flushed before it is published). `w.flush()` returns only
 when everything written so far is on disk, in one combined wait, and the

@@ -1,6 +1,7 @@
 // mef3io — session validation and targeted repair. See validate.hpp for the
 // contract; this file holds the check registry and the repair mechanics.
 #include "operation_marker.hpp"
+#include "mef3io/annotation_edit.hpp"
 #include "mef3io/validate.hpp"
 
 #include "durability.hpp"
@@ -875,6 +876,19 @@ const std::vector<CheckImpl>& check_impls() {
                  [](const SegmentState&, const SegmentTruth&, Finding&, bool&) {},
                  {}});
 
+    v.push_back({{"records.interrupted-edit", "No annotation edit was left unfinished",
+                  "remove_annotations swaps a level's record files in a few renames, guarded by "
+                  "the session's operation marker. A crash or power cut in that window leaves the "
+                  "marker, and a level's .rdat/.ridx pair may be half swapped: its annotations "
+                  "should not be trusted and the session accepts no writes until the edit is "
+                  "finished. NOT repairable here (the registry rewrites declarations only): "
+                  "recover_session(apply=True) finishes the edit, or rolls it back when a new "
+                  "file is not intact. Judged from the marker; directory sessions only.",
+                  Severity::Error, false},
+                 // Not part of a segment: judged once per session (check_interrupted_edit).
+                 [](const SegmentState&, const SegmentTruth&, Finding&, bool&) {},
+                 {}});
+
     v.push_back({{"units.mixed", "A channel's segments share one units string",
                   "Every segment of a channel should declare the same units_description (the "
                   "reader reports the first segment's for the whole channel, so a segment in "
@@ -1442,6 +1456,37 @@ void check_records_encryption(const SessionSource& src, const std::vector<Segmen
   }
 }
 
+// records.interrupted-edit: the marker of an unfinished remove_annotations.
+void check_interrupted_edit(const std::string& path, Report& report) {
+  if (path_has_suffix(path, ".tar")) return;
+  std::optional<InterruptedRecordEdit> edit;
+  try {
+    edit = interrupted_record_edit(path);
+  } catch (const std::exception&) {
+    Finding f;
+    f.check_id = "records.interrupted-edit";
+    f.severity = Severity::Error;
+    f.segment_number = -1;
+    f.message = "an annotation edit was interrupted and its record of what it was doing cannot be "
+                "read; run recover_session to see why";
+    report.findings.push_back(std::move(f));
+    return;
+  }
+  if (!edit) return;
+  Finding f;
+  f.check_id = "records.interrupted-edit";
+  f.severity = Severity::Error;
+  f.segment_number = -1;
+  f.field = "operation marker";
+  f.stored = "annotation edit interrupted";
+  f.expected = "no unfinished edit";
+  f.message = "an annotation edit (remove_annotations) is in progress or was interrupted: " +
+              std::to_string(edit->files.size()) +
+              " record file(s) may be half swapped; run recover_session with apply=True, which "
+              "will " + edit->action + " it";
+  report.findings.push_back(std::move(f));
+}
+
 // The shared body of validate/repair. `repair` empty => read-only.
 Report run(const std::string& path, const ValidateOptions& opts, const RepairSelection* repair,
            const Control& ctl, std::shared_ptr<const SessionSource> given = nullptr) {
@@ -1962,6 +2007,7 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
     }
   }
   if (selected(opts.check_ids, "records.encryption")) check_records_encryption(*src, segments, report);
+  if (selected(opts.check_ids, "records.interrupted-edit")) check_interrupted_edit(path, report);
 
   // segment-repaired: a non-last segment of these channels changed, so their
   // LAST segment's .tmet says so (see last_segment.hpp). Header-only, backed up

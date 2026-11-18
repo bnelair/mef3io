@@ -91,8 +91,12 @@ ArchiveRename rename_archive(const std::string& path, const std::string& new_nam
 /// in the session folder while it runs. It names no session, path or person.
 struct OperationMarker {
   std::string tool;       ///< e.g. "mef3io 1.5.0"
-  std::string operation;  ///< "rename", "fix-name-drift"
+  std::string operation;  ///< "rename", "fix-name-drift", "remove-annotations"
   std::string id;         ///< 32 hex characters; names the journal
+  /// Further `key value` lines of the marker file (internal; never shown to a
+  /// user): the plan of a "remove-annotations" edit lives here, because for
+  /// it the marker IS the journal. Empty for a rename.
+  std::vector<std::string> details;
 };
 
 struct RenameOptions {

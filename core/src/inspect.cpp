@@ -14,6 +14,7 @@
 #include <map>
 #include <set>
 
+#include "mef3io/annotation_edit.hpp"
 #include "mef3io/byteio.hpp"
 #include "mef3io/crypto.hpp"
 #include "mef3io/errors.hpp"
@@ -604,10 +605,15 @@ SessionSummary detail::inspect_session_through(std::shared_ptr<const SessionSour
   std::vector<std::string> unread_root_records;  // .rdat at the root that are not the session's
   std::size_t records_failed = 0;
 
+  // An interrupted annotation edit: a level's record files may be half swapped, so no
+  // record is read and none is counted (a count would be wrong); a warning says so.
+  const bool edit_interrupted = has_interrupted_edit(path);
+
   auto read_file = [&](const std::string& rdat, std::optional<si8> rto, bool rto_assumed,
                        const std::string& why, RecordLevel level, const std::string& channel,
                        int segment) {
     ctl.check();
+    if (edit_interrupted) return;
     std::vector<InspectRecord> got;
     std::vector<std::string> texts;  // each record's free text, for the identity table
     std::uint64_t file_bytes = 0;
@@ -904,6 +910,13 @@ SessionSummary detail::inspect_session_through(std::shared_ptr<const SessionSour
   auto warn = [&](std::string code, std::string message, bool blocks) {
     out.warnings.push_back(InspectWarning{std::move(code), std::move(message), blocks});
   };
+  if (edit_interrupted)
+    warn("annotation-edit-interrupted",
+         "an annotation edit (remove_annotations) is in progress or was interrupted: a level's "
+         "annotation files may be half swapped, so the records are NOT read and no record count "
+         "is reported here. Samples are unaffected. If no program is editing this session, run "
+         "recover_session with apply=True to finish the edit or roll it back.",
+         true);
   if (!out.video_channels.empty()) {
     std::string list;
     for (const auto& v : out.video_channels) list += (list.empty() ? "" : ", ") + v;

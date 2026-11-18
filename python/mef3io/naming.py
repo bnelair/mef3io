@@ -344,6 +344,8 @@ def clear_operation_marker(path) -> None:
     is gone (another machine, a deleted folder). Refused unless
     :func:`name_drift` shows the name consistent, so a session the operation
     left half-changed keeps its marker. When the journal exists, run the
-    operation again instead: it rolls back.
+    operation again instead: it rolls back. The marker of an interrupted
+    annotation edit (:func:`remove_annotations`) is never cleared this way:
+    ``recover_session(path, apply=True)`` finishes or rolls back that edit.
     """
     _backend().clear_operation_marker(os.fspath(path))

@@ -428,21 +428,10 @@ fs::path session_dir(const std::string& path) {
   return dir;
 }
 
-/// A session that is being written must not be renamed underneath its
-/// writer: a copy's `<dst>.partial` beside it (or beside the target), a
-/// writer's or repair's temp file inside it.
+/// The shared rule (operation_marker.hpp): a session that is being written
+/// must not be renamed underneath its writer.
 void refuse_if_being_written(const fs::path& dir, const fs::path& target) {
-  std::error_code ec;
-  for (const auto& p : {dir, target})
-    if (fs::exists(u8(str(p) + ".partial"), ec))
-      throw WriteConflictError("a copy is being written beside the session (" + str(p) +
-                               ".partial): finish or remove it first");
-  for (fs::recursive_directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
-    const std::string n = str(it->path().filename());
-    if (ends_with(n, ".mef3io-tmp") || ends_with(n, ".mef3io-repair-tmp"))
-      throw WriteConflictError("the session is being written (" + str(it->path()) +
-                               " exists); if no writer is running, the file can be removed");
-  }
+  detail::refuse_if_being_written(dir, target);
 }
 
 /// Read every file the plan rewrites and check it can be rewritten: CRCs
@@ -637,7 +626,7 @@ RenameReport run(Plan p, const fs::path& dir, const RenameOptions& o, RenameRepo
   reached();
   // The journal is durable; only now the marker, and only after the marker
   // the first change.
-  detail::write_operation_marker(dir, {tool_name(), p.operation, j.id});
+  detail::write_operation_marker(dir, {tool_name(), p.operation, j.id, {}});
 
   try {
     reached();
@@ -778,8 +767,14 @@ std::optional<OperationMarker> operation_marker(const std::string& path) {
 
 void clear_operation_marker(const std::string& path) {
   const fs::path dir = session_dir(path);
-  if (!detail::read_operation_marker(dir))
+  const auto marker = detail::read_operation_marker(dir);
+  if (!marker)
     throw std::invalid_argument("the session carries no operation marker: " + str(dir));
+  if (marker->operation == detail::EDIT_ANNOTATIONS_OPERATION)
+    throw WriteConflictError(
+        "the marker stays: it belongs to an interrupted annotation edit, whose plan it carries "
+        "(removing it would leave a level's annotation files half swapped). Run recover_session "
+        "with apply=True, which finishes the edit or rolls it back.");
   if (!name_drift(str(dir)).consistent)
     throw WriteConflictError(
         "the marker stays: the session's name is out of step (name_drift), so the "

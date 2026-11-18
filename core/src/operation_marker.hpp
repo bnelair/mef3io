@@ -45,7 +45,7 @@ inline std::optional<OperationMarker> read_operation_marker(const std::filesyste
   std::error_code ec;
   const auto file = dir / OPERATION_MARKER;
   if (!std::filesystem::exists(file, ec)) return std::nullopt;
-  OperationMarker m{"unknown", "unknown", ""};
+  OperationMarker m{"unknown", "unknown", "", {}};
   std::ifstream in(detail::utf8_path(file), std::ios::binary);
   std::string line;
   if (in && std::getline(in, line) && line == OPERATION_MARKER_MAGIC) {
@@ -54,8 +54,9 @@ inline std::optional<OperationMarker> read_operation_marker(const std::filesyste
       if (sp == std::string::npos) continue;
       const std::string key = line.substr(0, sp), value = line.substr(sp + 1);
       if (key == "tool") m.tool = value;
-      if (key == "operation") m.operation = value;
-      if (key == "id") m.id = value;
+      else if (key == "operation") m.operation = value;
+      else if (key == "id") m.id = value;
+      else m.details.push_back(line);
     }
   }
   return m;
@@ -75,6 +76,7 @@ inline void write_operation_marker(const std::filesystem::path& dir, const Opera
       if (!out) throw IoError("cannot write the operation marker: " + detail::path_utf8(part));
       out << OPERATION_MARKER_MAGIC << "\ntool " << m.tool << "\noperation " << m.operation
           << "\nid " << m.id << "\n";
+      for (const auto& d : m.details) out << d << "\n";
       finish_stream(out, detail::path_utf8(part));
     }
     fsync_file_or_throw(detail::path_utf8(part));
@@ -101,7 +103,17 @@ inline void remove_operation_marker(const std::filesystem::path& dir) {
   fsync_directory(dir);
 }
 
+inline constexpr const char* EDIT_ANNOTATIONS_OPERATION = "remove-annotations";
+
 inline std::string mid_operation_message(const OperationMarker& m) {
+  if (m.operation == EDIT_ANNOTATIONS_OPERATION)
+    return "the session is in the middle of an annotation edit (remove_annotations, started by " +
+           m.tool + (m.id.empty() ? "" : ", operation " + m.id) +
+           ") that was interrupted or is still running: one level's annotation files may be "
+           "half swapped, so its annotations should not be trusted until it is finished. "
+           "Nothing will be written to the session until then. If no program is editing this "
+           "session, run recover_session with apply=True, which finishes the edit (or rolls it "
+           "back when its new files are not intact).";
   return "the session is in the middle of an operation (" + m.operation + ", started by " +
          m.tool + (m.id.empty() ? "" : ", operation " + m.id) +
          "). Nothing will be written to it until that operation is finished or rolled back: "
@@ -116,6 +128,31 @@ inline void refuse_if_mid_operation(const std::string& session_path) {
   if (path_has_suffix(session_path, ".tar")) return;
   if (const auto m = read_operation_marker(detail::utf8_path(session_path)))
     throw WriteConflictError(mid_operation_message(*m));
+}
+
+/// A session that is being written must not be changed underneath its writer
+/// (the ONE rule of every in-place operation: rename_session, fix_name_drift,
+/// remove_annotations): a copy's `<dst>.partial` beside it (or beside
+/// `target`), a writer's or repair's temp file inside it. There is no
+/// cross-process write lock (docs/design.md): a Writer that is open but idle
+/// leaves no sign, so this cannot see it.
+inline void refuse_if_being_written(const std::filesystem::path& dir,
+                                    const std::filesystem::path& target) {
+  namespace fsys = std::filesystem;
+  const auto ends_with = [](const std::string& s, const std::string& suffix) {
+    return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+  };
+  std::error_code ec;
+  for (const auto& p : {dir, target})
+    if (fsys::exists(detail::utf8_path(detail::path_utf8(p) + ".partial"), ec))
+      throw WriteConflictError("a copy is being written beside the session (" +
+                               detail::path_utf8(p) + ".partial): finish or remove it first");
+  for (fsys::recursive_directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+    const std::string n = detail::path_utf8(it->path().filename());
+    if (ends_with(n, ".mef3io-tmp") || ends_with(n, ".mef3io-repair-tmp"))
+      throw WriteConflictError("the session is being written (" + detail::path_utf8(it->path()) +
+                               " exists); if no writer is running, the file can be removed");
+  }
 }
 
 }  // namespace mef3io::detail

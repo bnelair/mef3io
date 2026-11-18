@@ -393,6 +393,7 @@ def test_running_out_of_descriptors_heals(tmp_path):
     # 6 Readers x 64 files would be 384 descriptors: far over the limit of 120,
     # which each Reader runs into in turn and recovers from by letting go.
     env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)  # a dev tree has no install
     out = subprocess.run([sys.executable, str(script), str(s), "120"], capture_output=True, text=True,
                          env=env, timeout=300)
     assert out.returncode == 0, out.stderr[-2000:]

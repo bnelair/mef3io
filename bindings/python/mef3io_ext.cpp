@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "mef3io/annotation_edit.hpp"
 #include "mef3io/anonymize.hpp"
 #include "mef3io/control.hpp"
 #include "mef3io/crc.hpp"
@@ -218,6 +219,123 @@ nb::dict record_to_dict(const mef3io::Record& rec) {
   }
   return d;
 }
+
+// ---- remove_annotations: dicts <-> selectors / adds / reports --------------------------
+
+mef3io::RecordField::Value field_value_from(nb::handle v) {
+  using V = mef3io::RecordField::Value;
+  if (PyBool_Check(v.ptr())) throw std::invalid_argument("a record field is never a bool");
+  if (PyLong_Check(v.ptr())) return V(to_si8(nb::borrow(v), "record field"));
+  if (PyFloat_Check(v.ptr())) return V(nb::cast<double>(v));
+  if (PyUnicode_Check(v.ptr())) return V(nb::cast<std::string>(v));
+  if (PyList_Check(v.ptr()) || PyTuple_Check(v.ptr())) {
+    nb::list l = nb::cast<nb::list>(v);
+    if (l.size() == 0) return V(std::vector<mef3io::si4>{});
+    if (PyDict_Check(nb::handle(l[0]).ptr())) {
+      std::vector<mef3io::SeizureChannel> ch;
+      for (auto item : l) {
+        nb::dict d = nb::cast<nb::dict>(item);
+        mef3io::SeizureChannel c;
+        c.name = nb::cast<std::string>(d["name"]);
+        c.onset = to_si8(d["onset"], "seizure channel onset");
+        c.offset = to_si8(d["offset"], "seizure channel offset");
+        ch.push_back(std::move(c));
+      }
+      return V(std::move(ch));
+    }
+    std::vector<mef3io::si4> t;
+    for (auto item : l) t.push_back(static_cast<mef3io::si4>(to_si8(nb::borrow(item), "template value")));
+    return V(std::move(t));
+  }
+  throw std::invalid_argument("a record field must be an int, float, str or list");
+}
+
+void level_from_dict(nb::dict d, mef3io::RecordLevel& level, std::string& channel, int& segment) {
+  channel.clear();
+  segment = -1;
+  const bool has_channel = d.contains("channel") && !nb::object(d["channel"]).is_none();
+  const bool has_segment = d.contains("segment") && !nb::object(d["segment"]).is_none();
+  if (has_channel) channel = nb::cast<std::string>(d["channel"]);
+  if (has_segment) segment = static_cast<int>(to_si8(d["segment"], "segment"));
+  if (d.contains("level") && !nb::object(d["level"]).is_none()) {
+    const std::string l = nb::cast<std::string>(d["level"]);
+    if (l == "session") level = mef3io::RecordLevel::Session;
+    else if (l == "channel") level = mef3io::RecordLevel::Channel;
+    else if (l == "segment") level = mef3io::RecordLevel::Segment;
+    else throw std::invalid_argument("level must be 'session', 'channel' or 'segment'; got '" + l + "'");
+  } else {
+    level = has_segment   ? mef3io::RecordLevel::Segment
+            : has_channel ? mef3io::RecordLevel::Channel
+                          : mef3io::RecordLevel::Session;
+  }
+}
+
+/// A time in an exact-by-content call: a whole number of microseconds (an int,
+/// or a float that is one); anything else is refused, never rounded.
+mef3io::si8 exact_time(nb::object o, const char* what) {
+  if (PyFloat_Check(o.ptr())) {
+    const double v = nb::cast<double>(o);
+    if (!std::isfinite(v) || std::floor(v) != v)
+      throw std::invalid_argument(std::string(what) + " must be a whole number of microseconds, got " +
+                                  std::to_string(v));
+  }
+  return to_si8(o, what);
+}
+
+mef3io::RecordSelector selector_from_dict(nb::dict d) {
+  mef3io::RecordSelector s;
+  if (!d.contains("type")) throw std::invalid_argument("a selector needs a record type");
+  if (!d.contains("time")) throw std::invalid_argument("a selector needs the record's time");
+  s.type = nb::cast<std::string>(d["type"]);
+  s.time = exact_time(d["time"], "a selector's time");
+  level_from_dict(d, s.level, s.channel, s.segment);
+  for (auto item : d) {
+    const std::string key = nb::cast<std::string>(item.first);
+    if (key == "type" || key == "time" || key == "level" || key == "channel" || key == "segment" ||
+        key == "version_major" || key == "version_minor")
+      continue;
+    if (key == "expect") {
+      s.expect = to_si8(nb::borrow(item.second), "expect");
+      continue;
+    }
+    if (key == "all_copies") {
+      s.all_copies = nb::cast<bool>(item.second);
+      continue;
+    }
+    mef3io::RecordField f{key, std::nullopt};
+    if (!nb::handle(item.second).is_none()) f.value = field_value_from(item.second);
+    s.fields.push_back(std::move(f));
+  }
+  return s;
+}
+
+mef3io::Record add_record_from_dict(nb::dict d) {
+  mef3io::Record r;
+  r.type = d.contains("type") ? nb::cast<std::string>(d["type"]) : std::string("Note");
+  if (!d.contains("time")) throw std::invalid_argument("a record to add needs its time");
+  r.time = exact_time(d["time"], "a record's time");
+  level_from_dict(d, r.level, r.channel, r.segment);
+  if (d.contains("text")) {
+    nb::object t = d["text"];
+    if (!t.is_none()) r.text = nb::cast<std::string>(t);
+  }
+  if (d.contains("duration")) {
+    nb::object dur = d["duration"];
+    if (!dur.is_none()) r.duration = to_si8(dur, "record duration");
+  }
+  return r;
+}
+
+nb::dict interrupted_edit_dict(const mef3io::InterruptedRecordEdit& e) {
+  nb::dict d;
+  d["id"] = e.id;
+  d["files"] = e.files;
+  d["action"] = e.action;
+  d["reason"] = e.reason;
+  d["running"] = e.running;
+  d["applied"] = e.applied;
+  return d;
+}
 }  // namespace
 
 namespace {
@@ -277,6 +395,9 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
   d["last_time"] = opt_obj(s.last_time);
 
   nb::list chans;
+  const bool records_reported =
+      std::none_of(s.warnings.begin(), s.warnings.end(),
+                   [](const auto& w) { return w.code == "annotation-edit-interrupted"; });
   for (const auto& c : s.channels) {
     nb::dict cd;
     cd["name"] = record_str(c.name);
@@ -293,7 +414,8 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
     cd["gaps_certain"] = c.gaps_certain;
     cd["offset_assumed_zero"] = c.offset_assumed_zero;
     cd["bytes"] = c.bytes;
-    cd["records"] = c.records;
+    // not counted while an annotation edit is interrupted: null, never a wrong number
+    cd["records"] = records_reported ? nb::object(nb::int_(c.records)) : nb::object(nb::none());
     nb::list gaps;
     for (const auto& g : c.gaps) gaps.append(nb::make_tuple(g.start, g.end));
     cd["gaps"] = gaps;
@@ -826,6 +948,105 @@ NB_MODULE(_mef3io, m) {
       nb::arg("cancel").none() = nb::none(), nb::arg("progress") = nb::none(),
       "Unpack a session archive back into a directory and return its path.");
 
+  // --- remove_annotations: take stored annotations out (and so change them) ---
+  m.def(
+      "remove_annotations",
+      [](const std::string& path, nb::list remove, nb::list add, const std::string& password_1,
+         const std::string& password_2, bool dry_run, int crash_at, int fail_at,
+         const mef3io::CancelToken* cancel, nb::object progress) {
+        // Converted WITH the GIL; the file work runs without it (PyHooks::run).
+        std::vector<mef3io::RecordSelector> sels;
+        for (auto item : remove) sels.push_back(selector_from_dict(nb::cast<nb::dict>(item)));
+        std::vector<mef3io::Record> adds;
+        for (auto item : add) adds.push_back(add_record_from_dict(nb::cast<nb::dict>(item)));
+        mef3io::RemoveAnnotationsOptions o;
+        o.password_1 = password_1;
+        o.password_2 = password_2;
+        o.dry_run = dry_run;
+        o.crash_at = crash_at;
+        o.fail_at = fail_at;
+        PyHooks hooks(cancel, std::move(progress));
+        mef3io::RemoveAnnotationsReport r = hooks.run([&](const mef3io::Control& ctl) {
+          return mef3io::remove_annotations(path, sels, adds, o, ctl);
+        });
+        nb::dict out;
+        nb::list files;
+        for (const auto& f : r.files) {
+          nb::dict d;
+          d["level"] = mef3io::record_level_name(f.level);
+          d["channel"] = f.level == mef3io::RecordLevel::Session ? nb::object(nb::none())
+                                                                 : nb::object(nb::str(f.channel.c_str()));
+          d["segment"] = f.level == mef3io::RecordLevel::Segment ? nb::object(nb::int_(f.segment))
+                                                                 : nb::object(nb::none());
+          d["file"] = f.file;
+          d["records_before"] = f.records_before;
+          d["removed"] = f.removed;
+          d["added"] = f.added;
+          d["records_after"] = f.records_after;
+          d["pair_removed"] = f.pair_removed;
+          files.append(d);
+        }
+        out["files"] = files;
+        out["removed"] = r.removed;
+        out["added"] = r.added;
+        out["dry_run"] = r.dry_run;
+        out["resumed"] = r.resumed;
+        out["notes"] = r.notes;
+        return out;
+      },
+      nb::arg("path"), nb::arg("remove"), nb::arg("add"), nb::arg("password_1") = "",
+      nb::arg("password_2") = "", nb::arg("dry_run") = false, nb::arg("_crash_at") = -1,
+      nb::arg("_fail_at") = -1, nb::arg("cancel").none() = nb::none(),
+      nb::arg("progress") = nb::none(),
+      "Remove annotations by content (and add others) in one crash-safe rewrite of the "
+      "record files of the levels involved (see mef3io.remove_annotations).");
+  // TEST SEAM: the durable steps of an edit, in order (see mef3io::testing).
+  m.def(
+      "_set_edit_observer",
+      [](nb::object fn) {
+        static nb::object* observer = new nb::object();  // leaked on purpose: no teardown order
+        if (fn.is_none()) {
+          mef3io::testing::set_edit_observer({});
+          *observer = nb::none();
+          return;
+        }
+        *observer = fn;
+        mef3io::testing::set_edit_observer([](const std::string& kind, const std::string& path) {
+          nb::gil_scoped_acquire gil;
+          try {
+            (*observer)(kind, path);
+          } catch (nb::python_error& e) {
+            throw mef3io::IoError(std::string("the edit observer raised: ") + e.what());
+          }
+        });
+      },
+      nb::arg("observer").none());
+  m.def(
+      "interrupted_record_edit",
+      [](const std::string& path) -> nb::object {
+        std::optional<mef3io::InterruptedRecordEdit> e;
+        {
+          nb::gil_scoped_release release;
+          e = mef3io::interrupted_record_edit(path);
+        }
+        if (!e) return nb::none();
+        return interrupted_edit_dict(*e);
+      },
+      nb::arg("path"), "The annotation edit this session was interrupted in, or None.");
+  m.def(
+      "_finish_interrupted_edit",
+      [](const std::string& path, int crash_at, int fail_at) -> nb::object {
+        std::optional<mef3io::InterruptedRecordEdit> e;
+        {
+          nb::gil_scoped_release release;
+          e = mef3io::finish_interrupted_record_edit(path, crash_at, fail_at);
+        }
+        if (!e) return nb::none();
+        return interrupted_edit_dict(*e);
+      },
+      nb::arg("path"), nb::arg("_crash_at") = -1, nb::arg("_fail_at") = -1,
+      "Test hook: finish an interrupted annotation edit, optionally crashing at a step.");
+
   m.def(
       "recover_session",
       [](const std::string& path, bool apply, bool backup, const std::string& password,
@@ -865,9 +1086,12 @@ NB_MODULE(_mef3io, m) {
         }
         nb::list skipped;
         for (const auto& s : r.skipped) skipped.append(s);
+        nb::list edits;
+        for (const auto& e : r.record_edits) edits.append(interrupted_edit_dict(e));
         nb::dict out;
         out["segments"] = segs;
         out["record_files"] = rfiles;
+        out["record_edits"] = edits;
         out["skipped"] = skipped;
         out["segments_examined"] = r.segments_examined;
         out["applied"] = r.applied;

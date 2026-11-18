@@ -887,10 +887,21 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
   if (!path_has_suffix(path, ".mefd"))
     throw IoError("session directory must end with .mefd: " + path);
   if (!fsys::is_directory(detail::utf8_path(path))) throw IoError("no such session directory: " + path);
+  // An interrupted annotation edit comes FIRST: with `apply` it is finished (or
+  // rolled back) so the record files below are examined in a settled state; a
+  // dry run only says what finishing would do. Any other operation's marker
+  // still refuses a write.
+  std::optional<InterruptedRecordEdit> edit;
+  if (apply) edit = finish_interrupted_record_edit(path);
+  else edit = interrupted_record_edit(path);
   if (apply) detail::refuse_if_mid_operation(path);
 
   const fsys::path root = detail::utf8_path(path);
   RecoveryReport report;
+  if (edit) report.record_edits.push_back(*edit);
+  for (const auto& left : record_edit_leftovers(path, apply))
+    report.notes.push_back(std::string(apply ? "removed" : "would remove") +
+                           " a temporary file an interrupted annotation edit left: " + left);
   std::set<fsys::path> channels_to_stamp;
   const fsys::path backup_root =
       root.parent_path() / detail::utf8_path(detail::path_utf8(root.filename()) + ".recover-backup");
@@ -1838,7 +1849,12 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
     report.notes.push_back(channel + ": last segment stamped segment-repaired (header only): " +
                            detail::path_utf8(stamp.tmet));
   }
-  recover_record_files(root, apply, backup, backup_root, report, ctl);
+  if (edit && !apply)
+    report.notes.push_back(
+        "the annotation files were not examined: finish the interrupted annotation edit first "
+        "(recover_session with apply)");
+  else
+    recover_record_files(root, apply, backup, backup_root, report, ctl);
   report.applied = apply;
   return report;
 }

@@ -531,13 +531,6 @@ void validate_records_for_write(const std::vector<Record>& records) {
 
 namespace {
 
-struct EncodedRecord {
-  std::vector<ui1> bytes;                  // header + padded (maybe encrypted) body, CRC set
-  std::array<ui1, fmt::RECORD_INDEX_BYTES> entry{};  // index entry; offset (8) filled by caller
-  si8 time = 0;                            // absolute uUTC
-  si8 disk_time = 0;
-};
-
 // Encode in the given order. `keys` is used only when `encrypt`.
 std::vector<EncodedRecord> encode_records(const std::vector<const Record*>& ordered, si8 rto,
                                           bool encrypt, const crypto::AccessKeys& keys) {
@@ -604,6 +597,17 @@ constexpr const char* RECOVER_ADVICE =
     " (a write was probably interrupted; run recover_session, which repairs it, and write again)";
 
 }  // namespace
+
+std::vector<EncodedRecord> encode_records_for_file(const std::vector<Record>& records, si8 rto,
+                                                   bool encrypt, const crypto::AccessKeys& keys) {
+  // The very order and bytes write_records produces for one call: time order
+  // (stable), the same body layout, padding, encryption and CRC.
+  std::vector<const Record*> ordered;
+  for (const auto& r : records) ordered.push_back(&r);
+  std::stable_sort(ordered.begin(), ordered.end(),
+                   [](const Record* a, const Record* b) { return a->time < b->time; });
+  return encode_records(ordered, rto, encrypt, keys);
+}
 
 namespace {
 

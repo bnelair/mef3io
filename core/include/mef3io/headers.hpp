@@ -126,8 +126,11 @@ enum class Operation : ui1 {
                        ///< times and samples verbatim; stamped on every file
   SegmentRepaired = 9, ///< stamped on a channel's LAST segment when repair or
                        ///< recovery modified ANOTHER segment of that channel
+  RecordsEdit = 10,    ///< remove_annotations: a record file pair rewritten
+                       ///< without (or with other) records; the kept ones
+                       ///< carried over byte for byte
 };
-inline constexpr ui1 MAX_CODE = 9;
+inline constexpr ui1 MAX_CODE = 10;
 static_assert(MAX_CODE < 32, "every operation code needs a bit in the 32-bit mask");
 
 /// Stable lowercase name of a code ("create", "append", ...); nullptr if unknown.

@@ -17,7 +17,7 @@ The layout is a FROZEN format (docs/mef3_format.md, "Provenance region"):
 
 Codes: 0 unset, 1 create, 2 append, 3 header-repair, 4 recovery,
 5 metadata-update, 6 anonymize (#70), 7 rename (#72), 8 transform (#73), 9 segment-repaired (stamped on a channel's LAST segment when a
-repair or recovery modified another segment — tests/test_p23). Append-only.
+repair or recovery modified another segment — tests/test_p23), 10 records-edit (remove_annotations rewrote a record file pair). Append-only.
 
 What is pinned here, on real files (the byte layout itself, saturation and
 bounds are pinned in the Catch2 suite):

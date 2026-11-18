@@ -279,10 +279,149 @@ records **within each level** by time (stable: equal times keep their write
 order); the levels stay session, channel, segment. `inspect()` lists a file's
 records in file order. Legacy readers (mef_tools, pymef) return file order, so
 they show an out-of-order append unsorted. In encrypted sessions record
-bodies are level-2 encrypted. To start from nothing, write to a new session
-(or level). If a power cut interrupted an append, the next write is refused
-until `recover_session` has repaired the file (see
+bodies are level-2 encrypted. Appending never removes or changes a stored
+record; to take one back use [`remove_annotations`](#remove_annotations)
+(a separate call). If a power cut interrupted an append, the next write is
+refused until `recover_session` has repaired the file (see
 [long recordings](long_recordings.md)).
+
+### `remove_annotations`
+
+```python
+mef3io.remove_annotations(path, remove, add=(), *, password1="", password2="",
+                          all_copies=False, dry_run=False, cancel=None, progress=None)
+```
+
+Removes stored annotations **by content** and, in the same call, may add
+others, so changing a note is one rewrite. It is a module-level function, not
+a `Writer` method: `write_annotations` stays append-only. A removed annotation
+is **gone** (there is no undo and no history).
+
+```python
+notes = mef3io.Reader(path).records()
+wrong = [n for n in notes if n["type"] == "Note" and n["text"] == "typo"]
+report = mef3io.remove_annotations(
+    path, remove=wrong, add=[{"time": wrong[0]["time"], "text": "fixed"}])
+report.removed, report.added          # 1, 1
+```
+
+- **Selection.** Each `remove` item names a record exactly as
+  `Reader.records()` returns it: `level`, `channel` / `segment` where they
+  apply, `time`, `type` and every body field of the type (a dict from
+  `records()` works unchanged). A selector that leaves out a field the stored
+  record has (`selector-incomplete`), names a field its type does not carry
+  (`selector-unknown-field`), matches nothing (`no-match`), more than it says
+  it expects (`ambiguous`: identical duplicates; say `expect=2` or
+  `all_copies=True`), fewer (`count-mismatch`) or names a record another
+  selector names (`selectors-overlap`) is refused with `.code` on the
+  exception, and **nothing is removed**: the call is all or nothing, across
+  levels.
+- **What is rewritten.** Only the annotation files (`.rdat` + `.ridx`) of the
+  levels involved. Signal files and metadata are never opened for writing.
+  Every record that stays is carried over byte for byte (body, CRC, time,
+  order, encryption level); the headers are made right (count, span, CRCs,
+  provenance `records-edit`). If the last record of a level goes, its two
+  files are removed, which is the state of a level that never had annotations;
+  a later `write_annotations` creates fresh ones.
+- **`add`** records are like `write_annotations` takes them (plus an optional
+  `channel` / `segment`); the level's file must already exist. In a protected
+  session pass both passwords (as for `Writer`): added records are level-2
+  encrypted, kept ones keep their ciphertext.
+- **Crash safety.** The new files are written beside the old, flushed and
+  read back; then a marker file in the session (`.mef3io-operation`) records the
+  plan and the files are swapped by rename. After a crash or power cut the
+  session is either as it was, or carries the marker: opening it warns
+  (`SessionOperationWarning`), writes are refused, **every reader of annotations
+  raises (`edit-interrupted`) instead of returning a half-swapped level as if it
+  were whole**: `Reader.records()`, `MultiReader.records()`, `MefReader.get_annotations()`,
+  the extension's raw `records`, the C API (so MATLAB's `records`) and C++
+  `Session::read_records`; `inspect` (library and command line) still describes the
+  session but says the records are **not reported** (warning
+  `annotation-edit-interrupted`) instead of showing a count. Reading samples keeps
+  working, `validate_session` reports
+  `records.interrupted-edit`, and `recover_session(path, apply=True)` settles
+  it: it finishes the swap when every new file is intact, and otherwise rolls
+  it back to the old annotations (the report then says **the removal was NOT
+  done** and why, and `python -m mef3io recover` exits with status 1; this also
+  happens when the new files were deleted by someone). The next
+  `remove_annotations` does the same first (`report.resumed`).
+  **A healthy edit that is still running looks the same to a reader** (the marker
+  is there), so the error says "in progress or was interrupted": if no program
+  is editing the session, run `recover_session`. The marker records the process
+  that placed it (process id, host name, start time where the system gives it):
+  `recover_session(apply=True)` and `remove_annotations` **refuse**
+  (`edit-in-progress`) while that process is alive on the same machine, and
+  `report.record_edits[i].running` says so in a dry run. An owner that is dead,
+  on another machine (a session on a network drive: nothing can be checked, so
+  make sure no other machine is editing) or unknown (an unreadable plan) is
+  settled. A thread of the process that is itself calling cannot be told from a
+  crashed call of it and is not counted.
+  If the marker's plan itself cannot be read (a damaged file system, a newer
+  layout), recovery decides from the files alone, **for all levels of the edit
+  together** (the levels are those with `.new` / `.old` leftovers beside their
+  files), so a multi-level edit does not end half new and half old (the rollback
+  keeps every level's `.new` file until all levels are back, so a rollback that
+  dies part way is read the same way again): if no `.new`
+  file is left and every target is a whole pair, the swaps were all done and the
+  new pairs stay (done); otherwise, if every level that was swapped still has
+  its intact `.old` pair, every level goes back to the old pair (the removal was
+  **NOT done**); anything else is refused (`edit-unsettled`) with the files to
+  look at and nothing touched. The report and `python -m mef3io recover` tell
+  the three apart (exit 0 done, 1 rolled back and NOT done, 2 refused). Leftover
+  `.new` / `.old` files are **moved** to `<session>.edit-leftovers` beside the
+  session, never deleted. `clear_operation_marker` does not clear this marker.
+  Limits: this holds as long as the plan is gone only, or the `.new` files are
+  gone only; a removal whose plan AND `.new` files are both gone cannot be told
+  from a finished one, and a marker whose recorded CRC is wrong (not torn) can make
+  a finished removal be reported as not done (the state is then still all new).
+- **A torn annotation file is never trimmed silently.** If bytes lie after the
+  last record the header counts (a record or a fragment an interrupted
+  `write_annotations` left) or the index disagrees with the data, the call
+  refuses (`record-torn`, `record-index-mismatch`) and changes nothing. Run
+  `recover_session(apply=True)` first, which keeps every whole record.
+- **What a selector can tell apart.** Records are compared on the fields
+  mef3io decodes (every type at version 1.0). A record whose body it cannot
+  decode (an unknown type, another version) is matched on its location, type
+  and time only, so two such records at the same time look identical: the call
+  then refuses (`ambiguous`) unless you say `expect=2` or `all_copies=True`.
+  Bytes a selector cannot see (anything after a text's terminating NUL, the
+  record version) make no difference either: records that differ only there
+  are identical copies, and `all_copies=True` removes all of them. Note text
+  that is not valid UTF-8 (written by another tool) is shown with replacement
+  characters by `Reader.records()`, so a selector built from it matches
+  nothing and is refused (`no-match`), never matched wrongly; such a note
+  cannot be removed through this call. A selector's `time` must be a whole
+  number of microseconds (a float with a fraction is refused, not rounded).
+- **Memory.** The annotation files of the levels involved are held in memory
+  several times over while the call works (measured at roughly ten to twenty
+  times the size of the files); a record file of many gigabytes needs that much
+  memory.
+- **Cancel / progress** (`cancel=`, `progress=`) work before the swap; after it
+  starts it always completes. `dry_run=True` reports what would change and
+  writes nothing.
+- **Refused:** a `.mefd.tar` (`tar-read-only`), an annotation file that cannot be
+  read in full (`record-damaged`, `record-crc`, `record-index-mismatch`,
+  `record-index-missing`, `record-torn`; run `recover_session` first), wrong or
+  missing passwords (`password`, `record-locked`), a session being written or
+  mid-operation (`being-written`, `mid-operation`), annotations that changed
+  while the call worked (`records-changed`), an unknown recording-time offset
+  (`offset-unknown`), a record to add at a negative time (`add-time`).
+- **Other writers.** There is no cross-process write lock: stop other writers of
+  the session first. The call refuses while it sees a write in progress, puts
+  its marker down before it moves anything, and checks the old files again
+  before it renames each of them, rolling back on a difference. A
+  `Writer.write_annotations` call looks for the marker at its start, again right
+  before it appends, and once more after (an edit that started during the append
+  makes it raise "may have been lost"). What remains: **an append that is already
+  running when the marker appears, and lands after the edit's last check of that
+  file, is lost** (the writer's own check after the append says so). On Windows a record file another
+  program holds open stops the swap (`edit-failed`, the old files are put
+  back). An open `Reader` reads the files by path on every call, so it shows
+  the new annotations (and none for a level that lost its last record) as soon
+  as the swap is done.
+
+Python and C++ only; there is no MATLAB equivalent (MATLAB's
+`writeAnnotations` only appends).
 
 ## Reading
 

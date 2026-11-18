@@ -203,7 +203,9 @@ class MefReader:
         ``Reader.records(channel, level="segment")``). Every dict carries
         ``level`` / ``channel`` / ``segment``; see :meth:`mef3io.Reader.records`
         for the fields. Returns ``None`` (with a printed warning) on failure,
-        as the legacy API did.
+        as the legacy API did; the one exception is an interrupted annotation edit
+        (``remove_annotations``), which raises ``WriteConflictError``
+        (``code == "edit-interrupted"``) instead of looking like "no annotations".
         """
         # The warning sits OUTSIDE the try: under -W error it must propagate,
         # not be mistaken for a failed read and swallowed.
@@ -214,7 +216,10 @@ class MefReader:
                     if channel is None:
                         return self._r.records()
                     return self._r.records(channel, level="channel")
-                except Exception:
+                except Exception as exc:
+                    # an interrupted annotation edit is not "no annotations": say so, loudly
+                    if getattr(exc, "code", None) == "edit-interrupted":
+                        raise
                     print("WARNING: read of annotations record failed, no annotations returned")
                     return None
         finally:
