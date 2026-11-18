@@ -411,10 +411,11 @@ little.
 **What it costs:**
 
 - **Descriptors are held** until `release_files()`, `close()` or the Reader is
-  garbage collected. If the process runs out of descriptors, every Reader with
-  the option on lets go of its kept files and retries once, so a read does not
-  fail because of them; but other code that opens files meanwhile competes with
-  the cache.
+  garbage collected. If the process runs out of descriptors ("too many open
+  files"), the library tries to recover: every Reader with the option on lets go
+  of its kept files and the open is retried once. This is best effort (other
+  threads can refill the descriptors in between, and other code that opens
+  files competes with the cache), so keep `open_files` well under the limit.
 - **On Windows, a folder cannot be renamed or removed, and a file cannot be
   replaced by renaming over it, while any file in it is held** (the OS refuses
   it for every open handle, whatever the sharing). Appending, deleting or moving

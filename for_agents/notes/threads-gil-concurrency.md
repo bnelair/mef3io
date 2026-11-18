@@ -81,3 +81,15 @@
   It covers opening/planning sources, copying channels, verifying; the GIL is
   released for the whole call (`PyHooks::run`), progress/text callbacks take it.
   Details and the error-order rule: copy-engine.md "MERGE IN ONE PASS".
+
+- **Kept-open Reader files and `fork()`.** The opt-in `open_files` handle caches
+  (large-files-and-append.md (f2)) and the process-wide registry of them
+  (`g_reader_caches` in source.cpp, used to heal descriptor exhaustion) have NO
+  at-fork handler, like the rest of the library (it has none): a child forked
+  from a multithreaded process inherits the descriptors and the cache mutexes in
+  whatever state another thread left them, so use only `spawn` (or fork before
+  any Reader exists / `release_files()` first). Positional reads keep the
+  inherited descriptors themselves safe; the mutexes are the hazard. No new
+  machinery was added for this. Healing (`healing()`) acts ONLY on descriptor
+  exhaustion (errno EMFILE/ENFILE, Windows ERROR_TOO_MANY_OPEN_FILES) and is best
+  effort: one retry, other threads may refill the descriptors.

@@ -644,15 +644,28 @@ DirectorySource::DirectorySource(std::string root, std::shared_ptr<detail::Handl
     : root_(std::move(root)), cache_(std::move(cache)) {}
 
 namespace {
+/// Remember why a plain open just failed (errno / GetLastError), for healing().
+void note_plain_open_failure() {
+#ifdef _WIN32
+  last_open_error = static_cast<int>(GetLastError());
+#else
+  last_open_error = errno;
+#endif
+}
+
 /// Run a plain (open-per-call) read of a Reader's source; when it fails while
 /// this Session or another Reader keeps files open, the failure may be the
 /// process being out of descriptors: let go of every kept file and try once more.
 template <class F>
 auto healing(const std::shared_ptr<detail::HandleCache>& c, F&& fn) -> decltype(fn()) {
   if (!c || !c->reader_mode || detail::cache_cap(*c) == 0) return fn();
+  last_open_error = 0;
   try {
     return fn();
   } catch (const IoError&) {
+    // ONLY descriptor exhaustion: a missing file or a short read must leave
+    // every Reader's kept files alone.
+    if (!out_of_descriptors(last_open_error)) throw;
     detail::release_all_reader_caches();
     return fn();  // a second failure is the real one
   }
@@ -804,7 +817,10 @@ std::vector<ui1> DirectorySource::read_all_once(const std::string& rel) const {
   }
   if (detail::source_open_observer) detail::source_open_observer(path);
   std::ifstream f(detail::utf8_path(path), std::ios::binary | std::ios::ate);
-  if (!f) throw IoError("cannot open file: " + path);
+  if (!f) {
+    note_plain_open_failure();
+    throw IoError("cannot open file: " + path);
+  }
   auto size = f.tellg();
   f.seekg(0);
   buf.assign(static_cast<std::size_t>(size), 0);
@@ -831,7 +847,10 @@ std::vector<ui1> DirectorySource::read_head_once(const std::string& rel, std::si
     return buf;
   if (detail::source_open_observer) detail::source_open_observer(path);
   std::ifstream f(detail::utf8_path(path), std::ios::binary);
-  if (!f) throw IoError("cannot open file: " + path);
+  if (!f) {
+    note_plain_open_failure();
+    throw IoError("cannot open file: " + path);
+  }
   buf.assign(max_bytes, 0);
   f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(max_bytes));
   if (f.bad()) throw IoError("read failed: " + path);
@@ -859,7 +878,10 @@ std::vector<ui1> DirectorySource::read_range_once(const std::string& rel, std::s
     return buf;
   if (detail::source_open_observer) detail::source_open_observer(path);
   std::ifstream f(detail::utf8_path(path), std::ios::binary);
-  if (!f) throw IoError("cannot open file: " + path);
+  if (!f) {
+    note_plain_open_failure();
+    throw IoError("cannot open file: " + path);
+  }
   f.seekg(static_cast<std::streamoff>(offset));
   buf.assign(length, 0);
   if (length && !f.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(length)))

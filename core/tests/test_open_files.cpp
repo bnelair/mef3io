@@ -431,10 +431,29 @@ TEST_CASE("kept files: deleted and recreated under the same name (same size, oth
     fsys::remove(old_path);
     fsys::copy_file(new_path, old_path);
   } catch (const fsys::filesystem_error&) {
-    return;  // the OS keeps the name of a deleted file that is still held: no recreate to check
+    SKIP("this OS keeps the name of a deleted file that is still held: no recreate to check");
   }
+  OpenWatch watch;
   const auto after = r.read("a", t0, t1);
+  REQUIRE(OpenWatch::opens_of(old_path) == 1);  // the path was opened afresh, not read through the old handle
   Reader fresh(dir, "", 1, true);
   REQUIRE(same(after, fresh.read("a", t0, t1)));
   REQUIRE_FALSE(same(after, before));
+}
+
+TEST_CASE("kept files: a read of a missing file leaves other Readers' kept files alone", "[open_files]") {
+  const auto dir = write_session("mef3io_of_missing.mefd");
+  const auto dir2 = write_session("mef3io_of_missing2.mefd");
+  Reader other(dir2, "", 1, true);
+  other.set_open_files(detail::suggested_open_files());
+  all(other, START, START + 3 * SEG_STEP);
+  const auto held = other.open_file_count();
+  REQUIRE(held == 12);
+  Reader r(dir, "", 1, true);
+  r.set_open_files(detail::suggested_open_files());
+  r.read("a", START + 1'000'000, START + 4'000'000);
+  fsys::remove(tdat_of(dir, "b", 0));
+  REQUIRE_THROWS(r.read("b", START + 1'000'000, START + 4'000'000));
+  REQUIRE(other.open_file_count() == held);
+  REQUIRE(r.open_file_count() == 1);
 }

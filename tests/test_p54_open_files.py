@@ -434,3 +434,17 @@ def test_multireader_default_is_off(tmp_path):
         assert m.open_files == 0
         m.read(list(CHANNELS), START, START + 5 * SECOND)
         assert sum(_kept(r) for r in m._readers) == 0
+
+
+def test_a_missing_file_does_not_release_other_readers_files(tmp_path):
+    s1 = _write(tmp_path / "one.mefd")
+    s2 = _write(tmp_path / "two.mefd")
+    with mef3io.Reader(str(s1), open_files=ON) as other, mef3io.Reader(str(s2), open_files=ON) as r:
+        other.read(list(CHANNELS), START, START + 25 * SECOND)
+        held = _kept(other)
+        assert held >= len(CHANNELS)
+        r.read("a", START, START + 2 * SECOND)
+        os.remove(_tdat(s2, "b", 0))
+        with pytest.raises(Exception):
+            r.read("b", START, START + 2 * SECOND)
+        assert _kept(other) == held

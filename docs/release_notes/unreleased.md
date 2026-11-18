@@ -19,8 +19,8 @@
   through one kept file.
   **When to use it:** one or a few Readers rereading the same files on a slow or
   network drive. **What it costs:** descriptors held until `release_files()` /
-  `close()` (if the process runs out, the kept files are let go and the read
-  retried); on Windows a folder cannot be renamed or removed, nor a file
+  `close()` (if the process runs out, the library tries to recover by letting
+  go of the kept files and retrying once; best effort); on Windows a folder cannot be renamed or removed, nor a file
   replaced by renaming over it, while files are held; and a single call that
   touches more files than `open_files` reopens them (raise `open_files`).
 - Not changed: the first read of a channel still reads the block index of
