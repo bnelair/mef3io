@@ -148,9 +148,10 @@ def remove_annotations(
     assume_owner_gone : bool, default False
         Only for finishing an earlier interrupted edit: skip the check that
         refuses (``edit-in-progress``) while the program that started it is
-        alive on this machine, and the refusal of a marker written by a newer
-        mef3io (``edit-newer-format``). Use it only when you are sure no
-        program is editing this session; the report notes it.
+        alive on this machine. Use it only when you are sure no program is
+        editing this session. If a program IS still editing when this is used, that program's edit can fail part-way or report success for a removal that was then rolled back, and a level's annotations can read as empty until the leftover ``.old`` files are put back by hand; nothing is deleted.
+        (A marker written by a newer mef3io is always refused,
+        ``edit-newer-format``: settle it with a mef3io at least as new.)
     cancel : CancelToken, optional
         Stops the call **before** the new files are in place, leaving the
         session as it was (:class:`Cancelled`). After that point a cancel is

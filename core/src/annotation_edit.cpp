@@ -28,11 +28,13 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <list>
 #include <map>
 #include <mutex>
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -332,31 +334,35 @@ std::string crc_hex_of(const std::string& text);  // below, with the marker help
 /// is a running edit of another thread while its root is in here, a crashed earlier call
 /// (nothing in flight) otherwise.
 std::mutex g_flight_mu;
-std::multiset<std::string> g_flight;
-
-std::string canonical_key(const fs::path& root) {
-  std::error_code ec;
-  const fs::path c = fs::weakly_canonical(root, ec);
-  return u8(ec ? root : c);
-}
+/// (session root, editing thread). Roots are compared with fs::equivalent (the same
+/// file-system object: symlinks, relative spellings, and case on case-insensitive volumes).
+std::list<std::pair<fs::path, std::thread::id>> g_flight;
 
 struct FlightGuard {
-  std::string key;
-  explicit FlightGuard(const fs::path& root) : key(canonical_key(root)) {
+  std::list<std::pair<fs::path, std::thread::id>>::iterator at;
+  explicit FlightGuard(const fs::path& root) {
     std::lock_guard<std::mutex> lk(g_flight_mu);
-    g_flight.insert(key);
+    g_flight.emplace_back(root, std::this_thread::get_id());
+    at = std::prev(g_flight.end());
   }
   ~FlightGuard() {
     std::lock_guard<std::mutex> lk(g_flight_mu);
-    g_flight.erase(g_flight.find(key));
+    g_flight.erase(at);
   }
   FlightGuard(const FlightGuard&) = delete;
   FlightGuard& operator=(const FlightGuard&) = delete;
 };
 
+/// An edit of this session is in flight in ANOTHER thread of this process (the calling
+/// thread's own registration, e.g. remove_annotations settling an earlier edit, is no one else).
 bool in_flight_here(const fs::path& root) {
   std::lock_guard<std::mutex> lk(g_flight_mu);
-  return g_flight.count(canonical_key(root)) > 0;
+  for (const auto& [r, tid] : g_flight) {
+    if (tid == std::this_thread::get_id()) continue;
+    std::error_code ec;
+    if (fs::equivalent(r, root, ec) && !ec) return true;
+  }
+  return false;
 }
 
 /// The owner of the marker edits the session NOW: a live process on this machine (not a
@@ -371,7 +377,7 @@ bool owner_live(const Owner& o, const fs::path& root) {
 
 /// The owner line, read ALONE (its own small check at the end of the line), so an unreadable
 /// plan still yields the owner when this line is intact. `owner <pid> <hex host> <start|-> <crc>`;
-/// a line without the check (the previous build's) is accepted as it is.
+/// a line without its check, or torn, is "owner unknown".
 Owner parse_owner(const OperationMarker& m) {
   for (const auto& line : m.details) {
     if (line.rfind("owner ", 0) != 0) continue;
@@ -380,10 +386,8 @@ Owner parse_owner(const OperationMarker& m) {
     std::string hexhost, started, check;
     if (!(in >> pid >> hexhost >> started)) continue;
     in >> check;
-    if (!check.empty()) {
-      const std::string body = "owner " + std::to_string(pid) + " " + hexhost + " " + started;
-      if (check != crc_hex_of(body)) continue;  // torn: the owner is unknown, never guessed
-    }
+    const std::string body = "owner " + std::to_string(pid) + " " + hexhost + " " + started;
+    if (check != crc_hex_of(body)) continue;  // no check or a torn line: the owner is unknown
     const auto h = from_hex(hexhost);
     if (!h) continue;
     return Owner{true, pid, *h, started == "-" ? std::string() : started};
@@ -1306,6 +1310,11 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
 
   RemoveAnnotationsReport report;
   report.dry_run = opts.dry_run;
+  // For the rest of the call (settling an earlier edit included) this process has an edit of
+  // the session in flight: another thread's recover_session / remove_annotations must not
+  // settle it. A dry run writes nothing.
+  std::optional<FlightGuard> flight;
+  if (!opts.dry_run) flight.emplace(root);
   Steps steps;
   steps.crash_at = opts.crash_at;
   steps.fail_at = opts.fail_at;
@@ -1626,9 +1635,6 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
   ctl.check();
 
   // ---- B: stage the new files beside the old ----------------------------------------
-  // from here until the end of the call this process has an edit of the session in flight
-  // (another thread's recover_session must not settle it)
-  const FlightGuard flight(root);
   const std::string id = detail::random_token();
   JPlan plan;
   plan.root = root;
@@ -2019,49 +2025,49 @@ bool is_unreadable_plan(const CopyError& e) { return e.code() == "edit-journal-i
 namespace {
 
 const char* const OVERRIDE_HINT =
-    "if you are sure no program is editing this session, pass assume_owner_gone=True "
-    "(recover_session / remove_annotations) or --owner-gone (python -m mef3io recover)";
+    "if you are sure no program is editing this session, run `python -m mef3io recover "
+    "--owner-gone <session>` (from Python: recover_session(..., assume_owner_gone=True); "
+    "from C or MATLAB the command line is the way). Settling under a program that IS still "
+    "editing can make its edit fail part-way or report success for a removal that was then "
+    "rolled back, and a level's annotations can read as empty until the leftover .old files "
+    "are put back by hand (nothing is deleted)";
 
 /// The two refusals that protect a RUNNING edit, decided from the marker alone (owner line and
 /// declared format), whatever the plan says. Returns true when the override was needed.
 bool guard_running_edit(const fs::path& root, const OperationMarker& m, bool assume_owner_gone) {
-  bool needed = false;
-  if (marker_format(m) > KNOWN_EDIT_FORMAT) {
-    if (!assume_owner_gone)
-      refuse(RefusalKind::WriteConflict, "edit-newer-format",
-             std::string("the marker of the annotation edit was written by a newer mef3io (its ") +
-                 "layout is not known to this version), so it is not settled from the files: update "
-                 "mef3io, or, " + OVERRIDE_HINT);
-    needed = true;
-  }
+  // A marker of a newer layout has NO override: this version cannot know what its plan means.
+  if (marker_format(m) > KNOWN_EDIT_FORMAT)
+    refuse(RefusalKind::WriteConflict, "edit-newer-format",
+           "the marker of the annotation edit was written by a newer mef3io (its layout is not "
+           "known to this version), so this version does not settle it, not even from the files: "
+           "settle it with a mef3io version at least as new as the one that wrote it");
   const Owner o = parse_owner(m);
-  if (owner_live(o, root)) {
-    if (!assume_owner_gone)
-      refuse(RefusalKind::WriteConflict, "edit-in-progress",
-             "an annotation edit of this session is RUNNING (process " + std::to_string(o.pid) +
-                 " on this machine): settling it now could finish or roll it back under that "
-                 "program. Wait for it, or end that program, then try again; " + OVERRIDE_HINT);
-    needed = true;
-  }
-  return needed;
+  if (!owner_live(o, root)) return false;
+  if (!assume_owner_gone)
+    refuse(RefusalKind::WriteConflict, "edit-in-progress",
+           "an annotation edit of this session is RUNNING (process " + std::to_string(o.pid) +
+               " on this machine): settling it now could finish or roll it back under that "
+               "program. Wait for it, or end that program, then try again; " + OVERRIDE_HINT);
+  return true;
 }
 
 }  // namespace
 
 std::optional<InterruptedRecordEdit> interrupted_record_edit(const std::string& path,
-                                                             bool assume_owner_gone) {
+                                                             bool /*assume_owner_gone*/) {
   if (path_has_suffix(path, ".tar")) return std::nullopt;
   const fs::path root = from8(path);
   const auto m = detail::read_operation_marker(root);
   if (!m || !is_edit_marker(root, *m)) return std::nullopt;
   const bool running = owner_live(parse_owner(*m), root);
-  if (marker_format(*m) > KNOWN_EDIT_FORMAT && !assume_owner_gone) {
+  if (marker_format(*m) > KNOWN_EDIT_FORMAT) {
     InterruptedRecordEdit e;
     e.id = m->id;
     e.action = "refused";
     e.running = running;
-    e.reason = std::string("the marker was written by a newer mef3io: recovery refuses (edit-newer-format); ") +
-               "update mef3io, or, " + OVERRIDE_HINT;
+    e.reason = "the marker was written by a newer mef3io: this version refuses to settle it "
+               "(edit-newer-format); settle it with a mef3io version at least as new as the one "
+               "that wrote it";
     return e;
   }
   try {

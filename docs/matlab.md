@@ -53,7 +53,14 @@ combined wait, and `delete(w)` does the same (see
 [When is my data on disk?](long_recordings.md#when-is-my-data-on-disk); 2.0
 removed `Durability`). After an unclean
 shutdown, `mef3io.recoverSession(path)` reports what is wrong (a dry run) and
-`mef3io.recoverSession(path, Apply=true)` fixes it.
+`mef3io.recoverSession(path, Apply=true)` fixes it. Its summary also says what became of an
+interrupted annotation edit made from Python or C++ (`remove_annotations`): finished, rolled
+back ("the removal was NOT done"), or not settled. If recovery REFUSES because the program that
+started the edit still seems to run on this machine (`edit-in-progress`), MATLAB has no way to
+override it: run `python -m mef3io recover --owner-gone <session>` from a terminal, only when
+you are sure no program is editing the session (if one is, its edit can fail part-way or report
+success for a removal that was rolled back, and a level's annotations can read as empty until
+the leftover `.old` files are put back by hand; nothing is deleted).
 
 - **`write(channel, data, startUutc, fs, Precision=-1, NewSegment=false)`** —
   float path: NaN runs become gaps; `Precision` sets the conversion factor to

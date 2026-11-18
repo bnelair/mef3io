@@ -360,19 +360,27 @@ report.removed, report.added          # 1, 1
   killed and not yet reaped, is dead), and also while another thread of the
   calling process is editing that session; `report.record_edits[i].running` says
   so in a dry run. A marker written by a **newer mef3io** (an `edit-format` this
-  version does not know) is refused outright (`edit-newer-format`), never settled
-  from the files by an older build. If you are sure no program is editing the
-  session (a process id reused by an unrelated program, a container whose
-  zombies are never reaped), pass **`assume_owner_gone=True`**
-  (`remove_annotations`, `recover_session`) or **`--owner-gone`**
-  (`python -m mef3io recover`): the owner check is skipped, recovery settles as
-  for a dead owner, and the report says so (`owner_override`). An owner that is
-  dead or on another machine is settled. **Limits:** a session on a network
-  drive edited from another machine cannot be seen (make sure no other machine is
-  editing; two machines with the same host name look the same); and when the
-  owner line itself is torn or missing (a marker of the previous build, a
-  damaged file), the owner is unknown and recovery settles from the files: **this
-  is the one case in which recovery cannot protect a running edit.**
+  version does not know) is always refused (`edit-newer-format`): this version
+  never settles it, not even from the files; use a mef3io at least as new as the
+  one that wrote it. If you are sure no program is editing the session (a process
+  id reused by an unrelated program, a container whose zombies are never
+  reaped), pass **`assume_owner_gone=True`** (`remove_annotations`,
+  `recover_session`) or run **`python -m mef3io recover --owner-gone <session>`**
+  (the way out from C and MATLAB too): the owner check is skipped, recovery
+  settles as for a dead owner, and the report says so (`owner_override`).
+  **If a program IS still editing when you do this, its edit can fail part-way or
+  report success for a removal that was then rolled back, and a level's
+  annotations can read as empty until the leftover `.old` files are put back by
+  hand; nothing is deleted (`validate_session` flags the leftovers,
+  `records.edit-leftovers`).** An owner that is dead or on another machine is
+  settled. **Limits:** a session on a network drive edited from another machine
+  cannot be seen (make sure no other machine is editing; two machines with the
+  same host name look the same); and when the owner line itself is torn or
+  missing (a damaged file), the owner is unknown and recovery settles from the
+  files: **this is the one case on this machine in which recovery cannot protect
+  a running edit.** The in-process guard compares session folders as file-system
+  objects (symlinks, relative spellings and case on case-insensitive volumes
+  included).
   If the marker's plan itself cannot be read (a damaged file system, a newer
   layout), recovery decides from the files alone, **for all levels of the edit
   together** (the levels are those with `.new` / `.old` leftovers beside their

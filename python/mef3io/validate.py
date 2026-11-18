@@ -886,11 +886,13 @@ def recover_session(
         interrupted in is settled first. Recovery **refuses**
         (``edit-in-progress``) while the program that started it is alive on
         this machine, or an edit of the session is running in another thread
-        of this process, and (``edit-newer-format``) a marker written by a
-        newer mef3io. With ``True`` those two checks are skipped and recovery
+        of this process. With ``True`` that check is skipped and recovery
         settles as for a dead owner (the report records it,
         ``record_edits[i].owner_override``). Use it only when you are sure no
-        program is editing the session. CLI: ``recover --owner-gone``.
+        program is editing the session. If a program IS still editing when this is used, that program's edit can fail part-way or report success for a removal that was then rolled back, and a level's annotations can read as empty until the leftover ``.old`` files are put back by hand; nothing is deleted.
+        A marker written by a newer mef3io is always refused
+        (``edit-newer-format``): settle it with a mef3io at least as new.
+        CLI: ``recover --owner-gone``.
 
     Returns
     -------
@@ -958,9 +960,12 @@ def _recover_main(argv) -> int:
                    help="ignored: a backup is always kept in <session>.recover-backup/")
     p.add_argument("--password", default="", help="for encrypted sessions")
     p.add_argument("--owner-gone", action="store_true",
-                   help="an interrupted annotation edit is settled even if the program that "
-                        "started it still seems to run on this machine (or its marker is of a "
-                        "newer layout): only when you are sure no program is editing the session")
+                   help="settle an interrupted annotation edit even if the program that started "
+                        "it still seems to run on this machine; only when you are sure no program "
+                        "is editing the session: if one is, its edit can fail part-way or report "
+                        "success for a removal that was rolled back, and a level's annotations can "
+                        "read as empty until the leftover .old files are put back by hand "
+                        "(nothing is deleted)")
     args = p.parse_args(list(argv))
 
     try:

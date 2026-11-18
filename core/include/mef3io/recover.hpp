@@ -147,10 +147,13 @@ struct RecoveryReport {
 ///
 /// @param assume_owner_gone  an annotation edit this session was interrupted in is settled
 ///                  first; recovery REFUSES (edit-in-progress) while the program that started
-///                  it is alive on this machine (or edits it in another thread), and (edit-newer-format)
-///                  a marker of a newer layout. With this set, those two checks are skipped and
-///                  recovery settles as for a dead owner; the report records it. Only when you
-///                  are sure no program is editing the session.
+///                  it is alive on this machine (or edits it in another thread). With this set that
+///                  check is skipped and recovery settles as for a dead owner; the report records
+///                  it. Only when you are sure no program is editing the session: if one is, its
+///                  edit can fail part-way or report success for a removal that was then rolled
+///                  back, and a level's annotations can read as empty until the leftover .old
+///                  files are put back by hand (nothing is deleted). A marker of a newer layout
+///                  (edit-newer-format) is always refused: settle it with a newer mef3io.
 RecoveryReport recover_session(const std::string& path, bool apply = false, bool backup = true,
                                const std::string& password = "", const Control& ctl = {},
                                bool assume_owner_gone = false);

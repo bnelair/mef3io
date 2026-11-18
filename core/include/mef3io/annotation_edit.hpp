@@ -83,9 +83,11 @@ struct RemoveAnnotationsOptions {
   /// Select, build and verify everything in memory, report, write nothing.
   bool dry_run = false;
   /// Finish an earlier interrupted edit even if the program that started it still seems to be
-  /// running on this machine (or its marker is of a newer layout): the owner check is skipped
-  /// and recovery settles as for a dead owner. Only when you are sure no program is editing
-  /// this session; the report says it was used.
+  /// running on this machine: the owner check is skipped and recovery settles as for a dead
+  /// owner. Only when you are sure no program is editing this session; if one is, its edit can
+  /// fail part-way or report success for a removal that was then rolled back, and a level's
+  /// annotations can read as empty until the leftover .old files are put back by hand (nothing
+  /// is deleted). The report says it was used. A marker of a newer layout is never settled.
   bool assume_owner_gone = false;
   /// For tests only: stop at this step as a crash would (nothing cleaned up)
   /// by throwing IoError. -1 (default): never. See annotation_edit.cpp for
