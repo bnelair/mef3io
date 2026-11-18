@@ -245,3 +245,17 @@ REVIEW ROUND 3 ADDITIONS:
   The calling process is never "running elsewhere" (a simulated crash in a test, or another
   thread, cannot be told apart). No existing convention for this in the library: it is new.
 - `inspect` channel `records` is None (not 0) while the marker is present.
+
+OWNER CHECK, REVISED (post-merge review of round 3):
+- The marker's FIRST detail line is `owner <pid> <hex host> <start|-> <crc8 of that text>`; the plan
+  follows (`edit-format 1`, `direction back`, `file ...`). `parse_owner` reads it alone, so an unreadable
+  plan still yields the owner while the line is intact; a line without the check (the previous build's)
+  is accepted as it is, a torn one means "owner unknown" (settled from the files: the one case in which
+  recovery cannot protect a live edit; documented).
+- `guard_running_edit` (before ANY settling, plan or not): `edit-format` above KNOWN_EDIT_FORMAT ->
+  `edit-newer-format`; owner live -> `edit-in-progress`. Live = same host and (this process: an edit of
+  this root is in FLIGHT here (`FlightGuard`, a process-wide multiset of canonical roots held by
+  `remove_annotations` from staging to its end) | another pid: alive, not a zombie (Linux state Z/X),
+  start time equal where known; Windows access-denied counts as alive).
+- `assume_owner_gone` (C++ options / `recover_session` / `finish_interrupted_record_edit`, Python
+  keyword, CLI `--owner-gone`) skips exactly those two refusals; the report has `owner_override`.

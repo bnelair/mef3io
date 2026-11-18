@@ -39,7 +39,15 @@
     plan cannot be read is settled from the files alone; nothing is ever deleted
     (leftovers move to `<session>.edit-leftovers`).
   - Recovery refuses (`edit-in-progress`) while the program that started the edit is still
-    running on the same machine; readers' error says "in progress or was interrupted".
+    running on the same machine (a zombie counts as dead) or in another thread of the same
+    process, whatever the marker's plan says (the owner is its own checked line at the top
+    of the marker), and refuses (`edit-newer-format`) a marker written by a newer mef3io;
+    readers' error says "in progress or was interrupted". The way out when you are sure no
+    program is editing: `recover_session(..., assume_owner_gone=True)`,
+    `remove_annotations(..., assume_owner_gone=True)` or `python -m mef3io recover
+    --owner-gone` (the report records it). While an edit is in progress or interrupted the
+    marker holds the process id and the machine name of the editing program; it is removed
+    when the edit is settled and a session that carries it is refused by every copy.
   - Password-protected sessions: pass both passwords as for `Writer`; added
     records are level-2 encrypted. Tar archives are refused
     (`tar-read-only`). Cancel and progress work until the swap starts.

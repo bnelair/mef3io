@@ -347,15 +347,32 @@ report.removed, report.added          # 1, 1
   `remove_annotations` does the same first (`report.resumed`).
   **A healthy edit that is still running looks the same to a reader** (the marker
   is there), so the error says "in progress or was interrupted": if no program
-  is editing the session, run `recover_session`. The marker records the process
-  that placed it (process id, host name, start time where the system gives it):
+  is editing the session, run `recover_session`. While an edit is in progress or
+  interrupted, the marker holds the **process id and the machine name** of the
+  editing program (and its start time where the system gives it), besides the
+  plan; it is removed when the edit is settled, and a session that still carries
+  it is refused by every copy (`anonymize_session`, `transform_session`,
+  `merge_sessions`, `archive_session`: recover it first), so those names never
+  reach a copy. The owner sits at the top of the marker on its own line with its
+  own check, so it is read even when the plan is not.
   `recover_session(apply=True)` and `remove_annotations` **refuse**
-  (`edit-in-progress`) while that process is alive on the same machine, and
-  `report.record_edits[i].running` says so in a dry run. An owner that is dead,
-  on another machine (a session on a network drive: nothing can be checked, so
-  make sure no other machine is editing) or unknown (an unreadable plan) is
-  settled. A thread of the process that is itself calling cannot be told from a
-  crashed call of it and is not counted.
+  (`edit-in-progress`) while that process is alive on the same machine (a zombie,
+  killed and not yet reaped, is dead), and also while another thread of the
+  calling process is editing that session; `report.record_edits[i].running` says
+  so in a dry run. A marker written by a **newer mef3io** (an `edit-format` this
+  version does not know) is refused outright (`edit-newer-format`), never settled
+  from the files by an older build. If you are sure no program is editing the
+  session (a process id reused by an unrelated program, a container whose
+  zombies are never reaped), pass **`assume_owner_gone=True`**
+  (`remove_annotations`, `recover_session`) or **`--owner-gone`**
+  (`python -m mef3io recover`): the owner check is skipped, recovery settles as
+  for a dead owner, and the report says so (`owner_override`). An owner that is
+  dead or on another machine is settled. **Limits:** a session on a network
+  drive edited from another machine cannot be seen (make sure no other machine is
+  editing; two machines with the same host name look the same); and when the
+  owner line itself is torn or missing (a marker of the previous build, a
+  damaged file), the owner is unknown and recovery settles from the files: **this
+  is the one case in which recovery cannot protect a running edit.**
   If the marker's plan itself cannot be read (a damaged file system, a newer
   layout), recovery decides from the files alone, **for all levels of the edit
   together** (the levels are those with `.new` / `.old` leftovers beside their

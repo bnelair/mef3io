@@ -144,7 +144,15 @@ struct RecoveryReport {
 /// (negated) form is rewritten (in that form), else a note. The .tmet header
 /// is backed up and stamped Recovery; a stale end alone makes a channel's
 /// last segment need recovery there.
+///
+/// @param assume_owner_gone  an annotation edit this session was interrupted in is settled
+///                  first; recovery REFUSES (edit-in-progress) while the program that started
+///                  it is alive on this machine (or edits it in another thread), and (edit-newer-format)
+///                  a marker of a newer layout. With this set, those two checks are skipped and
+///                  recovery settles as for a dead owner; the report records it. Only when you
+///                  are sure no program is editing the session.
 RecoveryReport recover_session(const std::string& path, bool apply = false, bool backup = true,
-                               const std::string& password = "", const Control& ctl = {});
+                               const std::string& password = "", const Control& ctl = {},
+                               bool assume_owner_gone = false);
 
 }  // namespace mef3io

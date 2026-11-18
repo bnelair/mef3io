@@ -285,16 +285,35 @@ std::string process_started(long long pid) {
 #endif
 }
 
+/// Linux: a zombie (killed, not yet reaped by its parent) or a dead process still listed is
+/// not running: state Z / X in the same /proc line the start time comes from.
+bool process_is_zombie(long long pid) {
+#ifdef __linux__
+  std::ifstream f("/proc/" + std::to_string(pid) + "/stat");
+  std::string line;
+  if (!f || !std::getline(f, line)) return false;
+  const auto close = line.rfind(')');
+  if (close == std::string::npos || close + 2 >= line.size()) return false;
+  const char state = line[close + 2];
+  return state == 'Z' || state == 'X';
+#else
+  (void)pid;
+  return false;
+#endif
+}
+
 bool pid_alive(long long pid) {
 #ifdef _WIN32
   HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
-  if (!h) return false;
+  // another user's or an elevated process cannot be opened: it EXISTS (as EPERM below)
+  if (!h) return GetLastError() == ERROR_ACCESS_DENIED;
   DWORD code = 0;
   const bool alive = GetExitCodeProcess(h, &code) && code == STILL_ACTIVE;
   CloseHandle(h);
   return alive;
 #else
-  return ::kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
+  if (!(::kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM)) return false;
+  return !process_is_zombie(pid);
 #endif
 }
 
@@ -307,13 +326,85 @@ Owner this_process() {
   return o;
 }
 
-/// A live process on this machine, not this one, placed the marker. (The same process is not
-/// counted: a thread of it cannot be told from a crashed call of it, and the process itself
-/// cannot be dead.)
-bool owner_running_elsewhere(const Owner& o) {
-  if (!o.known || o.pid == my_pid() || o.host != host_name() || !pid_alive(o.pid)) return false;
+std::string crc_hex_of(const std::string& text);  // below, with the marker helpers
+
+/// Sessions with an edit IN FLIGHT in this process (canonical path): a marker whose pid is ours
+/// is a running edit of another thread while its root is in here, a crashed earlier call
+/// (nothing in flight) otherwise.
+std::mutex g_flight_mu;
+std::multiset<std::string> g_flight;
+
+std::string canonical_key(const fs::path& root) {
+  std::error_code ec;
+  const fs::path c = fs::weakly_canonical(root, ec);
+  return u8(ec ? root : c);
+}
+
+struct FlightGuard {
+  std::string key;
+  explicit FlightGuard(const fs::path& root) : key(canonical_key(root)) {
+    std::lock_guard<std::mutex> lk(g_flight_mu);
+    g_flight.insert(key);
+  }
+  ~FlightGuard() {
+    std::lock_guard<std::mutex> lk(g_flight_mu);
+    g_flight.erase(g_flight.find(key));
+  }
+  FlightGuard(const FlightGuard&) = delete;
+  FlightGuard& operator=(const FlightGuard&) = delete;
+};
+
+bool in_flight_here(const fs::path& root) {
+  std::lock_guard<std::mutex> lk(g_flight_mu);
+  return g_flight.count(canonical_key(root)) > 0;
+}
+
+/// The owner of the marker edits the session NOW: a live process on this machine (not a
+/// zombie, same start time where known), or, when it is this process, an edit of this
+/// session in flight in it (another thread). Dead, remote and unknown owners are not.
+bool owner_live(const Owner& o, const fs::path& root) {
+  if (!o.known || o.host != host_name()) return false;
+  if (o.pid == my_pid()) return in_flight_here(root);
+  if (!pid_alive(o.pid)) return false;
   return o.started.empty() || process_started(o.pid) == o.started;
 }
+
+/// The owner line, read ALONE (its own small check at the end of the line), so an unreadable
+/// plan still yields the owner when this line is intact. `owner <pid> <hex host> <start|-> <crc>`;
+/// a line without the check (the previous build's) is accepted as it is.
+Owner parse_owner(const OperationMarker& m) {
+  for (const auto& line : m.details) {
+    if (line.rfind("owner ", 0) != 0) continue;
+    std::istringstream in(line.substr(6));
+    long long pid = 0;
+    std::string hexhost, started, check;
+    if (!(in >> pid >> hexhost >> started)) continue;
+    in >> check;
+    if (!check.empty()) {
+      const std::string body = "owner " + std::to_string(pid) + " " + hexhost + " " + started;
+      if (check != crc_hex_of(body)) continue;  // torn: the owner is unknown, never guessed
+    }
+    const auto h = from_hex(hexhost);
+    if (!h) continue;
+    return Owner{true, pid, *h, started == "-" ? std::string() : started};
+  }
+  return {};
+}
+
+/// The `edit-format` the marker declares (0 = none): a number above what this build knows is
+/// a newer layout it cannot read and must not settle from the files.
+int marker_format(const OperationMarker& m) {
+  for (const auto& line : m.details)
+    if (line.rfind("edit-format ", 0) == 0) {
+      try {
+        return std::stoi(line.substr(12));
+      } catch (const std::exception&) {
+        return 1 << 20;  // unreadable number: not ours to guess
+      }
+    }
+  return 0;
+}
+constexpr int KNOWN_EDIT_FORMAT = 1;
 
 /// One of the files of an edit: `target`, its new file and the backup of the
 /// old one.
@@ -365,13 +456,20 @@ std::string crc_hex(ui4 v) {
   return o;
 }
 
+std::string crc_hex_of(const std::string& text) {
+  return crc_hex(crc::calculate(std::span<const ui1>(reinterpret_cast<const ui1*>(text.data()), text.size())));
+}
+
 /// The marker for a plan: the marker IS the journal.
 OperationMarker marker_for(const JPlan& p) {
   OperationMarker m{tool_name(), OP, p.id, {}};
+  // the owner FIRST, on its own line with its own check: read without the plan
+  if (p.owner.known) {
+    const std::string body = "owner " + std::to_string(p.owner.pid) + " " + to_hex(p.owner.host) +
+                             " " + (p.owner.started.empty() ? std::string("-") : p.owner.started);
+    m.details.push_back(body + " " + crc_hex_of(body));
+  }
   m.details.push_back("edit-format 1");
-  if (p.owner.known)
-    m.details.push_back("owner " + std::to_string(p.owner.pid) + " " + to_hex(p.owner.host) + " " +
-                        (p.owner.started.empty() ? std::string("-") : p.owner.started));
   if (p.back) m.details.push_back("direction back");
   for (const auto& f : p.files)
     m.details.push_back(std::string("file ") + (f.had_old ? "1" : "0") + " " +
@@ -385,6 +483,7 @@ std::optional<JPlan> plan_from_marker(const fs::path& root, const OperationMarke
   JPlan p;
   p.root = root;
   p.id = m.id;
+  p.owner = parse_owner(m);
   bool format = false;
   for (const auto& line : m.details) {
     if (line == "edit-format 1") {
@@ -395,19 +494,7 @@ std::optional<JPlan> plan_from_marker(const fs::path& root, const OperationMarke
       p.back = true;
       continue;
     }
-    if (line.rfind("owner ", 0) == 0) {
-      // owner <pid> <hex host> <start or ->; an owner line this version cannot read = no owner
-      std::istringstream in(line.substr(6));
-      long long pid = 0;
-      std::string hexhost, started;
-      if (in >> pid >> hexhost >> started) {
-        const auto h = from_hex(hexhost);
-        if (h) {
-          p.owner = Owner{true, pid, *h, started == "-" ? std::string() : started};
-        }
-      }
-      continue;
-    }
+    if (line.rfind("owner ", 0) == 0) continue;  // read by parse_owner, alone
     if (line.rfind("file ", 0) != 0) continue;
     // file <had_old> <has_new> <hex rel>
     if (line.size() < 10 || line[6] != ' ' || line[8] != ' ' || line[5] < '0' || line[5] > '1' ||
@@ -1235,7 +1322,7 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
              "may be half swapped, so nothing can be previewed. Run recover_session with "
              "apply=True (or a real remove_annotations call, which finishes it first)");
     } else {
-      const auto done = finish_interrupted_record_edit(path);
+      const auto done = finish_interrupted_record_edit(path, -1, -1, opts.assume_owner_gone);
       if (done) {
         report.resumed = done->id;
         report.notes.push_back(
@@ -1539,6 +1626,9 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
   ctl.check();
 
   // ---- B: stage the new files beside the old ----------------------------------------
+  // from here until the end of the call this process has an edit of the session in flight
+  // (another thread's recover_session must not settle it)
+  const FlightGuard flight(root);
   const std::string id = detail::random_token();
   JPlan plan;
   plan.root = root;
@@ -1926,11 +2016,54 @@ bool is_unreadable_plan(const CopyError& e) { return e.code() == "edit-journal-i
 
 }  // namespace
 
-std::optional<InterruptedRecordEdit> interrupted_record_edit(const std::string& path) {
+namespace {
+
+const char* const OVERRIDE_HINT =
+    "if you are sure no program is editing this session, pass assume_owner_gone=True "
+    "(recover_session / remove_annotations) or --owner-gone (python -m mef3io recover)";
+
+/// The two refusals that protect a RUNNING edit, decided from the marker alone (owner line and
+/// declared format), whatever the plan says. Returns true when the override was needed.
+bool guard_running_edit(const fs::path& root, const OperationMarker& m, bool assume_owner_gone) {
+  bool needed = false;
+  if (marker_format(m) > KNOWN_EDIT_FORMAT) {
+    if (!assume_owner_gone)
+      refuse(RefusalKind::WriteConflict, "edit-newer-format",
+             std::string("the marker of the annotation edit was written by a newer mef3io (its ") +
+                 "layout is not known to this version), so it is not settled from the files: update "
+                 "mef3io, or, " + OVERRIDE_HINT);
+    needed = true;
+  }
+  const Owner o = parse_owner(m);
+  if (owner_live(o, root)) {
+    if (!assume_owner_gone)
+      refuse(RefusalKind::WriteConflict, "edit-in-progress",
+             "an annotation edit of this session is RUNNING (process " + std::to_string(o.pid) +
+                 " on this machine): settling it now could finish or roll it back under that "
+                 "program. Wait for it, or end that program, then try again; " + OVERRIDE_HINT);
+    needed = true;
+  }
+  return needed;
+}
+
+}  // namespace
+
+std::optional<InterruptedRecordEdit> interrupted_record_edit(const std::string& path,
+                                                             bool assume_owner_gone) {
   if (path_has_suffix(path, ".tar")) return std::nullopt;
   const fs::path root = from8(path);
   const auto m = detail::read_operation_marker(root);
   if (!m || !is_edit_marker(root, *m)) return std::nullopt;
+  const bool running = owner_live(parse_owner(*m), root);
+  if (marker_format(*m) > KNOWN_EDIT_FORMAT && !assume_owner_gone) {
+    InterruptedRecordEdit e;
+    e.id = m->id;
+    e.action = "refused";
+    e.running = running;
+    e.reason = std::string("the marker was written by a newer mef3io: recovery refuses (edit-newer-format); ") +
+               "update mef3io, or, " + OVERRIDE_HINT;
+    return e;
+  }
   try {
     const auto plan = plan_from_marker(root, *m);
     if (plan) {
@@ -1940,20 +2073,26 @@ std::optional<InterruptedRecordEdit> interrupted_record_edit(const std::string& 
       const Decision d = decide(*plan);
       e.action = d.dir == Dir::Forward ? "finish" : "roll back";
       e.reason = d.why;
-      e.running = owner_running_elsewhere(plan->owner);
+      e.running = running;
       return e;
     }
   } catch (const CopyError& e) {
     if (!is_unreadable_plan(e)) throw;
   }
-  return settle_from_files(root, *m, false);
+  auto e = settle_from_files(root, *m, false);
+  e.running = running;
+  return e;
 }
 
 std::optional<InterruptedRecordEdit> finish_interrupted_record_edit(const std::string& path,
-                                                                    int crash_at, int fail_at) {
+                                                                    int crash_at, int fail_at,
+                                                                    bool assume_owner_gone) {
   const fs::path root = session_root(path);
   const auto m = detail::read_operation_marker(root);
   if (!m || !is_edit_marker(root, *m)) return std::nullopt;
+  const bool overridden = guard_running_edit(root, *m, assume_owner_gone);
+  const std::string override_note =
+      overridden ? " (the check for a running edit was skipped on request)" : "";
   Steps steps;
   steps.crash_at = crash_at;
   steps.fail_at = fail_at;
@@ -1963,15 +2102,10 @@ std::optional<InterruptedRecordEdit> finish_interrupted_record_edit(const std::s
       InterruptedRecordEdit e;
       e.id = plan->id;
       for (const auto& f : plan->files) e.files.push_back(f.rel);
-      if (owner_running_elsewhere(plan->owner))
-        refuse(RefusalKind::WriteConflict, "edit-in-progress",
-               "an annotation edit of this session is RUNNING in another program on this machine "
-               "(process " + std::to_string(plan->owner.pid) + "): settling it now could finish or "
-               "roll it back under that program. Wait for it, or end that program, then try "
-               "again");
       const Decision d = decide(*plan);
       e.action = d.dir == Dir::Forward ? "finish" : "roll back";
-      e.reason = d.why;
+      e.reason = d.why + override_note;
+      e.owner_override = overridden;
       settle(*plan, d.dir, (crash_at >= 0 || fail_at >= 0) ? &steps : nullptr);
       e.applied = true;
       return e;
@@ -1979,7 +2113,10 @@ std::optional<InterruptedRecordEdit> finish_interrupted_record_edit(const std::s
   } catch (const CopyError& e) {
     if (!is_unreadable_plan(e)) throw;
   }
-  return settle_from_files(root, *m, true, (crash_at >= 0 || fail_at >= 0) ? &steps : nullptr);
+  auto e = settle_from_files(root, *m, true, (crash_at >= 0 || fail_at >= 0) ? &steps : nullptr);
+  e.reason += override_note;
+  e.owner_override = overridden;
+  return e;
 }
 
 std::vector<std::string> record_edit_leftovers(const std::string& path, bool apply) {

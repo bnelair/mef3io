@@ -88,6 +88,7 @@ def remove_annotations(
     password2: str = "",
     all_copies: bool = False,
     dry_run: bool = False,
+    assume_owner_gone: bool = False,
     cancel: Optional[CancelToken] = None,
     progress: Optional[ProgressCallback] = None,
     _crash_at: int = -1,
@@ -144,6 +145,12 @@ def remove_annotations(
     dry_run : bool, default False
         Select, build and verify everything in memory and report; write
         nothing.
+    assume_owner_gone : bool, default False
+        Only for finishing an earlier interrupted edit: skip the check that
+        refuses (``edit-in-progress``) while the program that started it is
+        alive on this machine, and the refusal of a marker written by a newer
+        mef3io (``edit-newer-format``). Use it only when you are sure no
+        program is editing this session; the report notes it.
     cancel : CancelToken, optional
         Stops the call **before** the new files are in place, leaving the
         session as it was (:class:`Cancelled`). After that point a cancel is
@@ -226,7 +233,7 @@ def remove_annotations(
     add = [dict(a) for a in add]
     raw = _backend().remove_annotations(
         os.fspath(path), remove, add, password1 or "", password2 or "", bool(dry_run),
-        _crash_at, _fail_at, **_hooks(cancel, progress)
+        _crash_at, _fail_at, **_hooks(cancel, progress), assume_owner_gone=bool(assume_owner_gone)
     )
     return RemoveAnnotationsReport(
         files=tuple(RecordFileEdit(**f) for f in raw["files"]),

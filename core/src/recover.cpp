@@ -875,7 +875,8 @@ void recover_record_files(const fsys::path& root, bool apply, bool backup,
 }  // namespace
 
 RecoveryReport recover_session(const std::string& path, bool apply, bool /*backup: ignored*/,
-                               const std::string& password, const Control& ctl) {
+                               const std::string& password, const Control& ctl,
+                               bool assume_owner_gone) {
   // The library never deletes stored data without keeping a copy: the backup
   // flag is accepted for source compatibility and ignored.
   constexpr bool backup = true;
@@ -892,8 +893,8 @@ RecoveryReport recover_session(const std::string& path, bool apply, bool /*backu
   // dry run only says what finishing would do. Any other operation's marker
   // still refuses a write.
   std::optional<InterruptedRecordEdit> edit;
-  if (apply) edit = finish_interrupted_record_edit(path);
-  else edit = interrupted_record_edit(path);
+  if (apply) edit = finish_interrupted_record_edit(path, -1, -1, assume_owner_gone);
+  else edit = interrupted_record_edit(path, assume_owner_gone);
   if (apply) detail::refuse_if_mid_operation(path);
 
   const fsys::path root = detail::utf8_path(path);
