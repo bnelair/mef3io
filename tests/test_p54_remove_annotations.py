@@ -383,8 +383,8 @@ def test_a_session_being_written_or_mid_operation_is_refused(tmp_path):
         mef3io.remove_annotations(p, [rec])
     assert _code(e) == "being-written"
     busy.unlink()
-    (p / ".mef3io-operation").write_text(
-        "mef3io-operation 1\ntool mef3io x\noperation rename\nid " + "0" * 32 + "\n")
+    (p / ".mef3io-operation").write_bytes(
+        b"mef3io-operation 1\ntool mef3io x\noperation rename\nid " + b"0" * 32 + b"\n")
     with pytest.raises(mef3io.WriteConflictError) as e:
         mef3io.remove_annotations(p, [rec])
     assert _code(e) == "mid-operation"
@@ -788,8 +788,8 @@ def test_leftover_temporary_files_are_swept_by_recovery_only(tmp_path):
 
 def test_recovery_of_a_session_with_an_unreadable_plan_refuses_to_guess(tmp_path):
     p = _session(tmp_path / "s.mefd")
-    (p / ".mef3io-operation").write_text(
-        "mef3io-operation 1\ntool mef3io x\noperation remove-annotations\nid " + "a" * 32 + "\n")
+    (p / ".mef3io-operation").write_bytes(
+        b"mef3io-operation 1\ntool mef3io x\noperation remove-annotations\nid " + b"a" * 32 + b"\n")
     with pytest.raises(mef3io.FormatError) as e:
         mef3io.recover_session(str(p), apply=True)
     assert _code(e) == "edit-journal-inconsistent"
