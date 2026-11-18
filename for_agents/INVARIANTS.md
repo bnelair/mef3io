@@ -402,3 +402,19 @@ never a byte restore. Headers are patched as bytes (name field, provenance
 region, CRCs); `UniversalHeader::serialize` would cut a 256-byte name that
 fills its field. Tests: `tests/test_p36_rename.py` (a crash at EVERY point via
 the test-only `_crash_at`, which leaves the disk as a crash would).
+
+## 16. Annotations change by append; removal is its own call, staged and journaled
+
+`write_annotations` only APPENDS (#156). The only other change to a record file
+is `remove_annotations` (2.4), a separate, explicitly named call that rewrites the
+`.rdat` + `.ridx` of the levels it names and nothing else. Because the two files
+cannot be renamed atomically as a pair, it follows §15's shape: build and verify
+both new files beside the old (`<file>.<id>.new`, flushed, read back), write the
+OPERATION MARKER (it carries the plan: it IS the journal), swap by rename, remove
+the `.old` files, remove the marker. Rules: never write a record file in place for
+a removal; never swap before the marker is durable; the direction of a rollback is
+written to the marker BEFORE anything is undone (a half-undone state looks like a
+half-done one); every settle step is idempotent; `recover_session` settles an
+interrupted edit before it looks at anything else; kept records are copied from the
+raw bytes, never re-encoded. Pinned by the crash-at-every-step matrix in
+tests/test_p54_remove_annotations.py. Details: notes/records-and-time.md.

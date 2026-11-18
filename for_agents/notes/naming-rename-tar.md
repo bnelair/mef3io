@@ -77,3 +77,13 @@ on Windows; the rule now holds repo-wide, INVARIANTS §8 "Paths"). Known gap: a 
 a rename can race it (needs a cross-process write lock, filed as an issue). Not done: NFD length
 check on HFS+ (the file system refuses at the folder step, which rolls back),
 per-segment end time/entry counts in the report (`files` has size+mtime).
+
+THE MARKER IS SHARED (2.4): `remove_annotations` (records-and-time.md, "Removing
+annotations") uses the same `.mef3io-operation` file with operation
+`remove-annotations`; for it the marker IS the journal (extra `file ...` /
+`direction back` lines, hex-coded relative paths), so there is no backup-folder
+journal and `clear_operation_marker` must never be used on it (recover_session
+settles it). The "being written" rule (`detail::refuse_if_being_written`,
+operation_marker.hpp) is now ONE function for rename_session, fix_name_drift and
+remove_annotations. A rename that meets that marker refuses with the specialised
+`mid_operation_message`.

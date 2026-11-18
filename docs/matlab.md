@@ -68,7 +68,7 @@ shutdown, `mef3io.recoverSession(path)` reports what is wrong (a dry run) and
 - **`writeInt32Many(channels, data, ufact, startUutc, fs, NewSegment=false)`** — the same run of int32 counts for many channels in one call (`data` is n_samples x n_channels; `channels` a cell array; `ufact` one value or one per channel). Like Python's `write_int32_many`: channels in parallel on the Writer's threads, one combined disk barrier, all channels rolled back on a failure before publishing. Returns one summary struct per channel.
 - **`writeAnnotations(records, channel)`** — struct array (or table) with
   fields `time` (required), `type` (default `'Note'`), `text`, `duration`.
-  Omit `channel` for session-level records. Appends to the records already stored at that level (created if absent); never replaces or deletes one.
+  Omit `channel` for session-level records. Appends to the records already stored at that level (created if absent); never replaces or deletes one. Removing an annotation is Python and C++ only (`mef3io.remove_annotations`); MATLAB cannot remove one.
 - **`setMetadata(md)`** / the `Metadata=` constructor option — session-wide
   subject/acquisition metadata. Use the object API (mirrors Python):
 

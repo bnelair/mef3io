@@ -353,6 +353,7 @@ const char* operation_name(ui1 code) {
     case 7: return "rename";
     case 8: return "transform";
     case 9: return "segment-repaired";
+    case 10: return "records-edit";
     default: return nullptr;
   }
 }

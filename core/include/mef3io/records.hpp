@@ -2,6 +2,7 @@
 // parallel <name>.ridx index, at session, channel or segment level.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -173,6 +174,25 @@ std::vector<Record> parse_records(std::span<const ui1> rdat_bytes, si8 rto,
 /// it first; callers that create directories run it before doing so.
 void validate_records_for_write(const std::vector<Record>& records);
 
+/// One record as it is stored: header + padded (maybe encrypted) body with its
+/// CRC set, and its `.ridx` entry (the file offset, bytes 8..16, is left for
+/// the caller to fill in).
+struct EncodedRecord {
+  std::vector<ui1> bytes;
+  std::array<ui1, fmt::RECORD_INDEX_BYTES> entry{};
+  si8 time = 0;       ///< absolute uUTC
+  si8 disk_time = 0;  ///< as stored (to_stored_time)
+};
+
+/// Encode `records` exactly as write_records stores them (time order, stable;
+/// the same body layout, padding, level-2 encryption when `encrypt` and CRC),
+/// so a rewrite that adds records writes the bytes an append would have.
+/// Refuses what write_records refuses: a time that cannot be stored against
+/// `rto` (WriteConflictError), and a missing level-2 key (PasswordError).
+/// Call validate_records_for_write first for the type/payload rules.
+std::vector<EncodedRecord> encode_records_for_file(const std::vector<Record>& records, si8 rto,
+                                                   bool encrypt, const crypto::AccessKeys& keys);
+
 /// What a Writer has learned about how its session's channels are protected
 /// (one entry per channel that has a `.tmet`). Held by the SessionWriter so the
 /// folders are scanned ONCE per writer, not on every annotation call.
@@ -201,7 +221,8 @@ void require_record_write_access(const std::string& session_dir,
 
 /// APPEND records to `<dir>/<base>.rdat` + `<base>.ridx`, creating the pair
 /// when it does not exist. NEVER replaces, truncates or rewrites stored
-/// records: the new bytes are added in place (record data, then its index
+/// records (removing one is the separate call remove_annotations,
+/// annotation_edit.hpp): the new bytes are added in place (record data, then its index
 /// entries, then the headers that count them; body CRCs are extended, not
 /// recomputed), so the cost is O(new records) however large the file is.
 /// A record earlier than the last stored one is appended too (file order =

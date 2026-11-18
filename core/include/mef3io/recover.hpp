@@ -28,6 +28,7 @@
 #include <string>
 #include <vector>
 
+#include "mef3io/annotation_edit.hpp"
 #include "mef3io/control.hpp"
 #include "mef3io/types.hpp"
 
@@ -69,6 +70,11 @@ struct RecoveredRecordFile {
 struct RecoveryReport {
   std::vector<RecoveredSegment> segments;   ///< only segments needing work
   std::vector<RecoveredRecordFile> record_files;  ///< annotation files needing work
+  /// An annotation edit (remove_annotations) this session was interrupted in:
+  /// in a dry run what finishing it would do, with `apply` what was done (the
+  /// edit is finished, or rolled back when a new file is not intact, BEFORE
+  /// anything else is examined).
+  std::vector<InterruptedRecordEdit> record_edits;
   std::vector<std::string> skipped;         ///< segment + reason
   si8 segments_examined = 0;
   bool applied = false;
@@ -79,7 +85,9 @@ struct RecoveryReport {
   std::vector<std::string> notes;
 
   /// True when every segment is self-consistent and nothing needs doing.
-  bool nothing_to_do() const { return segments.empty() && record_files.empty() && skipped.empty(); }
+  bool nothing_to_do() const {
+    return segments.empty() && record_files.empty() && record_edits.empty() && skipped.empty();
+  }
 };
 
 /// Make every segment's index and data agree.

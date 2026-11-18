@@ -229,7 +229,12 @@ Changes in every version, and what an upgrade asks of you, are listed in the
   macOS and Linux) or the free 7-Zip on Windows. The unpacked `.mefd` folder
   works with the legacy tools.
 - **Records** (annotations): every record type MEF 3.0 defines is read;
-  `Note`, `SyLg` and `EDFA` can be written with their text.
+  `Note`, `SyLg` and `EDFA` can be written with their text. Writing only
+  appends. A wrong annotation is taken back with the separate
+  `mef3io.remove_annotations` (Python and C++, not MATLAB): it names the record
+  by its content, rewrites only that level's annotation files, survives a
+  crash at any step, and cannot be undone — see the
+  [Python guide](https://bnelair.github.io/mef3io/python/#remove_annotations).
 - **De-identification**: meflib's recording-time offset, once used to
   "anonymize" sessions, is deprecated in mef3io: it does not hide the
   recording date (the date stays in every metadata file, in plain text unless

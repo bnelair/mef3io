@@ -567,7 +567,15 @@ class Reader:
         from . import _mef3io as _ext  # noqa: PLC0415 - one stat, never cached
 
         marker = _ext.operation_marker(self._path)
-        if marker is not None:
+        if marker is not None and marker["operation"] == "remove-annotations":
+            pending.append((SessionOperationWarning,
+                  "an annotation edit (remove_annotations) was interrupted or is still "
+                  "running: the annotations of one level may be half swapped, so do not "
+                  "trust them yet, and writes are refused until it is finished. Run "
+                  "mef3io.recover_session(path, apply=True), which finishes the edit (or "
+                  "rolls it back when a new file is not intact)",
+                  dict(path=self._path, details=[marker])))
+        elif marker is not None:
             pending.append((SessionOperationWarning,
                   f"the session is in the middle of an operation ({marker['operation']}, "
                   f"started by {marker['tool']}) that was interrupted or is still running: "

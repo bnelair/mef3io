@@ -5,7 +5,10 @@ a type ("Note", "EDFA", "SyLg", "Seiz"), a uUTC time, and typically text;
 "EDFA" carries a duration. In encrypted sessions record bodies are encrypted
 at level 2. write_annotations always APPENDS to the records already stored at
 that level (and creates them the first time); it never replaces or deletes
-one. Readers return the records in time order.
+one. Taking a wrong annotation back is a separate, explicit call,
+remove_annotations (shown at the end): it names the record by its content,
+rewrites only that level's annotation files, and a removed annotation cannot
+be recovered. Readers return the records in time order.
 """
 import tempfile
 from pathlib import Path
@@ -48,3 +51,14 @@ from mef3io import MefReader  # noqa: E402
 anns = MefReader(session).get_annotations("ch1")
 assert [a["text"] for a in anns] == ["spike", "artifact"]
 print("legacy get_annotations sees:", [a["text"] for a in anns])
+
+# Taking a note back: name it by what Reader.records() returned (add= puts the
+# corrected one in the same, crash-safe rewrite). There is no undo.
+with mef3io.Reader(session) as r:
+    wrong = [x for x in r.records("ch1") if x["text"] == "spike"]
+report = mef3io.remove_annotations(
+    session, remove=wrong, add=[{"time": wrong[0]["time"], "text": "spike (checked)",
+                                 "channel": "ch1"}])
+print(f"removed {report.removed}, added {report.added}")
+with mef3io.Reader(session) as r:
+    assert [x["text"] for x in r.records("ch1")] == ["spike (checked)", "artifact"]

@@ -64,6 +64,12 @@ with mef3io.Reader("recording.mefd") as r:
     r.records("Fp1")   # one channel's annotations
 ```
 
+Annotations are added with `Writer.write_annotations`, which only appends. To
+take a wrong one back, `mef3io.remove_annotations` names it by what `records()`
+returned and rewrites that level's annotation files safely; a removed
+annotation cannot be recovered
+([details](../python.md#remove_annotations)).
+
 ## Encrypted sessions
 
 ```python

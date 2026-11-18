@@ -209,6 +209,7 @@ declarations a reader allocates from, then the time fields. Ids are stable API.
 | `header.entry-count` | warning | yes | `number_of_entries` in each file. **Error when under-declared** on `.tidx`/`.tdat`: meflib clamps the block count down to it (meflib.c:5983-5984, :6005-6006), so a reader silently returns a short segment |
 | `header.max-entry-size` | info | yes | `maximum_entry_size` in each file (`.tdat` value informational) |
 | `records.encryption` | error | no | Annotation (`.rdat`) files are protected like the session they belong to (segment level: that segment's metadata; channel level: that channel's; session level: protected when any channel is). An unprotected record file in a protected session holds its text in plaintext (mef3io before the fix of #167 could create one): **error**. A protected header over unencrypted record bodies (legacy `mef_tools` writes these; the index entries say so) is reported as a **warning**: the note text is stored without encryption. A protected file in an unprotected session is an error. Findings about channel or session level files have `segment == -1` (`channel == ""` for the session). Not repairable: fixing it means re-encrypting record bodies, which repair (declarations only) never does; copy the annotations out and write them again with both passwords |
+| `records.interrupted-edit` | error | no | An annotation edit ([`remove_annotations`](python.md#remove_annotations)) was interrupted: the session carries its operation marker, and a level's `.rdat` / `.ridx` pair may be half swapped. Judged from the marker alone (directory sessions); `segment == -1`. Not repairable here (the registry rewrites declarations only): `recover_session(path, apply=True)` finishes the edit, or rolls it back when a new file is not intact |
 | `units.mixed` | warning | no | The segments of one channel declare different `units_description` strings (as stored; `uV`, `µV` and `μV` count as one). Readers label the whole channel with the first segment's units, so a segment in other units would be mislabelled; samples are untouched. Reported once for each segment that differs from the channel's first. Not repairable: which string is right is a decision about the recording. `merge_sessions` allows it, with a `MixedUnitsWarning` and a note |
 
 `Validator.available_checks()` returns the same table at runtime, with each
@@ -406,7 +407,13 @@ that is short, torn or missing. Recovery keeps every whole record, drops only
 the torn fragment after the last whole record (backed up), and rebuilds the `.ridx` and both headers from the
 records. They are listed in `report.record_files` (a dry run says what it
 would do); a healthy file, including one written by the legacy stack, is
-never listed. A whole record that fails its CRC (bit rot, foreign damage; not
+never listed. A session left in the middle of an annotation edit
+([`remove_annotations`](python.md#remove_annotations)) carries its operation
+marker: `recover_session(apply=True)` **first** finishes that edit (or rolls it
+back when a new file is not intact), and the dry run lists it in
+`report.record_edits` with what it would do; the annotation files themselves
+are not examined until then. Temporary files an interrupted edit left unused
+are reported in `report.notes` and removed with `apply`. A whole record that fails its CRC (bit rot, foreign damage; not
 an interrupted append) is never removed and does not stop the walk: it stays in
 the file and the index, every record after it stays too, and it is reported in
 `report.notes` (or as `records_damaged` when the file needs other repair).

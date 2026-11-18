@@ -922,8 +922,10 @@ TEST_CASE("provenance region: frozen layout, bounds, saturation, foreign data",
     REQUIRE(std::string(pv::operation_name(8)) == "transform");
     REQUIRE(static_cast<int>(Op::SegmentRepaired) == 9);
     REQUIRE(std::string(pv::operation_name(9)) == "segment-repaired");
-    REQUIRE(pv::operation_name(10) == nullptr);
-    REQUIRE(pv::MAX_CODE == 9);
+    REQUIRE(static_cast<int>(Op::RecordsEdit) == 10);
+    REQUIRE(std::string(pv::operation_name(10)) == "records-edit");
+    REQUIRE(pv::operation_name(11) == nullptr);
+    REQUIRE(pv::MAX_CODE == 10);
   }
 
   SECTION("the count saturates; it never wraps back to zero") {

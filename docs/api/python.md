@@ -37,6 +37,18 @@ See the [Python guide](../python.md#inspecting-a-session-without-reading-its-sam
 
 ::: mef3io.SummaryWarning
 
+## Removing annotations
+
+`Writer.write_annotations` only appends; this separate call removes (and so
+changes) stored annotations. See the
+[Python guide](../python.md#remove_annotations).
+
+::: mef3io.remove_annotations
+
+::: mef3io.RemoveAnnotationsReport
+
+::: mef3io.RecordFileEdit
+
 ## Ordering and naming sessions
 
 ::: mef3io.time_range
@@ -159,6 +171,8 @@ See the [validation guide](../validation.md) for what each check means.
 ::: mef3io.RecoveredSegment
 
 ::: mef3io.RecoveredRecordFile
+
+::: mef3io.InterruptedRecordEdit
 
 ## Errors
 

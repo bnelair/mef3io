@@ -59,6 +59,12 @@ version number.
   name, edited subject details and descriptions, optionally only a time window. Every time and sample is
   copied as stored, and the copy is verified against its source. Python and
   C++ — see [Modified copies](transform.md).
+- **Taking an annotation back** — `Writer.write_annotations` only appends;
+  `mef3io.remove_annotations` removes (or, with `add=`, changes) stored
+  annotations chosen by their content, as one all-or-nothing rewrite of that
+  level's annotation files that a crash cannot leave half-done. A removed
+  annotation cannot be recovered. Python and C++ — see
+  [`remove_annotations`](python.md#remove_annotations).
 - **Renaming without breaking anything** — `mef3io.rename_session` changes a
   session's name in the folder, the session-level annotation files and every
   file's header as one operation that a crash cannot leave half-done and

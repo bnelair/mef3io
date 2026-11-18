@@ -45,7 +45,7 @@ the first session-level annotation or new channel: that reads and
 CRC-checks every segment's `.tmet` once per Writer (about 1.4–1.8 s and
 157 MB at 64 channels × 150 segments) and nothing afterwards.
 
-## Annotations are appended in place
+## Annotations are appended in place (and removed only by a separate call)
 
 `write_annotations` never rewrites the annotation files. A call appends the new
 records to `.rdat` and their entries to `.ridx`, updates the two headers (the
@@ -67,6 +67,24 @@ state (the next `write_annotations` to a torn file is refused until then).
 Records are only ever *added*: recovery drops a torn fragment after the last
 whole record (backed up) and never removes a whole record, even one that fails
 its CRC.
+
+### Removing an annotation
+
+[`remove_annotations`](python.md#remove_annotations) is the one
+call that takes a stored annotation out (or changes one: remove plus add). It
+is separate from `write_annotations`, which still only appends. It rewrites
+the `.rdat` + `.ridx` of the level involved, and since two files cannot be
+renamed as one, it does so under the session's operation marker:
+
+| a crash or power cut ... | the session is | what repairs it |
+|---|---|---|
+| before the marker is written (while the new files are being written beside the old) | exactly as before; unused `<file>.<id>.new` files lie beside the records | nothing is needed; `recover_session(apply=True)` removes the unused files |
+| after the marker, before every swap is done | the marker is there: the open warns, writes are refused, the validator reports `records.interrupted-edit`; a level's pair may be half swapped | `recover_session(apply=True)` finishes the swap, or rolls it back to the exact old files when a new file is not intact; the next `remove_annotations` does the same first |
+| after the swap, before the marker is removed | the new annotations, plus the marker | the same: recovery only removes the leftovers and the marker |
+
+A removed annotation is gone: the old files are kept only until the swap is
+complete. Details and what it needs from other writers:
+[`remove_annotations`](python.md#remove_annotations).
 
 ## When is my data on disk?
 

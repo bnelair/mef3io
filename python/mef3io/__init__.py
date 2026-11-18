@@ -79,6 +79,11 @@ from ._writer import (  # noqa: E402
     WriterFlushWarning,
     password_interop_issue,
 )
+from .annotations import (  # noqa: E402
+    RemoveAnnotationsReport,
+    RecordFileEdit,
+    remove_annotations,
+)
 from .metadata import Acquisition, Metadata, Subject  # noqa: E402
 from .validate import (  # noqa: E402
     Check,
@@ -89,6 +94,7 @@ from .validate import (  # noqa: E402
     available_checks,
     describe_check,
     BackupAlwaysKeptWarning,
+    InterruptedRecordEdit,
     RecoveredSegment,
     RecoveredRecordFile,
     RecoveryReport,
@@ -128,7 +134,8 @@ __all__ = [
     "Validator", "Check", "Finding", "Report", "SkippedSegment",
     "available_checks", "describe_check",
     "validate_session", "repair_session", "recover_session",
-    "RecoveryReport", "RecoveredSegment", "RecoveredRecordFile",
+    "RecoveryReport", "RecoveredSegment", "RecoveredRecordFile", "InterruptedRecordEdit",
+    "remove_annotations", "RemoveAnnotationsReport", "RecordFileEdit",
     "MefWarning",
     "MixedFactorsWarning",
     "MixedUnitsWarning",

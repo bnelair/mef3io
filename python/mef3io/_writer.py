@@ -763,7 +763,8 @@ class Writer:
 
         Always **appends** to the records already stored at the given level
         (the files are created the first time); it never replaces or deletes a
-        stored record. The new records are added in place, so the cost does not
+        stored record. To take a stored record back, use the separate call
+        :func:`mef3io.remove_annotations`. The new records are added in place, so the cost does not
         grow with the number already stored. A record earlier than the stored
         ones is appended as well; :meth:`mef3io.Reader.records` returns them
         sorted by time. In encrypted sessions record bodies are level-2

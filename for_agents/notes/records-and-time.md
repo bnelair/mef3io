@@ -37,8 +37,11 @@
 Maintainer decision, firm: "WE NEED ONLY APPEND. CREATE IF THERE'S NO PREV
 FILE. WE CANNOT BE DELETING DATA LIKE THIS." Before 2.0.1 `write_records`
 truncated `.rdat`/`.ridx` and wrote only the batch (every call deleted what was
-stored; the old docs said "Replaces"). There is NO replace mode, no
-truncation and no whole-file rewrite anywhere — do not add one.
+stored; the old docs said "Replaces"). `write_records` / `write_annotations`
+have NO replace mode, no truncation and no whole-file rewrite — do not add one.
+The 2.4 decision (a clinical viewer must be able to take back a wrong note)
+did NOT relax that: removal is a SEPARATE, explicitly named call,
+`remove_annotations` (next section), and nothing else may rewrite a record file.
 
 - `write_records` (core/src/records.cpp): file absent -> create the pair (a
   batch is written in time order, stable); present -> APPEND in place, in the
@@ -75,3 +78,97 @@ truncation and no whole-file rewrite anywhere — do not add one.
   returned, each damaged one is a `problems()` entry (kind "records", reason
   with byte offset, key rdat@offset); strict unchanged. Appends: stored body CRC 0 stays 0; unset max entry size is measured from the index; session level targets `session_record_file` (ambiguous = refuse); orphan `.ridx` refused (never truncated; recovery notes it); rollback restores both headers. Reported as `RecoveredRecordFile` in
   `RecoveryReport.record_files`. No false positives on legacy files (test).
+
+## Removing annotations (`remove_annotations`, core/src/annotation_edit.cpp)
+
+Maintainer decision (2.4): a user must be able to REMOVE a stored annotation,
+and to change one (= remove + add in ONE rewrite). Python + C++ only (no C ABI,
+no MATLAB, like the copies), a free function (`mef3io.remove_annotations`),
+never a Writer method: `write_annotations` stays append-only and unchanged.
+
+SELECTION (by content, never by position): a `RecordSelector` = level (+ channel
+/ segment), `time`, `type` and EVERY body field as `records()` returns it
+(`selector_for(record)` builds it). A field the stored record has a value for
+must be named (`selector-incomplete`), a field the type does not carry is
+refused (`selector-unknown-field`); `expect` (default 1) is the exact number of
+stored records it must match, `all_copies` lifts the count (>= 1 still). 0 =
+`no-match`, more = `ambiguous`, fewer = `count-mismatch`, one stored record named
+by two selectors = `selectors-overlap`. ALL OR NOTHING: everything is selected
+and built in memory before the first byte is written. Messages never quote note
+text (PHI), only type, level and counts. Matching uses the decoded `Record`
+(`parse_records` with the level's rto, the same one the Reader resolves; an
+unknown/disputed offset = `offset-unknown`, never a guess), carrying uses the RAW
+bytes (`core/src/record_raw.hpp`, ONE reader shared with the copy engine's
+`read_record_file`).
+
+WHAT IS REWRITTEN: only the `.rdat` + `.ridx` of the levels named (a call may name
+several: one journal covers all pairs). Each kept record is copied byte for byte
+(header, body, CRC, encryption level, time) in file order; its index entry is the
+stored one with the offset rewritten. Headers are made right as for a fresh file
+(count, span from the kept records' absolute times via `to_stored_time`, body CRC
+recomputed whole, header CRC, provenance op 10 `records-edit`); `maximum_entry_size`
+never goes DOWN (INVARIANTS §3, same rule as an append). Added records go through
+`encode_records_for_file` = the very bytes `write_records` stores (shared encoder),
+appended after the kept ones in time order, level-2 encrypted in a protected
+session; they may only go to a level whose file exists (`add-level-missing`: use
+`write_annotations` to create one). Passwords: both or neither, judged by the
+session (`require_record_write_access`, #167): wrong/missing = `password`. A kept
+record whose body the passwords cannot open = `record-locked`, nothing touched
+(selection needs to read bodies). The LAST record of a level removed = the pair is
+REMOVED (state of a level that never had annotations: every reader/validator/the
+oracle accepts it, pymef answers it exactly as for a never-annotated session; a
+zero-record pair is a state no writer produces and has a NO_ENTRY span); a later
+`write_annotations` creates a fresh pair.
+
+CRASH SAFETY (steps in the order they run; `Steps::point`, test hooks `_crash_at`
+/ `_fail_at` stop at the k-th as a crash / ordinary failure):
+ A. read, decode, select, build both images per pair and verify them in memory
+    (`check_images`: what a reader finds == kept + added; index offsets/times; CRCs);
+ B. per new file: write `<file>.<id>.new` (a crash mid-write leaves half of it),
+    fsync it; then flush the folders;  C. read the new files back, byte-compare with
+    the images, parse again;  D. write the OPERATION MARKER (it carries the plan:
+    `edit-format 1`, `file <had_old> <has_new> <hex rel path>`; marker = journal, no
+    separate journal file) with the repo's `write_operation_marker` (part file ->
+    fsync -> no-replace rename -> folder flush);  E. re-check that every old file
+    still has the size and header it was read with (`records-changed`: a Writer that
+    appended meanwhile; the marker is already down so its next write refuses);
+    F. swap per file: old -> `<file>.<id>.old` (rename), new -> `<file>` (rename);
+    G. flush folders;  H. remove the `.old` files;  I. flush, remove the marker.
+STATE AFTER A CRASH: before D = the old session, plus unused `.new` files (inert:
+the Reader ignores them; swept by `recover_session(apply)` / reported in its dry
+run, never by `remove_annotations` itself, so a concurrent edit's staging is not
+deleted). From D to I = the marker is there: reads still work but the open warns
+(`SessionOperationWarning`, text specialised in `mid_operation_message`), every
+write refuses (`refuse_if_mid_operation`), the validator has the non-repairable
+check `records.interrupted-edit`, and `recover_session(apply=True)` runs
+`finish_interrupted_record_edit` FIRST (before it looks at anything else): every
+file's state is read from what exists (T/new/old, `state_of`: replace S0 T+N, S1 N+O,
+S2 T+O, S3 T), FORWARD when every new file still to be moved is intact (CRCs), else
+BACK. THE DIRECTION IS DECIDED ONCE AND MADE DURABLE (`direction back` line, marker
+rewritten atomically) before anything is undone: a half-undone file cannot be told
+from a half-done one by what exists (this bit: a rollback that removed a `.new`
+looked like a finished swap). Every step is idempotent, so a crash inside recovery
+is finished by the next call; the next `remove_annotations` does the same first
+(`report.resumed`). A state no step leaves = `edit-journal-inconsistent`, nothing
+touched. An ordinary failure after D (e.g. a Windows sharing violation on a rename)
+rolls back in process the same way (BACK) unless the `.old` files are already gone
+(then it finishes forward); the error is `edit-failed`. Cancel is honoured until the
+read-back is verified (`ctl.check()`, progress `finish()` is the last point), never
+after D. The fault-injection matrix: tests/test_p54_remove_annotations.py (crash at
+EVERY step, then recovery crashed at every step of ITS own, plain and L1+L2; ordinary
+failure at every step; damaged new file -> rollback to the exact old bytes) and
+core/tests/test_annotation_edit.cpp.
+
+RENAMES use `detail::replace_file` after checking the target name is free (our
+temp names are 32 random hex characters: no clobbering possible, and a file system
+without no-replace rename still works). WINDOWS: renaming a file another process
+holds open without FILE_SHARE_DELETE fails; the failing rename changes nothing for
+that file, the earlier ones are rolled back, the call raises `edit-failed` naming
+the cause and the session is the old one. NOT SOLVED (same gap as rename_session):
+there is no cross-process write lock. The rule shared with rename (`detail::
+refuse_if_being_written`: `.mef3io-tmp`, `.mef3io-repair-tmp`, `<dst>.partial`) sees
+a writer in the middle of a write; the marker + step E catch a writer that appends
+between the read and the swap; a Writer that is open and idle, or an append landing
+inside the few microseconds between E and the rename, is lost. Documented as "stop
+other writers first". Two processes running `remove_annotations`/`recover_session`
+on one session at the same time are not supported either.

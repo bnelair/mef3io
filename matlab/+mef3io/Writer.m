@@ -245,7 +245,8 @@ classdef Writer < handle
             %WRITEANNOTATIONS Struct array with fields: time (required),
             %   type (default 'Note'), text, duration. Omit `channel` for
             %   session-level records. Appends to the records already stored at
-            %   that level (created if absent); never replaces or deletes one.
+            %   that level (created if absent); never replaces or deletes one
+            %   (removing an annotation is Python and C++ only).
             %   Text fields and the channel may be char or string ("...").
             if nargin < 3, channel = []; end
             if isstring(channel), channel = char(channel); end

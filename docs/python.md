@@ -279,10 +279,86 @@ records **within each level** by time (stable: equal times keep their write
 order); the levels stay session, channel, segment. `inspect()` lists a file's
 records in file order. Legacy readers (mef_tools, pymef) return file order, so
 they show an out-of-order append unsorted. In encrypted sessions record
-bodies are level-2 encrypted. To start from nothing, write to a new session
-(or level). If a power cut interrupted an append, the next write is refused
-until `recover_session` has repaired the file (see
+bodies are level-2 encrypted. Appending never removes or changes a stored
+record; to take one back use [`remove_annotations`](#remove_annotations)
+(a separate call). If a power cut interrupted an append, the next write is
+refused until `recover_session` has repaired the file (see
 [long recordings](long_recordings.md)).
+
+### `remove_annotations`
+
+```python
+mef3io.remove_annotations(path, remove, add=(), *, password1="", password2="",
+                          all_copies=False, dry_run=False, cancel=None, progress=None)
+```
+
+Removes stored annotations **by content** and, in the same call, may add
+others, so changing a note is one rewrite. It is a module-level function, not
+a `Writer` method: `write_annotations` stays append-only. A removed annotation
+is **gone** (there is no undo and no history).
+
+```python
+notes = mef3io.Reader(path).records()
+wrong = [n for n in notes if n["type"] == "Note" and n["text"] == "typo"]
+report = mef3io.remove_annotations(
+    path, remove=wrong, add=[{"time": wrong[0]["time"], "text": "fixed"}])
+report.removed, report.added          # 1, 1
+```
+
+- **Selection.** Each `remove` item names a record exactly as
+  `Reader.records()` returns it: `level`, `channel` / `segment` where they
+  apply, `time`, `type` and every body field of the type (a dict from
+  `records()` works unchanged). A selector that leaves out a field the stored
+  record has (`selector-incomplete`), names a field its type does not carry
+  (`selector-unknown-field`), matches nothing (`no-match`), more than it says
+  it expects (`ambiguous`: identical duplicates; say `expect=2` or
+  `all_copies=True`), fewer (`count-mismatch`) or names a record another
+  selector names (`selectors-overlap`) is refused with `.code` on the
+  exception, and **nothing is removed**: the call is all or nothing, across
+  levels.
+- **What is rewritten.** Only the annotation files (`.rdat` + `.ridx`) of the
+  levels involved. Signal files and metadata are never opened for writing.
+  Every record that stays is carried over byte for byte (body, CRC, time,
+  order, encryption level); the headers are made right (count, span, CRCs,
+  provenance `records-edit`). If the last record of a level goes, its two
+  files are removed, which is the state of a level that never had annotations;
+  a later `write_annotations` creates fresh ones.
+- **`add`** records are like `write_annotations` takes them (plus an optional
+  `channel` / `segment`); the level's file must already exist. In a protected
+  session pass both passwords (as for `Writer`): added records are level-2
+  encrypted, kept ones keep their ciphertext.
+- **Crash safety.** The new files are written beside the old, flushed and
+  read back; then a marker file in the session (`.mef3io-operation`) records the
+  plan and the files are swapped by rename. After a crash or power cut the
+  session is either as it was, or carries the marker: opening it warns
+  (`SessionOperationWarning`), writes are refused, `validate_session` reports
+  `records.interrupted-edit`, and `recover_session(path, apply=True)` finishes
+  the swap (or rolls it back when a new file is not intact). The next
+  `remove_annotations` does the same first (`report.resumed`). Until then,
+  annotations of the affected level should not be trusted.
+- **What a selector can tell apart.** Records are compared on the fields
+  mef3io decodes (every type at version 1.0). A record whose body it cannot
+  decode (an unknown type, another version) is matched on its location, type
+  and time only, so two such records at the same time look identical: the call
+  then refuses (`ambiguous`) unless you say `expect=2` or `all_copies=True`.
+  An annotation file is held in memory a few times over while the call works.
+- **Cancel / progress** (`cancel=`, `progress=`) work before the swap; after it
+  starts it always completes. `dry_run=True` reports what would change and
+  writes nothing.
+- **Refused:** a `.mefd.tar` (`tar-read-only`), an annotation file that cannot be
+  read in full (`record-damaged`, `record-crc`, `record-index-mismatch`,
+  `record-index-missing`; run `recover_session` first), wrong or missing
+  passwords (`password`, `record-locked`), a session being written or
+  mid-operation (`being-written`, `mid-operation`), annotations that changed
+  while the call worked (`records-changed`), an unknown recording-time offset
+  (`offset-unknown`).
+- **Other writers.** There is no cross-process write lock: stop other writers of
+  the session first. On Windows a record file another program holds open
+  stops the swap (`edit-failed`, the old files are put back). An open
+  `Reader` shows the old annotations until it is reopened.
+
+Python and C++ only; there is no MATLAB equivalent (MATLAB's
+`writeAnnotations` only appends).
 
 ## Reading
 

@@ -49,6 +49,7 @@
 
 #include "durability.hpp"
 #include "out_file.hpp"
+#include "record_raw.hpp"
 #include "segment_copy.hpp"
 #include "session_layout.hpp"
 
@@ -746,114 +747,28 @@ struct Scanner {
 // Record files, raw.
 // ---------------------------------------------------------------------------
 
-struct RawRecord {
-  std::array<ui1, 4> type_bytes{};
-  std::string type;
-  ui1 vmaj = 0, vmin = 0;
-  si1 enc = 0;
-  si8 time = 0;
-  std::vector<ui1> body;  // decrypted; stored length
-};
-
-struct RawRecordFile {
-  std::vector<ui1> uh;                  // 1024 bytes
-  std::vector<RawRecord> records;
-  std::vector<si8> record_offsets;      // file-relative
-  bool has_ridx = false;
-  std::vector<ui1> ridx_uh;
-  std::vector<std::array<ui1, RIDX>> ridx;
-  crypto::AccessKeys keys;
-};
+// The raw record file reader is shared with remove_annotations (record_raw.hpp).
+using detail::RawRecord;
+using detail::RawRecordFile;
 
 std::span<const ui1> key_for(const crypto::AccessKeys& keys, int level) {
-  if (level == fmt::LEVEL_1_ENCRYPTION && keys.level1_key) return *keys.level1_key;
-  if (level == fmt::LEVEL_2_ENCRYPTION && keys.level2_key) return *keys.level2_key;
-  return {};
+  return detail::record_key_for(keys, level);
 }
 
-std::string ridx_of(const std::string& rdat) { return rdat.substr(0, rdat.size() - 5) + ".ridx"; }
+std::string ridx_of(const std::string& rdat) { return detail::ridx_name_of(rdat); }
 
 RawRecordFile read_record_file(const SessionSource& src, const std::string& rdat_rel,
                                const std::string& password) {
-  RawRecordFile f;
   const auto bytes = src.read_all(rdat_rel);
-  const std::string where = src.describe(rdat_rel);
-  if (bytes.size() < UH)
-    refuse(RefusalKind::Format, "record-damaged", "record file smaller than its header: " + where);
-  f.uh.assign(bytes.begin(), bytes.begin() + UH);
-  f.keys = crypto::validate_password(password, std::span<const ui1>(bytes).subspan(UH_L1_FIELD, 16),
-                                     std::span<const ui1>(bytes).subspan(UH_L2_FIELD, 16));
-  const si8 declared = read<si8>(bytes, 32);
-  const bool known = declared != -1;
-  std::size_t off = UH;
-  while (true) {
-    if (known && static_cast<si8>(f.records.size()) == declared) break;
-    if (off + RHDR > bytes.size()) {
-      const bool clean = !known && all_zero(std::span<const ui1>(bytes).subspan(off));
-      if (clean) break;
-      refuse(RefusalKind::Format, "record-damaged",
-             "record file truncated after " + std::to_string(f.records.size()) +
-                 " record(s): " + where);
-    }
-    RawRecord r;
-    std::copy_n(bytes.begin() + static_cast<std::ptrdiff_t>(off + 4), 4, r.type_bytes.begin());
-    r.type = read_string(bytes, off + 4, 4);
-    if (r.type.empty() && !known) break;
-    if (r.type.empty())
-      refuse(RefusalKind::Format, "record-damaged", "record without a type code in " + where);
-    const ui4 stored_crc = read<ui4>(bytes, off);
-    r.vmaj = read<ui1>(bytes, off + 9);
-    r.vmin = read<ui1>(bytes, off + 10);
-    r.enc = read<si1>(bytes, off + 11);
-    const ui4 nb = read<ui4>(bytes, off + 12);
-    r.time = read<si8>(bytes, off + 16);
-    const std::size_t body_off = off + RHDR;
-    if (nb > bytes.size() - body_off)
-      refuse(RefusalKind::Format, "record-damaged",
-             "record " + std::to_string(f.records.size()) + " runs past the end of " + where);
-    if (stored_crc != fmt::CRC_NO_ENTRY &&
-        crc::calculate(std::span<const ui1>(bytes).subspan(off + 4, RHDR - 4 + nb)) != stored_crc)
-      refuse(RefusalKind::Crc, "record-crc",
-             "record " + std::to_string(f.records.size()) + " (" + r.type +
-                 ") fails its CRC: " + where);
-    r.body.assign(bytes.begin() + static_cast<std::ptrdiff_t>(body_off),
-                  bytes.begin() + static_cast<std::ptrdiff_t>(body_off + nb));
-    if (r.enc > 0) {
-      const auto key = key_for(f.keys, r.enc);
-      if (key.empty())
-        refuse(RefusalKind::Password, "record-locked",
-               "a record body in " + where +
-                   " is encrypted and the password does not open it (the level-2 password "
-                   "opens every record)");
-      const std::size_t whole = r.body.size() / 16 * 16;  // meflib: bytes / 16 blocks
-      auto dec = crypto::aes128_ecb_decrypt(std::span<const ui1>(r.body).first(whole), key);
-      std::copy(dec.begin(), dec.end(), r.body.begin());
-    }
-    f.record_offsets.push_back(static_cast<si8>(off));
-    f.records.push_back(std::move(r));
-    off = body_off + nb;
-  }
   const std::string ridx_rel = ridx_of(rdat_rel);
-  if (src.exists(ridx_rel)) {
-    const auto ib = src.read_all(ridx_rel);
-    if (ib.size() < UH || (ib.size() - UH) % RIDX != 0)
-      refuse(RefusalKind::Format, "record-index-mismatch",
-             "record index has a partial entry: " + src.describe(ridx_rel));
-    f.has_ridx = true;
-    f.ridx_uh.assign(ib.begin(), ib.begin() + UH);
-    for (std::size_t o = UH; o + RIDX <= ib.size(); o += RIDX) {
-      std::array<ui1, RIDX> e{};
-      std::copy_n(ib.begin() + static_cast<std::ptrdiff_t>(o), RIDX, e.begin());
-      f.ridx.push_back(e);
-    }
-    if (f.ridx.size() != f.records.size())
-      refuse(RefusalKind::Format, "record-index-mismatch",
-             "record index " + src.describe(ridx_rel) + " lists " +
-                 std::to_string(f.ridx.size()) + " record(s) but " + where + " holds " +
-                 std::to_string(f.records.size()) +
-                 "; which one is right is unknown, so neither is copied");
-  }
-  return f;
+  std::vector<ui1> ib;
+  const bool has_ridx = src.exists(ridx_rel);
+  if (has_ridx) ib = src.read_all(ridx_rel);
+  return detail::parse_record_file(
+      bytes, has_ridx ? &ib : nullptr, src.describe(rdat_rel), src.describe(ridx_rel), password,
+      [](RefusalKind kind, std::string code, std::string message) {
+        refuse(kind, std::move(code), std::move(message));
+      });
 }
 
 // Record body layouts at version 1.0 (mefrec.h). Offsets body-relative.

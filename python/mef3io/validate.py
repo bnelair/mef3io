@@ -724,12 +724,31 @@ class RecoveredRecordFile:
 
 
 @dataclasses.dataclass(frozen=True)
+class InterruptedRecordEdit:
+    """An annotation edit (:func:`remove_annotations`) this session was interrupted in.
+
+    ``action`` is what recovery does (or did): ``"finish"`` the swap of the
+    record files (every new file is intact) or ``"roll back"`` (a new file is
+    damaged and the old ones are still there). ``files`` are session-relative
+    record files; ``id`` names the edit's temporary files.
+    """
+
+    id: str = ""
+    files: tuple[str, ...] = ()
+    action: str = ""
+    applied: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
 class RecoveryReport:
     """What `recover_session` found, and did or would do."""
 
     segments: tuple[RecoveredSegment, ...] = ()
     #: Annotation files needing work (torn last record, short or missing index).
     record_files: tuple[RecoveredRecordFile, ...] = ()
+    #: An interrupted annotation edit: what finishing it does (dry run), or
+    #: what was done first (``apply=True``). See :func:`remove_annotations`.
+    record_edits: tuple[InterruptedRecordEdit, ...] = ()
     skipped: tuple[str, ...] = ()
     segments_examined: int = 0
     applied: bool = False
@@ -740,7 +759,8 @@ class RecoveryReport:
 
     @property
     def nothing_to_do(self) -> bool:
-        return not self.segments and not self.record_files and not self.skipped
+        return (not self.segments and not self.record_files and not self.record_edits
+                and not self.skipped)
 
     def summary(self) -> str:
         lines = [
@@ -754,13 +774,18 @@ class RecoveryReport:
             lines.append(f"    {s.path}: {s.action}")
         for f in self.record_files:
             lines.append(f"    {f.path}: {f.action}")
+        for e in self.record_edits:
+            lines.append(
+                f"    interrupted annotation edit ({len(e.files)} record file(s)): "
+                + (f"{e.action} done" if e.applied else f"would {e.action}")
+            )
         for s in self.skipped:
             lines.append(f"    skipped {s}")
         for n in self.notes:
             lines.append(f"    note: {n}")
         if self.applied and self.backup_root:
             lines.append(f"  originals backed up under {self.backup_root}")
-        if self.segments and not self.applied:
+        if (self.segments or self.record_edits) and not self.applied:
             lines.append("")
             lines.append("To apply:  mef3io.recover_session(path, apply=True)")
         if self.segments and self.applied:
@@ -857,6 +882,11 @@ def recover_session(
             for s in raw["segments"]
         ),
         record_files=tuple(RecoveredRecordFile(**f) for f in raw.get("record_files", ())),
+        record_edits=tuple(
+            InterruptedRecordEdit(id=e["id"], files=tuple(e["files"]), action=e["action"],
+                                  applied=e["applied"])
+            for e in raw.get("record_edits", ())
+        ),
         skipped=tuple(raw["skipped"]),
         segments_examined=raw["segments_examined"],
         applied=raw["applied"],
