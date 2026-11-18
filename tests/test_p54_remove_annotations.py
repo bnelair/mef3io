@@ -1030,7 +1030,7 @@ def _contents(*roots):
     return sorted(out)
 
 
-@pytest.mark.parametrize("style", ["truncated", "newer-format"])
+@pytest.mark.parametrize("style", ["truncated"])
 def test_an_unreadable_plan_with_whole_target_pairs_keeps_them_and_sets_leftovers_aside(tmp_path, style):
     p = _crash_where(tmp_path, "a", lambda q: mef3io.operation_marker(q) is not None
                      and len(list(q.rglob("*.new"))) == 4 and not list(q.rglob("*.old")))
@@ -1042,7 +1042,7 @@ def test_an_unreadable_plan_with_whole_target_pairs_keeps_them_and_sets_leftover
     assert e.action == "roll back" and e.not_done and "NOT done" in e.reason
     assert _contents(p) == everything
     rep = mef3io.recover_session(str(p), apply=True)
-    assert rep.record_edits[0].applied
+    assert rep.record_edits[0].applied and not rep.record_edits[0].owner_override
     assert mef3io.operation_marker(p) is None and _state(p) == OLD
     assert not _leftovers(p) and len(list(aside.rglob("*.new"))) == 4
     assert _contents(p, aside) == everything                     # nothing deleted, nothing made
@@ -1373,7 +1373,7 @@ def _damage_plan(p, how):
     (p / ".mef3io-operation").write_bytes(b"\n".join(out))
 
 
-@pytest.mark.parametrize("how", ["truncated", "torn-crc", "format-2", "wrong-crc"])
+@pytest.mark.parametrize("how", ["truncated", "torn-crc", "wrong-crc"])
 @pytest.mark.parametrize("shape", ["session+channel", "session+3-channels"])
 def test_an_unreadable_plan_never_settles_to_a_mixed_state(tmp_path, how, shape):
     three = shape == "session+3-channels"
@@ -1633,3 +1633,282 @@ def test_recovery_goes_ahead_when_the_owner_is_dead_or_elsewhere(tmp_path):
         assert not dry.record_edits[0].running
         mef3io.recover_session(str(p), apply=True)
         assert mef3io.operation_marker(p) is None and _state(p) in (OLD, NEW)
+
+
+# ---------------------------------------------------------------------------
+# the owner of an edit (post-merge review of round 3)
+# ---------------------------------------------------------------------------
+
+def _owner_line_index(lines):
+    return next(i for i, ln in enumerate(lines) if ln.startswith(b"owner "))
+
+
+def _set_owner(p, pid=None, host_hex=None, started="-", keep_check=True):
+    """Rewrite the marker's owner line (with its own check, or without it)."""
+    lines = _marker_lines(p)
+    i = _owner_line_index(lines)
+    _, old_pid, old_host, *_ = lines[i].split(b" ")
+    body = b"owner %s %s %s" % (str(pid).encode() if pid is not None else old_pid,
+                                 host_hex if host_hex is not None else old_host, started.encode())
+    if keep_check:
+        body += b" " + format(_crc(body), "08x").encode()
+    lines[i] = body
+    (p / ".mef3io-operation").write_bytes(b"\n".join(lines))
+
+
+def test_the_marker_starts_with_its_owner_line_and_that_line_carries_its_own_check(tmp_path):
+    p = _marker_crash(tmp_path, "m")
+    lines = _marker_lines(p)
+    assert [ln.split(b" ")[0] for ln in lines[:5]] == [b"mef3io-operation", b"tool", b"operation", b"id", b"owner"]
+    body, check = lines[4].rsplit(b" ", 1)
+    assert format(_crc(body), "08x").encode() == check
+    assert lines[5] == b"edit-format 1"
+
+
+def test_a_marker_without_an_owner_line_is_settled_from_what_it_does_say(tmp_path):
+    q = _marker_crash(tmp_path, "noown")
+    lines = [ln for ln in _marker_lines(q) if not ln.startswith(b"owner ")]
+    (q / ".mef3io-operation").write_bytes(b"\n".join(lines))
+    mef3io.recover_session(str(q), apply=True)
+    assert mef3io.operation_marker(q) is None and _state(q) in (OLD, NEW)
+    r = _marker_crash(tmp_path, "nocheck")                # an owner line without its check is unknown
+    _set_owner(r, pid=1, keep_check=False)
+    mef3io.recover_session(str(r), apply=True)
+    assert mef3io.operation_marker(r) is None
+
+
+def test_a_marker_of_a_newer_layout_is_never_settled_not_even_with_the_override(tmp_path):
+    p = _marker_crash(tmp_path, "newer")
+    _damage_plan(p, "format-2")
+    before = _snap(p)
+    dry = mef3io.recover_session(str(p))
+    assert dry.record_edits[0].action == "refused" and "at least as new" in dry.record_edits[0].reason
+    for kw in ({}, {"assume_owner_gone": True}):
+        with pytest.raises(mef3io.WriteConflictError) as e:
+            mef3io.recover_session(str(p), apply=True, **kw)
+        assert e.value.code == "edit-newer-format" and "at least as new" in str(e.value)
+        assert _snap(p) == before
+    with pytest.raises(mef3io.WriteConflictError) as e:
+        mef3io.remove_annotations(p, [{"type": "Note", "time": START + S, "text": "a", "level": "session"}],
+                                  assume_owner_gone=True)
+    assert e.value.code == "edit-newer-format" and _snap(p) == before
+
+
+def test_the_validator_flags_leftovers_of_an_edit_whose_marker_is_gone(tmp_path):
+    # the state of an edit settled under a running program: the marker is gone, a level reads
+    # empty, its previous file sits beside it as .old
+    p = _marker_crash(tmp_path, "left")
+    (p / ".mef3io-operation").unlink()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert _records(p, level="session") == []
+    rep = mef3io.Validator(str(p)).validate()
+    hits = [f for f in rep.findings if f.check_id == "records.edit-leftovers"]
+    assert hits and hits[0].severity == "warning" and ".old" in hits[0].message
+    assert not mef3io.Validator.describe_check("records.edit-leftovers").repairable
+    assert not [f for f in mef3io.Validator(str(_session(tmp_path / "clean.mefd"))).validate().findings
+                if f.check_id == "records.edit-leftovers"]
+
+
+def test_a_zombie_pid_one_and_a_reused_pid_and_the_override(tmp_path):
+    import signal
+    import subprocess
+    import time
+    # a live process whose start time is not recorded (macOS, Windows; pid 1 on a POSIX box):
+    # recovery refuses, the override settles
+    alive = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    live_pid = 1 if os.name == "posix" else alive.pid
+    p = _marker_crash(tmp_path, "one")
+    _set_owner(p, pid=live_pid)
+    before = _snap(p)
+    dry = mef3io.recover_session(str(p))
+    assert dry.record_edits[0].running
+    with pytest.raises(mef3io.WriteConflictError) as e:
+        mef3io.recover_session(str(p), apply=True)
+    assert e.value.code == "edit-in-progress" and "assume_owner_gone" in str(e.value)
+    assert _snap(p) == before
+    with pytest.raises(mef3io.WriteConflictError):
+        mef3io.remove_annotations(p, [{"type": "Note", "time": START + S, "text": "a", "level": "session"}])
+    rep = mef3io.recover_session(str(p), apply=True, assume_owner_gone=True)
+    assert rep.record_edits[0].owner_override and rep.record_edits[0].applied
+    assert "skipped on request" in rep.record_edits[0].reason
+    assert mef3io.operation_marker(p) is None and _state(p) in (OLD, NEW)
+    # the CLI flag
+    from mef3io import validate as _v
+    q = _marker_crash(tmp_path, "cli")
+    _set_owner(q, pid=live_pid)
+    assert _v._recover_main([str(q), "--apply"]) == 2 and mef3io.operation_marker(q) is not None
+    assert _v._recover_main([str(q), "--apply", "--owner-gone"]) in (0, 1)
+    assert mef3io.operation_marker(q) is None
+    # a reused pid without a start time looks alive and needs the override; with the real
+    # start time of an unrelated process it is told apart (Linux)
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        r = _marker_crash(tmp_path, "reuse")
+        _set_owner(r, pid=sleeper.pid, started="-")
+        with pytest.raises(mef3io.WriteConflictError):
+            mef3io.recover_session(str(r), apply=True)
+        if sys.platform.startswith("linux"):
+            _set_owner(r, pid=sleeper.pid, started="1")           # not this process's start time
+            mef3io.recover_session(str(r), apply=True)
+            assert mef3io.operation_marker(r) is None
+        # a zombie (killed, not reaped) is dead
+        z = _marker_crash(tmp_path, "zombie")
+        _set_owner(z, pid=sleeper.pid, started="-")
+        sleeper.send_signal(signal.SIGKILL) if hasattr(signal, "SIGKILL") else sleeper.kill()
+        time.sleep(0.3)                                           # never wait()ed: a zombie
+        if sys.platform.startswith("linux"):
+            assert "Z" in Path(f"/proc/{sleeper.pid}/stat").read_text().rsplit(")", 1)[1][:3]
+            mef3io.recover_session(str(z), apply=True)
+            assert mef3io.operation_marker(z) is None
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+        alive.kill()
+        alive.wait()
+
+
+_PAUSED_EDIT = """
+import sys, time, os
+sys.path[:0] = {paths!r}
+import mef3io
+from mef3io import _mef3io as m
+root, ready, go, nth = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+renames = [0]
+def observer(kind, path):
+    if kind == "rename" and "|" in path and not path.split("|")[0].endswith(".part"):
+        renames[0] += 1
+        if renames[0] == nth:
+            open(ready, "w").close()
+            while not os.path.exists(go):
+                time.sleep(0.02)
+m._set_edit_observer(observer)
+rm = [mef3io.Reader(root).records(level="session")[1], mef3io.Reader(root).records("ch1", level="channel")[0]]
+mef3io.remove_annotations(root, rm, add=[{{"time": rm[0]["time"], "text": "b fixed"}}])
+"""
+
+
+@pytest.mark.parametrize("nth", [2, 5])
+@pytest.mark.parametrize("damage", ["readable", "truncated", "newer-format"])
+def test_recovery_never_settles_under_a_live_edit_whatever_the_plan_says(tmp_path, nth, damage):
+    import subprocess
+    import time
+    p = _crash_session(tmp_path, "s.mefd")
+    ready, go = tmp_path / "ready", tmp_path / "go"
+    script = tmp_path / "paused.py"
+    script.write_text(_PAUSED_EDIT.format(paths=[q for q in sys.path if q]))
+    child = subprocess.Popen([sys.executable, str(script), str(p), str(ready), str(go), str(nth)],
+                             env=dict(os.environ, PYTHONPATH=os.pathsep.join(q for q in sys.path if q)))
+    try:
+        for _ in range(500):
+            if ready.exists():
+                break
+            assert child.poll() is None
+            time.sleep(0.02)
+        assert ready.exists()
+        if damage != "readable":
+            m = _marker_lines(p)
+            head = [ln for ln in m if ln.split(b" ")[0] in (b"mef3io-operation", b"tool", b"operation", b"id", b"owner")]
+            body = head if damage == "truncated" else head + [b"edit-format 2"]
+            (p / ".mef3io-operation").write_bytes(b"\n".join(body) + b"\n")
+        before = _snap(p)
+        want = "edit-newer-format" if damage == "newer-format" else "edit-in-progress"
+        for call in (lambda: mef3io.recover_session(str(p), apply=True),
+                     lambda: mef3io.remove_annotations(
+                         p, [{"type": "Note", "time": START + 3 * S, "text": "c", "level": "session"}])):
+            with pytest.raises(mef3io.WriteConflictError) as e:
+                call()
+            assert e.value.code in (want, "edit-in-progress"), e.value.code
+            assert _snap(p) == before                              # nothing settled, nothing touched
+        go.write_text("go")
+        assert child.wait(timeout=60) == 0                         # the editor finishes undisturbed
+    finally:
+        if child.poll() is None:
+            child.kill()
+    assert mef3io.operation_marker(p) is None and _state(p) == NEW
+    assert mef3io.validate_session(str(p)).ok
+
+
+def test_recovery_refuses_under_an_edit_running_in_another_thread_of_the_same_process(tmp_path):
+    import threading
+    p = _crash_session(tmp_path, "s.mefd")
+    paused, release = threading.Event(), threading.Event()
+    seen = [0]
+
+    def observer(kind, path):
+        if kind == "rename" and not path.split("|")[0].endswith(".part"):
+            seen[0] += 1
+            if seen[0] == 2:
+                paused.set()
+                assert release.wait(30)
+
+    errors = []
+
+    def edit():
+        try:
+            _crash_run(p)
+        except Exception as exc:                     # pragma: no cover
+            errors.append(exc)
+
+    _m._set_edit_observer(observer)
+    t = threading.Thread(target=edit)
+    try:
+        t.start()
+        assert paused.wait(30)
+        before = _snap(p)
+        with pytest.raises(mef3io.WriteConflictError) as e:
+            mef3io.recover_session(str(p), apply=True)
+        assert e.value.code == "edit-in-progress"
+        assert mef3io.recover_session(str(p)).record_edits[0].running
+        assert _snap(p) == before
+        release.set()
+        t.join(60)
+    finally:
+        release.set()
+        _m._set_edit_observer(None)
+    assert not errors and _state(p) == NEW and mef3io.operation_marker(p) is None
+    # a crashed earlier call of this process (nothing in flight any more) is settled as before
+    q = _marker_crash(tmp_path, "crashed")
+    mef3io.recover_session(str(q), apply=True)
+    assert mef3io.operation_marker(q) is None
+
+
+def test_settling_at_the_start_of_remove_annotations_is_covered_by_the_in_process_guard(tmp_path):
+    import threading
+    p = _marker_crash(tmp_path, "settle")
+    link = tmp_path / "alias.mefd"
+    try:
+        os.symlink(p, link)
+    except (OSError, NotImplementedError):                        # no symlinks here
+        link = None
+    paused, release = threading.Event(), threading.Event()
+
+    def observer(kind, path):
+        if kind == "rename" and not path.split("|")[0].endswith(".part") and not paused.is_set():
+            paused.set()
+            assert release.wait(30)
+
+    errors = []
+
+    def edit():
+        try:
+            mef3io.remove_annotations(
+                p, [{"type": "Note", "time": START + S, "text": "a", "level": "session"}])
+        except Exception as exc:                                  # pragma: no cover
+            errors.append(exc)
+
+    _m._set_edit_observer(observer)
+    t = threading.Thread(target=edit)
+    try:
+        t.start()
+        assert paused.wait(30)                                    # inside the settling at its start
+        for target in [p] + ([link] if link else []):
+            with pytest.raises(mef3io.WriteConflictError) as e:
+                mef3io.recover_session(str(target), apply=True)
+            assert e.value.code == "edit-in-progress"
+        release.set()
+        t.join(60)
+    finally:
+        release.set()
+        _m._set_edit_observer(None)
+    assert not errors and mef3io.operation_marker(p) is None

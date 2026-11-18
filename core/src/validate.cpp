@@ -889,6 +889,21 @@ const std::vector<CheckImpl>& check_impls() {
                  [](const SegmentState&, const SegmentTruth&, Finding&, bool&) {},
                  {}});
 
+    v.push_back({{"records.edit-leftovers", "No leftover files of an annotation edit",
+                  "An annotation edit (remove_annotations) leaves its temporary files "
+                  "(`<record file>.<id>.new` / `.old`) beside the record files while it works and "
+                  "removes them when it is settled. Such files WITHOUT the operation marker mean "
+                  "the marker was removed by hand, or an edit was settled under a running program: "
+                  "a level's annotations may be missing from view (the previous file is the "
+                  "`.old`). Nothing reads them and nothing deletes them. NOT repairable here: "
+                  "look at them, and either put the `.old` file back in place of the missing "
+                  "`.rdat` / `.ridx`, or, when the record files are whole, remove the leftovers "
+                  "(recover_session(apply=True) removes them too). Directory sessions only.",
+                  Severity::Warning, false},
+                 // Not part of a segment: judged once per session (check_edit_leftovers).
+                 [](const SegmentState&, const SegmentTruth&, Finding&, bool&) {},
+                 {}});
+
     v.push_back({{"units.mixed", "A channel's segments share one units string",
                   "Every segment of a channel should declare the same units_description (the "
                   "reader reports the first segment's for the whole channel, so a segment in "
@@ -1487,6 +1502,33 @@ void check_interrupted_edit(const std::string& path, Report& report) {
   report.findings.push_back(std::move(f));
 }
 
+// records.edit-leftovers: temporary files of an annotation edit with no marker to explain them.
+void check_edit_leftovers(const std::string& path, Report& report) {
+  if (path_has_suffix(path, ".tar") || has_interrupted_edit(path)) return;
+  std::vector<std::string> left;
+  try {
+    left = record_edit_leftovers(path, false);
+  } catch (const std::exception&) {
+    return;
+  }
+  if (left.empty()) return;
+  Finding f;
+  f.check_id = "records.edit-leftovers";
+  f.severity = Severity::Warning;
+  f.segment_number = -1;
+  f.path = left.front();
+  f.field = "leftover files of an annotation edit";
+  f.stored = std::to_string(left.size()) + " file(s)";
+  f.expected = "none";
+  std::string names;
+  for (std::size_t i = 0; i < left.size() && i < 4; ++i) names += (i ? ", " : "") + left[i];
+  f.message = "leftover files of an annotation edit with no operation marker (" + names +
+              (left.size() > 4 ? ", ..." : "") +
+              "): a level's annotations may be missing from view; if a record file is missing, "
+              "put its .old file back, otherwise run recover_session(apply=True) to remove them";
+  report.findings.push_back(std::move(f));
+}
+
 // The shared body of validate/repair. `repair` empty => read-only.
 Report run(const std::string& path, const ValidateOptions& opts, const RepairSelection* repair,
            const Control& ctl, std::shared_ptr<const SessionSource> given = nullptr) {
@@ -2008,6 +2050,7 @@ Report run(const std::string& path, const ValidateOptions& opts, const RepairSel
   }
   if (selected(opts.check_ids, "records.encryption")) check_records_encryption(*src, segments, report);
   if (selected(opts.check_ids, "records.interrupted-edit")) check_interrupted_edit(path, report);
+  if (selected(opts.check_ids, "records.edit-leftovers")) check_edit_leftovers(path, report);
 
   // segment-repaired: a non-last segment of these channels changed, so their
   // LAST segment's .tmet says so (see last_segment.hpp). Header-only, backed up

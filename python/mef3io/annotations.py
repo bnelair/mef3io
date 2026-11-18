@@ -88,6 +88,7 @@ def remove_annotations(
     password2: str = "",
     all_copies: bool = False,
     dry_run: bool = False,
+    assume_owner_gone: bool = False,
     cancel: Optional[CancelToken] = None,
     progress: Optional[ProgressCallback] = None,
     _crash_at: int = -1,
@@ -144,6 +145,13 @@ def remove_annotations(
     dry_run : bool, default False
         Select, build and verify everything in memory and report; write
         nothing.
+    assume_owner_gone : bool, default False
+        Only for finishing an earlier interrupted edit: skip the check that
+        refuses (``edit-in-progress``) while the program that started it is
+        alive on this machine. Use it only when you are sure no program is
+        editing this session. If a program IS still editing when this is used, that program's edit can fail part-way or report success for a removal that was then rolled back, and a level's annotations can read as empty until the leftover ``.old`` files are put back by hand; nothing is deleted.
+        (A marker written by a newer mef3io is always refused,
+        ``edit-newer-format``: settle it with a mef3io at least as new.)
     cancel : CancelToken, optional
         Stops the call **before** the new files are in place, leaving the
         session as it was (:class:`Cancelled`). After that point a cancel is
@@ -171,7 +179,8 @@ def remove_annotations(
         An annotation file that cannot be read in full (``record-damaged``,
         ``record-crc``, ``record-index-mismatch``, ``record-index-missing``,
         ``ambiguous-session-records``), or an earlier interrupted edit whose
-        files do not settle (``edit-unsettled``): nothing is touched; run
+        files do not settle (``edit-unsettled``), or one written by a newer mef3io
+        (``edit-newer-format``): nothing is touched; run
         :func:`recover_session` or :func:`validate_session` first.
     WriteConflictError
         The session is being written or mid-operation (``being-written``,
@@ -235,7 +244,7 @@ def remove_annotations(
     add = [dict(a) for a in add]
     raw = _backend().remove_annotations(
         os.fspath(path), remove, add, password1 or "", password2 or "", bool(dry_run),
-        _crash_at, _fail_at, **_hooks(cancel, progress)
+        _crash_at, _fail_at, **_hooks(cancel, progress), assume_owner_gone=bool(assume_owner_gone)
     )
     return RemoveAnnotationsReport(
         files=tuple(RecordFileEdit(**f) for f in raw["files"]),

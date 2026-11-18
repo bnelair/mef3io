@@ -210,6 +210,7 @@ declarations a reader allocates from, then the time fields. Ids are stable API.
 | `header.max-entry-size` | info | yes | `maximum_entry_size` in each file (`.tdat` value informational) |
 | `records.encryption` | error | no | Annotation (`.rdat`) files are protected like the session they belong to (segment level: that segment's metadata; channel level: that channel's; session level: protected when any channel is). An unprotected record file in a protected session holds its text in plaintext (mef3io before the fix of #167 could create one): **error**. A protected header over unencrypted record bodies (legacy `mef_tools` writes these; the index entries say so) is reported as a **warning**: the note text is stored without encryption. A protected file in an unprotected session is an error. Findings about channel or session level files have `segment == -1` (`channel == ""` for the session). Not repairable: fixing it means re-encrypting record bodies, which repair (declarations only) never does; copy the annotations out and write them again with both passwords |
 | `records.interrupted-edit` | error | no | An annotation edit ([`remove_annotations`](python.md#remove_annotations)) was interrupted: the session carries its operation marker, and a level's `.rdat` / `.ridx` pair may be half swapped. Judged from the marker alone (directory sessions); `segment == -1`. Not repairable here (the registry rewrites declarations only): `recover_session(path, apply=True)` finishes the edit, or rolls it back when a new file is not intact |
+| `records.edit-leftovers` | warning | no | An annotation edit ([`remove_annotations`](python.md#remove_annotations)) leaves temporary files (`<record file>.<id>.new` / `.old`) beside the record files while it works and removes them when it is settled. Such files **without** the operation marker mean the marker was removed by hand, or an edit was settled under a running program (`--owner-gone`): a level's annotations may be missing from view, the previous file being the `.old`. Nothing reads or deletes them. Not repairable here: put the `.old` file back in place of a missing `.rdat` / `.ridx`, or, when the record files are whole, remove the leftovers (`recover_session(apply=True)` removes them too); `segment == -1`; directory sessions only |
 | `units.mixed` | warning | no | The segments of one channel declare different `units_description` strings (as stored; `uV`, `µV` and `μV` count as one). Readers label the whole channel with the first segment's units, so a segment in other units would be mislabelled; samples are untouched. Reported once for each segment that differs from the channel's first. Not repairable: which string is right is a decision about the recording. `merge_sessions` allows it, with a `MixedUnitsWarning` and a note |
 
 `Validator.available_checks()` returns the same table at runtime, with each
@@ -328,7 +329,19 @@ The CLI does the same. It repairs nothing beyond the segments recovery reports
 ```bash
 python -m mef3io recover session.mefd            # dry run
 python -m mef3io recover session.mefd --apply
+python -m mef3io recover session.mefd --apply --owner-gone   # see below
 ```
+
+Recovery of an interrupted annotation edit refuses (`edit-in-progress`) while
+the program that started it still seems to run on this machine, or in another
+thread of your process, and always refuses a marker written by a newer mef3io
+(`edit-newer-format`; no override, use a mef3io at least as new). If you are
+sure no program is editing the session (for example a reused process id), pass
+`assume_owner_gone=True` / `--owner-gone`. If a program IS still editing, its
+edit can fail part-way or report success for a removal that was rolled back,
+and a level's annotations can read as empty until the leftover `.old` files are
+put back by hand; nothing is deleted, and the check `records.edit-leftovers`
+flags such files. Details: [`remove_annotations`](python.md#remove_annotations).
 
 ### What it does, and why the two cases differ
 

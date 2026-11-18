@@ -744,6 +744,8 @@ class InterruptedRecordEdit:
     #: The program that started the edit is still running on this machine: the edit is
     #: in progress, not interrupted, and recovery refuses (``edit-in-progress``).
     running: bool = False
+    #: ``assume_owner_gone`` was needed and used.
+    owner_override: bool = False
     applied: bool = False
 
     @property
@@ -795,6 +797,8 @@ class RecoveryReport:
             if e.action == "roll back":
                 what += ("rolled back" if e.applied else "would be rolled back") + (
                     ": the removal was NOT done" + (f" ({e.reason})" if e.reason else ""))
+            elif e.action == "refused":
+                what += "NOT settled by this version: " + e.reason
             elif e.action == "settle":
                 what += ("settled from the files alone: " if e.applied
                          else "would be settled from the files alone: ") + e.reason
@@ -825,6 +829,7 @@ def recover_session(
     *,
     cancel: CancelToken | None = None,
     progress: Callable[[int, int], object] | None = None,
+    assume_owner_gone: bool = False,
 ) -> RecoveryReport:
     """Make each segment's block index and data agree after an interrupted write.
 
@@ -876,6 +881,18 @@ def recover_session(
         ``progress(done, total)`` in bytes of ``.tidx`` + ``.tdat`` covered.
         Called at a bounded rate, never concurrently; ``(total, total)``
         exactly once, when the scan completes (before anything is written).
+    assume_owner_gone : bool, default False
+        An annotation edit (:func:`remove_annotations`) the session was
+        interrupted in is settled first. Recovery **refuses**
+        (``edit-in-progress``) while the program that started it is alive on
+        this machine, or an edit of the session is running in another thread
+        of this process. With ``True`` that check is skipped and recovery
+        settles as for a dead owner (the report records it,
+        ``record_edits[i].owner_override``). Use it only when you are sure no
+        program is editing the session. If a program IS still editing when this is used, that program's edit can fail part-way or report success for a removal that was then rolled back, and a level's annotations can read as empty until the leftover ``.old`` files are put back by hand; nothing is deleted.
+        A marker written by a newer mef3io is always refused
+        (``edit-newer-format``): settle it with a mef3io at least as new.
+        CLI: ``recover --owner-gone``.
 
     Returns
     -------
@@ -904,11 +921,15 @@ def recover_session(
     the edit is still running on this machine, recovery refuses
     (``WriteConflictError``, ``.code == "edit-in-progress"``); a plan that
     cannot be read, with files that do not settle, is refused as
-    ``edit-unsettled`` (``FormatError``) with nothing touched.
+    ``edit-unsettled`` (``FormatError``) with nothing touched; a marker written
+    by a newer mef3io is always refused (``edit-newer-format``, no override).
+    ``assume_owner_gone=True`` skips only the live-owner refusal (see its
+    description above for the risk if a program is in fact still editing).
     """
     _warn_backup_ignored(backup, path)
     raw = _backend().recover_session(
-        str(path), bool(apply), True, password or "", **_hooks(cancel, progress)
+        str(path), bool(apply), True, password or "", **_hooks(cancel, progress),
+        assume_owner_gone=bool(assume_owner_gone),
     )
     fields = {f.name for f in dataclasses.fields(RecoveredSegment)}
     return RecoveryReport(
@@ -921,6 +942,7 @@ def recover_session(
         record_edits=tuple(
             InterruptedRecordEdit(id=e["id"], files=tuple(e["files"]), action=e["action"],
                                   reason=e.get("reason", ""), running=e.get("running", False),
+                                  owner_override=e.get("owner_override", False),
                                   applied=e["applied"])
             for e in raw.get("record_edits", ())
         ),
@@ -954,11 +976,19 @@ def _recover_main(argv) -> int:
     p.add_argument("--no-backup", action="store_true",
                    help="ignored: a backup is always kept in <session>.recover-backup/")
     p.add_argument("--password", default="", help="for encrypted sessions")
+    p.add_argument("--owner-gone", action="store_true",
+                   help="settle an interrupted annotation edit even if the program that started "
+                        "it still seems to run on this machine; only when you are sure no program "
+                        "is editing the session: if one is, its edit can fail part-way or report "
+                        "success for a removal that was rolled back, and a level's annotations can "
+                        "read as empty until the leftover .old files are put back by hand "
+                        "(nothing is deleted)")
     args = p.parse_args(list(argv))
 
     try:
         report = recover_session(
-            args.path, apply=args.apply, backup=not args.no_backup, password=args.password
+            args.path, apply=args.apply, backup=not args.no_backup, password=args.password,
+            assume_owner_gone=args.owner_gone,
         )
     except (ValueError, RuntimeError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)

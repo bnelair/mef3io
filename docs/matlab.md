@@ -53,7 +53,14 @@ combined wait, and `delete(w)` does the same (see
 [When is my data on disk?](long_recordings.md#when-is-my-data-on-disk); 2.0
 removed `Durability`). After an unclean
 shutdown, `mef3io.recoverSession(path)` reports what is wrong (a dry run) and
-`mef3io.recoverSession(path, Apply=true)` fixes it.
+`mef3io.recoverSession(path, Apply=true)` fixes it. Its summary also says what became of an
+interrupted annotation edit made from Python or C++ (`remove_annotations`): finished, rolled
+back ("the removal was NOT done"), or not settled. If recovery REFUSES because the program that
+started the edit still seems to run on this machine (`edit-in-progress`), MATLAB has no way to
+override it: run `python -m mef3io recover --owner-gone <session>` from a terminal, only when
+you are sure no program is editing the session (if one is, its edit can fail part-way or report
+success for a removal that was rolled back, and a level's annotations can read as empty until
+the leftover `.old` files are put back by hand; nothing is deleted).
 
 - **`write(channel, data, startUutc, fs, Precision=-1, NewSegment=false)`** —
   float path: NaN runs become gaps; `Precision` sets the conversion factor to
@@ -68,7 +75,7 @@ shutdown, `mef3io.recoverSession(path)` reports what is wrong (a dry run) and
 - **`writeInt32Many(channels, data, ufact, startUutc, fs, NewSegment=false)`** — the same run of int32 counts for many channels in one call (`data` is n_samples x n_channels; `channels` a cell array; `ufact` one value or one per channel). Like Python's `write_int32_many`: channels in parallel on the Writer's threads, one combined disk barrier, all channels rolled back on a failure before publishing. Returns one summary struct per channel.
 - **`writeAnnotations(records, channel)`** — struct array (or table) with
   fields `time` (required), `type` (default `'Note'`), `text`, `duration`.
-  Omit `channel` for session-level records. Appends to the records already stored at that level (created if absent); never replaces or deletes one. Removing an annotation is Python and C++ only (`mef3io.remove_annotations`); MATLAB cannot remove one. A MATLAB `Reader` keeps no data file open between calls (the `open_files` option is Python and C++ only). While an annotation edit is running or was interrupted in a session, `records` raises an error whose code is `edit-interrupted`; `mef3io.recoverSession(path, Apply=true)` settles it, but its text summary does not say whether the removal was finished or rolled back; use Python (`recover_session`, whose report does) or `python -m mef3io recover` for that.
+  Omit `channel` for session-level records. Appends to the records already stored at that level (created if absent); never replaces or deletes one. Removing an annotation is Python and C++ only (`mef3io.remove_annotations`); MATLAB cannot remove one. A MATLAB `Reader` keeps no data file open between calls (the `open_files` option is Python and C++ only). While an annotation edit is running or was interrupted in a session, `records` raises an error whose code is `edit-interrupted`; `mef3io.recoverSession(path, Apply=true)` settles it and its summary says how it ended (see Recovery above).
 - **`setMetadata(md)`** / the `Metadata=` constructor option — session-wide
   subject/acquisition metadata. Use the object API (mirrors Python):
 
