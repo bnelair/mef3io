@@ -979,12 +979,11 @@ def test_recovery_says_plainly_when_the_new_files_were_lost_and_nothing_was_remo
     rep = mef3io.recover_session(str(p), apply=True)
     assert rep.record_edits[0].action == "roll back" and rep.record_edits[0].applied
     assert mef3io.operation_marker(p) is None and _state(p) == OLD
-    out = subprocess.run([sys.executable, "-m", "mef3io", "recover", str(p)],
-                         capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=str(REPO / "python")))
-    assert out.returncode == 0                      # nothing left to do now
+    from mef3io import validate as _v
+    assert _v._recover_main([str(p)]) == 0           # nothing left to do now
 
 
-def test_cli_recover_exits_nonzero_when_the_removal_was_not_done(tmp_path):
+def test_cli_recover_exits_nonzero_when_the_removal_was_not_done(tmp_path, capsys):
     k = 0
     while True:
         p = _crash_session(tmp_path, f"c{k}.mefd")
@@ -995,9 +994,9 @@ def test_cli_recover_exits_nonzero_when_the_removal_was_not_done(tmp_path):
             break
     for f in p.rglob("*.new"):
         f.unlink()
-    out = subprocess.run([sys.executable, "-m", "mef3io", "recover", str(p), "--apply"],
-                         capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=str(REPO / "python")))
-    assert out.returncode == 1 and "NOT done" in out.stdout
+    from mef3io import validate as _v
+    assert _v._recover_main([str(p), "--apply"]) == 1
+    assert "NOT done" in capsys.readouterr().out
 
 
 def _crash_where(tmp_path, name, pred):
