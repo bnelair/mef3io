@@ -46,3 +46,14 @@ inside one recording gets the whole budget. Setting `n_threads` re-splits
 (sub-readers' counts updated). The private per-call path exists ONLY for
 this: never re-expose a public per-call count (test_p42 pins signatures and
 that the budget is never exceeded on open or read).
+OPEN FILES (`open_files`, tests/test_p54_open_files.py): like `n_threads` ONE
+TOTAL for all recordings (each Reader keeps its own handle cache, so N
+recordings would otherwise hold N x the default: past macOS's 256 descriptors).
+`_share_files(touched)` runs in every `_gather`: each touched recording gets
+total // len(touched), every other recording 0 (its handles close: paging
+through day files keeps the budget with the day being read); the open gives
+each recording total // n; the setter splits equally until the next read.
+`release_files()` goes to every recording. Several threads reading DIFFERENT
+recordings of one MultiReader at once re-share per call (correct, may reopen).
+The MultiReader opens each recording ONCE (measured: one stat/open per file,
+3 recordings); its reads of several recordings already run concurrently.

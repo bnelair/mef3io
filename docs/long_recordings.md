@@ -384,6 +384,52 @@ terabytes. Nothing on a read path may touch a whole `.tdat`:
 bytes actually read. A one-minute window out of a ten-hour channel reads
 **0.57 %** of the file; before that gate existed, `read_runs` read 100 %.
 
+## Paging through a recording on a network drive
+
+On a network drive every open, size query and close is a round trip, so a
+viewer that pages through a recording used to pay several of them per channel
+and segment on every call. A `Reader` now keeps a bounded number of data files
+open between calls and reads from them directly:
+
+```python
+r = mef3io.Reader(path)                  # keeps up to 128 data files open (fewer where
+                                         # the process may hold few descriptors)
+r.read(channels, t0, t1)                 # opens each .tdat once ...
+r.read(channels, t1, t1 + (t1 - t0))     # ... and pages on without reopening it
+r.release_files()                        # let go of them now (before moving the folder)
+r.open_files = 0                         # or keep nothing open: every read opens and closes
+```
+
+- **Only data files are kept** (`.tdat`; for a tar session, the one archive),
+  read-only, and never more than `open_files` of them (a read that is in flight
+  while its file is evicted finishes on it, so at most `n_threads` more can be
+  open for a moment). The least recently used one goes first. A `MultiReader`
+  has ONE budget for all its recordings (`MultiReader(open_files=)`): a read
+  gives it to the recordings it touches and the others let go.
+- **Nothing a kept file shows can be stale.** Every read asks the path for the
+  file's size and identity first (one query, which replaces the size query the
+  read always made) and reads through the open file only if it is still the
+  file at that path. A file that grew by an append is read to its new end; a
+  file replaced by another one (a copy tool renaming a new file over it), or
+  removed, is never served from the old open file: the new file is opened, or the
+  read fails exactly as it would without kept files. The block index and the
+  metadata are not affected: they are read when the `Reader` needs them, as
+  before.
+- **A kept file does not block anyone.** Another process, or this one, can
+  append to it, replace it, rename it or delete it. On Windows that is because
+  the files are opened with read, write and delete sharing; a folder cannot be
+  renamed while any file in it is open there, so call `release_files()` (or
+  `close()`) first, as you would before archiving the session.
+- **Results never depend on it** (same samples at every `open_files` and every
+  thread count, directory or tar); only the number of file requests changes.
+
+Measured on a local disk with a counting tool (`strace`), 64 channels x 20
+segments, 16 channels read in 10 s windows: the 20 reads that follow the first
+went from 400 opens, 400 size queries, 400 reads and 400 closes to 96 opens (one per
+file the windows reached), the same 400 queries and reads, and no closes. How much
+that saves on a given network drive depends on the drive; the numbers above are
+requests, not seconds.
+
 ## Accuracy at length
 
 Long sessions are also where declarations drift, because every append rewrites

@@ -35,7 +35,54 @@
   Segment METADATA is loaded by the open and IMMUTABLE afterwards:
   `segment_metadata` is const and lock-free (#110); never add a lazy load.
   Pinned by core/tests/test_concurrency.cpp (TSan recipe in its header) and
-  tests/test_p31. (g) Benchmark the real shape with
+  tests/test_p31. (f2) KEPT-OPEN DATA FILES (`Reader(open_files=)`, `Session::
+  set_open_files`, core/src/source.cpp `detail::kept_pread`, `SessionSource::
+  read_extent`; core/tests/test_open_files.cpp, tests/test_p54_open_files.py).
+  WHY: on a network drive every open/stat/close is a round trip and a viewer
+  paging through a recording paid open + size query + read + close per
+  channel and segment per call. WHAT: each Session owns a `HandleCache` in
+  `reader_mode` (the copy engine's `ReadHandleScope` class, reused: pread /
+  OVERLAPPED ReadFile, LRU, one opener per path) that keeps up to
+  `open_files` (default `default_open_files()`: min(128, RLIMIT_NOFILE/4),
+  Windows 128; 0 = off = the old behaviour byte for byte) READ-ONLY handles
+  of `.tdat` files (a tar: the one archive, for every member read incl. the
+  open's). Nothing else is kept: `.tmet`/`.tidx` are read once per need (the
+  index is cached in memory, f), and reader mode NEVER memoizes sizes,
+  listings, existence or contents (`memo_cache()` is null; the copy's memos
+  rest on "the files do not change while the scope lives", which a Reader
+  cannot say). THE STALENESS RULE (decided here; the Reader treats a growing
+  session as "read the file as it is now, per call", so a kept handle must
+  not be worse): every read does ONE path stat (`stat_stamp`: size + file
+  identity = POSIX dev/inode, Windows creation time) which REPLACES the old
+  `file_size` query, then preads through the cached handle ONLY if its
+  identity equals the path's; otherwise (replaced/recreated/rename-over) the
+  handle is dropped and the path reopened; a path that is gone drops the
+  handle and falls to the plain read, which raises the old error (renamed or
+  deleted session = same exception as with 0). The size checked against the
+  index is the stat's (Windows: the handle's `GetFileSizeEx`, the directory
+  entry lags a writer that still holds the file), so an in-place append is
+  seen at once, a short file is `past_end` (-> "index points past end of
+  .tdat", as before), a shrink between stat and pread too. Do NOT drop the
+  stat for speed without a written freshness rule: modelled with a per-call
+  delay it is the half of what is left (stat + pread per file instead of
+  open + stat + read + close). A stale-handle error (ESTALE/EIO/EBADF,
+  Windows net errors) evicts and retries once through a fresh open. THE CAP:
+  bounds KEPT handles; a read in flight on an evicted handle finishes on it,
+  so up to `n_threads` more can be open for a moment (descriptors counted in
+  the tests). WINDOWS SHARING: handles are opened
+  `FILE_SHARE_READ|WRITE|DELETE` (the same open the copy engine uses), so the
+  Writer's append, `write_annotations`, repair/recover, `rename` of the FILE
+  and delete of the file are never blocked by a kept handle; a FOLDER
+  rename/remove still fails on Windows while any file under it is open (the
+  OS), hence `Reader.release_files()` / `close()`. A deleted name stays
+  reserved on Windows until the handle closes. The Reader's first read of a
+  channel still reads EVERY segment's `.tidx`: skipping a segment from
+  anything but the cached index's own span is the #146 data loss
+  (INVARIANTS 12), so there is NO lazy "only the touched segment's index";
+  and a partial `.tidx` read cannot skip entries either (the walks do not
+  assume a sorted index). MultiReader: ONE budget, see multireader.md.
+  C ABI/MATLAB: unchanged API, but they get the default (a MATLAB Reader
+  keeps files until it is deleted). (g) Benchmark the real shape with
   `benchmarks/long_session_benchmark.py` (24 h x 16 ch @ 512 Hz, 10-min
   appends, windowed reads): watch GROWTH (must stay ~1.00), write/read
   AMPLIFICATION and duty cycle. It validates + dry-run recovers at the end
