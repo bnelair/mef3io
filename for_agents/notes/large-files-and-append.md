@@ -72,9 +72,12 @@
   the tests). WINDOWS SHARING: handles are opened
   `FILE_SHARE_READ|WRITE|DELETE` (the same open the copy engine uses), so the
   Writer's append, `write_annotations`, repair/recover, `rename` of the FILE
-  and delete of the file are never blocked by a kept handle; a FOLDER
-  rename/remove still fails on Windows while any file under it is open (the
-  OS), hence `Reader.release_files()` / `close()`. A deleted name stays
+  and delete/move-away of the file are never blocked by a kept handle (CI:
+  an append + `write_annotations`, an `os.remove` under a handle); but WINDOWS
+  REFUSES (ACCESS_DENIED, found by CI, not by reading) a rename OVER a file
+  anyone holds open and a rename/remove of a FOLDER with open files, whatever
+  the share flags: hence `Reader.release_files()` / `close()`, documented.
+  Tests that replace or rename are `#ifndef _WIN32` / `skipif`. A deleted name stays
   reserved on Windows until the handle closes. The Reader's first read of a
   channel still reads EVERY segment's `.tidx`: skipping a segment from
   anything but the cached index's own span is the #146 data loss

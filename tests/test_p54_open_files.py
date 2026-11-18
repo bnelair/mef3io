@@ -12,9 +12,11 @@ every use. Pinned here (the C++ side in core/tests/test_open_files.cpp):
   count, a directory and a tar;
 * the cap is never exceeded (counted on the backend, and as process descriptors
   where ``/proc`` exists); ``release_files`` and ``close`` let go of everything;
-* a kept handle never blocks another writer, rename or delete of the file (the
-  Windows share flags, exercised on every platform), and a file removed or
-  replaced under a handle is never served from the old handle;
+* a kept handle never blocks another writer, a delete or a move of the file
+  (the Windows share flags, exercised on every platform; Windows itself refuses
+  to REPLACE a file anyone holds open, or to rename a folder with open files in
+  it), and a file removed or replaced under a handle is never served from the
+  old handle;
 * a MultiReader's ``open_files`` is a TOTAL over all its recordings.
 """
 from __future__ import annotations
@@ -263,9 +265,11 @@ def test_a_kept_handle_does_not_block_a_rename_or_delete_of_the_file(tmp_path):
         assert _kept(r) == 1
         # Replace a's segment-0 data with another recording's by renaming a copy
         # over it (what a sync tool does), and delete b's: neither is blocked.
-        new = Path(str(_tdat(s, "a", 0)) + ".new")
-        new.write_bytes(_tdat(other, "a", 0).read_bytes())
-        os.replace(new, _tdat(s, "a", 0))
+        replaced = sys.platform != "win32"  # Windows refuses to replace a file anyone holds open
+        if replaced:
+            new = Path(str(_tdat(s, "a", 0)) + ".new")
+            new.write_bytes(_tdat(other, "a", 0).read_bytes())
+            os.replace(new, _tdat(s, "a", 0))
         os.remove(_tdat(s, "b", 0))
         # The index in memory still describes the old file; the point here is
         # that the old handle is not what answers: the new bytes are read (and
@@ -274,7 +278,7 @@ def test_a_kept_handle_does_not_block_a_rename_or_delete_of_the_file(tmp_path):
             after = r.read("a", START + SECOND, START + 3 * SECOND)
         except Exception:  # the old index may not fit the new bytes: also not stale data
             after = None
-        if after is not None:
+        if replaced and after is not None:
             assert after.tobytes() != before.tobytes()
         with pytest.raises(Exception):
             r.read("b", START + SECOND, START + 3 * SECOND)
@@ -300,7 +304,7 @@ def test_a_renamed_session_fails_like_a_reader_that_keeps_nothing_open(tmp_path)
         assert kept.read("a", START + SECOND, START + 3 * SECOND).tobytes() == good.tobytes()
 
 
-def test_release_lets_a_folder_be_renamed_even_on_windows(tmp_path):
+def test_release_lets_a_folder_be_renamed_even_on_windows(tmp_path):  # (Windows: only after release)
     s = _write(tmp_path / "s.mefd")
     with mef3io.Reader(str(s)) as r:
         r.read(list(CHANNELS), START, START + 25 * SECOND)

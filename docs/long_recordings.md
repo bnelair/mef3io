@@ -416,10 +416,12 @@ r.open_files = 0                         # or keep nothing open: every read open
   metadata are not affected: they are read when the `Reader` needs them, as
   before.
 - **A kept file does not block anyone.** Another process, or this one, can
-  append to it, replace it, rename it or delete it. On Windows that is because
-  the files are opened with read, write and delete sharing; a folder cannot be
-  renamed while any file in it is open there, so call `release_files()` (or
-  `close()`) first, as you would before archiving the session.
+  append to it, move it or delete it. On Windows that is because the files are
+  opened with read, write and delete sharing. Windows itself still refuses two
+  things while ANY file handle is open, ours or another program's: renaming
+  over (replacing) the file, and renaming or removing a folder with an open file
+  in it. Call `release_files()` (or `close()`) first, as you would before
+  archiving the session or syncing over it.
 - **Results never depend on it** (same samples at every `open_files` and every
   thread count, directory or tar); only the number of file requests changes.
 

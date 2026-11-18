@@ -63,11 +63,17 @@ std::string tdat_of(const std::string& dir, const std::string& ch, int seg) {
   return (p / (ch + "-" + seg_name + ".tdat")).string();
 }
 
+// Paths compared with '/' separators: Windows mixes them in one path.
+std::string slashed(std::string p) {
+  std::replace(p.begin(), p.end(), '\\', '/');
+  return p;
+}
+
 std::mutex g_mu;
 std::map<std::string, int> g_opens;
 void note_open(const std::string& p) {
   std::lock_guard<std::mutex> lk(g_mu);
-  ++g_opens[p];
+  ++g_opens[slashed(p)];
 }
 struct OpenWatch {
   OpenWatch() {
@@ -77,7 +83,7 @@ struct OpenWatch {
   ~OpenWatch() { detail::source_open_observer = nullptr; }
   static int opens_of(const std::string& path) {
     std::lock_guard<std::mutex> lk(g_mu);
-    const auto it = g_opens.find(path);
+    const auto it = g_opens.find(slashed(path));
     return it == g_opens.end() ? 0 : it->second;
   }
   static int tdat_opens() {
@@ -278,6 +284,7 @@ TEST_CASE("kept files: a file appended in place is read to its new end", "[open_
   REQUIRE(r.open_file_count() == 1);  // still the one handle (same file, grown)
 }
 
+#ifndef _WIN32  // Windows refuses to replace a file that anyone holds open (see docs/long_recordings.md)
 TEST_CASE("kept files: a file replaced under a kept handle is never read through the old handle",
           "[open_files]") {
   const auto dir = write_session("mef3io_of_replace.mefd");
@@ -303,7 +310,9 @@ TEST_CASE("kept files: a file replaced under a kept handle is never read through
   REQUIRE_FALSE(same(after, before));  // the test can tell old from new
   REQUIRE(r.open_file_count() == 1);   // the old handle was replaced, not added
 }
+#endif
 
+#ifndef _WIN32  // Windows cannot rename or remove a folder while any file under it is open
 TEST_CASE("kept files: a renamed or deleted session fails like a Reader that keeps nothing open",
           "[open_files]") {
   const auto dir = write_session("mef3io_of_gone.mefd");
@@ -334,6 +343,20 @@ TEST_CASE("kept files: a renamed or deleted session fails like a Reader that kee
   const std::string c = message_of(kept), d = message_of(none);
   REQUIRE(c != "no error");
   REQUIRE(c == d);
+}
+#endif
+
+TEST_CASE("kept files: a file that is deleted under a kept handle is not served from it", "[open_files]") {
+  // The one file operation Windows allows under an open handle that shares delete
+  // (a replacing rename and a folder rename it refuses): remove the FILE.
+  const auto dir = write_session("mef3io_of_remove.mefd");
+  Reader r(dir, "", 1, true);
+  r.read("b", START + 1'000'000, START + 4'000'000);
+  REQUIRE(r.open_file_count() == 1);
+  fsys::remove(tdat_of(dir, "b", 0));  // not blocked by the kept handle
+  REQUIRE_THROWS(r.read("b", START + 1'000'000, START + 4'000'000));
+  REQUIRE(r.open_file_count() == 0);
+  REQUIRE(r.read("a", START + 1'000'000, START + 4'000'000).size() > 0);  // the others go on
 }
 
 TEST_CASE("kept files: a tar archive is read through its one kept file", "[open_files][tar]") {
