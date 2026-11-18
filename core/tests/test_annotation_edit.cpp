@@ -293,3 +293,81 @@ TEST_CASE("every reader of records refuses while an edit is interrupted (C ABI i
     fsys::remove_all(p.parent_path());
   }
 }
+
+namespace {
+
+/// A crashed edit of the session (marker present, swap not yet started: every .new in place).
+fsys::path crashed_edit(const char* name) {
+  for (int k = 0;; ++k) {
+    const auto p = make_session(name);
+    const auto sess = stored(p);
+    RemoveAnnotationsOptions o;
+    o.crash_at = k;
+    try {
+      remove_annotations(p.string(), {selector_for(sess[1])}, {}, o);
+    } catch (const IoError&) {
+    }
+    if (has_interrupted_edit(p.string())) {
+      bool all_new = true;
+      for (const char* f : {"s.rdat", "s.ridx"}) {
+        bool any = false;
+        for (const auto& e : fsys::directory_iterator(p))
+          any = any || e.path().filename().string().rfind(std::string(f) + ".", 0) == 0;
+        all_new = all_new && any;
+      }
+      if (all_new) return p;
+    }
+    fsys::remove_all(p.parent_path());
+  }
+}
+
+std::string c_recover(const fsys::path& p, int* rc) {
+  std::vector<char> buf(8192);
+  int64_t n = 0;
+  *rc = mef3io_recover_session(p.string().c_str(), 1, 1, "", buf.data(), buf.size(), &n);
+  return std::string(buf.data());
+}
+
+}  // namespace
+
+TEST_CASE("the C API recovery summary says what became of an interrupted annotation edit") {
+  int rc = 0;
+  auto p = crashed_edit("mef3io_capi_done");
+  auto text = c_recover(p, &rc);
+  REQUIRE(rc == MEF3IO_OK);
+  REQUIRE(text.find("interrupted annotation edit") != std::string::npos);
+  REQUIRE(text.find("finished") != std::string::npos);
+  REQUIRE(text.find("NOT done") == std::string::npos);
+  fsys::remove_all(p.parent_path());
+
+  // the new files are gone: rolled back, and the summary says the removal was NOT done
+  p = crashed_edit("mef3io_capi_back");
+  for (const auto& e : fsys::directory_iterator(p))
+    if (e.path().extension() == ".new") fsys::remove(e.path());
+  for (const auto& e : fsys::directory_iterator(p)) {
+    const auto n = e.path().filename().string();
+    if (n.size() > 4 && n.compare(n.size() - 4, 4, ".new") == 0) fsys::remove(e.path());
+  }
+  text = c_recover(p, &rc);
+  REQUIRE(rc == MEF3IO_OK);
+  REQUIRE(text.find("rolled back") != std::string::npos);
+  REQUIRE(text.find("the removal was NOT done") != std::string::npos);
+  fsys::remove_all(p.parent_path());
+
+  // a marker of a newer layout: refused through the error channel, nothing changed
+  p = crashed_edit("mef3io_capi_refused");
+  {
+    std::ifstream in(p / ".mef3io-operation", std::ios::binary);
+    std::string body((std::istreambuf_iterator<char>(in)), {});
+    in.close();
+    const auto at = body.find("edit-format 1");
+    REQUIRE(at != std::string::npos);
+    body.replace(at, 13, "edit-format 2");
+    std::ofstream(p / ".mef3io-operation", std::ios::binary | std::ios::trunc) << body;
+  }
+  text = c_recover(p, &rc);
+  REQUIRE(rc != MEF3IO_OK);
+  REQUIRE(std::string(mef3io_last_error()).find("newer mef3io") != std::string::npos);
+  REQUIRE(has_interrupted_edit(p.string()));
+  fsys::remove_all(p.parent_path());
+}

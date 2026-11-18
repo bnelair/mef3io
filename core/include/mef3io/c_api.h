@@ -420,6 +420,9 @@ int mef3io_archive_session(const char* session_dir, const char* tar_path, int ov
  *
  * Unlike a declaration repair this may change the block index, so it is a dry
  * run by default. Re-derive the declarations afterwards. */
+/* The summary text also says what became of an interrupted annotation edit: finished, rolled
+ * back ("the removal was NOT done"), or not settled; a recovery REFUSED because the editing
+ * program still runs fails with the error message "edit-in-progress ...". */
 int mef3io_recover_session(const char* mefd_path, int apply, int backup, const char* password,
                            char* out_summary, size_t out_summary_bytes, int64_t* out_segments);
 

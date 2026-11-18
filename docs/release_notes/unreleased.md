@@ -47,7 +47,10 @@
     `remove_annotations(..., assume_owner_gone=True)` or `python -m mef3io recover
     --owner-gone` (the report records it). While an edit is in progress or interrupted the
     marker holds the process id and the machine name of the editing program; it is removed
-    when the edit is settled and a session that carries it is refused by every copy.
+    when the edit is settled and a session that carries it is refused by every copy. The C API's
+    recovery summary (so MATLAB's `recoverSession`) now says whether an interrupted annotation
+    edit was finished or rolled back ("the removal was NOT done"); a refusal arrives as the error
+    message.
   - Password-protected sessions: pass both passwords as for `Writer`; added
     records are level-2 encrypted. Tar archives are refused
     (`tar-read-only`). Cancel and progress work until the swap starts.
