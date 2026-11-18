@@ -88,6 +88,21 @@ for its concurrent file access (as the open does: automatic = at least 8)
 and for its one decode pool. See
 [Threads](threads.md).
 
+**Keeping data files open (opt-in).** By default a `Reader` (or `Session`)
+holds no file open between calls: every read opens, reads and closes its
+`.tdat`. For ONE or a few readers that read the same files again and again on
+a slow or network drive, `r.set_open_files(n)` keeps up to `n` read-only
+data files open between calls (least recently used first; a tar session keeps
+its one archive), and `r.release_open_files()` lets go of them at once;
+`open_files()` returns the cap (the default is `0`, off). Every read first
+asks the path for the file's size and identity, so an appended file is read to
+its new end and a replaced or recreated file is never read through the old
+handle. Results never depend on the cap. The costs (descriptors held; on
+Windows a folder cannot be renamed or removed while files are held) and when
+to use it are in
+[Long recordings](long_recordings.md#paging-through-a-recording-on-a-network-drive).
+The C ABI and MATLAB have no such call and keep nothing open.
+
 `Reader` wraps `mef3io::Session` (`session.hpp`), which exposes the lower
 level: lazy `.mefd/.timd/.segd` traversal, `read_runs` (decoded contiguous
 runs), `collect_blocks` (undecoded block gathering for custom parallel

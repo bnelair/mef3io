@@ -38,7 +38,7 @@ TimeRange time_range(const std::string& path, const std::string& password, const
   // Only the channel folders are listed, and of each channel's segment
   // folders only the ones looked at: the first and the last complete segment
   // by number (three existence checks each). The
-  // other segments are never listed, stat'ed or opened (2.3.1: a recording of
+  // other segments are never listed, stat'ed or opened (2.4.0: a recording of
   // thousands of segments cost thousands of requests for two reads a channel).
   for (const auto& entry : src->list_dir("")) {
     if (!entry.is_dir || !entry.name.ends_with(".timd")) continue;

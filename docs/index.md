@@ -82,6 +82,9 @@ version number.
   decodes on a worker thread, and reads on one `Reader` can run from several
   threads at once (a `Writer` is not for sharing). One `n_threads` count per
   object covers opening, file access and decoding; see [Threads](threads.md).
+  A `Reader` can optionally keep its data files open between calls
+  (`open_files=`, off by default) for paging through a recording on a network
+  drive; see [Long recordings](long_recordings.md#paging-through-a-recording-on-a-network-drive).
 - **Made for tools** — `mef3io.inspect()` describes a session without
   reading its samples; reads and long operations can report progress and be
   cancelled from another thread; refusals of a de-identified copy come with

@@ -75,7 +75,7 @@ the leftover `.old` files are put back by hand; nothing is deleted).
 - **`writeInt32Many(channels, data, ufact, startUutc, fs, NewSegment=false)`** — the same run of int32 counts for many channels in one call (`data` is n_samples x n_channels; `channels` a cell array; `ufact` one value or one per channel). Like Python's `write_int32_many`: channels in parallel on the Writer's threads, one combined disk barrier, all channels rolled back on a failure before publishing. Returns one summary struct per channel.
 - **`writeAnnotations(records, channel)`** — struct array (or table) with
   fields `time` (required), `type` (default `'Note'`), `text`, `duration`.
-  Omit `channel` for session-level records. Appends to the records already stored at that level (created if absent); never replaces or deletes one. Removing an annotation is Python and C++ only (`mef3io.remove_annotations`); MATLAB cannot remove one.
+  Omit `channel` for session-level records. Appends to the records already stored at that level (created if absent); never replaces or deletes one. Removing an annotation is Python and C++ only (`mef3io.remove_annotations`); MATLAB cannot remove one. A MATLAB `Reader` keeps no data file open between calls (the `open_files` option is Python and C++ only). While an annotation edit is running or was interrupted in a session, `records` raises an error whose code is `edit-interrupted`; `mef3io.recoverSession(path, Apply=true)` settles it and its summary says how it ended (see Recovery above).
 - **`setMetadata(md)`** / the `Metadata=` constructor option — session-wide
   subject/acquisition metadata. Use the object API (mirrors Python):
 

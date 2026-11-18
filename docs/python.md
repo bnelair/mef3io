@@ -288,8 +288,9 @@ refused until `recover_session` has repaired the file (see
 ### `remove_annotations`
 
 ```python
-mef3io.remove_annotations(path, remove, add=(), *, password1="", password2="",
-                          all_copies=False, dry_run=False, cancel=None, progress=None)
+mef3io.remove_annotations(path, remove=(), add=(), *, password1="", password2="",
+                          all_copies=False, dry_run=False, assume_owner_gone=False,
+                          cancel=None, progress=None)
 ```
 
 Removes stored annotations **by content** and, in the same call, may add
@@ -315,7 +316,10 @@ report.removed, report.added          # 1, 1
   `all_copies=True`), fewer (`count-mismatch`) or names a record another
   selector names (`selectors-overlap`) is refused with `.code` on the
   exception, and **nothing is removed**: the call is all or nothing, across
-  levels.
+  levels. Refusals about the session or the selection carry a `.code`; an
+  argument of the wrong type or form (a fractional or non-numeric `time`, an
+  unknown `level`, `remove=` given a single dict instead of a list) raises a
+  plain `ValueError` / `TypeError` without one.
 - **What is rewritten.** Only the annotation files (`.rdat` + `.ridx`) of the
   levels involved. Signal files and metadata are never opened for writing.
   Every record that stays is carried over byte for byte (body, CRC, time,
@@ -363,7 +367,7 @@ report.removed, report.added          # 1, 1
   version does not know) is always refused (`edit-newer-format`): this version
   never settles it, not even from the files; use a mef3io at least as new as the
   one that wrote it. If you are sure no program is editing the session (a process
-  id reused by an unrelated program, a container whose zombies are never
+  id reused by an unrelated program, which looks alive until you do this because macOS and Windows record no start time; a container whose zombies are never
   reaped), pass **`assume_owner_gone=True`** (`remove_annotations`,
   `recover_session`) or run **`python -m mef3io recover --owner-gone <session>`**
   (the way out from C and MATLAB too): the owner check is skipped, recovery
@@ -466,7 +470,7 @@ with mef3io.Reader("session.mefd") as r:          # password="..." if encrypted
 ```
 
 `Reader(path, password="", backend="cpp", n_threads=0, cache=None,
-warn_declarations=True, strict=True)`
+warn_declarations=True, strict=True, open_files=None)`
 
 - A **level-2 password** unlocks everything; a **level-1 password** reads the
   signal and technical metadata while section-3 subject metadata stays locked
@@ -479,6 +483,15 @@ warn_declarations=True, strict=True)`
   (opening, file access, decoding, decrypting): `0` = automatic, `1` = no
   extra threads. It is also a settable property, used from the next call on;
   see [Threads](threads.md).
+- `open_files` (optional, **off by default**) is how many data files the Reader
+  keeps open between calls, for ONE or a few Readers that read the same files
+  again and again on a slow or network drive. With the default (`None`, which
+  means `0`) a Reader holds no file open between calls. It is also a settable
+  property, and `release_files()` lets go of the kept files at once. What it
+  costs (descriptors held, Windows folder operations blocked while files are
+  held) and when to use it:
+  [Paging through a recording on a network drive](long_recordings.md#paging-through-a-recording-on-a-network-drive).
+  Results never depend on it.
 - `strict=True` (the default) raises when any segment cannot be read.
   `strict=False` skips it instead: its time span reads back as NaN, it is
   listed in `Reader.problems`, and an `UnreadableSegmentWarning` is raised.
@@ -719,6 +732,14 @@ A write is refused, rather than misplacing times or breaking the session's own
   unreadable, and the readable segments use a non-zero offset or none are
   readable at all (`WriteConflictError`).
 
+While an annotation edit ([`remove_annotations`](#remove_annotations)) is
+running in another program, or was interrupted and not yet settled, `records()`
+(and `MultiReader.records()`, `MefReader.get_annotations()`) raises
+`WriteConflictError` with `.code == "edit-interrupted"` instead of returning a
+level that may be half swapped, and `write_annotations` is refused. Samples
+stay readable. If no program is editing the session, run
+`recover_session(path, apply=True)`.
+
 A channel that has no data yet takes the session's offset for its
 annotations. Its records are listed: `records("chNew")` and
 `records(level="all")` include it. It is not added to `Reader.channels`,
@@ -827,6 +848,13 @@ What it reports:
 | `warnings` | each with a `code`, a plain-words `message`, and `blocks_anonymize`; `s.anonymize_blockers` lists the ones `anonymize_session` refuses on |
 | `problems` | with `strict=False`, what could not be read (same shape as `Reader.problems`) |
 | `incomplete_channels` | channel folders without one complete segment. A segment folder missing its `.tmet`, `.tidx` or `.tdat` is skipped silently by a `Reader`; `inspect` lists it as `readable=False`, counts its files, reports what it may hold as unknown, and warns (`incomplete-segments`) |
+
+**During an interrupted annotation edit** (the session carries the marker of
+[`remove_annotations`](#remove_annotations)) no record is read: each channel's
+`records` count is `None` (`null` in `to_dict()` / `--json`), the record
+tables are empty, and the warning `annotation-edit-interrupted` says so. A
+`None` there means "not reported", never "no annotations". Everything about
+the samples is described as usual.
 
 Options:
 
@@ -939,8 +967,12 @@ on the window's own sampling grid, so nothing is rounded twice, also at rates
 whose period is not a whole number of microseconds.
 
 `MultiReader(paths, password="", backend="cpp", n_threads=0, cache=None,
-warn_declarations=True, strict=True)`
+warn_declarations=True, strict=True, open_files=None)`
 
+- `open_files` is ONE budget for all the recordings (like `n_threads`): a read
+  gives it to the recordings it touches and the others let their files go.
+  Off by default; `release_files()` lets go of all of them. See
+  [`Reader`](#reading).
 - **Refused on open** (`ValueError`): a channel with different sampling rates
   in different recordings; two recordings holding samples of the same channel
   at the same time. The overlap rule is `merge_sessions`': compared on the
@@ -1094,7 +1126,9 @@ names, or there are several session-level annotation files).
 machine started the operation): every write refuses, and the message says
 why. `mef3io.clear_operation_marker(path)` removes the marker, but only when
 `name_drift` shows the name consistent. A half-changed session keeps its
-marker.
+marker. An interrupted [annotation edit](#remove_annotations) leaves a
+marker of its own, which `clear_operation_marker` refuses to clear: settle it
+with `recover_session(path, apply=True)`.
 
 A `.mefd.tar` archive is renamed with `rename_archive`. To change the name
 inside it, extract, rename and archive again.

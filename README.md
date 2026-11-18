@@ -154,7 +154,11 @@ pages such as
   threads at once (a `Writer` is not for sharing). One `n_threads` count per
   object covers opening, file access and decoding, so a session on a network
   share opens in parallel; see
-  [Threads](https://bnelair.github.io/mef3io/threads/).
+  [Threads](https://bnelair.github.io/mef3io/threads/). For a viewer that
+  pages through a recording on a slow or network drive, a `Reader` can
+  optionally keep its data files open between calls (`open_files=`, off by
+  default; see
+  [Long recordings](https://bnelair.github.io/mef3io/long_recordings/#paging-through-a-recording-on-a-network-drive)).
 - **Copies with only what you need.** `mef3io.transform_session` writes a
   copy with chosen channels, new passwords (or none), a new name and edited
   subject details or descriptions, and can keep only a time window

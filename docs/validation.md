@@ -329,7 +329,19 @@ The CLI does the same. It repairs nothing beyond the segments recovery reports
 ```bash
 python -m mef3io recover session.mefd            # dry run
 python -m mef3io recover session.mefd --apply
+python -m mef3io recover session.mefd --apply --owner-gone   # see below
 ```
+
+Recovery of an interrupted annotation edit refuses (`edit-in-progress`) while
+the program that started it still seems to run on this machine, or in another
+thread of your process, and always refuses a marker written by a newer mef3io
+(`edit-newer-format`; no override, use a mef3io at least as new). If you are
+sure no program is editing the session (for example a reused process id), pass
+`assume_owner_gone=True` / `--owner-gone`. If a program IS still editing, its
+edit can fail part-way or report success for a removal that was rolled back,
+and a level's annotations can read as empty until the leftover `.old` files are
+put back by hand; nothing is deleted, and the check `records.edit-leftovers`
+flags such files. Details: [`remove_annotations`](python.md#remove_annotations).
 
 ### What it does, and why the two cases differ
 

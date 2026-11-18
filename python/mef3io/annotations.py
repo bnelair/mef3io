@@ -91,8 +91,6 @@ def remove_annotations(
     assume_owner_gone: bool = False,
     cancel: Optional[CancelToken] = None,
     progress: Optional[ProgressCallback] = None,
-    _crash_at: int = -1,
-    _fail_at: int = -1,
 ) -> RemoveAnnotationsReport:
     """Remove stored annotations by content, and optionally add others.
 
@@ -178,20 +176,28 @@ def remove_annotations(
     FormatError, CrcError
         An annotation file that cannot be read in full (``record-damaged``,
         ``record-crc``, ``record-index-mismatch``, ``record-index-missing``,
-        ``ambiguous-session-records``): nothing is touched; run
+        ``ambiguous-session-records``), or an earlier interrupted edit whose
+        files do not settle (``edit-unsettled``), or one written by a newer mef3io
+        (``edit-newer-format``): nothing is touched; run
         :func:`recover_session` or :func:`validate_session` first.
     WriteConflictError
         The session is being written or mid-operation (``being-written``,
         ``mid-operation``; ``edit-interrupted`` for a ``dry_run`` on a session an edit was
-        interrupted in), the annotations changed while the call worked
+        interrupted in; ``edit-in-progress`` when an earlier edit it must
+        finish first is still running in another program on this machine),
+        the annotations changed while the call worked
         (``records-changed``), a time cannot be stored (``add-time``), an
         unknown or disputed recording-time offset (``offset-unknown``), or
         records that do not match the session's encryption.
     IoError
         A tar archive (``tar-read-only``), a path that is not a ``.mefd``
         folder, or a failure while swapping the files (``edit-failed``; the
-        old files are put back). Every refusal exception has a stable
-        ``.code``.
+        old files are put back). Every refusal about the session or the
+        selection (everything listed above) carries a stable ``.code``; an
+        argument of the wrong type or form (a fractional or non-numeric
+        selector ``time``, an unknown ``level``, ``remove=`` given a single
+        dict instead of a list) raises plain ``ValueError`` / ``TypeError``,
+        which has no ``.code`` attribute.
     Cancelled
         ``cancel`` was set in time.
 
@@ -205,7 +211,13 @@ def remove_annotations(
     :func:`validate_session` reports ``records.interrupted-edit``, and
     ``recover_session(path, apply=True)`` finishes the edit (or rolls it back
     when a new file is not intact). The next ``remove_annotations`` does the
-    same first (``report.resumed``).
+    same first (``report.resumed``). While the marker is there every reader
+    of annotations (:meth:`Reader.records`, :meth:`MultiReader.records`,
+    ``MefReader.get_annotations``) raises ``WriteConflictError`` with
+    ``.code == "edit-interrupted"`` (the message says "in progress or was
+    interrupted": an edit that is still running looks the same), and
+    :func:`inspect` reports record counts as ``None`` with the warning
+    ``annotation-edit-interrupted``. Samples stay readable.
 
     **Concurrency.** There is no cross-process write lock: stop other
     writers of the session first. A session whose files show a writer at work
@@ -223,6 +235,29 @@ def remove_annotations(
     >>> mef3io.remove_annotations(path, remove=wrong,
     ...                           add=[{"time": wrong[0]["time"], "text": "fixed"}])
     """
+    return _remove_annotations(
+        path, remove, add, password1=password1, password2=password2,
+        all_copies=all_copies, dry_run=dry_run, assume_owner_gone=assume_owner_gone,
+        cancel=cancel, progress=progress)
+
+
+def _remove_annotations(
+    path,
+    remove,
+    add,
+    *,
+    password1: str = "",
+    password2: str = "",
+    all_copies: bool = False,
+    dry_run: bool = False,
+    assume_owner_gone: bool = False,
+    cancel=None,
+    progress=None,
+    _crash_at: int = -1,
+    _fail_at: int = -1,
+) -> RemoveAnnotationsReport:
+    """:func:`remove_annotations` with the test hooks (a simulated crash or
+    failure at step ``_crash_at`` / ``_fail_at``); the public call passes -1."""
     for name, value in (("remove", remove), ("add", add)):
         if isinstance(value, (Mapping, str, bytes)):
             raise TypeError(f"{name} must be a list of dicts (one per record), not a single "

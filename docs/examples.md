@@ -13,7 +13,7 @@ what it does. MATLAB equivalents of the core operations are shown in the
 | [02_int32_primitive.py](https://github.com/bnelair/mef3io/blob/main/examples/02_int32_primitive.py) | The primitive path: int32 counts + conversion factor, validity mask, bit-exact round trip |
 | [03_appending.py](https://github.com/bnelair/mef3io/blob/main/examples/03_appending.py) | In-segment append, reopening a session, gaps, forced new segments, rejected conflicts |
 | [04_segment_map.py](https://github.com/bnelair/mef3io/blob/main/examples/04_segment_map.py) | `Reader.segments()` / `toc()`: locating data across day-long gaps, targeted windowed reads |
-| [05_annotations.py](https://github.com/bnelair/mef3io/blob/main/examples/05_annotations.py) | Records at session and channel level; Note/SyLg/EDFA with durations |
+| [05_annotations.py](https://github.com/bnelair/mef3io/blob/main/examples/05_annotations.py) | Records at session and channel level; Note/SyLg/EDFA with durations; taking one back with `remove_annotations` |
 | [06_encryption.py](https://github.com/bnelair/mef3io/blob/main/examples/06_encryption.py) | Two-level passwords and what each level unlocks |
 | [07_legacy_mef_tools_style.py](https://github.com/bnelair/mef3io/blob/main/examples/07_legacy_mef_tools_style.py) | `from mef3io import MefReader, MefWriter` as a mef_tools drop-in |
 | [08_legacy_compatibility.py](https://github.com/bnelair/mef3io/blob/main/examples/08_legacy_compatibility.py) | Legacy-vs-new write/read timing and value comparison (needs `mef3io[test]` + scipy/tqdm) |
