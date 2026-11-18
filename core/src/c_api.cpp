@@ -656,6 +656,23 @@ int mef3io_recover_session_ex(const char* mefd_path, int apply, int backup, cons
       if (!report.applied) text += "  (DRY RUN - nothing was written)";
       for (const auto& s : report.segments) text += "\n    " + s.path + ": " + s.action;
       for (const auto& f : report.record_files) text += "\n    " + f.path + ": " + f.action;
+      // an interrupted annotation edit (remove_annotations): what was done, said plainly
+      for (const auto& e : report.record_edits) {
+        text += "\n    interrupted annotation edit (" + std::to_string(e.files.size()) +
+                " record file(s)): ";
+        if (e.action == "roll back")
+          text += std::string(e.applied ? "rolled back" : "would be rolled back") +
+                  ": the removal was NOT done" + (e.reason.empty() ? "" : " (" + e.reason + ")");
+        else if (e.action == "refused")
+          text += "NOT settled by this version: " + e.reason;
+        else if (e.action == "settle")
+          text += std::string(e.applied ? "settled from the files alone: " : "would be settled from the files alone: ") + e.reason;
+        else
+          text += std::string(e.applied ? "finished" : "would be finished") +
+                  (e.reason.empty() ? "" : " (" + e.reason + ")");
+        if (e.running) text += " [the editing program is RUNNING: recovery refuses until it ends]";
+        if (e.owner_override) text += " [owner check skipped on request]";
+      }
       for (const auto& s : report.skipped) text += "\n    skipped " + s;
       for (const auto& n : report.notes) text += "\n    note: " + n;
       if (report.applied && !report.backup_root.empty())

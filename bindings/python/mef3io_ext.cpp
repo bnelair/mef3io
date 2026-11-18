@@ -333,6 +333,7 @@ nb::dict interrupted_edit_dict(const mef3io::InterruptedRecordEdit& e) {
   d["action"] = e.action;
   d["reason"] = e.reason;
   d["running"] = e.running;
+  d["owner_override"] = e.owner_override;
   d["applied"] = e.applied;
   return d;
 }
@@ -953,7 +954,7 @@ NB_MODULE(_mef3io, m) {
       "remove_annotations",
       [](const std::string& path, nb::list remove, nb::list add, const std::string& password_1,
          const std::string& password_2, bool dry_run, int crash_at, int fail_at,
-         const mef3io::CancelToken* cancel, nb::object progress) {
+         const mef3io::CancelToken* cancel, nb::object progress, bool assume_owner_gone) {
         // Converted WITH the GIL; the file work runs without it (PyHooks::run).
         std::vector<mef3io::RecordSelector> sels;
         for (auto item : remove) sels.push_back(selector_from_dict(nb::cast<nb::dict>(item)));
@@ -963,6 +964,7 @@ NB_MODULE(_mef3io, m) {
         o.password_1 = password_1;
         o.password_2 = password_2;
         o.dry_run = dry_run;
+        o.assume_owner_gone = assume_owner_gone;
         o.crash_at = crash_at;
         o.fail_at = fail_at;
         PyHooks hooks(cancel, std::move(progress));
@@ -997,7 +999,7 @@ NB_MODULE(_mef3io, m) {
       nb::arg("path"), nb::arg("remove"), nb::arg("add"), nb::arg("password_1") = "",
       nb::arg("password_2") = "", nb::arg("dry_run") = false, nb::arg("_crash_at") = -1,
       nb::arg("_fail_at") = -1, nb::arg("cancel").none() = nb::none(),
-      nb::arg("progress") = nb::none(),
+      nb::arg("progress") = nb::none(), nb::arg("assume_owner_gone") = false,
       "Remove annotations by content (and add others) in one crash-safe rewrite of the "
       "record files of the levels involved (see mef3io.remove_annotations).");
   // TEST SEAM: the durable steps of an edit, in order (see mef3io::testing).
@@ -1035,25 +1037,26 @@ NB_MODULE(_mef3io, m) {
       nb::arg("path"), "The annotation edit this session was interrupted in, or None.");
   m.def(
       "_finish_interrupted_edit",
-      [](const std::string& path, int crash_at, int fail_at) -> nb::object {
+      [](const std::string& path, int crash_at, int fail_at, bool assume_owner_gone) -> nb::object {
         std::optional<mef3io::InterruptedRecordEdit> e;
         {
           nb::gil_scoped_release release;
-          e = mef3io::finish_interrupted_record_edit(path, crash_at, fail_at);
+          e = mef3io::finish_interrupted_record_edit(path, crash_at, fail_at, assume_owner_gone);
         }
         if (!e) return nb::none();
         return interrupted_edit_dict(*e);
       },
       nb::arg("path"), nb::arg("_crash_at") = -1, nb::arg("_fail_at") = -1,
+      nb::arg("assume_owner_gone") = false,
       "Test hook: finish an interrupted annotation edit, optionally crashing at a step.");
 
   m.def(
       "recover_session",
       [](const std::string& path, bool apply, bool backup, const std::string& password,
-         const mef3io::CancelToken* cancel, nb::object progress) {
+         const mef3io::CancelToken* cancel, nb::object progress, bool assume_owner_gone) {
         PyHooks hooks(cancel, std::move(progress));
         mef3io::RecoveryReport r = hooks.run([&](const mef3io::Control& ctl) {
-          return mef3io::recover_session(path, apply, backup, password, ctl);
+          return mef3io::recover_session(path, apply, backup, password, ctl, assume_owner_gone);
         });
         nb::list segs;
         for (const auto& s : r.segments) {
@@ -1103,7 +1106,7 @@ NB_MODULE(_mef3io, m) {
       },
       nb::arg("path"), nb::arg("apply") = false, nb::arg("backup") = true,
       nb::arg("password") = "", nb::arg("cancel").none() = nb::none(),
-      nb::arg("progress") = nb::none(),
+      nb::arg("progress") = nb::none(), nb::arg("assume_owner_gone") = false,
       "Make each segment's block index and data agree after an interrupted "
       "write. Dry run unless apply=True.");
 

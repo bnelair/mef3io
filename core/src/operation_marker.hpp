@@ -4,9 +4,14 @@
 // `<session>/.mef3io-operation` before its first change and removes it after
 // its last. While it is there, every mef3io WRITE to the session refuses
 // (refuse_if_mid_operation), and the Reader reports the session as
-// mid-operation. The file name is fixed and carries nothing identifying; the
-// content is only the tool that started the operation, its kind and a random
-// operation id (which names the journal in the caller's backup folder).
+// mid-operation. The file name is fixed. The content is the tool that started the
+// operation, its kind and a random operation id (which names the journal in the
+// caller's backup folder); an annotation edit (remove_annotations) also records,
+// while it is in progress or interrupted, the process id, the MACHINE NAME and the
+// start time of the editing program (so recovery can refuse to settle under a
+// running edit) and the plan of the edit. The marker is removed when the operation
+// ends or is settled, and a session that still carries it is refused by every copy
+// (anonymize / transform / merge / archive), so those names never reach a copy.
 // Not installed.
 #pragma once
 

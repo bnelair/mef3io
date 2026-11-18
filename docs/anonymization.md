@@ -315,7 +315,7 @@ with a shift; a copy that keeps the times never meets them.
 | `dst-not-mefd` | `IoError` | check | The destination does not end in `.mefd`. |
 | `dst-exists` | `IoError` | check | The destination exists (also when it appears while copying). |
 | `partial-exists` | `IoError` | check | A `<dst>.partial` from an earlier run is in the way. |
-| `source-mid-operation` | `WriteConflictError` | check | The source carries an operation marker: a [rename](python.md#renaming-a-session) was interrupted. Run it again to roll it back. |
+| `source-mid-operation` | `WriteConflictError` | check | The source carries an operation marker: a [rename](python.md#renaming-a-session) or an annotation edit ([`remove_annotations`](python.md#remove_annotations)) was interrupted or is still running. Run the rename again to roll it back; `recover_session(path, apply=True)` settles an annotation edit. The annotation edit's marker holds the process id and the machine name of the editing program, so a session that carries it must be recovered before it can be copied (the copy refuses it, and those names never reach a copy). |
 | `source-missing` | `IoError` | check | The source does not exist. |
 | `dst-inside-src` | `IoError` | check | The destination lies inside the source (or the other way round). |
 | `source-unreadable` | `IoError` | check | The source cannot be opened as a session (not `.mefd` / `.mefd.tar`, a compressed archive, an unreadable file). |

@@ -82,6 +82,13 @@ struct RemoveAnnotationsOptions {
   std::string password_1, password_2;
   /// Select, build and verify everything in memory, report, write nothing.
   bool dry_run = false;
+  /// Finish an earlier interrupted edit even if the program that started it still seems to be
+  /// running on this machine: the owner check is skipped and recovery settles as for a dead
+  /// owner. Only when you are sure no program is editing this session; if one is, its edit can
+  /// fail part-way or report success for a removal that was then rolled back, and a level's
+  /// annotations can read as empty until the leftover .old files are put back by hand (nothing
+  /// is deleted). The report says it was used. A marker of a newer layout is never settled.
+  bool assume_owner_gone = false;
   /// For tests only: stop at this step as a crash would (nothing cleaned up)
   /// by throwing IoError. -1 (default): never. See annotation_edit.cpp for
   /// the step list; a value past the last step does nothing.
@@ -163,11 +170,14 @@ struct InterruptedRecordEdit {
   /// (`edit-in-progress`) until it ends. False when its owner is dead, on another machine
   /// or unknown (an unreadable plan).
   bool running = false;
+  /// `assume_owner_gone` was needed and used (the report records it).
+  bool owner_override = false;
   bool applied = false;
 };
 
 /// The interrupted edit the session carries, if any (reads only).
-std::optional<InterruptedRecordEdit> interrupted_record_edit(const std::string& path);
+std::optional<InterruptedRecordEdit> interrupted_record_edit(const std::string& path,
+                                                             bool assume_owner_gone = false);
 
 /// Finish (or roll back) the interrupted edit, then remove its marker.
 /// Idempotent: a crash in here is finished by the next call. `crash_at` /
@@ -175,7 +185,8 @@ std::optional<InterruptedRecordEdit> interrupted_record_edit(const std::string& 
 /// session carries no such edit.
 std::optional<InterruptedRecordEdit> finish_interrupted_record_edit(const std::string& path,
                                                                     int crash_at = -1,
-                                                                    int fail_at = -1);
+                                                                    int fail_at = -1,
+                                                                    bool assume_owner_gone = false);
 
 /// Whether the session carries the marker of an interrupted annotation edit
 /// (a directory session; never throws). While it does, a level's record files
