@@ -345,10 +345,23 @@ report.removed, report.added          # 1, 1
   done** and why, and `python -m mef3io recover` exits with status 1; this also
   happens when the new files were deleted by someone). The next
   `remove_annotations` does the same first (`report.resumed`).
+  **A healthy edit that is still running looks the same to a reader** (the marker
+  is there), so the error says "in progress or was interrupted": if no program
+  is editing the session, run `recover_session`. The marker records the process
+  that placed it (process id, host name, start time where the system gives it):
+  `recover_session(apply=True)` and `remove_annotations` **refuse**
+  (`edit-in-progress`) while that process is alive on the same machine, and
+  `report.record_edits[i].running` says so in a dry run. An owner that is dead,
+  on another machine (a session on a network drive: nothing can be checked, so
+  make sure no other machine is editing) or unknown (an unreadable plan) is
+  settled. A thread of the process that is itself calling cannot be told from a
+  crashed call of it and is not counted.
   If the marker's plan itself cannot be read (a damaged file system, a newer
   layout), recovery decides from the files alone, **for all levels of the edit
   together** (the levels are those with `.new` / `.old` leftovers beside their
-  files), so a multi-level edit never ends half new and half old: if no `.new`
+  files), so a multi-level edit does not end half new and half old (the rollback
+  keeps every level's `.new` file until all levels are back, so a rollback that
+  dies part way is read the same way again): if no `.new`
   file is left and every target is a whole pair, the swaps were all done and the
   new pairs stay (done); otherwise, if every level that was swapped still has
   its intact `.old` pair, every level goes back to the old pair (the removal was
@@ -357,9 +370,10 @@ report.removed, report.added          # 1, 1
   the three apart (exit 0 done, 1 rolled back and NOT done, 2 refused). Leftover
   `.new` / `.old` files are **moved** to `<session>.edit-leftovers` beside the
   session, never deleted. `clear_operation_marker` does not clear this marker.
-  Limits: a removal whose plan AND `.new` files are both gone cannot be told from
-  a finished one, and a marker whose recorded CRC is wrong (not torn) can make a
-  finished removal be reported as not done; the state is never mixed.
+  Limits: this holds as long as the plan is gone only, or the `.new` files are
+  gone only; a removal whose plan AND `.new` files are both gone cannot be told
+  from a finished one, and a marker whose recorded CRC is wrong (not torn) can make
+  a finished removal be reported as not done (the state is then still all new).
 - **A torn annotation file is never trimmed silently.** If bytes lie after the
   last record the header counts (a record or a fragment an interrupted
   `write_annotations` left) or the index disagrees with the data, the call

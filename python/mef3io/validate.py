@@ -741,6 +741,9 @@ class InterruptedRecordEdit:
     action: str = ""
     #: Why recovery goes back, or what it found when it settles from the files.
     reason: str = ""
+    #: The program that started the edit is still running on this machine: the edit is
+    #: in progress, not interrupted, and recovery refuses (``edit-in-progress``).
+    running: bool = False
     applied: bool = False
 
     @property
@@ -786,6 +789,9 @@ class RecoveryReport:
             lines.append(f"    {f.path}: {f.action}")
         for e in self.record_edits:
             what = ("interrupted annotation edit (%d record file(s)): " % len(e.files))
+            if e.running:
+                what = ("annotation edit RUNNING in another program on this machine (%d record "
+                        "file(s)); recovery refuses until it ends: " % len(e.files))
             if e.action == "roll back":
                 what += ("rolled back" if e.applied else "would be rolled back") + (
                     ": the removal was NOT done" + (f" ({e.reason})" if e.reason else ""))
@@ -900,7 +906,8 @@ def recover_session(
         record_files=tuple(RecoveredRecordFile(**f) for f in raw.get("record_files", ())),
         record_edits=tuple(
             InterruptedRecordEdit(id=e["id"], files=tuple(e["files"]), action=e["action"],
-                                  reason=e.get("reason", ""), applied=e["applied"])
+                                  reason=e.get("reason", ""), running=e.get("running", False),
+                                  applied=e["applied"])
             for e in raw.get("record_edits", ())
         ),
         skipped=tuple(raw["skipped"]),

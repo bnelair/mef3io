@@ -158,6 +158,11 @@ struct InterruptedRecordEdit {
   std::string action;
   /// Why recovery goes back, or what it found when it settles from the files.
   std::string reason;
+  /// The program that placed the marker is a live process on this machine (not the
+  /// caller): the edit is RUNNING, not interrupted, and recovery refuses
+  /// (`edit-in-progress`) until it ends. False when its owner is dead, on another machine
+  /// or unknown (an unreadable plan).
+  bool running = false;
   bool applied = false;
 };
 

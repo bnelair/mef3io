@@ -31,6 +31,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <sstream>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -52,6 +53,11 @@
 #include "mef3io/time.hpp"
 #include "mef3io/transform.hpp"
 #include "mef3io/version.hpp"
+
+#ifndef _WIN32
+#include <signal.h>
+#include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -226,6 +232,89 @@ std::string tool_name() { return std::string("mef3io ") + version(); }
 
 // ---- the plan a marker carries, and the state of each file ----------------------
 
+/// Who is carrying out an edit: the process that placed the marker. Recovery refuses to
+/// settle an edit whose owner is a live process on THIS machine (it would roll back or
+/// finish under a running edit); an owner that is dead, on another machine, or unknown
+/// (an unreadable plan) is settled, as the docs say.
+struct Owner {
+  bool known = false;
+  long long pid = 0;
+  std::string host;     ///< this machine's host name
+  std::string started;  ///< the process's start time where the OS says it ("" = not known)
+};
+
+std::string host_name() {
+#ifdef _WIN32
+  char buf[256] = {};
+  DWORD n = sizeof buf;
+  return GetComputerNameA(buf, &n) ? std::string(buf, n) : std::string();
+#else
+  char buf[256] = {};
+  return ::gethostname(buf, sizeof buf - 1) == 0 ? std::string(buf) : std::string();
+#endif
+}
+
+long long my_pid() {
+#ifdef _WIN32
+  return static_cast<long long>(GetCurrentProcessId());
+#else
+  return static_cast<long long>(::getpid());
+#endif
+}
+
+/// The start time of a process (Linux: field 22 of /proc/<pid>/stat), so a recycled pid is not
+/// taken for the owner; "" where it cannot be read.
+std::string process_started(long long pid) {
+#ifdef __linux__
+  std::ifstream f("/proc/" + std::to_string(pid) + "/stat");
+  std::string line;
+  if (!f || !std::getline(f, line)) return {};
+  const auto close = line.rfind(')');
+  if (close == std::string::npos) return {};
+  std::size_t at = close + 2;  // after ") " : field 3 is the state
+  for (int field = 3; field < 22; ++field) {
+    at = line.find(' ', at);
+    if (at == std::string::npos) return {};
+    ++at;
+  }
+  const auto end = line.find(' ', at);
+  return line.substr(at, end == std::string::npos ? std::string::npos : end - at);
+#else
+  (void)pid;
+  return {};
+#endif
+}
+
+bool pid_alive(long long pid) {
+#ifdef _WIN32
+  HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
+  if (!h) return false;
+  DWORD code = 0;
+  const bool alive = GetExitCodeProcess(h, &code) && code == STILL_ACTIVE;
+  CloseHandle(h);
+  return alive;
+#else
+  return ::kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
+#endif
+}
+
+Owner this_process() {
+  Owner o;
+  o.known = true;
+  o.pid = my_pid();
+  o.host = host_name();
+  o.started = process_started(o.pid);
+  return o;
+}
+
+/// A live process on this machine, not this one, placed the marker. (The same process is not
+/// counted: a thread of it cannot be told from a crashed call of it, and the process itself
+/// cannot be dead.)
+bool owner_running_elsewhere(const Owner& o) {
+  if (!o.known || o.pid == my_pid() || o.host != host_name() || !pid_alive(o.pid)) return false;
+  return o.started.empty() || process_started(o.pid) == o.started;
+}
+
 /// One of the files of an edit: `target`, its new file and the backup of the
 /// old one.
 struct JFile {
@@ -249,6 +338,7 @@ struct JPlan {
   std::string id;
   std::vector<JFile> files;
   bool back = false;  ///< the marker says the edit is being rolled back (decided once, durable)
+  Owner owner;        ///< the process that placed the marker
   std::vector<fs::path> dirs() const {
     std::vector<fs::path> d;
     for (const auto& f : files) d.push_back(f.target.parent_path());
@@ -279,6 +369,9 @@ std::string crc_hex(ui4 v) {
 OperationMarker marker_for(const JPlan& p) {
   OperationMarker m{tool_name(), OP, p.id, {}};
   m.details.push_back("edit-format 1");
+  if (p.owner.known)
+    m.details.push_back("owner " + std::to_string(p.owner.pid) + " " + to_hex(p.owner.host) + " " +
+                        (p.owner.started.empty() ? std::string("-") : p.owner.started));
   if (p.back) m.details.push_back("direction back");
   for (const auto& f : p.files)
     m.details.push_back(std::string("file ") + (f.had_old ? "1" : "0") + " " +
@@ -300,6 +393,19 @@ std::optional<JPlan> plan_from_marker(const fs::path& root, const OperationMarke
     }
     if (line == "direction back") {
       p.back = true;
+      continue;
+    }
+    if (line.rfind("owner ", 0) == 0) {
+      // owner <pid> <hex host> <start or ->; an owner line this version cannot read = no owner
+      std::istringstream in(line.substr(6));
+      long long pid = 0;
+      std::string hexhost, started;
+      if (in >> pid >> hexhost >> started) {
+        const auto h = from_hex(hexhost);
+        if (h) {
+          p.owner = Owner{true, pid, *h, started == "-" ? std::string() : started};
+        }
+      }
       continue;
     }
     if (line.rfind("file ", 0) != 0) continue;
@@ -569,25 +675,34 @@ void settle(const JPlan& given, Dir dir, Steps* st) {
       }
       continue;
     }
+    // BACK: restore every level FIRST and leave each level's `.new` where it is: the `.new`
+    // files are the evidence an interrupted rollback leaves (settle_from_files reads "no
+    // .new anywhere" as "every swap was done"), so they go only after ALL levels are back,
+    // exactly as the forward direction removes the `.old` files only after all swaps.
     if (f.had_old && f.has_new) {
-      if (t && n && !o) remove_file(f.fresh, st);
-      else if (!t && n && o) { move_file(f.old, f.target, st); remove_file(f.fresh, st); }
-      else if (t && !n && o) {
-        move_file(f.target, f.fresh, st);  // the new file steps aside
+      if (t && n && !o) {
+        // not swapped: already the old file
+      } else if (!t && n && o) {
         move_file(f.old, f.target, st);
-        remove_file(f.fresh, st);
-      } else if (!(t && !n && !o)) inconsistent();
+      } else if (t && !n && o) {
+        move_file(f.target, f.fresh, st);  // the new file steps aside (and stays as evidence)
+        move_file(f.old, f.target, st);
+      } else if (!(t && !n && !o)) {
+        inconsistent();
+      }
     } else if (f.had_old) {
       if (!t && !n && o) move_file(f.old, f.target, st);
       else if (!(t && !n && !o)) inconsistent();
     } else {
-      if (!t && n && !o) remove_file(f.fresh, st);
-      else if (t && !n && !o) remove_file(f.target, st);
-      else if (!(!t && !n && !o)) inconsistent();
+      if (t && !n && !o) remove_file(f.target, st);
+      else if (!(n || (!t && !o))) inconsistent();
     }
   }
   point(st);
   flush_dirs(p.dirs());
+  if (dir == Dir::Back)
+    for (const auto& f : p.files)
+      if (f.has_new && has(f.fresh)) remove_file(f.fresh, st);
   if (dir == Dir::Forward)
     for (const auto& f : p.files)
       if (has(f.old)) remove_file(f.old, st);
@@ -1428,6 +1543,7 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
   JPlan plan;
   plan.root = root;
   plan.id = id;
+  plan.owner = this_process();
   for (const auto& fp : plans) {
     plan.files.push_back(make_jfile(root, fp.rel_rdat, id, true, !fp.remove_pair));
     plan.files.push_back(make_jfile(root, fp.rel_ridx, id, true, !fp.remove_pair));
@@ -1546,7 +1662,10 @@ RemoveAnnotationsReport remove_annotations(const std::string& path,
       return report;
     }
     try {
-      settle(plan, Dir::Back, nullptr);
+      // the same step counter: a test's crash_at beyond the failure lands inside the rollback
+      settle(plan, Dir::Back, &steps);
+    } catch (const SimulatedCrash&) {
+      throw;
     } catch (const std::exception& e) {
       refuse(RefusalKind::Io, "edit-failed",
              "the annotation edit failed (" + why + ") and could not be rolled back (" + e.what() +
@@ -1627,7 +1746,8 @@ bool pair_consistent(const fs::path& rdat, const fs::path& ridx) {
 /// The marker is removed last. (An edit whose `.new` files were lost as well as its
 /// plan cannot be told from a finished one: the levels without leftovers are not
 /// seen.)
-InterruptedRecordEdit settle_from_files(const fs::path& root, const OperationMarker& m, bool apply) {
+InterruptedRecordEdit settle_from_files(const fs::path& root, const OperationMarker& m, bool apply,
+                                        Steps* st = nullptr) {
   struct Group {
     fs::path dir;
     std::string stem;  // "name" of name.rdat / name.ridx
@@ -1724,12 +1844,12 @@ InterruptedRecordEdit settle_from_files(const fs::path& root, const OperationMar
     for (const auto& j : judged)
       for (const auto& l : j.g->leftovers) aside(l);
   } else if (way == Way::Back) {
+    // Restore EVERY level first; the `.new` files (the evidence that a rollback is not
+    // finished) are moved aside only after all of them are back, so a rollback that is
+    // interrupted and read again still sees them and finishes the same direction.
     for (const auto& j : judged) {
       Group& g = *j.g;
-      const bool swapped_or_half = !g.old_rdat.empty() || !g.old_ridx.empty();
-      for (const auto& l : g.leftovers)
-        if (l != g.old_rdat && l != g.old_ridx) aside(l);
-      if (!swapped_or_half) continue;  // never swapped: already the old pair
+      if (g.old_rdat.empty() && g.old_ridx.empty()) continue;  // never swapped: already old
       ++restored;
       if (!g.old_rdat.empty()) {
         if (has(j.trdat)) aside(j.trdat);
@@ -1740,6 +1860,9 @@ InterruptedRecordEdit settle_from_files(const fs::path& root, const OperationMar
         moves.push_back({g.old_ridx, j.tridx, false});
       }
     }
+    for (const auto& j : judged)
+      for (const auto& l : j.g->leftovers)
+        if (l != j.g->old_rdat && l != j.g->old_ridx) aside(l);
   }
   for (const auto& l : loose) aside(l);
   InterruptedRecordEdit e;
@@ -1775,6 +1898,7 @@ InterruptedRecordEdit settle_from_files(const fs::path& root, const OperationMar
     } else if (has(to)) {
       throw IoError("cannot restore " + u8(mv.from) + ": " + u8(to) + " is in the way");
     }
+    point(st);
     note("rename", u8(mv.from) + "|" + u8(to));
     detail::replace_file(mv.from, to);
   }
@@ -1783,7 +1907,9 @@ InterruptedRecordEdit settle_from_files(const fs::path& root, const OperationMar
     dirs.push_back(mv.from.parent_path());
     dirs.push_back(mv.to.parent_path());
   }
+  point(st);
   flush_dirs(dirs);
+  point(st);
   remove_marker(root);
   e.applied = true;
   return e;
@@ -1814,6 +1940,7 @@ std::optional<InterruptedRecordEdit> interrupted_record_edit(const std::string& 
       const Decision d = decide(*plan);
       e.action = d.dir == Dir::Forward ? "finish" : "roll back";
       e.reason = d.why;
+      e.running = owner_running_elsewhere(plan->owner);
       return e;
     }
   } catch (const CopyError& e) {
@@ -1836,6 +1963,12 @@ std::optional<InterruptedRecordEdit> finish_interrupted_record_edit(const std::s
       InterruptedRecordEdit e;
       e.id = plan->id;
       for (const auto& f : plan->files) e.files.push_back(f.rel);
+      if (owner_running_elsewhere(plan->owner))
+        refuse(RefusalKind::WriteConflict, "edit-in-progress",
+               "an annotation edit of this session is RUNNING in another program on this machine "
+               "(process " + std::to_string(plan->owner.pid) + "): settling it now could finish or "
+               "roll it back under that program. Wait for it, or end that program, then try "
+               "again");
       const Decision d = decide(*plan);
       e.action = d.dir == Dir::Forward ? "finish" : "roll back";
       e.reason = d.why;
@@ -1846,7 +1979,7 @@ std::optional<InterruptedRecordEdit> finish_interrupted_record_edit(const std::s
   } catch (const CopyError& e) {
     if (!is_unreadable_plan(e)) throw;
   }
-  return settle_from_files(root, *m, true);
+  return settle_from_files(root, *m, true, (crash_at >= 0 || fail_at >= 0) ? &steps : nullptr);
 }
 
 std::vector<std::string> record_edit_leftovers(const std::string& path, bool apply) {
@@ -1879,10 +2012,11 @@ bool has_interrupted_edit(const std::string& path) {
 void require_no_interrupted_edit(const std::string& path) {
   if (has_interrupted_edit(path))
     refuse(RefusalKind::WriteConflict, "edit-interrupted",
-           "the annotations cannot be read reliably: an annotation edit (remove_annotations) was "
-           "interrupted, so a level's annotation files may be half swapped. Samples are "
-           "unaffected. Run recover_session with apply=True, which finishes the edit or rolls it "
-           "back, then read again");
+           "the annotations cannot be read reliably: an annotation edit (remove_annotations) is in "
+           "progress or was interrupted, so a level's annotation files may be half swapped (or "
+           "about to be). Samples are unaffected. If no program is editing this session, run "
+           "recover_session with apply=True, which finishes the edit or rolls it back, then read "
+           "again");
 }
 
 namespace testing {

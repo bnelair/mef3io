@@ -912,10 +912,10 @@ SessionSummary detail::inspect_session_through(std::shared_ptr<const SessionSour
   };
   if (edit_interrupted)
     warn("annotation-edit-interrupted",
-         "an annotation edit (remove_annotations) was interrupted: a level's annotation files may "
-         "be half swapped, so the records are NOT read and no record count is reported here. "
-         "Samples are unaffected. Run recover_session with apply=True to finish the edit or roll "
-         "it back.",
+         "an annotation edit (remove_annotations) is in progress or was interrupted: a level's "
+         "annotation files may be half swapped, so the records are NOT read and no record count "
+         "is reported here. Samples are unaffected. If no program is editing this session, run "
+         "recover_session with apply=True to finish the edit or roll it back.",
          true);
   if (!out.video_channels.empty()) {
     std::string list;

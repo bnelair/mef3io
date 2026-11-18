@@ -332,6 +332,7 @@ nb::dict interrupted_edit_dict(const mef3io::InterruptedRecordEdit& e) {
   d["files"] = e.files;
   d["action"] = e.action;
   d["reason"] = e.reason;
+  d["running"] = e.running;
   d["applied"] = e.applied;
   return d;
 }
@@ -394,6 +395,9 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
   d["last_time"] = opt_obj(s.last_time);
 
   nb::list chans;
+  const bool records_reported =
+      std::none_of(s.warnings.begin(), s.warnings.end(),
+                   [](const auto& w) { return w.code == "annotation-edit-interrupted"; });
   for (const auto& c : s.channels) {
     nb::dict cd;
     cd["name"] = record_str(c.name);
@@ -410,7 +414,8 @@ nb::dict summary_to_dict(const mef3io::SessionSummary& s) {
     cd["gaps_certain"] = c.gaps_certain;
     cd["offset_assumed_zero"] = c.offset_assumed_zero;
     cd["bytes"] = c.bytes;
-    cd["records"] = c.records;
+    // not counted while an annotation edit is interrupted: null, never a wrong number
+    cd["records"] = records_reported ? nb::object(nb::int_(c.records)) : nb::object(nb::none());
     nb::list gaps;
     for (const auto& g : c.gaps) gaps.append(nb::make_tuple(g.start, g.end));
     cd["gaps"] = gaps;

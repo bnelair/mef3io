@@ -38,6 +38,8 @@
     reported. A marker whose
     plan cannot be read is settled from the files alone; nothing is ever deleted
     (leftovers move to `<session>.edit-leftovers`).
+  - Recovery refuses (`edit-in-progress`) while the program that started the edit is still
+    running on the same machine; readers' error says "in progress or was interrupted".
   - Password-protected sessions: pass both passwords as for `Writer`; added
     records are level-2 encrypted. Tar archives are refused
     (`tar-read-only`). Cancel and progress work until the swap starts.

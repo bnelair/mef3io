@@ -229,3 +229,19 @@ REVIEW ROUND 2 ADDITIONS:
 - `SessionWriter::write_records` looks at the marker again right before the append and once after.
 - Kept handles of `open_files` (#191) are `.tdat` only (`DirectorySource::read_extent`): record
   files are read with plain opens and renamed by the edit, nothing of this PR holds them.
+
+REVIEW ROUND 3 ADDITIONS:
+- The BACK direction of `settle` and of `settle_from_files` restores EVERY level first and
+  removes / moves aside the `.new` files only after all are restored: an interrupted rollback
+  must always leave the `.new` evidence (without it, "no .new + whole targets" reads as "all
+  swapped", and an unreadable plan settled the half-restored edit as done = mixed). Tests: a
+  fail_at after the swaps + crash_at inside the rollback (`_fail_at`/`_crash_at` share one
+  step counter), and crashes at every step of an unreadable-plan recovery (copy per step).
+  `settle_from_files` takes a Steps* so its moves are crash points too.
+- OWNER: the marker carries `owner <pid> <hex host> <start|->` (`Owner`; Linux start time from
+  /proc/<pid>/stat). `finish_interrupted_record_edit` refuses `edit-in-progress` when the owner
+  is a live process on this host other than the caller (`owner_running_elsewhere`);
+  `InterruptedRecordEdit.running` says it in a dry run. Dead / other host / unknown plan: settled.
+  The calling process is never "running elsewhere" (a simulated crash in a test, or another
+  thread, cannot be told apart). No existing convention for this in the library: it is new.
+- `inspect` channel `records` is None (not 0) while the marker is present.

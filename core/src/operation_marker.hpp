@@ -111,9 +111,9 @@ inline std::string mid_operation_message(const OperationMarker& m) {
            m.tool + (m.id.empty() ? "" : ", operation " + m.id) +
            ") that was interrupted or is still running: one level's annotation files may be "
            "half swapped, so its annotations should not be trusted until it is finished. "
-           "Nothing will be written to the session until then: run recover_session with "
-           "apply=True, which finishes the edit (or rolls it back when its new files are not "
-           "intact).";
+           "Nothing will be written to the session until then. If no program is editing this "
+           "session, run recover_session with apply=True, which finishes the edit (or rolls it "
+           "back when its new files are not intact).";
   return "the session is in the middle of an operation (" + m.operation + ", started by " +
          m.tool + (m.id.empty() ? "" : ", operation " + m.id) +
          "). Nothing will be written to it until that operation is finished or rolled back: "

@@ -1318,7 +1318,7 @@ def test_every_route_to_the_records_refuses_while_an_edit_is_interrupted(tmp_pat
         s = mef3io.inspect(str(p))
     assert [w.code for w in s.warnings].count("annotation-edit-interrupted") == 1
     assert s.records == [] and [c.name for c in s.channels] == ["ch1"]
-    assert all(c.records == 0 for c in s.channels)
+    assert all(c.records is None for c in s.channels)
     from mef3io._inspect import _main as inspect_main
     import contextlib
     import io
@@ -1469,3 +1469,167 @@ def test_a_writer_rechecks_the_marker_right_before_and_right_after_its_append(tm
             _m._set_edit_observer(None)
     marker.unlink()
     assert "late" in _texts(p)
+
+
+# ---------------------------------------------------------------------------
+# review round 3
+# ---------------------------------------------------------------------------
+
+def test_inspect_json_reports_no_channel_count_while_an_edit_is_interrupted(tmp_path):
+    p = _marker_crash(tmp_path, "j")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        s = mef3io.inspect(str(p))
+    assert s.channels[0].records is None and s.records == []
+    assert all(c["records"] is None for c in s.to_dict()["channels"])
+    healthy = _crash_session(tmp_path, "h.mefd")
+    assert mef3io.inspect(str(healthy)).channels[0].records == 2
+
+
+def _fail_then_crash_in_rollback(p, fail_at, crash_at):
+    rm = [_records(p, level="session")[1]] + [
+        _records(p, channel=ch, level="channel")[0] for ch in ("ch1", "ch2", "ch3")]
+    return mef3io.remove_annotations(p, rm, add=[_note(2, "b fixed")],
+                                     _fail_at=fail_at, _crash_at=crash_at)
+
+
+@pytest.mark.parametrize("how", ["readable", "truncated", "torn-crc"])
+def test_a_rollback_that_dies_part_way_never_settles_mixed(tmp_path, how):
+    # session + 3 channels: an error after the swaps starts a rollback; the process dies
+    # at each step of it; then the plan may be unreadable. The end state is all old or all
+    # new, the report agrees, and no step of the rollback hides the evidence of the next.
+    seen_old = seen_new = 0
+    for fail_at in range(35, 45):
+        for j in range(0, 14):
+            p = _three_channel_session(tmp_path, f"f{how[:3]}{fail_at}_{j}.mefd")
+            try:
+                _fail_then_crash_in_rollback(p, fail_at, fail_at + 1 + j)
+            except mef3io.IoError as e:
+                if "simulated crash" not in str(e):
+                    break                                    # the rollback completed by itself
+            if mef3io.operation_marker(p) is None:
+                continue
+            if how != "readable":
+                _damage_plan(p, how)
+            rep = mef3io.recover_session(str(p), apply=True)
+            got = _levels(p)
+            assert got in (OLD3, NEW3), (fail_at, j, got)
+            for edit in rep.record_edits:
+                assert edit.not_done == (got == OLD3), (fail_at, j, edit.action, got)
+            seen_old += got == OLD3
+            seen_new += got == NEW3
+            assert mef3io.operation_marker(p) is None and mef3io.validate_session(str(p)).ok
+    assert seen_old > 20
+
+
+@pytest.mark.parametrize("how", ["truncated", "torn-crc"])
+def test_recovery_with_an_unreadable_plan_that_dies_part_way_is_finished_by_the_next(tmp_path, how):
+    import shutil as _sh
+    k = 0
+    checked = 0
+    while True:
+        p = _three_channel_session(tmp_path, f"w{how[:3]}{k}.mefd")
+        try:
+            _three_channel_run(p, k)
+            break
+        except mef3io.IoError:
+            pass
+        k += 1
+        if mef3io.operation_marker(p) is None:
+            continue
+        _damage_plan(p, how)
+        j = 0
+        while True:
+            try:
+                _m._finish_interrupted_edit(str(p), j, -1)
+                break                                     # recovery completed
+            except mef3io.IoError as e:
+                assert "simulated crash" in str(e), str(e)
+            copy = tmp_path / f"copy{how[:3]}{k}_{j}.mefd"
+            _sh.copytree(p, copy)                         # the state a crash at step j leaves
+            mef3io.recover_session(str(copy), apply=True)
+            assert _levels(copy) in (OLD3, NEW3), (k, j, _levels(copy))
+            assert mef3io.validate_session(str(copy)).ok
+            checked += 1
+            _sh.rmtree(copy)
+            j += 1
+            assert j < 40
+        assert _levels(p) in (OLD3, NEW3), (k, _levels(p))
+    assert checked > 30
+
+
+_LIVE_EDIT = """
+import sys, time, os
+sys.path[:0] = {paths!r}
+import mef3io
+from mef3io import _mef3io as m
+root, ready, go = sys.argv[1:4]
+def observer(kind, path):
+    if kind == "marker-durable":
+        open(ready, "w").close()
+        while not os.path.exists(go):
+            time.sleep(0.02)
+m._set_edit_observer(observer)
+recs = mef3io.Reader(root).records(level="session")
+mef3io.remove_annotations(root, [recs[1]], add=[{{"time": recs[1]["time"], "text": "b fixed"}}])
+"""
+
+
+def _marker_lines(p):
+    return (p / ".mef3io-operation").read_bytes().split(b"\n")
+
+
+def test_recovery_refuses_while_another_program_is_running_the_edit(tmp_path):
+    import subprocess
+    import time
+    p = _crash_session(tmp_path, "s.mefd")
+    ready, go = tmp_path / "ready", tmp_path / "go"
+    script = tmp_path / "live.py"
+    script.write_text(_LIVE_EDIT.format(paths=[p_ for p_ in sys.path if p_]))
+    child = subprocess.Popen([sys.executable, str(script), str(p), str(ready), str(go)],
+                             env=dict(os.environ, PYTHONPATH=os.pathsep.join(q for q in sys.path if q)))
+    try:
+        for _ in range(500):
+            if ready.exists():
+                break
+            assert child.poll() is None
+            time.sleep(0.02)
+        assert ready.exists()
+        before = _snap(p)
+        dry = mef3io.recover_session(str(p))
+        assert dry.record_edits[0].running and "RUNNING" in dry.summary()
+        for call in (lambda: mef3io.recover_session(str(p), apply=True),
+                     lambda: mef3io.remove_annotations(
+                         p, [{"type": "Note", "time": START + S, "text": "a", "level": "session"}])):
+            with pytest.raises(mef3io.WriteConflictError) as e:
+                call()
+            assert e.value.code == "edit-in-progress" and str(child.pid) in str(e.value)
+            assert _snap(p) == before                     # nothing settled under the running edit
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(mef3io.WriteConflictError) as e:
+                mef3io.Reader(str(p)).records()
+        assert e.value.code == "edit-interrupted" and "in progress or was interrupted" in str(e.value)
+        go.write_text("go")
+        assert child.wait(timeout=60) == 0
+    finally:
+        if child.poll() is None:
+            child.kill()
+    assert mef3io.operation_marker(p) is None
+    assert _texts(p, level="session") == ["a", "b fixed", "c"]
+
+
+def test_recovery_goes_ahead_when_the_owner_is_dead_or_elsewhere(tmp_path):
+    import subprocess
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    for name, edit in (("dead", lambda ln: ln.split(b" ")[:1] + [str(dead.pid).encode()] + ln.split(b" ")[2:]),
+                       ("elsewhere", lambda ln: ln.split(b" ")[:2] + [b"6f74686572", b"-"])):
+        p = _marker_crash(tmp_path, name)
+        lines = [b" ".join(edit(ln)) if ln.startswith(b"owner ") else ln for ln in _marker_lines(p)]
+        assert any(ln.startswith(b"owner ") for ln in lines)
+        (p / ".mef3io-operation").write_bytes(b"\n".join(lines))
+        dry = mef3io.recover_session(str(p))
+        assert not dry.record_edits[0].running
+        mef3io.recover_session(str(p), apply=True)
+        assert mef3io.operation_marker(p) is None and _state(p) in (OLD, NEW)

@@ -1480,7 +1480,7 @@ void check_interrupted_edit(const std::string& path, Report& report) {
   f.field = "operation marker";
   f.stored = "annotation edit interrupted";
   f.expected = "no unfinished edit";
-  f.message = "an annotation edit (remove_annotations) was interrupted: " +
+  f.message = "an annotation edit (remove_annotations) is in progress or was interrupted: " +
               std::to_string(edit->files.size()) +
               " record file(s) may be half swapped; run recover_session with apply=True, which "
               "will " + edit->action + " it";

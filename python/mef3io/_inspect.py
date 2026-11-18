@@ -118,7 +118,7 @@ class ChannelSummary:
     gaps_certain: bool
     offset_assumed_zero: bool
     bytes: int
-    records: int
+    records: Optional[int]
     segments: list
 
     @classmethod
