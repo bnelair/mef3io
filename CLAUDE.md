@@ -21,6 +21,8 @@ threads (#79; GIL released on open and every long call; the Python races of
 (docs/threads.md): `n_threads` per object covers open, file access, decode,
 encode; settable at runtime; no per-call count (2.0) except the one-call, object-less `merge_sessions(n_threads=)` (approved 2026-11-04). Parallel open (#141),
 decode, encode, all byte-/result-deterministic across thread counts.
+A Reader can keep a bounded LRU of open `.tdat` handles between calls (`open_files`,
+OPT-IN, default off; validated against the path on every read; large-files-and-append.md (f2)).
 Python (pytest) + standalone C++ Catch2 suites.
 Wheel builds via `python -m build`.
 

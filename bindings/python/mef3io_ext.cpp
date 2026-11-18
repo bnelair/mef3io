@@ -1998,6 +1998,9 @@ NB_MODULE(_mef3io, m) {
     return mef3io::infer_precision(std::span<const mef3io::sf8>(d.data(), d.size()));
   });
 
+  m.def("default_open_files", [] { return mef3io::detail::default_open_files(); });
+  m.def("suggested_open_files", [] { return mef3io::detail::suggested_open_files(); });
+
   // --- Reader (P3 high-level API) ---
   auto opt_time = [](nb::object o) { return opt_si8(o, "t0/t1"); };
 
@@ -2013,6 +2016,14 @@ NB_MODULE(_mef3io, m) {
            nb::arg("strict") = true)
       .def("set_threads", &mef3io::Reader::set_threads, nb::arg("n"))
       .def("threads", &mef3io::Reader::threads)
+      .def("set_open_files", &mef3io::Reader::set_open_files, nb::arg("n"))
+      .def("open_files", &mef3io::Reader::open_files)
+      .def("release_open_files",
+           [](mef3io::Reader& r) {
+             nb::gil_scoped_release rel;  // closing a handle on a network drive is a round trip
+             r.release_open_files();
+           })
+      .def("open_file_count", &mef3io::Reader::open_file_count)
       .def("problems",
            [](mef3io::Reader& r) {
              nb::list out;

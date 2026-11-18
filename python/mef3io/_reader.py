@@ -397,6 +397,21 @@ def _check_threads(value) -> int:
     return n
 
 
+def _check_open_files(value):
+    """An ``open_files`` value: an int >= 0 (0 = keep nothing open) or None."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise TypeError("open_files must be an int or None, not bool")
+    try:
+        n = operator.index(value)
+    except TypeError:
+        raise TypeError(f"open_files must be an int or None, not {type(value).__name__}") from None
+    if n < 0:
+        raise ValueError(f"open_files must be >= 0 (0 = keep nothing open), not {n}")
+    return n
+
+
 class Reader:
     """Read-only interface to a MEF 3.0 session.
 
@@ -432,6 +447,19 @@ class Reader:
         disables it; ``"auto"`` uses the per-user OS cache directory; a path
         makes it persistent. Warm opens serve :attr:`channels` / :meth:`info`
         without touching the session tree.
+    open_files : int or None, optional
+        How many data files this Reader keeps open between calls. Default
+        ``None`` = ``0``: nothing is kept open, every read opens and closes its
+        file, exactly as in 2.3.0. Switch it on (for example ``open_files=64``;
+        keep it well under a quarter of the process's descriptor limit) when ONE
+        or a few Readers read the
+        same files again and again on a slow or network drive, where every open
+        is a round trip. It costs descriptors held until
+        :meth:`release_files` / :meth:`close` (or garbage collection), and on
+        Windows a folder cannot be renamed or removed, nor a file replaced by
+        renaming over it, while files are held. Results never depend on it.
+        Changeable later through :attr:`open_files`. See
+        [the long-recordings guide](https://bnelair.github.io/mef3io/long_recordings/).
     warn_declarations : bool, default True
         Emit a :class:`SessionDeclarationWarning` when the session leaves
         section-2 size declarations unset. The check is free — the metadata is
@@ -461,6 +489,7 @@ class Reader:
         cache=None,
         warn_declarations: bool = True,
         strict: bool = True,
+        open_files: int | None = None,
         *,
         _defer_warnings: bool = False,
     ):
@@ -472,6 +501,7 @@ class Reader:
         self._password = password or ""
         self._backend_name = backend
         self._n_threads = _check_threads(n_threads)
+        self._open_files = _check_open_files(open_files)
         self._strict = bool(strict)
         self._impl = None  # constructed lazily so a warm start stays cheap
         self._closed = False
@@ -668,6 +698,8 @@ class Reader:
                     self._impl = _mef3io.Reader(
                         self._path, self._password, self._n_threads, self._strict
                     )
+                    if self._open_files is not None:
+                        self._impl.set_open_files(self._open_files)
                 elif self._backend_name == "pure":
                     from .pure import Reader as PureReader
 
@@ -697,6 +729,50 @@ class Reader:
             impl = self._impl
             if impl is not None and hasattr(impl, "set_threads"):
                 impl.set_threads(value)
+
+    @property
+    def open_files(self) -> int:
+        """How many data files this Reader may keep open between calls.
+
+        Settable at any time: lowering it closes the extra files at once and
+        ``0`` keeps nothing open (every read opens and closes its file, as
+        before). Only ``.tdat`` files are kept (for a tar session, the one
+        archive); each is checked against its path on every read, so a file
+        replaced or deleted meanwhile is never served stale. Results never
+        depend on it.
+        """
+        with self._lock:
+            impl = self._impl
+            if impl is not None and hasattr(impl, "open_files"):
+                return int(impl.open_files())
+            if self._open_files is not None:
+                return self._open_files
+        return 0  # the default: nothing kept open
+
+    @open_files.setter
+    def open_files(self, value: int) -> None:
+        value = _check_open_files(value)
+        if value is None:
+            raise TypeError("open_files must be an int, not None")
+        with self._lock:
+            self._open_files = value
+            impl = self._impl
+            if impl is not None and hasattr(impl, "set_open_files"):
+                impl.set_open_files(value)
+
+    def release_files(self) -> None:
+        """Close every data file this Reader keeps open, now.
+
+        Call it before something else needs the session's files (writing notes
+        into it, moving or deleting it, archiving it): on Windows an open file
+        cannot be removed from its folder until it is closed. The Reader stays
+        usable; the next read opens what it needs again. :meth:`close` does
+        this too, and ends the Reader.
+        """
+        with self._lock:
+            impl = self._impl
+        if impl is not None and hasattr(impl, "release_open_files"):
+            impl.release_open_files()
 
     def __enter__(self) -> "Reader":
         return self

@@ -11,7 +11,7 @@ TimeSeriesIndex, RedBlockHeader — parse/serialize by explicit offset),
 `validate` (check registry + targeted repair; see validate-repair-recover.md),
 `session` (lazy .mefd/.timd/.segd tree, indexed reads, `collect_blocks`; ALL
 read-path file access funnels through `source`), `source` (SessionSource
-abstraction: DirectorySource/TarSource; `read_head` = one bounded read), `tar` (uncompressed .mefd.tar session
+abstraction: DirectorySource/TarSource; `read_head` = one bounded read; `read_extent` = size check + read in one call, the Reader's kept-open `.tdat` handles, f2 in large-files-and-append.md), `tar` (uncompressed .mefd.tar session
 archives: TarIndex/TarSource/`archive_session`), `reader` (gridding, NaN fill,
 scaling, parallel decode), `records` (read+write), `writer` (segment writer),
 `session_writer` (precision inference, quantization, NaN splitting, segments),
