@@ -15,7 +15,7 @@ does. Times in MEF 3.0 are **uUTC** — microseconds since the Unix epoch.
 | `02_int32_primitive.py` | The primitive path: int32 counts + conversion factor, validity mask |
 | `03_appending.py` | In-segment append, forced new segments, reopening a session, conflicts |
 | `04_segment_map.py` | `Reader.segments()` / `toc()` — finding what data is where across gaps |
-| `05_annotations.py` | Writing and reading records (annotations), session- and channel-level |
+| `05_annotations.py` | Writing and reading records (annotations), session- and channel-level, and taking one back with `remove_annotations` |
 | `06_encryption.py` | Two-level passwords, what each level can access |
 | `07_legacy_mef_tools_style.py` | `from mef3io import MefReader, MefWriter` as a mef_tools drop-in |
 | `08_legacy_compatibility.py` | Legacy-vs-new write/read timing and value comparison on larger data (needs `mef3io[test]` + scipy/tqdm; writes under a temporary directory, or `$MEF3IO_BENCH_DIR`) |

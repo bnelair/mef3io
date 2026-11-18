@@ -780,6 +780,19 @@ class Writer:
         channel : str or None, optional
             Channel name for channel-level records, or ``None`` (default) for
             session-level records.
+
+        Raises
+        ------
+        mef3io._mef3io.WriteConflictError
+            The session carries the operation marker of an annotation edit
+            (:func:`mef3io.remove_annotations`) that is running or was
+            interrupted: the write is refused until
+            :func:`mef3io.recover_session` has settled it. The same error is
+            raised after the append when such an edit started while the
+            records were being written: they were appended, but if the edit
+            was running they may have been lost, so read them back and write
+            them again if they are missing. There is no cross-process lock:
+            stop other writers before an edit.
         """
         if hasattr(annotations, "to_dict"):
             annotations = annotations.to_dict("records")

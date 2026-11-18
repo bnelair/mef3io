@@ -170,12 +170,15 @@ def remove_annotations(
     FormatError, CrcError
         An annotation file that cannot be read in full (``record-damaged``,
         ``record-crc``, ``record-index-mismatch``, ``record-index-missing``,
-        ``ambiguous-session-records``): nothing is touched; run
+        ``ambiguous-session-records``), or an earlier interrupted edit whose
+        files do not settle (``edit-unsettled``): nothing is touched; run
         :func:`recover_session` or :func:`validate_session` first.
     WriteConflictError
         The session is being written or mid-operation (``being-written``,
         ``mid-operation``; ``edit-interrupted`` for a ``dry_run`` on a session an edit was
-        interrupted in), the annotations changed while the call worked
+        interrupted in; ``edit-in-progress`` when an earlier edit it must
+        finish first is still running in another program on this machine),
+        the annotations changed while the call worked
         (``records-changed``), a time cannot be stored (``add-time``), an
         unknown or disputed recording-time offset (``offset-unknown``), or
         records that do not match the session's encryption.
@@ -197,7 +200,13 @@ def remove_annotations(
     :func:`validate_session` reports ``records.interrupted-edit``, and
     ``recover_session(path, apply=True)`` finishes the edit (or rolls it back
     when a new file is not intact). The next ``remove_annotations`` does the
-    same first (``report.resumed``).
+    same first (``report.resumed``). While the marker is there every reader
+    of annotations (:meth:`Reader.records`, :meth:`MultiReader.records`,
+    ``MefReader.get_annotations``) raises ``WriteConflictError`` with
+    ``.code == "edit-interrupted"`` (the message says "in progress or was
+    interrupted": an edit that is still running looks the same), and
+    :func:`inspect` reports record counts as ``None`` with the warning
+    ``annotation-edit-interrupted``. Samples stay readable.
 
     **Concurrency.** There is no cross-process write lock: stop other
     writers of the session first. A session whose files show a writer at work

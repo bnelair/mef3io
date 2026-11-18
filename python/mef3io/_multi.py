@@ -219,6 +219,15 @@ class MultiReader:
         one recording gets all of it. Changeable later through
         :attr:`n_threads` (re-split from the next call). Results do not
         depend on it. See [the threads guide](https://bnelair.github.io/mef3io/threads/).
+    open_files : int or None, optional
+        How many data files this MultiReader keeps open between calls, IN
+        TOTAL for all its recordings (like ``n_threads``: a read gives the
+        budget to the recordings it touches and the others let their files
+        go). Default ``None`` = ``0``: nothing is kept open, as it always has
+        been. Settable later through :attr:`open_files`;
+        :meth:`release_files` lets go of every kept file now. Costs and when to
+        use it: see :class:`Reader` and
+        [the long-recordings guide](https://bnelair.github.io/mef3io/long_recordings/).
     cache : None, "auto" or sequence, optional
         ``None`` (default) or ``"auto"`` as for :class:`Reader`, applied to
         every recording; or one cache path per recording, in the order of

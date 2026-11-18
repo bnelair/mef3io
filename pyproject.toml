@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "Filip Mivalt" }]
-keywords = ["MEF", "MEF3", "MEF 3.0", "Multiscale Electrophysiology Format", "EEG", "iEEG", "SEEG", "ECoG", "ECG", "biosignals", "electrophysiology", "neuroscience", "anonymization", "de-identification", "merge", "meflib", "pymef"]
+keywords = ["MEF", "MEF3", "MEF 3.0", "Multiscale Electrophysiology Format", "EEG", "iEEG", "SEEG", "ECoG", "ECG", "biosignals", "electrophysiology", "neuroscience", "annotations", "anonymization", "de-identification", "merge", "meflib", "pymef"]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Science/Research",

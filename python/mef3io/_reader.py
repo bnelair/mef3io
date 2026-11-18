@@ -450,7 +450,7 @@ class Reader:
     open_files : int or None, optional
         How many data files this Reader keeps open between calls. Default
         ``None`` = ``0``: nothing is kept open, every read opens and closes its
-        file, exactly as in 2.3.0. Switch it on (for example ``open_files=64``;
+        file, as it always has. Switch it on (for example ``open_files=64``;
         keep it well under a quarter of the process's descriptor limit) when ONE
         or a few Readers read the
         same files again and again on a slow or network drive, where every open

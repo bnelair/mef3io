@@ -891,6 +891,20 @@ def recover_session(
     run lists their check ids in ``RecoveredSegment.declarations``); a
     healthy segment's findings are left to :func:`repair_session`. A later
     segment whose ``.tmet`` was lost is rebuilt from the previous segment's.
+
+    **An interrupted annotation edit** (:func:`remove_annotations` stopped by a
+    crash or power cut; the session carries its operation marker) is settled
+    FIRST, with ``apply=True``: finished when every new annotation file is
+    intact, otherwise rolled back to the old annotations (the removal was then
+    **not done**; see :attr:`InterruptedRecordEdit.not_done`). The dry run
+    lists it in ``RecoveryReport.record_edits`` and does not examine the
+    annotation files until it is settled. Unused temporary files the edit left
+    are removed; files that cannot be placed are moved to
+    ``<session>.edit-leftovers``, never deleted. While the program that started
+    the edit is still running on this machine, recovery refuses
+    (``WriteConflictError``, ``.code == "edit-in-progress"``); a plan that
+    cannot be read, with files that do not settle, is refused as
+    ``edit-unsettled`` (``FormatError``) with nothing touched.
     """
     _warn_backup_ignored(backup, path)
     raw = _backend().recover_session(
